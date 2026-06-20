@@ -11,21 +11,24 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WORKSPACE_DIR = _REPO_ROOT / ".orion-stack" / "workspace"
 
 ALLOWED_CONTEXT_FILENAMES = (
-    # Bootstrap: loaded every turn in the system prompt
+    # Bootstrap: loaded every turn in the system prompt.
+    # The agent must know who the user is, their goals, and their
+    # preferences before every reply.
     "SOUL.md",
     "AGENTS.md",
     "TOOLS.md",
     "IDENTITY.md",
     "HEARTBEAT.md",
-)
-
-# On-demand files: not loaded every turn. Sage fetches via memory_read tool.
-# These files still exist on disk but are NOT injected into the bootstrap context.
-ON_DEMAND_MEMORY_FILENAMES = (
-    "MEMORY.md",
     "USER.md",
     "GOALS.md",
+    "MEMORY.md",
+    "PROCEDURES.md",
+    "REFLECTION.md",
 )
+
+# All core memory files are now loaded every turn.
+# On-demand files are handled via memory/files/*.md and daily notes.
+ON_DEMAND_MEMORY_FILENAMES: tuple[str, ...] = ()
 
 MAX_CONTEXT_ROOT_FILES = 12
 MAX_CONTEXT_FILE_BYTES = 64_000
@@ -84,16 +87,43 @@ DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
         "projects, important context. This is your primary memory store.\n"
         "Edit after conversations where important facts emerge.\n"
         "Delete outdated facts when they change.\n"
-        "Loaded on-demand, not every turn — keep it dense and factual, no filler.\n"
+        "Loaded every turn — keep it dense and factual, no filler.\n"
         "---\n\n"
         "# Curated Memory\n\n"
         "Store stable long-term facts that should remain visible across future sessions.\n"
     ),
     "USER.md": (
-        "",
+        "---\n"
+        "Purpose: Who the user is — name, preferences, context, important facts.\n"
+        "Edit during onboarding and whenever the user shares something about themselves.\n"
+        "Loaded every turn so Sage always knows who it is talking to.\n"
+        "---\n\n"
+        "# About the User\n"
     ),
     "GOALS.md": (
-        "",
+        "---\n"
+        "Purpose: What the user is working toward — short and long-term goals.\n"
+        "Edit when goals change or new ones emerge from conversation.\n"
+        "Loaded every turn so Sage can proactively help.\n"
+        "---\n\n"
+        "# Goals\n"
+    ),
+    "PROCEDURES.md": (
+        "---\n"
+        "Purpose: Reusable workflows and procedures the user wants Sage to follow.\n"
+        "Edit when the user establishes a new routine or process.\n"
+        "Loaded every turn so Sage knows how to handle recurring tasks.\n"
+        "---\n\n"
+        "# Procedures\n"
+    ),
+    "REFLECTION.md": (
+        "---\n"
+        "Purpose: Sage's own reflections on past interactions — what worked,\n"
+        "what didn't, patterns noticed.  Sage writes here after meaningful\n"
+        "conversations.\n"
+        "Loaded every turn so Sage learns and improves over time.\n"
+        "---\n\n"
+        "# Reflection\n"
     ),
     "HEARTBEAT.md": (
         "---\n"
