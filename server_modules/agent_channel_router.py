@@ -1,3 +1,17 @@
+"""
+Personal gateway channel router — Path B.
+
+ARCHITECTURE CONTRACT (Step 3):
+  This file imports gateway_execution_service and gateway_protocol_service
+  ONLY for channel infrastructure operations:
+    - dispatch_channel_outbound()  → channel message DELIVERY (not hardware)
+    - execute_tool_via_gateway()   → channel CONFIGURATION (pairing, QR setup)
+
+  It does NOT dispatch hardware actions (mouse, keyboard, shell, files).
+  For new channel-to-gateway communication needs, use channel_gateway_bridge
+  instead of importing gateway modules directly.
+"""
+
 from __future__ import annotations
 
 import os
@@ -8,7 +22,7 @@ from server_modules import (
     channel_blocking_policy_service,
     channel_lane_contract_service,
     gateway_state_repository,
-    gateway_execution_service,
+    gateway_execution_service,          # allowed: channel configuration only
     gateway_approval_service,
     kill_switch_gate,
     personal_channel_sage_bridge_service,

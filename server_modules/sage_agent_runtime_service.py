@@ -17,7 +17,6 @@ from server_modules import (
     direct_chat_generation_service,
     direct_chat_runtime_exports,
     direct_chat_tool_catalog_service,
-    kill_switch_gate,
     no_provider_service,
     response_leak_guard_service,
     sage_daily_operator_service,
@@ -48,7 +47,6 @@ from server_modules.direct_chat_provider_service import (
     supports_direct_message_native_chat,
     credential_auth_mode,
 )
-from server_modules.agent_computer_approval_decision_service import decide_agent_computer_action
 from server_modules.agent_computer_policy_service import (
     CAPABILITY_APP_CONTROL,
     CAPABILITY_CLOUD_STORAGE_ACCESS,
@@ -58,6 +56,10 @@ from server_modules.agent_computer_policy_service import (
     CAPABILITY_TERMINAL_COMMAND,
     AUTONOMY_ASK_EVERY_TIME,
     build_default_agent_computer_policy,
+)
+from server_modules.unified_governance_gate import (
+    evaluate_action_policy,
+    ActionPolicyDecision,
 )
 from server_modules.sage_agent_runtime_contract import (
     SAGE_MODE,
@@ -280,14 +282,44 @@ def resolve_model_for_capability(
 
 
 def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
-    """Resolve the default Sage provider and credentials.
+    """Resolve the Sage cloud provider with three-tier priority.
 
-    Uses hardcoded DeepSeek by default (env var DEEPSEEK_API_KEY).
-    Future: capability-aware routing via resolve_model_for_capability()
-    can be opted into once vault stores capability-labeled providers.
+    Tier 1 — user's explicitly selected provider (from workspace admin defaults,
+            persisted in the workspace metadata JSONB `sage_ai_provider` field).
+    Tier 2 — any BYOK key found in the workspace vault (user added a key but
+            did not explicitly pick a default).
+    Tier 3 — platform DeepSeek fallback (env var DEEPSEEK_API_KEY).
     """
-    # Hardcoded DeepSeek — the original path that works with env vars
-    credentials = direct_chat_credentials(workspace_id, "deepseek")
+    from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
+    from server_modules.control_plane_repository import load_workspace
+
+    normalized_ws = str(workspace_id or "default").strip() or "default"
+
+    # ── Tier 1: user's explicitly selected provider ──
+    try:
+        ws_record = load_workspace(normalized_ws)
+        ws_metadata = dict((ws_record or {}).get("metadata") or {})
+        admin_defaults = workspace_admin_defaults_from_metadata(ws_metadata)
+        selected = str(admin_defaults.sage_ai_provider or "").strip().lower()
+        if selected:
+            credentials = direct_chat_credentials(normalized_ws, selected)
+            if supports_direct_message_native_chat(selected, credentials):
+                return selected, credentials
+    except Exception:
+        pass  # workspace not found or metadata unreadable — fall through
+
+    # ── Tier 2: any BYOK key in the workspace vault ──
+    # direct_chat_credentials() resolves vault → provider profiles → env.
+    # If the user added an Anthropic key, it matches here. If only DeepSeek
+    # env var exists, this loop skips all four providers.
+    byok_providers = ("anthropic", "openai", "gemini", "ollama_cloud")
+    for provider in byok_providers:
+        credentials = direct_chat_credentials(normalized_ws, provider)
+        if supports_direct_message_native_chat(provider, credentials):
+            return provider, credentials
+
+    # ── Tier 3: platform fallback (DeepSeek via env var) ──
+    credentials = direct_chat_credentials(normalized_ws, "deepseek")
     if supports_direct_message_native_chat("deepseek", credentials):
         return "deepseek", credentials
 
@@ -486,15 +518,16 @@ def _build_agent_computer_decision_for_skill(
 ) -> dict:
     """Classify Sage's requested connected-computer action before approval.
 
-    Sage chat is a pre-execution surface: this builds the same decision envelope
-    the Gateway path uses, but does not consume remembered approvals yet.
+    Routes through the unified governance gate (Step 1 migration).
+    The gate internally runs kill switch → safe mode → risk classifier →
+    approval memory → approval card, all through the existing functions.
     """
     capability = _skill_capability(skill)
     policy = build_default_agent_computer_policy(
         autonomy_mode=AUTONOMY_ASK_EVERY_TIME,
         policy_id=f"sage-chat:{workspace_id}",
     )
-    decision = decide_agent_computer_action(
+    decision = evaluate_action_policy(
         workspace_id=workspace_id,
         actor_user_id=actor_user_id or "owner",
         agent_id=SAGE_MAIN_AGENT_ID,
@@ -510,15 +543,8 @@ def _build_agent_computer_decision_for_skill(
             "triggered_by": triggered_by,
             "user_message": message,
         },
-        current_kill_state=(
-            "active"
-            if kill_switch_gate.evaluate_kill_switch(
-                workspace_id=workspace_id,
-                agent_id=SAGE_MAIN_AGENT_ID,
-            ).blocked
-            else None
-        ),
         consume_approval_memory=False,
+        surface="sage_chat",
     )
     return decision.as_dict()
 

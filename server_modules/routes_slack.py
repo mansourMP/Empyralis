@@ -1,7 +1,7 @@
-"""Slack inbound message handler — routes through the shared command dispatcher.
+"""Slack inbound message handler — routes through the unified Sage ingress.
 
 Messages arrive via Slack Events API. Commands are handled by the shared
-sage_command_dispatcher; normal messages flow to handle_sage_chat().
+sage_command_dispatcher; normal messages flow through execute_sage_turn().
 """
 
 from __future__ import annotations
@@ -14,7 +14,8 @@ import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from server_modules import auth as auth_module
+from server_modules.runtime_common import require_api_key
+from server_modules.channel_adapter import filter_outbound_reply
 
 router = APIRouter()
 
@@ -36,14 +37,13 @@ if not _SLACK_SIGNING_SECRET or not _SLACK_BOT_TOKEN:
 
 
 def _verify_slack_signature(body_bytes: bytes, headers: dict) -> bool:
-    """Verify Slack request signature (https://api.slack.com/authentication/verifying-requests-from-slack)."""
+    """Verify Slack request signature."""
     if not _SLACK_SIGNING_SECRET:
         return False
     timestamp = str(headers.get("x-slack-request-timestamp", "")).strip()
     signature = str(headers.get("x-slack-signature", "")).strip()
     if not timestamp or not signature:
         return False
-    # Reject old timestamps (> 5 min)
     try:
         if abs(time.time() - int(timestamp)) > 300:
             return False
@@ -61,12 +61,11 @@ def _verify_slack_signature(body_bytes: bytes, headers: dict) -> bool:
 @router.post("/sage/slack/inbound")
 async def slack_inbound(
     request: Request,
-    current_user=Depends(auth_module.require_api_key),
+    current_user=Depends(require_api_key),
 ) -> dict:
     """Receive inbound Slack messages and route through Sage."""
     body_bytes = await request.body()
 
-    # Verify signature if configured
     if _SLACK_SIGNING_SECRET and not _verify_slack_signature(body_bytes, dict(request.headers)):
         raise HTTPException(status_code=403, detail="Invalid Slack signature")
 
@@ -106,33 +105,18 @@ async def slack_inbound(
         await _slack_reply(channel_id, cmd_reply)
         return {"ok": True, "command_handled": True, "reply": cmd_reply}
 
-    # ── Normal message: route to Sage ──
-    from server_modules.sage_agent_runtime_service import handle_sage_chat
-    from server_modules.channel_adapter import normalize_sage_inbound
-    from server_modules.sage_command_dispatcher import get_active_thread as _gat_slack
+    # ── Normal message: route through unified Sage ingress ──
+    from server_modules.sage_turn_adapter import execute_sage_turn
 
-    _active_thread = await _gat_slack(workspace_id, "slack")
-
-    turn = normalize_sage_inbound(
+    result = await execute_sage_turn(
         workspace_id=workspace_id,
         message=text,
-        surface="chat",
-        mode="owner_sage",
         channel_origin="slack",
         channel_sender_id=user_id,
         channel_sender_name=str(event.get("user_name") or "").strip(),
     )
-    result = await handle_sage_chat(
-        workspace_id=turn.workspace_id,
-        message=turn.message,
-        surface=turn.surface,
-        mode=turn.mode,
-        channel_origin=turn.channel_origin,
-        sender_id=user_id or None,
-        sender_name=str(event.get("user_name") or "").strip() or None,
-        thread_id=_active_thread,
-    )
-    reply = str(result.get("message") or "").strip()
+
+    reply = filter_outbound_reply(result.message)
     if reply:
         await _slack_reply(channel_id, reply)
 

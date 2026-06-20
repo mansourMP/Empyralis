@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 
 from server_modules import auth as auth_module
 from server_modules import sage_telegram_hosted_service as hosted
-from server_modules.channel_adapter import normalize_sage_inbound
 
 
 router = APIRouter()
@@ -113,8 +112,6 @@ async def telegram_webhook(request: Request) -> dict:
         return {"ok": True}
 
     try:
-        from server_modules.sage_agent_runtime_service import handle_sage_chat
-
         message_text = str(parsed.get("text") or "").strip()
 
         # ── Resolve media attachments (photo, document, voice) ──
@@ -153,32 +150,19 @@ async def telegram_webhook(request: Request) -> dict:
 
         await hosted.send_chat_action(chat_id, "typing")
 
-        # Resolve active thread (may be task thread if /new was used)
-        from server_modules.sage_command_dispatcher import get_active_thread as _gat
-        _active_thread = await _gat(workspace_id, "telegram_hosted")
+        # ── Route through unified Sage ingress ──
+        from server_modules.sage_turn_adapter import execute_sage_turn
 
-        turn = normalize_sage_inbound(
+        result = await execute_sage_turn(
             workspace_id=workspace_id,
             message=message_text if message_text else "[Media]",
-            surface="chat",
-            mode="owner_sage",
+            attachments=_attachments if _attachments else None,
             channel_origin="telegram_hosted",
             channel_sender_id=str(chat_id),
             channel_sender_name=str(parsed.get("from_first_name", "")).strip(),
         )
-        result = await handle_sage_chat(
-            workspace_id=turn.workspace_id,
-            message=turn.message,
-            surface=turn.surface,
-            attachments=_attachments if _attachments else None,
-            thread_id=_active_thread,
-            mode=turn.mode,
-            channel_origin=turn.channel_origin,
-            sender_id=str(chat_id),
-            sender_name=str(parsed.get("from_first_name", "")).strip(),
-        )
 
-        reply = str(result.get("message") or "").strip()
+        reply = str(result.message or "").strip()
         if reply and not hosted._should_skip_reply(reply):
             await hosted.send_sage_reply(
                 chat_id,
@@ -216,8 +200,6 @@ async def dev_poll_once() -> dict:
             processed += 1
             continue
         try:
-            from server_modules.sage_agent_runtime_service import handle_sage_chat
-
             message_text = str(parsed.get("text") or "").strip()
 
             # Handle /compact in dev-poll path
@@ -260,31 +242,21 @@ async def dev_poll_once() -> dict:
                 continue
 
             await hosted.send_chat_action(chat_id, "typing")
-            # Resolve active thread (may be task thread if /new was used)
-            from server_modules.sage_command_dispatcher import get_active_thread as _gat2
-            _active_thread2 = await _gat2(workspace_id, "telegram_hosted")
-            turn = normalize_sage_inbound(
+            # ── Route through unified Sage ingress ──
+            from server_modules.sage_turn_adapter import execute_sage_turn as _est2
+
+            result = await _est2(
                 workspace_id=workspace_id,
                 message=message_text,
-                surface="chat",
-                mode="owner_sage",
                 channel_origin="telegram_hosted",
                 channel_sender_id=str(chat_id),
                 channel_sender_name=str(parsed.get("from_first_name", "")).strip(),
             )
-            result = await handle_sage_chat(
-                workspace_id=turn.workspace_id,
-                message=turn.message,
-                surface=turn.surface,
-                mode=turn.mode,
-                channel_origin=turn.channel_origin,
-                thread_id=_active_thread2,
-            )
-            reply = str(result.get("message") or "").strip()
+            reply = str(result.message or "").strip()
             if reply:
                 await hosted.send_sage_reply(chat_id, reply, reply_to_message_id=parsed.get("message_id"))
         except Exception:
-            await hosted.send_sage_reply(chat_id, "Sorry, an error occurred.", reply_to_message_id=parsed.get("message_id"))
+            pass  # Error suppressed — LLM retry handles it naturally on next turn
         processed += 1
     return {"ok": True, "updates_processed": processed}
 

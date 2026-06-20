@@ -524,10 +524,24 @@ def _consume_gateway_approval_memory(
     request_id: str = "",
     browser_session_id: str = "",
 ):
+    # Extract capability from either CapabilityRiskDecision (old) or
+    # ActionPolicyDecision (unified gate → risk_decision dict inside)
+    if hasattr(risk_decision, "capability"):
+        capability = risk_decision.capability
+    elif isinstance(risk_decision, dict):
+        capability = risk_decision.get("capability", "")
+    elif hasattr(risk_decision, "risk_decision") and isinstance(risk_decision.risk_decision, dict):
+        capability = risk_decision.risk_decision.get("capability", "")
+    else:
+        capability = ""
+    capability = str(capability or "").strip()
+    decision_label = (
+        str(getattr(risk_decision, "decision", "normal") or "normal").strip() or "normal"
+    )
     rule = agent_approval_memory_service.find_matching_approval_memory_rule(
         workspace_id=workspace_id,
         owner_user_id=actor_user_id,
-        capability=risk_decision.capability,
+        capability=capability,
         policy_id=policy_id,
         gateway_id=str(registration.get("gateway_id") or "").strip(),
         payload=payload,
@@ -541,19 +555,19 @@ def _consume_gateway_approval_memory(
         tenant_id=tenant_id,
         actor_id=actor_user_id,
         quota_profile=GATEWAY_APPROVAL_ACTION,
-        capability_id=str(getattr(risk_decision, "capability", "") or "").strip(),
+        capability_id=capability,
         run_id=str(run_id or "").strip(),
         trace_id=str(trace_id or "").strip(),
         request_id=str(request_id or "").strip() or str(run_id or "").strip(),
         browser_session_id=str(browser_session_id or "").strip(),
         approval_provided=True,
         approval_memory_hit=True,
-        risk_decision=str(getattr(risk_decision, "decision", "normal") or "normal").strip() or "normal",
+        risk_decision=decision_label,
     )
     consumed = agent_approval_memory_service.consume_matching_approval_memory_rule(
         workspace_id=workspace_id,
         owner_user_id=actor_user_id,
-        capability=risk_decision.capability,
+        capability=capability,
         policy_id=policy_id,
         gateway_id=str(registration.get("gateway_id") or "").strip(),
         payload=payload,
@@ -575,10 +589,19 @@ def _emit_gateway_risk_decision(
     tenant_id: str,
     risk_decision,
 ) -> None:
-    payload = risk_decision.as_dict()
+    # Accept both CapabilityRiskDecision (old, has .as_dict()/.decision)
+    # and plain dict from unified gate's risk_decision field
+    if isinstance(risk_decision, dict):
+        payload = risk_decision
+        decision_label = risk_decision.get("decision", "unknown")
+    elif callable(getattr(risk_decision, "as_dict", None)):
+        payload = risk_decision.as_dict()
+        decision_label = str(getattr(risk_decision, "decision", "unknown") or "unknown")
+    else:
+        return  # unknown format, skip audit
     try:
         security_audit_service.emit_security_audit_event(
-            action=f"gateway.risk_decision.{risk_decision.decision}",
+            action=f"gateway.risk_decision.{decision_label}",
             status="blocked" if risk_decision.decision == DECISION_BLOCK else "logged",
             tenant_id=tenant_id,
             workspace_id=workspace_id,
@@ -607,13 +630,21 @@ def _emit_gateway_risk_decision(
 
 
 def _block_gateway_risk_decision(*, risk_decision) -> None:
-    reason = risk_decision.blocked_reason or "Gateway action blocked by risk policy."
+    # Accept both CapabilityRiskDecision (old) and ActionPolicyDecision (unified gate)
+    if hasattr(risk_decision, "blocked_reason"):
+        reason = risk_decision.blocked_reason
+    elif hasattr(risk_decision, "reason"):
+        reason = risk_decision.reason
+    else:
+        reason = "Gateway action blocked by risk policy."
+    reason = reason or "Gateway action blocked by risk policy."
+    as_dict = risk_decision.as_dict() if callable(getattr(risk_decision, "as_dict", None)) else dict(risk_decision) if isinstance(risk_decision, dict) else {}
     raise HTTPException(
         status_code=403,
         detail={
             "error": "GATEWAY_RISK_BLOCKED",
             "reason": reason,
-            "risk_decision": risk_decision.as_dict(),
+            "risk_decision": as_dict,
         },
     )
 
@@ -2275,46 +2306,61 @@ async def execute_gateway_tool(
         capability_id=body.capability_id,
     )
 
-    try:
-        gateway_policy = _gateway_policy_from_registration(registration)
-        risk_decision = classify_gateway_tool_risk(
-            policy=gateway_policy,
-            capability_id=body.capability_id,
-            arguments=body.arguments,
-        )
-    except CapabilityRiskClassifierError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # ── Unified governance gate (Step 1 migration) ──
+    # Replaces: classify_gateway_tool_risk() + capability_requires_owner_approval()
+    # The gate internally runs: kill switch → safe mode → risk classifier →
+    # registry contract check.  Approval memory is consumed by the gateway's
+    # own _consume_gateway_approval_memory() below (with its Rust kernel
+    # service decision enforcement).
+    from server_modules.unified_governance_gate import evaluate_action_policy
+    gateway_policy = _gateway_policy_from_registration(registration)
+    ug_decision = evaluate_action_policy(
+        workspace_id=resolved_workspace_id,
+        actor_user_id=str((current_user or {}).get("user_id") or "").strip() or "user",
+        agent_id="sage",
+        tenant_id=tenant_id,
+        gateway_id=gateway_id,
+        policy=gateway_policy,
+        capability=body.capability_id,
+        action_class=body.arguments.get("action_class") if isinstance(body.arguments, dict) else None,
+        target_url=body.arguments.get("url") if isinstance(body.arguments, dict) else None,
+        target_path=body.arguments.get("path") if isinstance(body.arguments, dict) else None,
+        payload=body.arguments,
+        consume_approval_memory=False,  # gateway handles approval memory below
+        surface="gateway_tool",
+    )
+
+    # Emit risk decision for audit (extract from the unified gate's risk_decision dict)
     _emit_gateway_risk_decision(
         gateway_id=gateway_id,
         workspace_id=resolved_workspace_id,
         tenant_id=tenant_id,
-        risk_decision=risk_decision,
+        risk_decision=ug_decision.risk_decision if isinstance(ug_decision.risk_decision, dict) else {},
     )
-    if risk_decision.decision == DECISION_BLOCK:
-        _block_gateway_risk_decision(risk_decision=risk_decision)
+    if ug_decision.blocked:
+        _block_gateway_risk_decision(risk_decision=ug_decision)
 
     explicit_full_access = _registration_sage_full_access(registration)
-    requires_owner_approval = gateway_approval_service.capability_requires_owner_approval(body.capability_id)
-    if explicit_full_access:
-        requires_owner_approval = False
-    risk_decision_requires_approval = risk_decision.decision == DECISION_APPROVAL_REQUIRED and not explicit_full_access
+    # The unified gate already incorporates capability_requires_owner_approval()
+    # logic via its registry contract checks.  Its decision is authoritative.
+    requires_approval = ug_decision.approval_required and not explicit_full_access
+
     remembered_approval_rule = None
-    if risk_decision_requires_approval or requires_owner_approval:
+    if requires_approval:
         remembered_approval_rule = _consume_gateway_approval_memory(
             registration=registration,
             workspace_id=resolved_workspace_id,
             tenant_id=tenant_id,
             actor_user_id=str((current_user or {}).get("user_id") or "").strip() or "user",
             policy_id=gateway_policy.policy_id,
-            risk_decision=risk_decision,
+            risk_decision=ug_decision,
             payload=body.arguments,
             run_id=body.run_id,
             trace_id=str(body.trace_id or body.request_id or body.run_id).strip() or body.run_id,
             request_id=str(body.request_id or "").strip() or body.run_id,
         )
-    risk_requires_approval = risk_decision_requires_approval and remembered_approval_rule is None
-    requires_owner_approval = requires_owner_approval and remembered_approval_rule is None
-    if not body.interactive_approvals and not (requires_owner_approval or risk_requires_approval):
+    requires_approval = requires_approval and remembered_approval_rule is None
+    if not body.interactive_approvals and not requires_approval:
         _audit_approval_bypass(
             gateway_id=gateway_id,
             capability_id=body.capability_id,
@@ -2322,7 +2368,7 @@ async def execute_gateway_tool(
             tenant_id=tenant_id,
         )
 
-    if requires_owner_approval or risk_requires_approval:
+    if requires_approval:
         return await _gateway_approval_required_response(
             registration=registration,
             gateway_id=gateway_id,
@@ -2333,7 +2379,7 @@ async def execute_gateway_tool(
             run_id=body.run_id,
             trace_id=str(body.trace_id or body.request_id or body.run_id).strip() or body.run_id,
             request_id=str(body.request_id or "").strip() or None,
-            risk_decision=risk_decision,
+            risk_decision=ug_decision,
         )
     _enforce_gateway_service_decision(
         operation="tool_execute",
@@ -2346,9 +2392,9 @@ async def execute_gateway_tool(
         run_id=body.run_id,
         trace_id=str(body.trace_id or body.request_id or body.run_id).strip() or body.run_id,
         request_id=str(body.request_id or "").strip() or body.run_id,
-        approval_provided=not (requires_owner_approval or risk_requires_approval),
+        approval_provided=not requires_approval,
         approval_memory_hit=remembered_approval_rule is not None,
-        risk_decision=risk_decision.decision,
+        risk_decision=ug_decision.decision,
     )
     try:
         return await gateway_execution_service.execute_tool_via_gateway(
