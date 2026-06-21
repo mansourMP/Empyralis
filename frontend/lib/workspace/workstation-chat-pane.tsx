@@ -3290,12 +3290,17 @@ export function WorkstationChatPane() {
           ? error.message
           : 'Could not send this message.';
         const normalizedRawMessage = rawMessage.toLowerCase();
-        const providerNeedsAttention = normalizedRawMessage.includes('provider')
+        const creditExhausted = normalizedError?.status === 402
+          || normalizedRawMessage.includes('reached your ai limit')
+          || normalizedRawMessage.includes('ai limit');
+        const providerNeedsAttention = !creditExhausted && (
+          normalizedRawMessage.includes('provider')
           || normalizedRawMessage.includes('credential')
           || normalizedRawMessage.includes('api key')
           || normalizedRawMessage.includes('ollama')
           || normalizedRawMessage.includes('selected for chat')
-          || normalizedRawMessage.includes('not available');
+          || normalizedRawMessage.includes('not available')
+        );
         const localComputerNeedsAttention = isLocalCompanionGateMessage(rawMessage) || normalizedRawMessage.includes('gateway offline');
         const approvalNeedsAttention = normalizedRawMessage.includes('requires owner approval')
           || normalizedRawMessage.includes('approval-required')
@@ -3309,7 +3314,9 @@ export function WorkstationChatPane() {
           || /bad gateway|gateway timeout|service unavailable|internal server error|server error/i.test(normalizedRawMessage);
         const noticeMessage = isLocalCompanionGateMessage(rawMessage)
           ? 'Agent Computer is needed for this request. Connect Agent Computer and try again.'
-          : providerNeedsAttention
+          : creditExhausted
+            ? "You've reached your AI limit. Open AI & Setup →"
+            : providerNeedsAttention
             ? 'The selected AI path is not ready. Use the workspace AI route, connect your own AI account, connect Agent Computer, or choose another model in Connections.'
             : approvalNeedsAttention
               ? 'Sage needs approval before using that capability. Review the pending request instead of retrying blindly.'
@@ -3331,14 +3338,16 @@ export function WorkstationChatPane() {
           message: providerNotice?.message ?? noticeMessage,
           retryable: error instanceof WorkstationClientError
             ? error.retryable
-            : true,
-          actions: localComputerNeedsAttention
-            ? [{ label: 'Open Hardware', target: 'hardware' }]
-            : approvalNeedsAttention
-              ? [{ label: 'Review approvals', target: 'approvals' }]
-              : authNeedsAttention
-                ? undefined
-                : providerNotice?.actions,
+            : (creditExhausted ? false : true),
+          actions: creditExhausted
+            ? [{ label: 'Open AI & Setup', target: 'integrations' }]
+            : localComputerNeedsAttention
+              ? [{ label: 'Open Hardware', target: 'hardware' }]
+              : approvalNeedsAttention
+                ? [{ label: 'Review approvals', target: 'approvals' }]
+                : authNeedsAttention
+                  ? undefined
+                  : providerNotice?.actions,
           retryDraft: outboundMessage,
         });
       }
@@ -3951,7 +3960,10 @@ export function WorkstationChatPane() {
                     const action = (sendFailureNotice.actions ?? [])[0];
                     setSendFailureNotice(null);
                     if (action?.target === 'integrations') {
-                      router.push(integrationsHref);
+                      // Use the backend-owned ai_setup_url when available,
+                      // fall back to hardcoded path for older responses.
+                      const setupUrl = action.url || `${integrationsHref}?section=ai-runtime`;
+                      router.push(setupUrl);
                       return;
                     }
                     if (action?.target === 'hardware') {

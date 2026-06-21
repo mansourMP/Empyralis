@@ -1645,7 +1645,7 @@ function describeHostedSageAi(hostedSageAi: HostedSageAiSnapshot, hostedProvider
     return 'Workspace AI needs workspace owner approval before use.';
   }
   if (hostedSageAi.reason === 'cap_reached') {
-    return 'Workspace AI monthly usage is exhausted. Connect your own AI account or adjust workspace usage.';
+    return "You've reached your AI limit.";
   }
   if (hostedSageAi.monthlyCreditCap > 0) {
     return `${formatCredits(Math.max(0, hostedSageAi.monthlyCreditsRemaining))} / ${formatCredits(hostedSageAi.monthlyCreditCap)} monthly usage left`;
