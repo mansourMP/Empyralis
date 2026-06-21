@@ -21,12 +21,21 @@ Environment="EMPYRALIS_MAX_COMMANDS_PER_POLL=5"
 Environment="EMPYRALIS_LEASE_SECONDS=120"
 Environment="EMPYRALIS_WORKER_LOG_FORMAT=json"
 
-# ── Python path (adjust for your system) ──────────────────────────────────
+# ── Rust kernel (uncomment + adjust path if not at the default location) ──
+# Environment="EMPYRALIS_RUNTIME_KERNEL_BIN=/opt/empyralis/empyralis-runtime-kernel/target/release/empyralis-runtime-kernel"
+
+# ── Python & system path ──────────────────────────────────────────────────
 Environment="PYTHONUNBUFFERED=1"
+# macOS (Homebrew):
 Environment="PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+# Linux / VPS — comment the line above and uncomment below:
+# Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Exec ──────────────────────────────────────────────────────────────────
+# macOS:
 ExecStart=/opt/homebrew/bin/python3 scripts/empyralis_self_hosted_command_worker.py
+# Linux / VPS — comment the line above and uncomment below:
+# ExecStart=/usr/bin/python3 scripts/empyralis_self_hosted_command_worker.py
 ExecStop=/bin/kill -TERM $MAINPID
 Restart=on-failure
 RestartSec=5
@@ -41,6 +50,12 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/opt/empyralis/.empyralis /opt/empyralis/.orion-stack
 ReadOnlyPaths=/opt/empyralis/scripts /opt/empyralis/server_modules
+
+# ── VPS note ──────────────────────────────────────────────────────────────
+# On a VPS, adjust: User, Group, WorkingDirectory, PATH, ExecStart, and
+# the ReadWritePaths / ReadOnlyPaths prefixes.  Do NOT run as root unless
+# the machine is single-tenant and firewalled.  Prefer a dedicated
+# "empyralis" user like the macOS version.
 
 [Install]
 WantedBy=multi-user.target
