@@ -287,44 +287,87 @@ def resolve_model_for_capability(
     return best[0], best[1], best[2]
 
 
-def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
-    """Resolve the Sage cloud provider with three-tier priority.
+# ── Canonical AI & Setup link — backend is the single source of truth ──
+# All channels (web, Telegram, future) use this path.  The frontend reads
+# ai_setup_url from the API response rather than hardcoding the path.
+_SAGE_AI_SETUP_PATH = "/integrations?section=ai-runtime"
 
-    Tier 1 — user's explicitly selected provider (from workspace admin defaults,
-            persisted in the workspace metadata JSONB `sage_ai_provider` field).
-    Tier 2 — any BYOK key found in the workspace vault (user added a key but
-            did not explicitly pick a default).
-    Tier 3 — platform DeepSeek fallback (env var DEEPSEEK_API_KEY).
+# ── User-facing AI-stop messages (imported from the single source of truth) ──
+from server_modules.sage_command_dispatcher import (
+    SAGE_AI_LIMIT_MESSAGE,
+    SAGE_AI_NEEDS_ATTENTION_MESSAGE,
+)
+
+
+async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
+    """Resolve the Sage cloud provider — ONE AI ROAD, NO FALLBACK.
+
+    INVARIANT: Each workspace has exactly ONE active AI provider.
+    It is EXPLICITLY selected.  Default = the PLATFORM provider
+    (DeepSeek, credit-gated).  Merely HAVING a vault key is NOT a
+    selection — a vault key is used ONLY when it is the explicitly
+    selected active provider.
+
+    RESOLUTION (no fallthrough, ever):
+      1. If the workspace has an explicit ``sage_ai_provider`` set
+         (e.g. ``"anthropic"``, ``"openai"``): use ONLY that provider.
+         If it is unavailable → hard stop.
+      2. Otherwise (default): use the PLATFORM provider (DeepSeek,
+         credit-gated via entitlements).  If the platform is blocked
+         or exhausted → hard stop.
+
+    There is NO tier that scans vault keys as a fallback.  A vault key
+    is only used when it IS the explicit ``sage_ai_provider``.
     """
     from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
-    from server_modules.control_plane_repository import load_workspace
+    from server_modules.control_plane_repository import get_workspace_by_id as _load_workspace
 
     normalized_ws = str(workspace_id or "default").strip() or "default"
 
-    # ── Tier 1: user's explicitly selected provider ──
+    # ── Resolve the active provider ──
+    active_provider: str = ""
     try:
-        ws_record = load_workspace(normalized_ws)
+        ws_record = await _load_workspace(normalized_ws)
         ws_metadata = dict((ws_record or {}).get("metadata") or {})
         admin_defaults = workspace_admin_defaults_from_metadata(ws_metadata)
-        selected = str(admin_defaults.sage_ai_provider or "").strip().lower()
-        if selected:
-            credentials = direct_chat_credentials(normalized_ws, selected)
-            if supports_direct_message_native_chat(selected, credentials):
-                return selected, credentials
+        active_provider = str(admin_defaults.sage_ai_provider or "").strip().lower()
     except Exception:
-        pass  # workspace not found or metadata unreadable — fall through
+        pass  # workspace not found or metadata unreadable
 
-    # ── Tier 2: any BYOK key in the workspace vault ──
-    # direct_chat_credentials() resolves vault → provider profiles → env.
-    # If the user added an Anthropic key, it matches here. If only DeepSeek
-    # env var exists, this loop skips all four providers.
-    byok_providers = ("anthropic", "openai", "gemini", "ollama_cloud")
-    for provider in byok_providers:
-        credentials = direct_chat_credentials(normalized_ws, provider)
-        if supports_direct_message_native_chat(provider, credentials):
-            return provider, credentials
+    # ── Explicit provider selected — LOCKED, NO FALLTHROUGH ──
+    if active_provider:
+        credentials = direct_chat_credentials(normalized_ws, active_provider)
+        if supports_direct_message_native_chat(active_provider, credentials):
+            return active_provider, credentials
+        # Explicit provider is unavailable — HARD STOP.
+        raise RuntimeError(
+            f"Your selected AI provider ({active_provider}) is not available. "
+            + SAGE_AI_NEEDS_ATTENTION_MESSAGE
+        )
 
-    # ── Tier 3: platform fallback (DeepSeek via env var) ──
+    # ── Default: PLATFORM provider (DeepSeek, credit-gated) ──
+    import os as _os
+
+    _platform_deepseek_configured = bool(
+        str(_os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    )
+    if _platform_deepseek_configured:
+        from server_modules.entitlements_service import (
+            hosted_sage_ai_access_state_for_workspace_id as _hosted_access,
+        )
+        _access = _hosted_access(workspace_id=normalized_ws)
+        if _access.get("allowed"):
+            credentials = direct_chat_credentials(normalized_ws, "deepseek")
+            if supports_direct_message_native_chat("deepseek", credentials):
+                return "deepseek", credentials
+            raise RuntimeError(
+                "Platform AI credentials could not be validated. "
+                + SAGE_AI_NEEDS_ATTENTION_MESSAGE
+            )
+        # Platform is configured but blocked (credits exhausted, policy, etc.)
+        _reason_msg = str(_access.get("message") or _access.get("reason") or "unavailable")
+        raise RuntimeError(_reason_msg)
+
     credentials = direct_chat_credentials(normalized_ws, "deepseek")
     if supports_direct_message_native_chat("deepseek", credentials):
         return "deepseek", credentials
@@ -2320,7 +2363,7 @@ async def handle_sage_chat(
         used_context.append("mcp_tools")
 
     # --- Call provider ---
-    provider, credentials = _resolve_cloud_provider(normalized_workspace_id)
+    provider, credentials = await _resolve_cloud_provider(normalized_workspace_id)
 
     context: dict = {
         "workspace_id": normalized_workspace_id,
@@ -2813,6 +2856,7 @@ async def handle_sage_chat(
             "daily_operator": daily_operator_payload,
             "proof_log": proof_log_payload,
             "proof_log_id": proof_log_id,
+            "ai_setup_url": f"/w/{normalized_workspace_id}{_SAGE_AI_SETUP_PATH}",
         }
 
     # ── B2: Overflow error recovery ──
@@ -3105,4 +3149,5 @@ async def handle_sage_chat(
         "proof_log": None,
         "proof_log_id": "",
         "transparency_events": transparency_events,
+        "ai_setup_url": f"/w/{normalized_workspace_id}{_SAGE_AI_SETUP_PATH}",
     }

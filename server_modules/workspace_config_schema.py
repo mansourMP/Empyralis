@@ -95,6 +95,7 @@ class WorkspaceAdminDefaultsConfig(BaseModel):
     allowed_live_channels: List[str] = Field(
         default_factory=lambda: sorted(config_defaults_service.live_deployment_channels())
     )
+    sage_ai_provider: str = ""
 
 
 class WorkspaceAdminDefaultsEnvelope(BaseModel):
@@ -203,6 +204,7 @@ def workspace_admin_defaults_from_metadata(
             ),
             "allowed_live_channels": _normalize_tokens(raw_defaults.get("allowed_live_channels"))
             or list(sorted(config_defaults_service.live_deployment_channels())),
+            "sage_ai_provider": str(raw_defaults.get("sage_ai_provider") or "").strip().lower(),
         }
     )
 

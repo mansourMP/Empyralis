@@ -734,4 +734,31 @@ async def update_workspace_default_ai_route(
         # the managed default route. The read model falls back to Light/Workspace AI.
         pass
 
+    # ── Persist the active provider to admin_defaults so the runtime resolver
+    #     (_resolve_cloud_provider) sees the same selection.  "empyralis_managed"
+    #     tiers clear the field (= use the credit-gated platform default); BYOK
+    #     providers store the provider id.
+    from server_modules import control_plane_repository as _cp_repo
+    from server_modules import workspace_config_schema as _ws_config
+
+    _next_provider = (
+        ""
+        if selected_kind == "empyralis_managed"
+        else str(selected_provider or "").strip().lower()
+    )
+    _ws_record = await _cp_repo.get_workspace_by_id(normalized_workspace_id)
+    if isinstance(_ws_record, dict):
+        _ws_meta = dict(_ws_record.get("metadata") or {})
+        _existing_defaults = _ws_config.workspace_admin_defaults_from_metadata(_ws_meta)
+        _next_defaults = _ws_config.WorkspaceAdminDefaultsConfig.model_validate(
+            {
+                **_existing_defaults.model_dump(),
+                "sage_ai_provider": _next_provider,
+            }
+        )
+        await _cp_repo.update_workspace_admin_defaults_metadata(
+            normalized_workspace_id,
+            _ws_config.workspace_admin_defaults_envelope(_next_defaults),
+        )
+
     return await build_workspace_ai_route_payload(normalized_workspace_id)
