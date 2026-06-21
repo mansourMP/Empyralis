@@ -169,13 +169,47 @@ async def telegram_webhook(request: Request) -> dict:
                 reply,
                 reply_to_message_id=parsed.get("message_id"),
             )
-    except Exception:
-        from server_modules.sage_command_dispatcher import SAGE_ERROR_REPLY as _err
-        await hosted.send_sage_reply(
-            chat_id,
-            _err,
-            reply_to_message_id=parsed.get("message_id"),
+        elif not reply and result.error:
+            # Error captured in result (not raised) — map to generic reply
+            from server_modules.sage_command_dispatcher import (
+                SAGE_ERROR_REPLY as _res_err,
+                SAGE_AI_LIMIT_REPLY as _res_limit,
+                SAGE_AI_NEEDS_ATTENTION_REPLY as _res_attn,
+            )
+            from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH as _sp
+
+            _err_msg = str(result.error).lower()
+            _res_setup = f"/w/{workspace_id}{_sp}" if workspace_id else _sp
+            _res_hint = f"\n\n{_res_setup}"
+            if "limit" in _err_msg or "cap" in _err_msg:
+                await hosted.send_sage_reply(chat_id, _res_limit + _res_hint, reply_to_message_id=parsed.get("message_id"))
+            elif "attention" in _err_msg or "not available" in _err_msg or "not configured" in _err_msg:
+                await hosted.send_sage_reply(chat_id, _res_attn + _res_hint, reply_to_message_id=parsed.get("message_id"))
+            else:
+                await hosted.send_sage_reply(chat_id, _res_err, reply_to_message_id=parsed.get("message_id"))
+
+    except Exception as exc:
+        from server_modules.sage_command_dispatcher import (
+            SAGE_ERROR_REPLY as _err,
+            SAGE_AI_LIMIT_REPLY as _limit_err,
+            SAGE_AI_NEEDS_ATTENTION_REPLY as _attention_err,
         )
+        from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
+
+        _msg = str(exc).lower()
+        # Build the AI & Setup link with workspace context
+        _setup_path = f"/w/{workspace_id}{_SAGE_AI_SETUP_PATH}" if workspace_id else _SAGE_AI_SETUP_PATH
+        _setup_hint = f"\n\n{_setup_path}"
+
+        if (
+            "reached your ai limit" in _msg or "ai limit" in _msg
+            or "cap_reached" in _msg
+        ):
+            await hosted.send_sage_reply(chat_id, _limit_err + _setup_hint, reply_to_message_id=parsed.get("message_id"))
+        elif "not available" in _msg or "no cloud provider" in _msg or "not configured" in _msg or "needs attention" in _msg:
+            await hosted.send_sage_reply(chat_id, _attention_err + _setup_hint, reply_to_message_id=parsed.get("message_id"))
+        else:
+            await hosted.send_sage_reply(chat_id, _err, reply_to_message_id=parsed.get("message_id"))
 
     return {"ok": True}
 
@@ -255,8 +289,27 @@ async def dev_poll_once() -> dict:
             reply = str(result.message or "").strip()
             if reply:
                 await hosted.send_sage_reply(chat_id, reply, reply_to_message_id=parsed.get("message_id"))
-        except Exception:
-            pass  # Error suppressed — LLM retry handles it naturally on next turn
+        except Exception as exc:
+            from server_modules.sage_command_dispatcher import (
+                SAGE_ERROR_REPLY as _err,
+                SAGE_AI_LIMIT_REPLY as _limit_err,
+                SAGE_AI_NEEDS_ATTENTION_REPLY as _attention_err,
+            )
+            from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
+
+            _msg = str(exc).lower()
+            _setup_path = f"/w/{workspace_id}{_SAGE_AI_SETUP_PATH}" if workspace_id else _SAGE_AI_SETUP_PATH
+            _setup_hint = f"\n\n{_setup_path}"
+
+            if (
+                "reached your ai limit" in _msg or "ai limit" in _msg
+                or "cap_reached" in _msg
+            ):
+                await hosted.send_sage_reply(chat_id, _limit_err + _setup_hint, reply_to_message_id=parsed.get("message_id"))
+            elif "not available" in _msg or "no cloud provider" in _msg or "not configured" in _msg or "needs attention" in _msg:
+                await hosted.send_sage_reply(chat_id, _attention_err + _setup_hint, reply_to_message_id=parsed.get("message_id"))
+            else:
+                await hosted.send_sage_reply(chat_id, _err, reply_to_message_id=parsed.get("message_id"))
         processed += 1
     return {"ok": True, "updates_processed": processed}
 
