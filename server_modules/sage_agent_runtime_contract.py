@@ -56,6 +56,7 @@ class SageTurnResult:
     trace_id: str = ""
     provider: str = ""
     model: Optional[str] = None
+    ai_setup_url: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -72,6 +73,7 @@ class SageTurnResult:
             "trace_id": self.trace_id,
             "provider": self.provider,
             "model": self.model,
+            "ai_setup_url": self.ai_setup_url,
         }
 
 

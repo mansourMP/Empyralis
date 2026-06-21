@@ -28,6 +28,24 @@ SAGE_COMPACTED = "✅ Context compacted."
 SAGE_COMPACT_NOT_NEEDED = "Nothing to compact — context is still small."
 SAGE_NEW_SESSION = "🆕 New session started. Type /main to return to your main thread."
 SAGE_MAIN_RETURN = "🏠 Back to your main thread."
+
+# ── AI limit / attention messages (ONE source of truth for all channels) ──
+# These are the ONLY user-facing AI-stop messages.  They are generic,
+# non-prescriptive, and brand-free.  The AI & Setup tab is where the
+# user sees what happened and chooses what to do.
+_SAGE_AI_SETUP_LABEL = "AI \\& Setup"
+
+SAGE_AI_LIMIT_REPLY = (
+    f"⚠️ You've reached your AI limit. Open {_SAGE_AI_SETUP_LABEL} →"
+)
+
+SAGE_AI_NEEDS_ATTENTION_REPLY = (
+    f"⚠️ Your AI needs attention. Open {_SAGE_AI_SETUP_LABEL} →"
+)
+
+# Web-chat plain-text variants (no Telegram markdown escaping)
+SAGE_AI_LIMIT_MESSAGE = "You've reached your AI limit. Open AI & Setup →"
+SAGE_AI_NEEDS_ATTENTION_MESSAGE = "Your AI needs attention. Open AI & Setup →"
 SAGE_NO_MEMORIES = "📭 No memories saved yet."
 
 SAGE_HELP_TEXT = (

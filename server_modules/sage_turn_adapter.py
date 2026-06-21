@@ -155,6 +155,8 @@ async def execute_sage_turn(
             channel_sender_name=resolved_sender_name,
         )
 
+    from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
+
     result = await handle_sage_chat(
         workspace_id=turn.workspace_id,
         tenant_id=turn.tenant_id,
@@ -169,6 +171,10 @@ async def execute_sage_turn(
         thread_id=resolved_thread_id,
     )
 
+    # Build canonical AI & Setup link — backend is the single source of truth
+    _ws_id = str(turn.workspace_id or "").strip()
+    _ai_setup_url = f"/w/{_ws_id}{_SAGE_AI_SETUP_PATH}" if _ws_id else _SAGE_AI_SETUP_PATH
+
     return SageTurnResult(
         message=result.get("message", ""),
         error=result.get("error"),
@@ -181,6 +187,7 @@ async def execute_sage_turn(
         trace_id=result.get("trace_id", ""),
         provider=result.get("provider", ""),
         model=result.get("model"),
+        ai_setup_url=_ai_setup_url,
     )
 
 

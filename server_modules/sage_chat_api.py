@@ -236,6 +236,17 @@ def register_sage_chat_routes(app) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except RuntimeError as exc:
+            _msg = str(exc).lower()
+            # Credit exhaustion / provider unavailable → 402 so the frontend
+            # can display the hard-stop message with a link to AI & Setup.
+            if (
+                "reached your ai limit" in _msg or "ai limit" in _msg
+                or "not available" in _msg
+                or "no cloud provider" in _msg
+                or "not configured" in _msg
+                or "needs attention" in _msg
+            ):
+                raise HTTPException(status_code=402, detail=str(exc))
             raise HTTPException(status_code=502, detail=str(exc))
 
         # Filter silent/empty replies via shared adapter function
@@ -310,6 +321,17 @@ def register_sage_chat_routes(app) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except RuntimeError as exc:
+            _msg = str(exc).lower()
+            # Credit exhaustion / provider unavailable → 402 so the frontend
+            # can display the hard-stop message with a link to AI & Setup.
+            if (
+                "reached your ai limit" in _msg or "ai limit" in _msg
+                or "not available" in _msg
+                or "no cloud provider" in _msg
+                or "not configured" in _msg
+                or "needs attention" in _msg
+            ):
+                raise HTTPException(status_code=402, detail=str(exc))
             raise HTTPException(status_code=502, detail=str(exc))
 
         # Filter silent/empty replies via shared adapter function
