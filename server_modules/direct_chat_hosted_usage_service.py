@@ -25,7 +25,7 @@ _RESERVATION_DB_PATH = Path(
     )
 ).expanduser()
 _RESERVATION_SCHEMA_READY = False
-_HOSTED_AI_PREFLIGHT_RESERVATION_USD = float(os.getenv("EMPYRALIS_HOSTED_AI_PREFLIGHT_RESERVATION_USD", "0.05"))
+_HOSTED_AI_PREFLIGHT_RESERVATION_USD = float(os.getenv("EMPYRALIS_HOSTED_AI_PREFLIGHT_RESERVATION_USD", "0.01"))
 _HOSTED_AI_MAX_ACTIVE_RESERVATION_USD = float(os.getenv("EMPYRALIS_HOSTED_AI_MAX_ACTIVE_RESERVATION_USD", "2.00"))
 
 
@@ -119,6 +119,7 @@ def reserve_direct_chat_hosted_usage_best_effort(
     availability_payload: Optional[Dict[str, Any]],
     requested_provider: Optional[str],
     requested_model: Optional[str],
+    credit_available_usd: float = 0.0,
 ) -> Optional[Dict[str, Any]]:
     availability = _coerce_dict(availability_payload)
     if _text(availability.get("credential_plane")).lower() != "platform_runtime":
@@ -139,6 +140,20 @@ def reserve_direct_chat_hosted_usage_best_effort(
         request_id=request_id,
         source_surface=source_surface,
     )
+    # ── Read credit state BEFORE the transaction (close enough to atomic) ──
+    if credit_available_usd <= 0:
+        # Caller didn't provide credit state — resolve it here best-effort.
+        try:
+            from server_modules.entitlements_service import (
+                hosted_sage_ai_access_state_for_workspace_id as _resolve_credit,
+            )
+            _access = _resolve_credit(workspace_id=workspace_token)
+            credit_available_usd = float(
+                _coerce_dict(_access).get("total_available_usd", 0) or 0
+            )
+        except Exception:
+            credit_available_usd = 0.0
+    available = max(0.0, round(float(credit_available_usd), 6))
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     with _reservation_connection() as connection:
         _ensure_reservation_schema(connection)
@@ -171,6 +186,15 @@ def reserve_direct_chat_hosted_usage_best_effort(
                 ).fetchone()["total"]
                 or 0.0
             )
+            # ── Credit balance gate — atomic with hold creation ──
+            # active_total includes holds from concurrent calls.  If
+            # available + active_total + amount_usd would exceed the
+            # balance, block the call BEFORE the LLM is invoked.
+            if available <= 0 or available - active_total - amount_usd < 0:
+                connection.commit()
+                raise RuntimeError(
+                    "You've reached your AI limit. Open AI & Setup →"
+                )
             if active_total + amount_usd > max_active_usd:
                 connection.commit()
                 raise RuntimeError("Hosted AI preflight reservation cap exceeded.")
@@ -362,6 +386,22 @@ def persist_direct_chat_hosted_usage_best_effort(
 ) -> None:
     availability = _coerce_dict(availability_payload)
     usage = _coerce_dict(usage_masked)
+    # ── Skip debit for empty / failed replies ──
+    # If the LLM returned no meaningful tokens, the user should not be
+    # charged.  Release the hold but don't run the debit.
+    _total_tokens = (
+        usage.get("total_tokens")
+        or _coerce_dict(usage.get("usage_accounting")).get("total_tokens")
+        or 0
+    )
+    if not _total_tokens or int(_total_tokens) <= 0:
+        release_direct_chat_hosted_usage_reservation_best_effort(
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            session_ctx=session_ctx,
+            status="released",
+        )
+        return
     if _text(availability.get("credential_plane")).lower() != "platform_runtime":
         if not availability:
             raise RuntimeError("Direct chat usage is missing a known AI source for credit accounting.")
