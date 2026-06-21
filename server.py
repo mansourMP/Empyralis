@@ -166,6 +166,39 @@ def _warn_project_local_secret_files() -> None:
 
 _warn_project_local_secret_files()
 
+
+def _check_runtime_kernel_startup() -> None:
+    """Warn loudly when the Rust runtime kernel binary is missing/unbuilt.
+
+    Without the kernel every governance decision fails closed
+    (``runtime_kernel_unavailable``), so the app is effectively
+    unusable.  This check runs at import time so the warning is
+    visible before any request is served.
+    """
+    try:
+        from server_modules.rust_runtime_kernel_client import runtime_kernel_binary, KERNEL_ENV_VAR
+    except ImportError:
+        return  # client module not available — probably a partial environment
+    binary = runtime_kernel_binary()
+    if binary is not None:
+        return
+    repo_root = os.environ.get("EMPYRALIS_REPO_ROOT") or os.getcwd()
+    build_cmd = "cargo build --manifest-path empyralis-runtime-kernel/Cargo.toml"
+    LOGGER.warning("=" * 72)
+    LOGGER.warning("RUST RUNTIME KERNEL IS NOT BUILT")
+    LOGGER.warning("=" * 72)
+    LOGGER.warning("The Rust runtime kernel binary was not found.")
+    LOGGER.warning("Every governance decision will fail with 'runtime_kernel_unavailable'.")
+    LOGGER.warning("")
+    LOGGER.warning("To fix, build the kernel:")
+    LOGGER.warning("  cd %s && %s", repo_root, build_cmd)
+    LOGGER.warning("")
+    LOGGER.warning("Or set %s to the binary path.", KERNEL_ENV_VAR)
+    LOGGER.warning("=" * 72)
+
+
+_check_runtime_kernel_startup()
+
 configure_runtime_memory(
     memory_enabled=ORION_MEMORY_ENABLED,
     memory_lancedb_uri=ORION_MEMORY_LANCEDB_URI,
