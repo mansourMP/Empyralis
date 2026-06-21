@@ -291,11 +291,14 @@ class DiscordBotRuntimeService:
                 connector_entry=connector_entry,
             )
 
-        # ── Personal DM routing (cloud-hosted, no Gateway required) ──
+        # ── Personal DM routing through unified Sage ingress (Path A) ──
+        # Mirrors the Telegram-hosted pattern:
+        #   parse → dispatch_command() → execute_sage_turn() → filter_outbound_reply() → send_dm()
+        # This guarantees identical safety rules, context loading, response envelope,
+        # persistence, and audit as every other Main Agent channel.
         message_type = str(parsed.get("message_type") or "").strip().lower()
         if message_type == "direct_message":
             try:
-                from server_modules import personal_channel_sage_bridge_service as _pc_svc
                 from server_modules.connectors.discord_connector import send_dm as _send_dm
 
                 _discord_user_id = str(parsed.get("user_id") or "").strip()
@@ -323,27 +326,33 @@ class DiscordBotRuntimeService:
                     )
                     return {"ok": True, "handled": True, "triggered": True, "reason": "command_dispatched"}
 
-                _reply = await _pc_svc.build_discord_personal_reply_async(
+                # ── Route through unified Sage ingress ──
+                from server_modules.sage_turn_adapter import execute_sage_turn
+
+                result = await execute_sage_turn(
                     workspace_id=_workspace_id,
-                    gateway_id=f"discord:{_workspace_id}",
-                    remote_jid=_discord_user_id,
-                    text=_text,
-                    push_name=_push_name or None,
-                    source_event_id=str(parsed.get("message_id") or "").strip() or None,
-                    linked_user_name=str(connector_entry.get("metadata", {}).get("linked_user_name") or "").strip() or None,
+                    message=_text,
+                    channel_origin="discord_personal",
+                    channel_sender_id=_discord_user_id,
+                    channel_sender_name=_push_name or None,
                 )
 
-                if _reply and str(_reply.get("text") or "").strip():
-                    _send_dm(
-                        credentials=dict(credentials),
-                        user_id=_discord_user_id,
-                        content=str(_reply.get("text") or "").strip(),
-                    )
-                    return {"ok": True, "handled": True, "triggered": True, "reason": "personal_dm_replied"}
-                else:
-                    return {"ok": True, "handled": True, "triggered": False, "reason": "personal_dm_no_reply"}
+                _sage_reply = str(result.message or "").strip()
+                if _sage_reply:
+                    from server_modules.channel_adapter import filter_outbound_reply
+                    _filtered = filter_outbound_reply(_sage_reply)
+                    if _filtered:
+                        _send_dm(
+                            credentials=dict(credentials),
+                            user_id=_discord_user_id,
+                            content=_filtered,
+                        )
+                        return {"ok": True, "handled": True, "triggered": True, "reason": "sage_ingress_dm_replied"}
+                return {"ok": True, "handled": True, "triggered": True, "reason": "sage_ingress_dm_no_reply"}
             except Exception as _dm_exc:
-                return {"ok": True, "handled": True, "triggered": False, "reason": f"personal_dm_error: {_dm_exc}"}
+                import logging as _logging
+                _logging.getLogger(__name__).warning("Discord Sage ingress DM failed: %s", _dm_exc)
+                return {"ok": True, "handled": True, "triggered": False, "reason": f"sage_ingress_dm_error: {_dm_exc}"}
 
         goal = build_run_goal_from_event(parsed)
         if not goal:

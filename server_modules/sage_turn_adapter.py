@@ -96,6 +96,7 @@ async def execute_sage_turn(
     from server_modules.sage_agent_runtime_service import handle_sage_chat
 
     # ── Resolve input: task data structure or individual parameters ──
+    turn = None
     if task is not None:
         resolved_workspace_id = str(task.workspace_id or "").strip()
         resolved_tenant_id = str(task.tenant_id or "").strip()

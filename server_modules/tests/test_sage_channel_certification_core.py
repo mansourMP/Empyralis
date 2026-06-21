@@ -626,6 +626,96 @@ class DiscordCertification(unittest.TestCase):
 
 
 # ===================================================================
+# Discord Sage Ingress (DM → Main Agent via execute_sage_turn)
+# ===================================================================
+
+class DiscordSageIngressCertification(unittest.TestCase):
+    """Discord DMs route through unified Sage ingress (Path A).
+
+    Upgraded from Path B (personal channel bridge) to Path A (direct
+    execute_sage_turn call) to match the Telegram-hosted and Slack pattern.
+    Guild messages with @mentions continue to use the specialist connector path.
+    """
+
+    def test_discord_dm_is_direct_message_type(self):
+        """parse_inbound_event identifies DMs with message_type 'direct_message'.
+        No guild_id → the message is a DM, not a guild message."""
+        from server_modules.connectors import discord_connector
+
+        parsed = discord_connector.parse_inbound_event({
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "dm-1",
+                "channel_id": "999",
+                "guild_id": "",  # Empty guild = DM
+                "content": "hello Sage",
+                "author": {"id": "user-1", "username": "testuser"},
+                "mentions": [],
+            },
+        })
+        self.assertEqual(parsed["message_type"], "direct_message")
+        self.assertIsNone(parsed["guild_id"])
+        self.assertEqual(parsed["user_id"], "user-1")
+
+    def test_discord_guild_mention_is_not_direct_message(self):
+        """Guild message with @mention has message_type 'mention', not 'direct_message'.
+        This ensures guild messages continue to use the specialist connector path."""
+        from server_modules.connectors import discord_connector
+
+        parsed = discord_connector.parse_inbound_event({
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "gm-1",
+                "channel_id": "111",
+                "guild_id": "222",
+                "content": "<@999> help me",
+                "author": {"id": "user-2", "username": "guildmember"},
+                "mentions": [{"id": "999"}],
+            },
+        })
+        self.assertEqual(parsed["message_type"], "mention")
+        self.assertIsNotNone(parsed["guild_id"])
+        self.assertEqual(parsed["guild_id"], "222")
+
+    def test_discord_dm_parse_extracts_user_identity(self):
+        """DM parse extracts user_id and username for channel_sender metadata."""
+        from server_modules.connectors import discord_connector
+
+        parsed = discord_connector.parse_inbound_event({
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "dm-2",
+                "channel_id": "888",
+                "guild_id": "",
+                "content": "what can you do?",
+                "author": {"id": "user-42", "username": "alice"},
+                "mentions": [],
+            },
+        })
+        self.assertEqual(parsed["user_id"], "user-42")
+        self.assertEqual(parsed["username"], "alice")
+        self.assertEqual(parsed["message_type"], "direct_message")
+        self.assertEqual(parsed["text"], "what can you do?")
+
+    def test_discord_dm_parse_preserves_message_id_for_dedup(self):
+        """DM parse extracts message_id so callers can deduplicate."""
+        from server_modules.connectors import discord_connector
+
+        parsed = discord_connector.parse_inbound_event({
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "dedup-me",
+                "channel_id": "777",
+                "guild_id": "",
+                "content": "ping",
+                "author": {"id": "user-3", "username": "bob"},
+                "mentions": [],
+            },
+        })
+        self.assertEqual(parsed["message_id"], "dedup-me")
+
+
+# ===================================================================
 # Google Workspace
 # ===================================================================
 
