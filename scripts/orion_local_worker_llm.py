@@ -3476,10 +3476,14 @@ def provider_order_for_run(context: Dict[str, Any], metadata: Dict[str, Any]) ->
         and provider_has_usable_credentials(explicit_requested_provider, context, metadata)
     )
     run_source = str(metadata.get("source") or context.get("source") or "").strip().lower()
+    # ── No-fallback is the DEFAULT (ONE AI ROAD. NO FALLBACK. EVER.) ──
+    # To enable provider fallback, the caller must explicitly set
+    # enable_provider_fallback: True in context or metadata, OR set the
+    # env var ORION_LOCAL_WORKER_PROVIDER_FALLBACK=1.
     disable_fallback = str(
         metadata.get("disable_provider_fallback")
         or context.get("disable_provider_fallback")
-        or ""
+        or "true"  # <-- DEFAULT: no fallback
     ).strip().lower() in {"1", "true", "yes", "on"}
     configured_fallback_provider = str(
         metadata.get("fallback_provider")
@@ -3516,7 +3520,7 @@ def provider_order_for_run(context: Dict[str, Any], metadata: Dict[str, Any]) ->
                 base.pop(openai_index)
                 base.insert(1, "openai")
 
-    fallback_enabled = str(os.getenv("ORION_LOCAL_WORKER_PROVIDER_FALLBACK", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    fallback_enabled = str(os.getenv("ORION_LOCAL_WORKER_PROVIDER_FALLBACK", "0")).strip().lower() not in {"0", "false", "no", "off"}
     if disable_fallback and context_provider in SUPPORTED_PROVIDERS:
         return [context_provider] if provider_has_usable_credentials(context_provider, context, metadata) else []
     if provider_hint and provider_hint != "auto" and provider_hint in SUPPORTED_PROVIDERS and not fallback_enabled:
@@ -3529,6 +3533,15 @@ def provider_order_for_run(context: Dict[str, Any], metadata: Dict[str, Any]) ->
         if context_provider and context_provider in available:
             insert_index = available.index(context_provider) + 1
         available.insert(insert_index, configured_fallback_provider)
+
+    # ── NO-FALLBACK GUARD (DEFAULT) ──
+    # When fallback is disabled, return at most ONE provider.  This is
+    # the core enforcement of "ONE AI ROAD. NO FALLBACK. EVER." — the
+    # calling code iterates over the list and tries each provider, so
+    # a single-element list means no switching on failure.
+    if not fallback_enabled or disable_fallback:
+        return available[:1]
+
     return available
 
 
