@@ -119,7 +119,7 @@ def reserve_direct_chat_hosted_usage_best_effort(
     availability_payload: Optional[Dict[str, Any]],
     requested_provider: Optional[str],
     requested_model: Optional[str],
-    credit_available_usd: float = 0.0,
+    credit_available_usd: float = -1.0,
 ) -> Optional[Dict[str, Any]]:
     availability = _coerce_dict(availability_payload)
     if _text(availability.get("credential_plane")).lower() != "platform_runtime":
@@ -141,8 +141,9 @@ def reserve_direct_chat_hosted_usage_best_effort(
         source_surface=source_surface,
     )
     # ── Read credit state BEFORE the transaction (close enough to atomic) ──
-    if credit_available_usd <= 0:
-        # Caller didn't provide credit state — resolve it here best-effort.
+    # credit_available_usd < 0 means "not provided" (sentinel); resolve it.
+    # 0.0 means "explicitly zero" → hard stop below.
+    if credit_available_usd < 0:
         try:
             from server_modules.entitlements_service import (
                 hosted_sage_ai_access_state_for_workspace_id as _resolve_credit,

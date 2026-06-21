@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -335,6 +336,52 @@ class SignupCreditGrantTests(unittest.TestCase):
             finally:
                 importlib.reload(cpr)
 
+    def test_workspace_shell_metadata_includes_billing_grant(self):
+        """_workspace_shell_metadata with _new_workspace_billing_metadata()
+        must preserve credit_balance_usd — the fix for create_workspace_for_user
+        (was passing {} before, which silently dropped the grant)."""
+        from server_modules.control_plane_repository import (
+            _new_workspace_billing_metadata,
+            _workspace_shell_metadata,
+        )
+
+        meta = _workspace_shell_metadata(
+            _new_workspace_billing_metadata(),
+            preferred_shell_profile="default",
+            default_route="/w/ws_test/chat",
+            setup_completed=True,
+        )
+        # The workspace shell metadata must carry the billing grant forward
+        billing = meta.get("billing", {})
+        self.assertIn("credit_balance_usd", billing)
+        self.assertGreater(billing["credit_balance_usd"], 0)
+
+        # Verify the grant amount: USD × 20,000 credits/USD
+        from server_modules.billing_credit_config import HOSTED_SAGE_AI_CREDITS_PER_USD
+        from server_modules.control_plane_repository import NEW_ACCOUNT_SIGNUP_CREDIT_USD
+        expected_credits = int(NEW_ACCOUNT_SIGNUP_CREDIT_USD * HOSTED_SAGE_AI_CREDITS_PER_USD)
+        credits = int(billing["credit_balance_usd"] * HOSTED_SAGE_AI_CREDITS_PER_USD)
+        self.assertEqual(credits, expected_credits)
+        self.assertGreater(credits, 0)
+
+        # The bonus transaction must record the grant
+        transactions = billing.get("credit_transactions", [])
+        self.assertGreater(len(transactions), 0)
+        bonus = transactions[0]
+        self.assertEqual(bonus["kind"], "bonus")
+        self.assertEqual(bonus["credits"], expected_credits)
+        self.assertEqual(bonus["source"], "signup_grant")
+
+        # Contrast: passing {} (the old behavior) would lose the grant
+        empty_meta = _workspace_shell_metadata(
+            {},
+            preferred_shell_profile="default",
+            default_route="/w/ws_test/chat",
+            setup_completed=True,
+        )
+        empty_billing = empty_meta.get("billing", {})
+        self.assertEqual(empty_billing.get("credit_balance_usd", 0), 0)
+
 
 class HardStopMessageTests(unittest.TestCase):
     """Verify the hard-stop messages are consistent and actionable."""
@@ -483,7 +530,11 @@ class NoFallbackDefaultTests(unittest.TestCase):
 
 
 class CreditHoldSettleTests(unittest.TestCase):
-    """Verify the hold→settle credit accounting pattern."""
+    """Verify the hold→settle credit accounting pattern.
+
+    Each test gets a fresh temp SQLite DB so stale reservations from
+    previous runs don't interfere.
+    """
 
     @staticmethod
     def _session_ctx(request_id, tenant_id="tenant-test"):
@@ -492,14 +543,32 @@ class CreditHoldSettleTests(unittest.TestCase):
             "tenant_id": tenant_id,
         }
 
+    def setUp(self):
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self._temp_db = os.path.join(self._temp_dir.name, "reservations.sqlite3")
+        self._orig_env = os.environ.get("EMPYRALIS_HOSTED_AI_RESERVATION_DB")
+        os.environ["EMPYRALIS_HOSTED_AI_RESERVATION_DB"] = self._temp_db
+        # Reload the module so it picks up the new DB path + fresh schema flag
+        import server_modules.direct_chat_hosted_usage_service as _svc
+        import importlib
+        importlib.reload(_svc)
+        self._svc = _svc
+
+    def tearDown(self):
+        if self._orig_env is not None:
+            os.environ["EMPYRALIS_HOSTED_AI_RESERVATION_DB"] = self._orig_env
+        elif "EMPYRALIS_HOSTED_AI_RESERVATION_DB" in os.environ:
+            del os.environ["EMPYRALIS_HOSTED_AI_RESERVATION_DB"]
+        self._temp_dir.cleanup()
+        # Reload again to restore original DB path
+        import server_modules.direct_chat_hosted_usage_service as _svc
+        import importlib
+        importlib.reload(_svc)
+
     def test_reservation_rejects_when_credit_available_is_zero(self):
         """When credit_available_usd is 0, reservation must raise hard-stop."""
-        from server_modules.direct_chat_hosted_usage_service import (
-            reserve_direct_chat_hosted_usage_best_effort,
-        )
-
         with self.assertRaises(RuntimeError) as ctx:
-            reserve_direct_chat_hosted_usage_best_effort(
+            self._svc.reserve_direct_chat_hosted_usage_best_effort(
                 workspace_id="ws_test_credit_zero",
                 thread_id="thread-1",
                 session_ctx=self._session_ctx("req-1"),
@@ -515,13 +584,8 @@ class CreditHoldSettleTests(unittest.TestCase):
 
     def test_reservation_allows_when_credit_available_sufficient(self):
         """When credit is sufficient, reservation succeeds."""
-        from server_modules.direct_chat_hosted_usage_service import (
-            reserve_direct_chat_hosted_usage_best_effort,
-            release_direct_chat_hosted_usage_reservation_best_effort,
-        )
-
         try:
-            result = reserve_direct_chat_hosted_usage_best_effort(
+            result = self._svc.reserve_direct_chat_hosted_usage_best_effort(
                 workspace_id="ws_test_credit_ok",
                 thread_id="thread-2",
                 session_ctx=self._session_ctx("req-2"),
@@ -537,7 +601,7 @@ class CreditHoldSettleTests(unittest.TestCase):
             self.assertEqual(result["status"], "active")
             self.assertGreater(result["amount_usd"], 0)
         finally:
-            release_direct_chat_hosted_usage_reservation_best_effort(
+            self._svc.release_direct_chat_hosted_usage_reservation_best_effort(
                 workspace_id="ws_test_credit_ok",
                 thread_id="thread-2",
                 session_ctx=self._session_ctx("req-2"),
@@ -547,14 +611,9 @@ class CreditHoldSettleTests(unittest.TestCase):
     def test_release_after_failure_clears_hold(self):
         """After releasing a hold, a new reservation should succeed
         (proving the hold was released and not leaked)."""
-        from server_modules.direct_chat_hosted_usage_service import (
-            reserve_direct_chat_hosted_usage_best_effort,
-            release_direct_chat_hosted_usage_reservation_best_effort,
-        )
-
         ws_id = "ws_test_release"
 
-        r1 = reserve_direct_chat_hosted_usage_best_effort(
+        r1 = self._svc.reserve_direct_chat_hosted_usage_best_effort(
             workspace_id=ws_id,
             thread_id="thread-r",
             session_ctx=self._session_ctx("req-release"),
@@ -568,14 +627,14 @@ class CreditHoldSettleTests(unittest.TestCase):
         )
         self.assertIsNotNone(r1)
 
-        release_direct_chat_hosted_usage_reservation_best_effort(
+        self._svc.release_direct_chat_hosted_usage_reservation_best_effort(
             workspace_id=ws_id,
             thread_id="thread-r",
             session_ctx=self._session_ctx("req-release"),
             status="released",
         )
 
-        r2 = reserve_direct_chat_hosted_usage_best_effort(
+        r2 = self._svc.reserve_direct_chat_hosted_usage_best_effort(
             workspace_id=ws_id,
             thread_id="thread-r2",
             session_ctx=self._session_ctx("req-release-2"),
@@ -589,7 +648,7 @@ class CreditHoldSettleTests(unittest.TestCase):
         )
         self.assertIsNotNone(r2)
 
-        release_direct_chat_hosted_usage_reservation_best_effort(
+        self._svc.release_direct_chat_hosted_usage_reservation_best_effort(
             workspace_id=ws_id,
             thread_id="thread-r2",
             session_ctx=self._session_ctx("req-release-2"),
@@ -599,17 +658,11 @@ class CreditHoldSettleTests(unittest.TestCase):
     def test_hold_prevents_overspend_when_balance_low(self):
         """When balance is exactly enough for one hold but not two,
         the second reservation fails — preventing overspend."""
-        from server_modules.direct_chat_hosted_usage_service import (
-            reserve_direct_chat_hosted_usage_best_effort,
-            release_direct_chat_hosted_usage_reservation_best_effort,
-            _HOSTED_AI_PREFLIGHT_RESERVATION_USD,
-        )
-
         ws_id = "ws_test_overspend_guard"
-        hold_amount = max(float(_HOSTED_AI_PREFLIGHT_RESERVATION_USD or 0), 0.01)
+        hold_amount = max(float(self._svc._HOSTED_AI_PREFLIGHT_RESERVATION_USD or 0), 0.01)
         available = hold_amount
 
-        r1 = reserve_direct_chat_hosted_usage_best_effort(
+        r1 = self._svc.reserve_direct_chat_hosted_usage_best_effort(
             workspace_id=ws_id,
             thread_id="thread-os-1",
             session_ctx=self._session_ctx("req-os-1"),
@@ -625,7 +678,7 @@ class CreditHoldSettleTests(unittest.TestCase):
 
         try:
             with self.assertRaises(RuntimeError) as ctx:
-                reserve_direct_chat_hosted_usage_best_effort(
+                self._svc.reserve_direct_chat_hosted_usage_best_effort(
                     workspace_id=ws_id,
                     thread_id="thread-os-2",
                     session_ctx=self._session_ctx("req-os-2"),
@@ -639,7 +692,7 @@ class CreditHoldSettleTests(unittest.TestCase):
                 )
             self.assertIn("reached your AI limit", str(ctx.exception))
         finally:
-            release_direct_chat_hosted_usage_reservation_best_effort(
+            self._svc.release_direct_chat_hosted_usage_reservation_best_effort(
                 workspace_id=ws_id,
                 thread_id="thread-os-1",
                 session_ctx=self._session_ctx("req-os-1"),
@@ -649,16 +702,10 @@ class CreditHoldSettleTests(unittest.TestCase):
     def test_empty_usage_skips_debit(self):
         """When total_tokens is 0 (empty reply), persist skips debit
         and releases the hold."""
-        from server_modules.direct_chat_hosted_usage_service import (
-            persist_direct_chat_hosted_usage_best_effort,
-            reserve_direct_chat_hosted_usage_best_effort,
-            release_direct_chat_hosted_usage_reservation_best_effort,
-        )
-
         ws_id = "ws_test_empty"
         ctx = self._session_ctx("req-empty")
 
-        reserve_direct_chat_hosted_usage_best_effort(
+        self._svc.reserve_direct_chat_hosted_usage_best_effort(
             workspace_id=ws_id,
             thread_id="thread-empty",
             session_ctx=ctx,
@@ -671,7 +718,7 @@ class CreditHoldSettleTests(unittest.TestCase):
             credit_available_usd=10.0,
         )
 
-        persist_direct_chat_hosted_usage_best_effort(
+        self._svc.persist_direct_chat_hosted_usage_best_effort(
             workspace_id=ws_id,
             thread_id="thread-empty",
             session_ctx=ctx,
@@ -686,7 +733,7 @@ class CreditHoldSettleTests(unittest.TestCase):
             effective_model="deepseek-chat",
         )
 
-        release_direct_chat_hosted_usage_reservation_best_effort(
+        self._svc.release_direct_chat_hosted_usage_reservation_best_effort(
             workspace_id=ws_id,
             thread_id="thread-empty",
             session_ctx=ctx,
