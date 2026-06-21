@@ -4045,8 +4045,9 @@ async def create_workspace_for_user(
     clean_tenant_id = f"tenant_{uuid.uuid4().hex[:12]}"
     tenant_slug = _slugify(f"{clean_name}-{clean_tenant_id[:8]}", f"tenant-{clean_tenant_id[:8]}")
     workspace_slug = _slugify(f"{clean_name}-{resolved_workspace_id[:8]}", f"workspace-{resolved_workspace_id[:8]}")
+    # seed the 10,000-credit signup grant for every new workspace
     metadata = _workspace_shell_metadata(
-        {},
+        _new_workspace_billing_metadata(),
         preferred_shell_profile=clean_preferred_shell_profile,
         default_route=_normalize_workspace_default_route(resolved_workspace_id, clean_default_route),
         setup_completed=True,
