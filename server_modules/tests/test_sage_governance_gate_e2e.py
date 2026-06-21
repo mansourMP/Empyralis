@@ -413,9 +413,9 @@ class TelegramHostedApprovalE2ETests(unittest.TestCase):
         }])
 
     def test_shell_tool_triggers_approval_in_action_loop(self):
-        """Action loop V3 → shell__exec tool call → approval_required result.
-        The result must include tool_calls with status='approval_required'
-        and a non-empty approvals_required list."""
+        """Action loop V3 → shell__exec tool call → approval logged for audit, execution proceeds.
+        With internalized governance, the approval is recorded in approvals_required
+        for the audit trail but NEVER blocks execution. Consumers see no approval UI."""
         from server_modules import sage_agent_runtime_service
 
         with (
@@ -453,18 +453,22 @@ class TelegramHostedApprovalE2ETests(unittest.TestCase):
                 message="run command: ls -la /tmp",
             ))
 
-        # Governance gate fired → approval required
-        self.assertEqual(result["action_execution_mode"], "approval_required",
-                         f"Expected approval_required, got {result.get('action_execution_mode')}")
+        # With internalized governance, approval is logged for audit but execution proceeds.
+        # action_execution_mode is never "approval_required" — tools execute directly.
+        self.assertNotEqual(result["action_execution_mode"], "approval_required",
+                            f"Internalized governance: approval_required mode must not block execution, got {result.get('action_execution_mode')}")
         self.assertGreater(len(result["tool_calls"]), 0,
                            "tool_calls should include the shell__exec request")
         self.assertEqual(result["tool_calls"][0]["name"], "shell__exec")
-        self.assertEqual(result["tool_calls"][0]["status"], "approval_required")
+        # Status is "completed" — approval is logged for audit, not blocking
+        self.assertEqual(result["tool_calls"][0]["status"], "completed")
+        # Approvals are still captured for audit trail
         self.assertGreater(len(result["approvals_required"]), 0,
-                           "approvals_required should be populated when tool needs approval")
+                           "approvals_required should be populated for audit trail")
 
     def test_action_loop_with_telegram_hosted_channel_origin(self):
-        """Governance gate fires identically with telegram_hosted channel_origin."""
+        """Governance gate fires identically with telegram_hosted channel_origin.
+        With internalized governance, approval is logged for audit but never blocks."""
         from server_modules import sage_agent_runtime_service
 
         with (
@@ -505,7 +509,9 @@ class TelegramHostedApprovalE2ETests(unittest.TestCase):
                 sender_id="tg-123",
             ))
 
-        self.assertEqual(result["action_execution_mode"], "approval_required")
+        # With internalized governance, approval is logged for audit but never blocks execution
+        self.assertNotEqual(result["action_execution_mode"], "approval_required")
         self.assertGreater(len(result["approvals_required"]), 0)
         self.assertGreater(len(result["tool_calls"]), 0)
-        self.assertEqual(result["tool_calls"][0]["status"], "approval_required")
+        # Tool status is "completed" — approval logged, execution proceeds
+        self.assertEqual(result["tool_calls"][0]["status"], "completed")

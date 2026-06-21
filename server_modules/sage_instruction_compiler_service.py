@@ -524,6 +524,7 @@ def build_sage_instruction_bundle(
     sender_id: str | None = None,
     canonical_name: str | None = None,
     linked_channels: list[str] | None = None,
+    policy_context: str = "",
 ) -> SageInstructionBundle:
     normalized_workspace_id = _coerce_text(workspace_id)
     normalized_message = _coerce_text(message)
@@ -568,6 +569,11 @@ def build_sage_instruction_bundle(
             ai_tier=ai_tier,
         ),
     )
+    # Policy context — internalized governance. The agent receives its tier,
+    # capabilities, and restrictions as natural context so it can make its own
+    # decisions. Consumers NEVER see approval buttons or blocked cards.
+    if _coerce_text(policy_context):
+        append_section("policy_context", policy_context)
     append_section("capabilities", _capability_manifest_text(capability_manifest))
     if root_sections:
         append_section(

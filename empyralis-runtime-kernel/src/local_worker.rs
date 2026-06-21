@@ -127,6 +127,13 @@ pub fn local_worker_decision_command(input: &Value) -> Value {
             actor_role,
             &run_status,
         ),
+        "execute_command" => execute_command_decision(
+            input,
+            workspace_id,
+            worker_id,
+            run_id,
+            &actor_role,
+        ),
         _ => block("local_worker_operation_unknown"),
     }
 }
@@ -452,6 +459,40 @@ fn fail_run_decision(
     )
 }
 
+fn execute_command_decision(
+    input: &Value,
+    workspace_id: Option<String>,
+    worker_id: Option<String>,
+    run_id: Option<String>,
+    actor_role: &str,
+) -> Value {
+    if !can_read(actor_role) {
+        return block("local_worker_actor_cannot_read");
+    }
+    if !boolish(input, "local_companion_enabled", true) {
+        return block("local_companion_disabled");
+    }
+    if boolish(input, "kill_switch_active", false) {
+        return block("local_worker_kill_switch_active");
+    }
+    let workspace = workspace_id.as_deref().unwrap_or("default");
+    // Validate command_id is present (command must be traceable)
+    if string_field(input, "command_id").is_none() {
+        return block("command_id_missing");
+    }
+    allow(
+        "execute_command_allowed",
+        "execute_command",
+        "execute_hardware_command",
+        Some(workspace.to_string()),
+        worker_id,
+        run_id,
+        actor_role,
+        false,
+        "security",
+    )
+}
+
 fn read_decision(
     reason: &str,
     operation: &str,
@@ -581,6 +622,7 @@ fn normalize_operation(value: &str) -> String {
         "complete_run" | "complete_local_run" => "complete_run".to_string(),
         "pause_run" | "pause_local_run" => "pause_run".to_string(),
         "fail_run" | "fail_local_run" => "fail_run".to_string(),
+        "execute_command" | "exec_command" | "execute_hardware_command" => "execute_command".to_string(),
         _ => String::new(),
     }
 }
@@ -649,7 +691,7 @@ fn worker_mismatch(worker_id: &Option<String>, current_worker_id: &Option<String
 }
 
 fn requires_workspace(operation: &str) -> bool {
-    matches!(operation, "get_queue" | "cleanup_queue")
+    matches!(operation, "get_queue" | "cleanup_queue" | "execute_command")
 }
 
 fn requires_worker(operation: &str) -> bool {

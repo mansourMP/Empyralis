@@ -80,6 +80,9 @@ screenshots/
 test_payload.json
 dead_code_report.txt
 
+# Platform frontend (separate Next.js project — add as submodule when ready)
+platform/
+
 # Archive notes
 # backend/ is a legacy NestJS runtime era archive target. Keep tracked until final deletion.
 # desktop/ is a legacy Electron shell era archive target. Keep tracked until final deletion.

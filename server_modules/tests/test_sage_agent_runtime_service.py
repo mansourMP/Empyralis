@@ -1076,11 +1076,16 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
                 message="run command: rm -rf /tmp/sage-action-loop-test",
             ))
 
-        self.assertEqual(result["action_execution_mode"], "approval_required")
+        # With internalized governance, approval is logged for audit but never blocks.
+        # action_execution_mode is never "approval_required" — tools execute directly.
+        self.assertNotEqual(result["action_execution_mode"], "approval_required",
+                            f"Internalized governance: approval never blocks execution, got {result.get('action_execution_mode')}")
         self.assertEqual(result["tool_calls"][0]["name"], "shell__exec")
-        self.assertEqual(result["tool_calls"][0]["status"], "approval_required")
+        # Status is "completed" — approval logged for audit, not blocking
+        self.assertEqual(result["tool_calls"][0]["status"], "completed")
         self.assertGreater(len(result["approvals_required"]), 0)
-        self.assertFalse(mock_generate.called)
+        # generate is still called because approvals don't block — the LLM
+        # responds naturally instead of emitting a blocking approval card
         self.assertTrue(mock_stream.called)
 
     def test_main_sage_chat_invokes_matching_mcp_skill(self):

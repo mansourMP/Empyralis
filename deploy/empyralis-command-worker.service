@@ -1,0 +1,46 @@
+[Unit]
+Description=Empyralis Self-Hosted Command Worker
+Documentation=https://empyralis.com/docs/self-hosted
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=empyralis
+Group=empyralis
+WorkingDirectory=/opt/empyralis
+
+# ── Required environment ──────────────────────────────────────────────────
+Environment="EMPYRALIS_CLOUD_URL=https://empyralis.com"
+Environment="EMPYRALIS_RUNTIME_PROFILE_ID=rp_xxxx"
+Environment="EMPYRALIS_NODE_SESSION_TOKEN=ns_xxxx"
+
+# ── Optional tuning ───────────────────────────────────────────────────────
+Environment="EMPYRALIS_POLL_INTERVAL=2.0"
+Environment="EMPYRALIS_MAX_COMMANDS_PER_POLL=5"
+Environment="EMPYRALIS_LEASE_SECONDS=120"
+Environment="EMPYRALIS_WORKER_LOG_FORMAT=json"
+
+# ── Python path (adjust for your system) ──────────────────────────────────
+Environment="PYTHONUNBUFFERED=1"
+Environment="PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# ── Exec ──────────────────────────────────────────────────────────────────
+ExecStart=/opt/homebrew/bin/python3 scripts/empyralis_self_hosted_command_worker.py
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# ── Security hardening ────────────────────────────────────────────────────
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/empyralis/.empyralis /opt/empyralis/.orion-stack
+ReadOnlyPaths=/opt/empyralis/scripts /opt/empyralis/server_modules
+
+[Install]
+WantedBy=multi-user.target

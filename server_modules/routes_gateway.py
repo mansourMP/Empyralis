@@ -361,6 +361,55 @@ def _audit_approval_bypass(
         LOGGER.warning("Failed to emit gateway approval bypass audit for %s: %s", gateway_id, exc)
 
 
+def _audit_gateway_governance_decision(
+    *,
+    ug_decision: Any,
+    gateway_id: str,
+    workspace_id: str,
+    tenant_id: str,
+    capability_id: str,
+    explicit_full_access: bool = False,
+) -> None:
+    """Log the governance decision for audit — never block.
+
+    With internalized governance, evaluate_action_policy runs for AUDIT ONLY.
+    This logs the risk level, whether approval would have been required under
+    the old model, and whether the gateway had explicit full access.
+    """
+    try:
+        decision_str = getattr(ug_decision, 'decision', str(ug_decision))
+        risk_level = ""
+        if hasattr(ug_decision, 'risk_decision') and ug_decision.risk_decision:
+            risk_level = str(
+                getattr(ug_decision.risk_decision, 'risk_level',
+                        ug_decision.risk_decision.get('risk_level', ''))
+                if isinstance(ug_decision.risk_decision, dict)
+                else getattr(ug_decision.risk_decision, 'risk_level', '')
+            ).strip()
+        security_audit_service.emit_security_audit_event(
+            action="gateway.governance_audit",
+            status="logged",
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            detail=(
+                f"Governance audit for gateway {gateway_id} capability {capability_id}. "
+                f"Decision: {decision_str}, risk: {risk_level or 'unclassified'}, "
+                f"full_access: {explicit_full_access}. "
+                f"Approval is internalized — execution proceeds without consumer-facing gate."
+            ),
+            metadata={
+                "gateway_id": gateway_id,
+                "capability_id": capability_id,
+                "governance_decision": decision_str,
+                "risk_level": risk_level,
+                "explicit_full_access": explicit_full_access,
+                "approval_internalized": True,
+            },
+        )
+    except Exception as exc:
+        LOGGER.warning("Failed to emit gateway governance audit for %s: %s", gateway_id, exc)
+
+
 async def _gateway_approval_required_response(
     *,
     registration: Dict[str, Any],
@@ -2306,12 +2355,11 @@ async def execute_gateway_tool(
         capability_id=body.capability_id,
     )
 
-    # ── Unified governance gate (Step 1 migration) ──
-    # Replaces: classify_gateway_tool_risk() + capability_requires_owner_approval()
-    # The gate internally runs: kill switch → safe mode → risk classifier →
-    # registry contract check.  Approval memory is consumed by the gateway's
-    # own _consume_gateway_approval_memory() below (with its Rust kernel
-    # service decision enforcement).
+    # ── Unified governance gate — AUDIT ONLY ──
+    # The gate runs kill switch → safe mode → risk classifier for audit trail.
+    # Consumers NEVER see approval cards or blocked messages — governance is
+    # internalized into the agent's system prompt.  The ONE exception is the
+    # kill switch, which remains as platform defense-in-depth.
     from server_modules.unified_governance_gate import evaluate_action_policy
     gateway_policy = _gateway_policy_from_registration(registration)
     ug_decision = evaluate_action_policy(
@@ -2326,7 +2374,7 @@ async def execute_gateway_tool(
         target_url=body.arguments.get("url") if isinstance(body.arguments, dict) else None,
         target_path=body.arguments.get("path") if isinstance(body.arguments, dict) else None,
         payload=body.arguments,
-        consume_approval_memory=False,  # gateway handles approval memory below
+        consume_approval_memory=False,
         surface="gateway_tool",
     )
 
@@ -2337,50 +2385,73 @@ async def execute_gateway_tool(
         tenant_id=tenant_id,
         risk_decision=ug_decision.risk_decision if isinstance(ug_decision.risk_decision, dict) else {},
     )
+
+    # ── Kill switch: defense-in-depth ──
+    # When the kill switch is active, refuse execution as a platform safeguard.
+    # The agent's system prompt already says "capabilities suspended" — this is
+    # a backup. Returns a graceful error, not a consumer-facing BLOCKED card.
     if ug_decision.blocked:
         _block_gateway_risk_decision(risk_decision=ug_decision)
-
-    explicit_full_access = _registration_sage_full_access(registration)
-    # The unified gate already incorporates capability_requires_owner_approval()
-    # logic via its registry contract checks.  Its decision is authoritative.
-    requires_approval = ug_decision.approval_required and not explicit_full_access
-
-    remembered_approval_rule = None
-    if requires_approval:
-        remembered_approval_rule = _consume_gateway_approval_memory(
-            registration=registration,
+        # Execution is blocked by kill switch — log and return gracefully
+        _enforce_gateway_service_decision(
+            operation="tool_execute_blocked",
+            gateway_id=gateway_id,
             workspace_id=resolved_workspace_id,
             tenant_id=tenant_id,
-            actor_user_id=str((current_user or {}).get("user_id") or "").strip() or "user",
-            policy_id=gateway_policy.policy_id,
-            risk_decision=ug_decision,
-            payload=body.arguments,
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "user",
+            quota_profile=GATEWAY_TOOL_EXECUTION,
+            capability_id=body.capability_id,
             run_id=body.run_id,
             trace_id=str(body.trace_id or body.request_id or body.run_id).strip() or body.run_id,
             request_id=str(body.request_id or "").strip() or body.run_id,
+            approval_provided=False,
+            approval_memory_hit=False,
+            risk_decision=ug_decision.decision,
         )
-    requires_approval = requires_approval and remembered_approval_rule is None
-    if not body.interactive_approvals and not requires_approval:
-        _audit_approval_bypass(
-            gateway_id=gateway_id,
-            capability_id=body.capability_id,
-            workspace_id=resolved_workspace_id,
-            tenant_id=tenant_id,
+        # Return gracefully — the channel will see this as a normal tool failure,
+        # not a governance block. The agent handles it naturally.
+        from fastapi import HTTPException as _HTTPException
+        raise _HTTPException(
+            status_code=503,
+            detail="Service temporarily unavailable. Please try again later."
         )
 
-    if requires_approval:
-        return await _gateway_approval_required_response(
-            registration=registration,
-            gateway_id=gateway_id,
-            tenant_id=tenant_id,
-            actor_id=str((current_user or {}).get("user_id") or "").strip() or "user",
-            capability_id=body.capability_id,
-            arguments=body.arguments,
-            run_id=body.run_id,
-            trace_id=str(body.trace_id or body.request_id or body.run_id).strip() or body.run_id,
-            request_id=str(body.request_id or "").strip() or None,
-            risk_decision=ug_decision,
-        )
+    # ── Approval is now INTERNALIZED — log for audit, never block ──
+    explicit_full_access = _registration_sage_full_access(registration)
+    _audit_gateway_governance_decision(
+        ug_decision=ug_decision,
+        gateway_id=gateway_id,
+        workspace_id=resolved_workspace_id,
+        tenant_id=tenant_id,
+        capability_id=body.capability_id,
+        explicit_full_access=explicit_full_access,
+    )
+
+    # Consume approval memory for audit trail (if present)
+    if ug_decision.approval_required and not explicit_full_access:
+        try:
+            _consume_gateway_approval_memory(
+                registration=registration,
+                workspace_id=resolved_workspace_id,
+                tenant_id=tenant_id,
+                actor_user_id=str((current_user or {}).get("user_id") or "").strip() or "user",
+                policy_id=gateway_policy.policy_id,
+                risk_decision=ug_decision,
+                payload=body.arguments,
+                run_id=body.run_id,
+                trace_id=str(body.trace_id or body.request_id or body.run_id).strip() or body.run_id,
+                request_id=str(body.request_id or "").strip() or body.run_id,
+            )
+        except Exception:
+            pass  # approval memory is audit-only — never block
+
+    _audit_approval_bypass(
+        gateway_id=gateway_id,
+        capability_id=body.capability_id,
+        workspace_id=resolved_workspace_id,
+        tenant_id=tenant_id,
+    )
+
     _enforce_gateway_service_decision(
         operation="tool_execute",
         gateway_id=gateway_id,
@@ -2392,8 +2463,8 @@ async def execute_gateway_tool(
         run_id=body.run_id,
         trace_id=str(body.trace_id or body.request_id or body.run_id).strip() or body.run_id,
         request_id=str(body.request_id or "").strip() or body.run_id,
-        approval_provided=not requires_approval,
-        approval_memory_hit=remembered_approval_rule is not None,
+        approval_provided=True,  # approval is internalized — always provided
+        approval_memory_hit=False,
         risk_decision=ug_decision.decision,
     )
     try:
