@@ -382,6 +382,15 @@ def resolve_workspace_entitlement_state(
         ).strip()
         billing_source = "workspace_billing"
         billing_metadata = _coerce_dict(subscription.get("metadata"))
+    # ── Fallback: when the billing summary lacks credit_balance_usd (e.g.
+    #     explicit-plan path or local dev without a billing ledger), read it
+    #     directly from workspace metadata so the signup grant always counts.
+    if "hosted_sage_credit_balance_usd" not in billing_usage:
+        fallback_balance = _coerce_non_negative_float(
+            workspace_meta.get("credit_balance_usd"), 0.0
+        )
+        if fallback_balance > 0:
+            billing_usage["hosted_sage_credit_balance_usd"] = fallback_balance
     workspace_plan_id = explicit_plan
     if (
         billing_plan_id == DEFAULT_PLAN_ID
@@ -535,6 +544,14 @@ def hosted_sage_ai_access_state(
             "message": "Hosted Sage AI needs owner approval before this workspace can use it.",
         }
     if total_available_usd <= 0:
+        credit_balance_credits = int(round(credit_balance_usd * HOSTED_SAGE_AI_CREDITS_PER_USD))
+        total_available_credits = int(round(total_available_usd * HOSTED_SAGE_AI_CREDITS_PER_USD))
+        # If the user had a credit balance that is now depleted, give a
+        # friendlier message directing them to add their own key.
+        if credit_balance_credits <= 0 and remaining_usd <= 0:
+            message = "You've reached your AI limit. Open AI & Setup →"
+        else:
+            message = "Hosted Sage AI monthly cap is reached for this workspace."
         return {
             "allowed": False,
             "plan_allows_hosted_ai": True,
@@ -543,12 +560,12 @@ def hosted_sage_ai_access_state(
             "monthly_cost_usd": monthly_cost_usd,
             "monthly_remaining_usd": remaining_usd,
             "credit_balance_usd": credit_balance_usd,
-            "credit_balance_credits": int(round(credit_balance_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
+            "credit_balance_credits": credit_balance_credits,
             "total_available_usd": total_available_usd,
-            "total_available_credits": int(round(total_available_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
+            "total_available_credits": total_available_credits,
             **credit_fields,
             "reason": "cap_reached",
-            "message": "Hosted Sage AI monthly cap is reached for this workspace.",
+            "message": message,
         }
     return {
         "allowed": True,

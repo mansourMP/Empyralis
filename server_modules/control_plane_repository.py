@@ -43,13 +43,37 @@ NEW_ACCOUNT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = _env_non_negative_float(
     0.50,
 )
 
+# One-time signup credit grant in USD.  0.50 USD × 20,000 credits/USD = 10,000 credits.
+# Overridable via env var EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD.
+NEW_ACCOUNT_SIGNUP_CREDIT_USD = _env_non_negative_float(
+    "EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD",
+    0.50,
+)
+
+# Display credits per USD — must match billing_credit_config.HOSTED_SAGE_AI_CREDITS_PER_USD.
+_SIGNUP_CREDITS_PER_USD = 20_000
+
 
 def _new_workspace_billing_metadata() -> Dict[str, Any]:
+    grant_usd = NEW_ACCOUNT_SIGNUP_CREDIT_USD
     return {
         "billing": {
             "plan_id": "personal",
             "hosted_sage_ai_policy": NEW_ACCOUNT_HOSTED_SAGE_AI_POLICY,
             "hosted_sage_ai_monthly_cap_usd": NEW_ACCOUNT_HOSTED_SAGE_AI_MONTHLY_CAP_USD,
+            "credit_balance_usd": grant_usd,
+            "credit_transactions": [
+                {
+                    "kind": "bonus",
+                    "amount_usd": grant_usd,
+                    "credits": int(round(grant_usd * _SIGNUP_CREDITS_PER_USD)),
+                    "request_id": "",
+                    "usage_month": "",
+                    "source": "signup_grant",
+                    "label": "10,000 free platform AI credits",
+                    "created_at": int(time.time()),
+                }
+            ] if grant_usd > 0 else [],
         }
     }
 
@@ -5203,7 +5227,22 @@ def _build_workspace_credit_debit_result(
             "debited_usd": 0.0,
             "reason": "already_recorded",
         }
-    current_balance_usd = max(0.0, round(_billing_float(payload.get("credit_balance_usd"), 0.0), 6))
+    # ── Resolve current balance ──
+    # The signup grant lives in metadata.billing.credit_balance_usd;
+    # debits live in admin_defaults.credit_balance_usd.  When
+    # admin_defaults hasn't been seeded yet, fall back to billing so
+    # the grant is visible to the debit path.
+    admin_has_balance = "credit_balance_usd" in payload
+    admin_balance = max(0.0, round(_billing_float(payload.get("credit_balance_usd"), 0.0), 6))
+    billing_meta = _coerce_dict(_coerce_dict(metadata).get("billing"))
+    billing_balance = max(0.0, round(_billing_float(billing_meta.get("credit_balance_usd"), 0.0), 6))
+    if admin_has_balance:
+        current_balance_usd = admin_balance
+    else:
+        # admin_defaults has never been seeded — use the billing grant
+        # and seed admin_defaults so future debits track correctly.
+        current_balance_usd = max(admin_balance, billing_balance)
+        payload["credit_balance_usd"] = current_balance_usd
     cap_usd = max(
         0.0,
         round(_billing_float(payload.get("hosted_sage_ai_monthly_cap_usd"), monthly_cap_usd), 6),
