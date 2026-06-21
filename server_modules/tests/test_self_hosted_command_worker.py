@@ -42,9 +42,9 @@ class GovernanceGateTests(unittest.TestCase):
             "scripts.empyralis_self_hosted_command_worker._kernel_available",
             return_value=True,
         ), patch(
-            "server_modules.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-            return_value={"decision": "allow", "next_action": "execute_local_command",
-                          "ok": True},
+            "scripts.empyralis_self_hosted_command_worker._run_runtime_kernel",
+            return_value={"ok": True, "decision": "allow",
+                          "next_action": "execute_local_command"},
         ):
             decision = enforce_command_governance(
                 operation="execute_command",
@@ -63,8 +63,9 @@ class GovernanceGateTests(unittest.TestCase):
             "scripts.empyralis_self_hosted_command_worker._kernel_available",
             return_value=True,
         ), patch(
-            "server_modules.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-            side_effect=CommandWorkerError("local_worker_kill_switch_active"),
+            "scripts.empyralis_self_hosted_command_worker._run_runtime_kernel",
+            return_value={"ok": False, "decision": "block",
+                          "reason": "local_worker_kill_switch_active"},
         ):
             with self.assertRaises(CommandWorkerError) as ctx:
                 enforce_command_governance(
@@ -98,8 +99,9 @@ class GovernanceGateTests(unittest.TestCase):
             "scripts.empyralis_self_hosted_command_worker._kernel_available",
             return_value=True,
         ), patch(
-            "server_modules.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-            side_effect=CommandWorkerError("local_companion_disabled"),
+            "scripts.empyralis_self_hosted_command_worker._run_runtime_kernel",
+            return_value={"ok": False, "decision": "block",
+                          "reason": "local_companion_disabled"},
         ):
             with self.assertRaises(CommandWorkerError) as ctx:
                 enforce_command_governance(
@@ -260,9 +262,9 @@ class PollClaimExecuteCompleteCycleTests(unittest.TestCase):
             patch.object(worker.http, "retry") as mock_http,
             patch("scripts.empyralis_self_hosted_command_worker._kernel_available",
                   return_value=True),
-            patch("server_modules.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                  return_value={"decision": "allow", "next_action": "execute_local_command",
-                                "ok": True}),
+            patch("scripts.empyralis_self_hosted_command_worker._run_runtime_kernel",
+                  return_value={"ok": True, "decision": "allow",
+                                "next_action": "execute_local_command"}),
         ):
             # claim returns one command
             mock_http.return_value = {"commands": [cmd], "claimed": [cmd]}
@@ -293,8 +295,9 @@ class PollClaimExecuteCompleteCycleTests(unittest.TestCase):
             patch.object(worker.http, "retry", return_value={"ok": True}),
             patch("scripts.empyralis_self_hosted_command_worker._kernel_available",
                   return_value=True),
-            patch("server_modules.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                  side_effect=CommandWorkerError("local_worker_kill_switch_active")),
+            patch("scripts.empyralis_self_hosted_command_worker._run_runtime_kernel",
+                  return_value={"ok": False, "decision": "block",
+                                "reason": "local_worker_kill_switch_active"}),
         ):
             success = worker._process_command(cmd)
 
@@ -326,9 +329,9 @@ class PollClaimExecuteCompleteCycleTests(unittest.TestCase):
             patch.object(worker.http, "retry", return_value={"ok": True}),
             patch("scripts.empyralis_self_hosted_command_worker._kernel_available",
                   return_value=True),
-            patch("server_modules.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                  return_value={"decision": "allow", "next_action": "execute_local_command",
-                                "ok": True}),
+            patch("scripts.empyralis_self_hosted_command_worker._run_runtime_kernel",
+                  return_value={"ok": True, "decision": "allow",
+                                "next_action": "execute_local_command"}),
         ):
             success = worker._process_command(cmd)
 
