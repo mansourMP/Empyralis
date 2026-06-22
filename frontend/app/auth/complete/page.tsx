@@ -19,10 +19,7 @@ function resolveNextPath(value: string | null): string {
 
 function AuthCompleteContent() {
   const searchParams = useSearchParams();
-  const provider = useMemo(() => {
-    const token = String(searchParams.get('provider') || '').trim().toLowerCase();
-    return token === 'apple' ? 'apple' : 'google';
-  }, [searchParams]);
+  const provider = 'google' as const;
   const nextPath = useMemo(
     () => resolveNextPath(searchParams.get('next')),
     [searchParams],

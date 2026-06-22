@@ -12,7 +12,7 @@ type AwaitBrowserAuthReadyOptions = {
   delayMs?: number;
 };
 
-type ExternalAuthProvider = 'google' | 'apple';
+type ExternalAuthProvider = 'google';
 
 type ExternalAuthPendingRecord = {
   provider: ExternalAuthProvider;
@@ -27,7 +27,6 @@ type ExternalAuthCompletionRecord = {
 export type AuthProviderOptions = {
   email?: { enabled?: boolean } | null;
   google?: { enabled?: boolean } | null;
-  apple?: { enabled?: boolean } | null;
 };
 
 const EXTERNAL_AUTH_PENDING_STORAGE_KEY = 'empyralis.external-auth.pending';
@@ -38,7 +37,7 @@ function hasWindowStorage(): boolean {
 }
 
 function parseExternalAuthProvider(value: unknown): ExternalAuthProvider | null {
-  if (value === 'google' || value === 'apple') {
+  if (value === 'google') {
     return value;
   }
   return null;

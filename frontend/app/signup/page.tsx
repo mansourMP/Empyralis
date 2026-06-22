@@ -14,7 +14,7 @@ import {
   type AuthProviderOptions,
   watchExternalAuthCompletion,
 } from '@/lib/auth/auth-client';
-import { AppleProviderIcon, GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
+import { GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
 function authErrorCopy(error: string): string {
@@ -81,7 +81,6 @@ export default function SignupPage() {
   const [providers, setProviders] = useState<AuthProviderOptions>({
     email: { enabled: true },
     google: { enabled: true },
-    apple: { enabled: false },
   });
   const [channelAttribution, setChannelAttribution] = useState('');
   const [agent, setAgent] = useState('');
@@ -131,14 +130,12 @@ export default function SignupPage() {
         setProviders({
           email: { enabled: payload?.email?.enabled !== false },
           google: { enabled: payload?.google?.enabled === true },
-          apple: { enabled: false },
         });
       })
       .catch(() => {
         setProviders({
           email: { enabled: true },
           google: { enabled: true },
-          apple: { enabled: false },
         });
       });
   }, []);
@@ -239,20 +236,6 @@ export default function SignupPage() {
                 <span className="app-auth-social__content">
                   <span className="app-auth-social__title">Continue with Google</span>
                   <span className="app-auth-social__meta">Live now · quickest account start</span>
-                </span>
-              </AppButton>
-              <AppButton
-                type="button"
-                tone="secondary"
-                className="app-auth-social"
-                disabled
-                aria-disabled="true"
-                title="Apple sign-in is not enabled on the web app yet."
-              >
-                <AppleProviderIcon className="app-auth-provider-mark app-auth-provider-mark--apple" />
-                <span className="app-auth-social__content">
-                  <span className="app-auth-social__title">Apple</span>
-                  <span className="app-auth-social__meta">Coming soon on web</span>
                 </span>
               </AppButton>
             </div>

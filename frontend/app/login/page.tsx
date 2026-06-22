@@ -15,7 +15,7 @@ import {
   type AuthProviderOptions,
   watchExternalAuthCompletion,
 } from '@/lib/auth/auth-client';
-import { AppleProviderIcon, GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
+import { GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
 function authErrorCopy(error: string): string {
@@ -92,7 +92,6 @@ function LoginPageContent() {
   const [providers, setProviders] = useState<AuthProviderOptions>({
     email: { enabled: false },
     google: { enabled: false },
-    apple: { enabled: false },
   });
   const agentParam = String(searchParams.get('agent') || '').trim();
   const channelAttribution = String(searchParams.get('channel_attribution') || '').trim();
@@ -136,7 +135,6 @@ function LoginPageContent() {
         setProviders({
           email: { enabled: payload?.email?.enabled !== false },
           google: { enabled: payload?.google?.enabled === true },
-          apple: { enabled: false },
         });
         setAuthRuntimeError(null);
         setProvidersLoaded(true);
@@ -148,7 +146,6 @@ function LoginPageContent() {
         setProviders({
           email: { enabled: false },
           google: { enabled: false },
-          apple: { enabled: false },
         });
         setAuthRuntimeError(message);
         setProvidersLoaded(true);
