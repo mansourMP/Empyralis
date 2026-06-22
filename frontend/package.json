@@ -10,6 +10,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "smoke:api-wall": "node scripts/api-wall-network-smoke.mjs",
+    "test:unit": "tsx lib/workspace/platform-brand.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:deployed-agents": "playwright test tests/e2e/deployed-agents.spec.ts tests/e2e/non-scaffold-surface-sweep.spec.ts",
     "test:e2e:install": "playwright install chromium"
@@ -33,6 +34,7 @@
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
+    "tsx": "^4.19.0",
     "typescript": "^5.9.3"
   }
 }

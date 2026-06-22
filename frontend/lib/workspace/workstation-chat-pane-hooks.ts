@@ -108,6 +108,7 @@ export type SendFailureNotice = {
   actions?: {
     label: string;
     target: 'gateway' | 'hardware' | 'integrations' | 'approvals';
+    url?: string;
   }[];
 };
 
