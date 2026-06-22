@@ -7,6 +7,7 @@ from server_modules import (
     agent_registry_repository,
     agent_trace_service,
     hardware_access_policy_service,
+    hardware_activity_event_service,
     hardware_result_correlator_service,
     hardware_runtime_session_service,
     hardware_runtime_target_resolver,
@@ -445,6 +446,16 @@ async def execute_self_hosted_node_action(
             "self_hosted_command_id": command_id,
         },
     )
+    # ── Emit progress so the chat isn't silent while the VPS works ──
+    try:
+        await agent_trace_service.emit_tool_progress(
+            trace_context,
+            tool_call_id=tool_call_id,
+            message=f"Running {capability_id} on your Server…",
+            percent=0,
+        )
+    except Exception:
+        pass
     return {
         "status": "running",
         "execution": {
@@ -536,6 +547,30 @@ async def record_self_hosted_command_completion(completion: Dict[str, Any]) -> D
             "completion_status": status,
         },
     )
+    # ── Emit progress + hardware activity for VPS completion/failure ──
+    is_completed = status == "completed"
+    try:
+        await agent_trace_service.emit_tool_progress(
+            trace_context,
+            tool_call_id=text(command_payload.get("request_id")) or text(runtime_session.get("request_id")) or session_id,
+            message=f"{"Completed" if is_completed else "Failed to run"} {capability_id} on your Server",
+            percent=100,
+        )
+    except Exception:
+        pass
+    try:
+        hardware_activity_event_service.emit_hardware_action_event(
+            workspace_id=text(command_payload.get("workspace_id")) or "default",
+            tenant_id=text(command_payload.get("tenant_id")) or "default",
+            gateway_id=text(command_payload.get("runtime_node_id")) or "unknown",
+            capability=capability_id,
+            status="completed" if is_completed else "failed",
+            duration_ms=0,
+            run_id=text(command_payload.get("run_id")) or session_id,
+            trace_id=text(command_payload.get("trace_id")) or None,
+        )
+    except Exception:
+        pass
     completion["runtime_session"] = runtime_session
     completion["artifacts"] = artifact_ids
     return completion

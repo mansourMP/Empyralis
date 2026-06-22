@@ -47,6 +47,12 @@ HARDWARE_ACTION_STATES = {
 DEFAULT_GUARDED_RUNTIME_ACCESS_MODE = execution_mode_policy.GUARDED_RUNTIME_ACCESS_MODE
 FULL_RUNTIME_ACCESS_MODE = execution_mode_policy.FULL_RUNTIME_ACCESS_MODE
 
+_FRIENDLY_RUNTIME_LABEL = {
+    "user_device_gateway": "Agent Computer",
+    "self_hosted_node": "Server",
+    "empyralis_cloud_computer": "Cloud Computer",
+}
+
 _CLOUD_COMPUTER_RUNTIME_REGISTRY: Any = None
 
 normalize_hardware_capability_id = hardware_access_policy_service.normalize_hardware_capability_id
@@ -771,6 +777,18 @@ async def execute_hardware_action(
             "runtime_session": runtime_session,
             "trace_id": resolved_trace_id,
         }
+
+    # ── Emit progress so the chat doesn't go silent during hardware actions ──
+    friendly_label = _FRIENDLY_RUNTIME_LABEL.get(canonical_target_id, "Computer")
+    try:
+        await agent_trace_service.emit_tool_progress(
+            resolved_trace_context,
+            tool_call_id=tool_call_id,
+            message=f"Running {resolved_capability_id} on your {friendly_label}…",
+            percent=0,
+        )
+    except Exception:
+        pass
 
     if canonical_target_id == "empyralis_cloud_computer":
         return await cloud_computer_adapter.execute_cloud_computer_action(

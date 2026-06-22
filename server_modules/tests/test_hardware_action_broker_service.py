@@ -1613,6 +1613,132 @@ class HardwareActionBrokerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enqueue_kwargs["command_type"], "cancel_runtime_action")
         self.assertEqual(enqueue_kwargs["command_payload"]["target_request_id"], "req-self-host")
 
+    async def test_hardware_action_emits_tool_progress_start_for_gateway_target(self) -> None:
+        """F4: Verify tool.progress is emitted when a hardware action starts on a Mac gateway."""
+        create_patch, extend_patch, started_patch, result_patch, artifact_patch, approval_patch = self._session_patches()
+        execute_mock = AsyncMock(
+            return_value={
+                "gateway_id": "gw-1",
+                "device_id": "device-1",
+                "workspace_id": "ws-1",
+                "request_id": "req-1",
+                "capability_id": "shell.execute",
+                "run_id": "run-1",
+                "result": {"summary": "Command ran.", "artifacts": []},
+            }
+        )
+        progress_mock = AsyncMock(return_value="evt-progress")
+        with (
+            create_patch,
+            extend_patch,
+            started_patch,
+            result_patch,
+            artifact_patch,
+            approval_patch,
+            patch(
+                "server_modules.hardware_action_broker_service.gateway_state_repository.get_gateway_registration",
+                return_value=_registration(),
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.gateway_protocol_service.gateway_connection_is_live",
+                return_value=True,
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.gateway_approval_service.capability_requires_owner_approval",
+                return_value=False,
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.gateway_execution_service.execute_tool_via_gateway",
+                execute_mock,
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.agent_trace_service.emit_tool_progress",
+                progress_mock,
+            ),
+        ):
+            await broker.execute_hardware_action(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                action_id="shell.exec",
+                arguments={"command": "echo hello"},
+                runtime_target="user_device_gateway",
+                gateway_id="gw-1",
+                run_id="run-1",
+                trace_id="trace-1",
+                request_id="req-1",
+                session_id="hrs-gateway",
+                trace_context=_trace(),
+            )
+
+        # The broker emits start progress; the gateway adapter emits completion.
+        progress_mock.assert_awaited()
+        # First call: start progress from the broker
+        start_call = progress_mock.await_args_list[0].kwargs
+        self.assertEqual(start_call["message"], "Running shell.execute on your Agent Computer…")
+        self.assertEqual(start_call["percent"], 0)
+        # Second call: completion progress from the gateway adapter
+        completion_call = progress_mock.await_args_list[-1].kwargs
+        self.assertIn("Completed", completion_call["message"])
+        self.assertEqual(completion_call["percent"], 100)
+
+    async def test_hardware_action_emits_tool_progress_start_for_self_hosted_target(self) -> None:
+        """F4: Verify tool.progress is emitted when a hardware action starts on a VPS node."""
+        create_patch, extend_patch, started_patch, result_patch, artifact_patch, approval_patch = self._session_patches()
+        enqueue_mock = AsyncMock(
+            return_value={
+                "ok": True,
+                "runtime_profile_id": "rprof-self",
+                "runtime_node_id": "node-1",
+                "workspace_id": "ws-1",
+                "command": {"id": "shcmd-1", "state": "queued", "command_type": "hardware_action"},
+            }
+        )
+        progress_mock = AsyncMock(return_value="evt-progress")
+        with (
+            create_patch,
+            extend_patch,
+            started_patch,
+            result_patch as emit_result,
+            artifact_patch,
+            approval_patch,
+            patch(
+                "server_modules.hardware_action_broker_service.runtime_attachment_service.list_workspace_runtime_attachments",
+                new=AsyncMock(return_value=_self_hosted_inventory()),
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.agent_registry_repository.enqueue_self_hosted_runtime_command",
+                enqueue_mock,
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.agent_trace_service.emit_tool_progress",
+                progress_mock,
+            ),
+        ):
+            await broker.execute_hardware_action(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                action_id="shell.exec",
+                arguments={"command": "printf hello"},
+                runtime_target="self_hosted_node",
+                node_id="node-1",
+                run_id="run-self-1",
+                trace_id="trace-self-1",
+                request_id="req-self",
+                session_id="hrs-self-host",
+                trace_context=_trace(),
+                require_approval=False,
+            )
+
+        # The broker emits start progress; the VPS adapter also emits its own.
+        progress_mock.assert_awaited()
+        # First call: start progress from the broker
+        first_call_kwargs = progress_mock.await_args_list[0].kwargs
+        self.assertEqual(first_call_kwargs["message"], "Running shell.execute on your Server…")
+        self.assertEqual(first_call_kwargs["percent"], 0)
+        # The tool result should show status "running" (enqueued)
+        emit_result.assert_awaited()
+        self.assertEqual(emit_result.await_args.kwargs["status"], "running")
+
 
 if __name__ == "__main__":
     unittest.main()

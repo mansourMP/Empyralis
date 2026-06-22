@@ -384,12 +384,32 @@ async def execute_gateway_action(
             action_id=action_id,
             metadata=metadata,
         )
+        try:
+            await agent_trace_service.emit_tool_progress(
+                trace_context,
+                tool_call_id=tool_call_id,
+                message=f"Failed to run {capability_id} on your Agent Computer",
+                percent=100,
+            )
+        except Exception:
+            pass
         return {
             "status": state,
             "reason": reason,
             "runtime_session": runtime_session,
             "trace_id": trace_id,
         }
+
+    # ── Emit progress completion for Mac gateway path ──
+    try:
+        await agent_trace_service.emit_tool_progress(
+            trace_context,
+            tool_call_id=tool_call_id,
+            message=f"Completed {capability_id} on your Agent Computer",
+            percent=100,
+        )
+    except Exception:
+        pass
 
     artifact_ids = hardware_result_correlator_service.artifact_ids_from_execution(execution)
     await hardware_result_correlator_service.emit_artifacts(

@@ -35,6 +35,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -442,11 +443,42 @@ class SelfHostedCommandWorker:
             self._commands_failed += 1
             return False
 
-        # ── Step 2: Execute ──
+        # ── Step 2: Execute (with progress heartbeat for long-running commands) ──
         _log.info("executing %s (%s)", capability_id, command_id, extra={**log_ctx, "operation": "execute"})
         start = time.monotonic()
-        result = execute_command(capability_id, arguments)
+        result: Optional[Dict[str, Any]] = None
+        execution_error: Optional[str] = None
+
+        def _run_execution() -> None:
+            nonlocal result, execution_error
+            try:
+                result = execute_command(capability_id, arguments)
+            except Exception as exc:
+                execution_error = str(exc)
+
+        exec_thread = threading.Thread(target=_run_execution, daemon=True)
+        exec_thread.start()
+        heartbeat_interval_s = 10.0
+
+        while exec_thread.is_alive():
+            exec_thread.join(timeout=heartbeat_interval_s)
+            if exec_thread.is_alive():
+                elapsed_so_far = round(time.monotonic() - start, 1)
+                _log.info(
+                    "still running %s (%s) — %.1fs elapsed",
+                    capability_id, command_id, elapsed_so_far,
+                    extra={**log_ctx, "operation": "heartbeat", "elapsed": elapsed_so_far},
+                )
+                try:
+                    self.heartbeat()
+                except Exception:
+                    pass
+
         elapsed = round(time.monotonic() - start, 3)
+        if execution_error:
+            result = {"status": "error", "error": execution_error}
+        elif result is None:
+            result = {"status": "error", "error": "execution returned no result"}
         status = str(result.get("status") or "error")
 
         _log.info(

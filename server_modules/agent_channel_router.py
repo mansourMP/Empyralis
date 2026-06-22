@@ -14,9 +14,12 @@ ARCHITECTURE CONTRACT (Step 3):
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, Optional
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from server_modules import (
     channel_blocking_policy_service,
@@ -2123,3 +2126,55 @@ async def dispatch_cloud_channel_outbound(
             return {"ok": True, "status": response.status_code, "message_id": body.get("message_id")}
     except Exception as exc:
         return {"ok": False, "error": f"dispatch_error: {exc}"}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Studio connector channel routing (safe honest stub)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def route_inbound_channel_message(
+    *,
+    tenant_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    channel_key: str = "",
+    endpoint_key: Optional[str] = None,
+    customer_message: Optional[Dict[str, Any]] = None,
+    session_key: Optional[str] = None,
+    message_id: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    actor_display_name: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    allow_master_fallback: bool = False,
+    privileged_runtime_approved: bool = False,
+    trace_id: Optional[str] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Route an inbound studio-connector message to the agent pipeline.
+
+    HONEST STUB — this function exists to prevent runtime AttributeError
+    crashes at the 7 call sites that reference it.  Studio connector channels
+    (Slack guild, Discord guild, WhatsApp Business, Telegram connector, GitHub)
+    are NOT yet implemented end-to-end.
+
+    Once a channel's specialist routing pipeline is built, replace this stub
+    with the real implementation that fans out to the agent registry, deployed
+    agent run dispatch, or other channel-specific handlers.
+    """
+    logger.warning(
+        "agent_channel_router.route_inbound_channel_message: channel=%s is not "
+        "available — studio connector routing is not yet implemented. "
+        "Message from actor=%s at endpoint=%s dropped safely.",
+        channel_key,
+        actor_id or "unknown",
+        endpoint_key or "unknown",
+    )
+    return {
+        "ok": False,
+        "status": "channel_unavailable",
+        "error": (
+            f"The {channel_key} channel is not available yet. "
+            "Studio connector routing has not been implemented."
+        ),
+        "run_id": None,
+        "reply": None,
+    }
