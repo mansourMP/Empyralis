@@ -12,6 +12,8 @@ import {
   Wrench,
 } from 'lucide-react';
 
+import { isPlatformBillingSource } from '@/lib/workspace/platform-brand';
+
 function formatTimestamp(value: string | null): string | null {
   if (!value) {
     return null;
@@ -65,8 +67,10 @@ function effectiveProviderLabel(metadata: Record<string, unknown>): string {
     : null;
   const billingSource = String(metadata.billing_source ?? contextUsed?.billing_source ?? '').trim();
   const aiLabel = String(metadata.ai_label ?? contextUsed?.ai_label ?? '').trim();
-  if (billingSource === 'empyralis_credits' && aiLabel) {
-    return `${aiLabel} · Workspace AI`;
+  if (isPlatformBillingSource(billingSource)) {
+    // Platform path: NEVER leak the underlying provider.
+    // Use the backend-supplied ai_label when available, otherwise default to "Platform AI".
+    return aiLabel ? `${aiLabel} · Workspace AI` : 'Platform AI · Workspace AI';
   }
   const provider = String(
     metadata.effective_provider

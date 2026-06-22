@@ -1103,6 +1103,8 @@ export function providerReadyForStudio(provider: ProviderCatalogSnapshot | null 
 export function resolveEmpyralisProviderModelForTier(
   tier: WizardState['aiTier'],
 ): { providerId: string; modelId: string } {
+  // Internal routing IDs — NEVER surface providerId or modelId to the consumer.
+  // Consumer-facing labels come from PLATFORM_MODEL_LABELS / platform-brand helpers.
   if (tier === 'light') {
     return { providerId: 'deepseek', modelId: 'deepseek-v4-flash' };
   }

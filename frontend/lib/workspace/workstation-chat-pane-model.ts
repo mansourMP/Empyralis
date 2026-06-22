@@ -1676,7 +1676,7 @@ export function normalizeChatModelOptions(payload: unknown): ChatModelOption[] {
       id: tierId,
       label: EMPYRALIS_TIER_LABELS[tierId],
       providerId: readString(hostedProvider.id) || 'empyralis',
-      providerLabel: readString(hostedProvider.label) || 'Empyralis',
+      providerLabel: 'Empyralis', // NEVER the underlying provider label — platform brand only
       routeProviderId: 'empyralis',
       routeModelId,
       supportsReasoning: true,
@@ -2748,10 +2748,15 @@ export function withTimeout<T>(
 }
 
 export function hostedCreditsFallbackProvider(): ProviderCatalogRecord {
+  // Model IDs MUST stay as real provider IDs — they are used for internal
+  // routing lookups (e.g. preferredModelId matching at line 1659).
+  // Consumer-facing labels are overridden by the empyralis UI section
+  // (EMPYRALIS_TIER_LABELS, context strip, platform-brand helpers).
+  // NEVER surface these labels or IDs directly to the consumer.
   return {
     id: 'deepseek',
     kind: 'provider',
-    label: 'DeepSeek',
+    label: 'Empyralis',
     state: 'configured',
     usable: true,
     active: true,
@@ -2766,7 +2771,7 @@ export function hostedCreditsFallbackProvider(): ProviderCatalogRecord {
     models: [
       {
         id: 'deepseek-v4-flash',
-        label: 'DeepSeek V4 Flash',
+        label: 'Platform Fast',
         provider: 'deepseek',
         supports_reasoning: false,
         reasoning_levels: ['medium'],
@@ -2774,7 +2779,7 @@ export function hostedCreditsFallbackProvider(): ProviderCatalogRecord {
       },
       {
         id: 'deepseek-v4-pro',
-        label: 'DeepSeek V4 Pro',
+        label: 'Platform Pro',
         provider: 'deepseek',
         supports_reasoning: true,
         reasoning_levels: ['high', 'max'],
@@ -2782,7 +2787,7 @@ export function hostedCreditsFallbackProvider(): ProviderCatalogRecord {
       },
       {
         id: 'deepseek-chat',
-        label: 'DeepSeek Chat',
+        label: 'Platform Chat',
         provider: 'deepseek',
         supports_reasoning: true,
         reasoning_levels: ['low', 'medium', 'high'],

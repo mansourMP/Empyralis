@@ -15,6 +15,10 @@ import { useWorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
 import { emitWorkstationProviderChanged } from '@/lib/workspace/workstation-provider-events';
 import { useWorkspaceServices } from '@/lib/workspace/workspace-services';
 import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
+import { DataPaneError } from '@/lib/workspace/data-pane-error';
+import { platformSafeImage, platformSafeLabel } from '@/lib/workspace/platform-brand';
+import { normalizeHostedCreditStateForChat } from '@/lib/workspace/workstation-chat-pane-model';
+import type { ChatHostedCreditState } from '@/lib/workspace/workstation-chat-pane-model';
 import type {
   ProviderCatalogModelRecord,
   ConnectionStatusItem,
@@ -369,6 +373,7 @@ type SageConnectorsPaneCache = {
   personalChannelSurfaces: PersonalChannelSurfaceRecord[];
   hostedSageAi: HostedSageAiSnapshot;
   workspaceAiRoute: WorkspaceAiRoutePayload | null;
+  billingCredits: ChatHostedCreditState | null;
   mcpServers: McpServerRecord[];
   connectionStatusItems: ConnectionStatusItem[];
 };
@@ -2765,10 +2770,11 @@ export function WorkstationSageConnectorsPane({
   const [personalChannelSurfaces, setPersonalChannelSurfaces] = useState<PersonalChannelSurfaceRecord[]>(() => cachedState?.personalChannelSurfaces ?? []);
   const [hostedSageAi, setHostedSageAi] = useState<HostedSageAiSnapshot>(() => cachedState?.hostedSageAi ?? DEFAULT_HOSTED_SAGE_AI);
   const [workspaceAiRoute, setWorkspaceAiRoute] = useState<WorkspaceAiRoutePayload | null>(() => cachedState?.workspaceAiRoute ?? null);
+  const [billingCredits, setBillingCredits] = useState<ChatHostedCreditState | null>(() => cachedState?.billingCredits ?? null);
   const [mcpServers, setMcpServers] = useState<McpServerRecord[]>(() => cachedState?.mcpServers ?? []);
   const [connectionStatusItems, setConnectionStatusItems] = useState<ConnectionStatusItem[]>(() => cachedState?.connectionStatusItems ?? []);
   const [isLoading, setIsLoading] = useState(() => cachedState === null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [personalChannelError, setPersonalChannelError] = useState<string | null>(null);
   const [, setStatus] = useState<string | null>(null);
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
@@ -2801,7 +2807,7 @@ export function WorkstationSageConnectorsPane({
   });
 
   const loadState = useCallback(async () => {
-    const [catalogResult, routeResult, profileResult, credentialResult, connectorResult, mcpResult, connectionStatusResult, gatewayResult] = await Promise.allSettled([
+    const [catalogResult, routeResult, profileResult, credentialResult, connectorResult, mcpResult, connectionStatusResult, gatewayResult, billingResult] = await Promise.allSettled([
       services.client.listProviderCatalog(),
       services.client.getWorkspaceAiRoute(),
       services.client.listProviderProfiles(),
@@ -2865,9 +2871,11 @@ export function WorkstationSageConnectorsPane({
             : [],
         };
       })(),
+      services.client.getBillingSummary().catch(() => null),
     ]);
 
     const catalogPayload = catalogResult.status === 'fulfilled' ? catalogResult.value : null;
+    const billingCreditsPayload = billingResult.status === 'fulfilled' ? billingResult.value : null;
     const normalizedConnectionStatusItems = connectionStatusResult.status === 'fulfilled' && Array.isArray(connectionStatusResult.value?.items)
       ? connectionStatusResult.value.items.filter((item): item is ConnectionStatusItem => Boolean(item) && typeof item === 'object')
       : [];
@@ -2913,6 +2921,9 @@ export function WorkstationSageConnectorsPane({
       personalChannelSurfaces: gatewayPayload.personalChannelSurfaces,
       hostedSageAi: normalizeHostedSageAi(catalogPayload),
       workspaceAiRoute: routeResult.status === 'fulfilled' ? routeResult.value : null,
+      billingCredits: billingCreditsPayload && typeof billingCreditsPayload === 'object'
+        ? normalizeHostedCreditStateForChat(billingCreditsPayload as Record<string, unknown>)
+        : null,
       mcpServers: mcpResult.status === 'fulfilled' ? normalizeMcpServers(mcpResult.value) : [],
       connectionStatusItems: normalizedConnectionStatusItems,
     };
@@ -2929,6 +2940,7 @@ export function WorkstationSageConnectorsPane({
     setPersonalChannelSurfaces(nextState.personalChannelSurfaces);
     setHostedSageAi(nextState.hostedSageAi);
     setWorkspaceAiRoute(nextState.workspaceAiRoute);
+    setBillingCredits(nextState.billingCredits);
     setMcpServers(nextState.mcpServers);
     setConnectionStatusItems(nextState.connectionStatusItems);
 
@@ -2950,7 +2962,7 @@ export function WorkstationSageConnectorsPane({
             setError(null);
             return;
           }
-          setError(loadError instanceof Error ? loadError.message : 'Connections are unavailable right now.');
+          setError(loadError);
         }
       })
       .finally(() => {
@@ -3128,16 +3140,23 @@ export function WorkstationSageConnectorsPane({
   const aiProviderSummary = useMemo<AiProviderSummary>(() => {
     const backupName = backupProviderCard?.provider.id === 'gemini' ? 'Gemini' : backupProviderCard?.label ?? 'Backup model';
     const backupAvailability = providerAvailabilityLabel(backupProviderCard, localCompanionOnline);
-    const creditsLabel = hostedSageAi.monthlyCreditCap > 0
-      ? `${formatCredits(hostedSageAi.monthlyCreditsRemaining)} remaining`
+    // Canonical credit source: billing/summary endpoint (same as chat/billing/settings panes).
+    // Falls back to catalog-hostedSageAi while billing loads.
+    const canonicalRemaining = billingCredits?.monthlyCreditsRemaining ?? hostedSageAi.monthlyCreditsRemaining;
+    const canonicalCap = billingCredits?.monthlyCreditCap ?? hostedSageAi.monthlyCreditCap;
+    const creditsLabel = canonicalCap > 0
+      ? `${formatCredits(canonicalRemaining)} remaining`
       : hostedSageAi.allowed
         ? 'Available'
         : 'Not active';
+    const creditsDetail = canonicalCap > 0
+      ? `${formatCredits(canonicalRemaining)} / ${formatCredits(canonicalCap)} monthly usage left`
+      : describeHostedSageAi(hostedSageAi, hostedProviderCard);
     return {
       activeLabel: providerActiveSummaryLabel(activeProviderCard, hostedProviderCard, explicitSelectedProfile),
       activeDetail: providerActiveSummaryDetail(activeProviderCard, hostedProviderCard, explicitSelectedProfile, hostedSageAi),
       creditsLabel,
-      creditsDetail: hostedSageAi.monthlyCreditCap > 0 ? hostedCreditUsageLabel(hostedSageAi) : describeHostedSageAi(hostedSageAi, hostedProviderCard),
+      creditsDetail,
       backupLabel: backupProviderCard ? `${backupName} ${backupAvailability}` : 'No backup configured',
       backupDetail: backupProviderCard
         ? `${backupProviderCard.label} stays available as ${providerPathLabel(backupProviderCard)}.`
@@ -3145,7 +3164,7 @@ export function WorkstationSageConnectorsPane({
       configLabel: 'Provider configuration',
       configDetail: 'Connect another AI account. Computer models stay optional for local/private work.',
     };
-  }, [activeProviderCard, backupProviderCard, explicitSelectedProfile, hostedProviderCard, hostedSageAi, localCompanionOnline]);
+  }, [activeProviderCard, backupProviderCard, billingCredits, explicitSelectedProfile, hostedProviderCard, hostedSageAi, localCompanionOnline]);
 
   const providerPickerSections = useMemo<ProviderPickerSection[]>(() => {
     const visibleProviderCards = providerCards.filter((record) =>
@@ -4823,49 +4842,6 @@ export function WorkstationSageConnectorsPane({
     router.push(`/w/${encodeURIComponent(workspaceId)}/settings?section=billing`);
   }
 
-  function renderProviderCard(record: ProviderCardRecord) {
-    const isExpanded = expandedCardId === record.id;
-    const badge = providerRouteBadge(record);
-    const status = providerStatusPresentation(record, localCompanionOnline);
-    return (
-      <button
-        key={record.id}
-        type="button"
-        className={joinClassNames('sage-unified-card', isExpanded && 'sage-unified-card--selected')}
-        onClick={() => {
-          setExpandedCardId(isExpanded ? null : record.id);
-        }}
-      >
-        <BrandLogo
-          id={record.id}
-          label={record.label}
-          src={record.image}
-          failedLogos={failedLogos}
-          onError={markLogoFailed}
-        />
-        <div className="sage-unified-card__title-row">
-          <strong className="sage-unified-card__title">{record.label}</strong>
-          {badge ? (
-            <span
-              className={joinClassNames(
-                'sage-unified-card__badge',
-                badge.tone === 'hosted' && 'sage-unified-card__badge--hosted',
-                badge.tone === 'local' && 'sage-unified-card__badge--local',
-              )}
-            >
-              {badge.label}
-            </span>
-          ) : null}
-        </div>
-        <span className="sage-unified-card__detail">{describeProviderCard(record, localCompanionOnline)}</span>
-        <span className={joinClassNames('sage-unified-card__status', status.className)}>
-          {status.showDot ? <span className="sage-unified-card__dot" aria-hidden="true" /> : null}
-          {status.label}
-        </span>
-      </button>
-    );
-  }
-
   function providerApiDisplayLabel(record: ProviderCardRecord): string {
     switch (record.provider.id) {
       case 'deepseek':
@@ -4935,8 +4911,8 @@ export function WorkstationSageConnectorsPane({
       >
         <BrandLogo
           id={record.id}
-          label={record.label}
-          src={record.image}
+          label={platformSafeLabel(record.provider.credentialPlane, record.label)}
+          src={platformSafeImage(record.provider.credentialPlane, record.image)}
           failedLogos={failedLogos}
           onError={markLogoFailed}
         />
@@ -6411,7 +6387,7 @@ export function WorkstationSageConnectorsPane({
           <BrandLogo
             id={record.id}
             label={displayLabel}
-            src={record.image}
+            src={platformSafeImage(record.provider.credentialPlane, record.image)}
             failedLogos={failedLogos}
             onError={markLogoFailed}
           />
@@ -6541,8 +6517,8 @@ export function WorkstationSageConnectorsPane({
               {activeProviderCard ? (
                 <BrandLogo
                   id={activeProviderCard.id}
-                  label={activeProviderCard === hostedProviderCard && !explicitSelectedProfile ? 'Workspace AI' : activeProviderCard.label}
-                  src={activeProviderCard.image}
+                  label={platformSafeLabel(activeProviderCard?.provider.credentialPlane, activeProviderCard.label, 'Workspace AI')}
+                  src={platformSafeImage(activeProviderCard?.provider.credentialPlane, activeProviderCard.image)}
                   failedLogos={failedLogos}
                   onError={markLogoFailed}
                 />
@@ -6600,20 +6576,21 @@ export function WorkstationSageConnectorsPane({
 
   function renderAiRouteSummary() {
     const currentRoute = workspaceDefaultRoute;
-    const routeBudgets = workspaceAiRoute?.budgets && typeof workspaceAiRoute.budgets === 'object'
-      ? workspaceAiRoute.budgets
-      : null;
-    const monthlyCapUsd = readNumber(routeBudgets?.workspaceMonthlyCapUsd, Number.NaN);
-    const remainingCredits = readInteger(routeBudgets?.remainingCredits, Number.NaN);
-    const budgetDetail = Number.isFinite(remainingCredits)
-      ? `${formatCredits(remainingCredits)} credits remaining`
-      : Number.isFinite(monthlyCapUsd)
-        ? `$${monthlyCapUsd.toFixed(2)} monthly cap`
-        : `Credits: ${aiProviderSummary.creditsDetail}`;
     const routeNeedsSetup = workspaceDefaultRouteNeedsSetup;
+    // Single source of truth: credits from billing/summary (canonical, same as chat/billing/settings panes),
+    // tier from aiProviderSummary.activeLabel (profile-derived, same as current model card).
+    // Falls back to hostedSageAi while billing loads. Previously these read
+    // workspaceAiRoute.budgets.remainingCredits (could be 0) and currentRoute.label (could say "Light").
+    const remainingCredits = billingCredits?.monthlyCreditsRemaining ?? hostedSageAi.monthlyCreditsRemaining;
+    const creditCap = billingCredits?.monthlyCreditCap ?? hostedSageAi.monthlyCreditCap;
+    const budgetDetail = creditCap > 0
+      ? `${formatCredits(remainingCredits)} / ${formatCredits(creditCap)} credits remaining`
+      : hostedSageAi.allowed
+        ? 'Credits: Available'
+        : 'Credits: Not active';
     const routeLabel = routeNeedsSetup
       ? 'Needs setup'
-      : readString(currentRoute?.label) || aiProviderSummary.activeLabel;
+      : aiProviderSummary.activeLabel;
     const routeDescription = routeNeedsSetup
       ? readString(currentRoute?.description) || 'Reconnect this provider before it can be the workspace AI route.'
       : readString(currentRoute?.description) || aiProviderSummary.activeDetail;
@@ -7256,14 +7233,7 @@ export function WorkstationSageConnectorsPane({
         ) : null}
         {renderSelectedIntegrationDetail()}
       </WorkstationSplitWorkbench>
-      {error ? (
-        <PlatformNotification
-          tone="warning"
-          title="Connection setup needs attention"
-          detail={error}
-          onClose={() => setError(null)}
-        />
-      ) : null}
+      {error ? <DataPaneError error={error} onRetry={() => void loadState()} label="Connections" /> : null}
 
       {renderComputerConnectSheet()}
 
