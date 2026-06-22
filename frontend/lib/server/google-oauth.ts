@@ -89,6 +89,17 @@ export function configuredAuthOrigins(): Set<string> {
 
 export function isAllowedAuthOrigin(request: NextRequest): boolean {
   const origin = requestOrigin(request);
+
+  // In dev without an explicit allowed-origins list, allow all origins.
+  // Must check BEFORE configuredAuthOrigins() because DEFAULT_PRODUCTION_AUTH_ORIGINS
+  // always populates the set, making the old dev fallback unreachable.
+  if (
+    process.env.NODE_ENV !== 'production'
+    && !process.env.EMPYRALIS_AUTH_ALLOWED_ORIGINS
+  ) {
+    return true;
+  }
+
   const allowed = configuredAuthOrigins();
   if (allowed.size > 0) {
     return allowed.has(origin);

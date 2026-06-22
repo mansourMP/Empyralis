@@ -154,16 +154,44 @@ export async function GET(request: NextRequest) {
     const completionUrl = new URL('/auth/complete', requestOrigin(request));
     completionUrl.searchParams.set('provider', 'google');
     completionUrl.searchParams.set('next', '/');
-    const response = NextResponse.redirect(completionUrl);
-    // Delete state cookie BEFORE appending auth cookies to avoid
-    // Next.js cookies.delete() overwriting set-cookie headers.
-    response.cookies.delete(GOOGLE_OAUTH_STATE_COOKIE);
-    appendUpstreamCookies(response, upstream.headers);
-    return response;
-  } catch (error) {
-    logGoogleAuthFailure('Google OAuth callback failed.', {
-      message: error instanceof Error ? error.message : 'unknown',
+
+    // Next.js strips set-cookie headers from redirect responses, so we set
+    // cookies client-side via JavaScript instead. Parse the upstream cookies
+    // and embed them in a self-redirecting HTML page.
+    const upstreamCookies = upstream.headers.getSetCookie
+      ? upstream.headers.getSetCookie()
+      : splitCombinedSetCookieHeader(upstream.headers.get('set-cookie') || '');
+
+    const cookieJsLines = upstreamCookies.map(raw => {
+      // Parse name=value from the raw Set-Cookie string
+      const [nvPair] = raw.split(';');
+      const [name, ...vr] = nvPair.trim().split('=');
+      const value = vr.join('=');
+      if (!name || !value) return '';
+      // Only set non-HttpOnly cookies via JS; HttpOnly cookies can only be
+      // set server-side, so we strip HttpOnly and set with JS for local dev.
+      const cleanAttrs = raw
+        .split(';')
+        .map(s => s.trim())
+        .filter(s => s.toLowerCase() !== 'httponly')
+        .join('; ');
+      return `document.cookie = ${JSON.stringify(cleanAttrs)};`;
+    }).filter(Boolean).join('\n');
+
+    const redirectUrl = completionUrl.toString();
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
+${cookieJsLines}
+window.location.href = ${JSON.stringify(redirectUrl)};
+</script></body></html>`;
+
+    return new NextResponse(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
     });
-    return redirectWithError(request, 'google_auth_failed');
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : 'unknown';
+    logGoogleAuthFailure('Google OAuth callback failed.', { message: errMsg });
+    // Surface the actual error in the redirect so we can see what failed
+    return redirectWithError(request, `google_auth_failed: ${encodeURIComponent(errMsg)}`);
   }
 }
