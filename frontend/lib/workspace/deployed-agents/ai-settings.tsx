@@ -178,13 +178,13 @@ export function AgentAiSettingsSections({
       <section className="studio-ai-settings__route-overview" aria-label="AI route options">
         <section className="studio-ai-settings__inheritance">
           <span>Default behavior</span>
-          <strong>Use workspace default</strong>
+          <h3>Use workspace default</h3>
           <p>Provider setup belongs in Connections → AI & Runtime. Studio agents only override the route when there is a specific business reason.</p>
         </section>
         <section className="studio-ai-settings__selected-card">
           <div className="studio-ai-settings__selected-copy">
             <span>Selected route</span>
-            <strong>{selectedSourceOption.title}</strong>
+            <h3>{selectedSourceOption.title}</h3>
             <p>{selectedSourceOption.hint}</p>
           </div>
           <div className="studio-ai-settings__selected-copy">

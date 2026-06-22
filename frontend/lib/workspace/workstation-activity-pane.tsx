@@ -6,6 +6,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { CommandSheet } from '@/lib/ui/command-sheet';
 import { FormField, FormGrid, FormInput, FormSection, FormTextarea } from '@/lib/ui/form-controls';
+import { DataPaneError } from '@/lib/workspace/data-pane-error';
 import { PlatformNotification } from '@/lib/ui/platform-notification';
 import { AppButton, AppTextarea } from '@/lib/ui/primitives';
 import { SkeletonBlock } from '@/lib/ui/skeleton-block';
@@ -514,7 +515,7 @@ export function WorkstationActivityPane() {
   const cachedSnapshot = memoryPaneCache.get(workspaceId) ?? null;
   const [snapshot, setSnapshot] = useState<SageMemorySnapshot>(() => cachedSnapshot ?? normalizeMemorySnapshot(null));
   const [isLoading, setIsLoading] = useState(() => cachedSnapshot === null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [storagePolicy, setStoragePolicy] = useState<SageMemoryStoragePolicy | null>(null);
   const cachedProfilePayload = services.queryClient.peek<unknown>('chat:canonical:sage-profile');
@@ -580,7 +581,7 @@ export function WorkstationActivityPane() {
     let cancelled = false;
     void refresh(cachedSnapshot === null).catch((loadError) => {
       if (!cancelled) {
-        setError(memoryPaneErrorMessage(loadError));
+        setError(loadError);
         setIsLoading(false);
       }
     });
@@ -593,7 +594,7 @@ export function WorkstationActivityPane() {
     let cancelled = false;
     void refreshProfile(cachedProfile === null).catch((loadError) => {
       if (!cancelled) {
-        setError(loadError instanceof Error ? loadError.message : 'Memory identity is unavailable right now.');
+        setError(loadError);
         setIsProfileLoading(false);
       }
     });
@@ -988,6 +989,29 @@ export function WorkstationActivityPane() {
       </button>
     </div>
   );
+  const stripYamlFrontmatter = (raw: string): string => {
+    const trimmed = raw.trimStart();
+    if (!trimmed.startsWith('---')) {
+      return raw;
+    }
+    const afterFirstDelim = trimmed.indexOf('\n', 3);
+    if (afterFirstDelim === -1) {
+      return raw;
+    }
+    const closingIndex = trimmed.indexOf('\n---', afterFirstDelim + 1);
+    if (closingIndex === -1) {
+      // No closing delimiter — not valid frontmatter, render as-is
+      return raw;
+    }
+    // Skip past the closing "---" line (including its trailing newline)
+    const afterClosing = trimmed.indexOf('\n', closingIndex + 4);
+    if (afterClosing === -1) {
+      // Document is only frontmatter, no body
+      return '';
+    }
+    return trimmed.slice(afterClosing + 1);
+  };
+
   const renderMarkdownPreview = (markdown: string) => {
     const blocks: ReactNode[] = [];
     let listItems: string[] = [];
@@ -1061,7 +1085,7 @@ export function WorkstationActivityPane() {
     }
     return memoryDocumentViewMode === 'source'
       ? <pre className="app-memory-document-markdown">{content}</pre>
-      : renderMarkdownPreview(content);
+      : renderMarkdownPreview(stripYamlFrontmatter(content));
   };
   const renderDocumentToolbar = (documentId: string, filename: string, content: string) => {
     const isEditing = editingDocumentId === documentId;
@@ -1174,16 +1198,8 @@ export function WorkstationActivityPane() {
 
   return (
     <>
-      {error ? (
-        <PlatformNotification
-          tone="warning"
-          title="Memory needs attention"
-          detail={error}
-          onClose={() => {
-            setError(null);
-          }}
-        />
-      ) : statusMessage ? (
+      {error ? <DataPaneError error={error} onRetry={() => { void refresh(false); void refreshProfile(false); }} label="Memory" /> : null}
+      {!error && statusMessage ? (
         <PlatformNotification
           tone="success"
           title="Memory updated"

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { CommandSheet } from '@/lib/ui/command-sheet';
+import { DataPaneError } from '@/lib/workspace/data-pane-error';
 import { EmptyPanel } from '@/lib/ui/empty-panel';
 import { SkeletonBlock } from '@/lib/ui/skeleton-block';
 import { subscribeWorkstationApprovalResolved } from '@/lib/workspace/workstation-approval-events';
@@ -85,28 +86,10 @@ type ActivityProofItem = {
 
 type ActivityFilterId = 'all' | ActivityProofType;
 
-type PilotProofSnapshot = {
-  status: string;
-  adsReady: boolean;
-  pilotUsers: number;
-  messagesHandled: number;
-  tasksCompleted: number;
-  failureRate: number;
-  approvalRate: number;
-  usefulnessScore: number | null;
-  missingEvidence: string[];
-  unresolvedIssueCount: number;
-  evidenceTraceIds: string[];
-  caseStudyStatus: string;
-  investorMemoStatus: string;
-  adsReasons: string[];
-};
-
 const ACTIVE_THREAD_STORAGE_PREFIX = 'empyralis.chat.active-thread.v1';
 const HISTORY_PAGE_SIZE = 50;
 const threadsPaneCache = new Map<string, ThreadListItem[]>();
 const activityPaneCache = new Map<string, ActivityProofItem[]>();
-const pilotProofPaneCache = new Map<string, PilotProofSnapshot | null>();
 
 const ACTIVITY_FILTERS: Array<{ id: ActivityFilterId; label: string }> = [
   { id: 'all', label: 'All' },
@@ -538,52 +521,6 @@ function mergeProofItems(items: ActivityProofItem[]): ActivityProofItem[] {
     .sort((left, right) => parseTimestamp(right.occurredAt) - parseTimestamp(left.occurredAt));
 }
 
-function normalizePilotProofSnapshot(
-  readinessPayload: unknown,
-  caseStudyPayload: unknown,
-  investorMemoPayload: unknown,
-  adsPayload: unknown,
-): PilotProofSnapshot | null {
-  const readinessRecord = readRecord(readinessPayload);
-  const proofReadiness = readRecord(readinessRecord.proof_readiness);
-  const proofMetrics = readRecord(readinessRecord.proof_metrics);
-  const evidence = readRecord(readinessRecord.evidence);
-  const adsReadiness = readRecord(readRecord(adsPayload).ads_readiness);
-  const caseStudy = readRecord(readRecord(caseStudyPayload).case_study);
-  const investorMemo = readRecord(readRecord(investorMemoPayload).investor_memo);
-  const status = readString(proofReadiness.proof_status);
-  if (!status && Object.keys(readinessRecord).length === 0) {
-    return null;
-  }
-  return {
-    status: status || 'insufficient_data',
-    adsReady: adsReadiness.ads_ready === true,
-    pilotUsers: Math.max(0, Math.round(readNumber(proofMetrics.pilot_users, 0))),
-    messagesHandled: Math.max(0, Math.round(readNumber(proofMetrics.messages_handled, 0))),
-    tasksCompleted: Math.max(0, Math.round(readNumber(proofMetrics.tasks_completed, 0))),
-    failureRate: Math.max(0, readNumber(proofMetrics.failure_rate, 0)),
-    approvalRate: Math.max(0, readNumber(proofMetrics.manual_approval_rate, 0)),
-    usefulnessScore: proofMetrics.average_usefulness_score === null || proofMetrics.average_usefulness_score === undefined
-      ? null
-      : readNumber(proofMetrics.average_usefulness_score, 0),
-    missingEvidence: readStringList(proofReadiness.missing_evidence),
-    unresolvedIssueCount: readList(proofReadiness.unresolved_p0_p1_issues).length,
-    evidenceTraceIds: readStringList(evidence.trace_ids),
-    caseStudyStatus: readString(caseStudy.status, status || 'insufficient_data'),
-    investorMemoStatus: readString(investorMemo.status, status || 'insufficient_data'),
-    adsReasons: readStringList(adsReadiness.reasons),
-  };
-}
-
-function formatProofStatus(value: string): string {
-  const normalized = readString(value, 'insufficient_data').replace(/_/g, ' ');
-  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
-}
-
-function formatPercent(value: number): string {
-  return `${Math.round(Math.max(0, value) * 100)}%`;
-}
-
 function toThreadListItems(threads: ThreadRecord[]): ThreadListItem[] {
   return threads
     .map((thread, index) => ({
@@ -702,12 +639,10 @@ export function WorkstationRunsPane() {
   const activityVersion = useWorkstationActivityVersion();
   const cachedThreads = threadsPaneCache.get(workspaceId) ?? null;
   const cachedActivity = activityPaneCache.get(workspaceId) ?? null;
-  const cachedPilotProof = pilotProofPaneCache.get(workspaceId) ?? null;
   const [hadInitialCache] = useState(() => cachedThreads !== null && cachedActivity !== null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(() => readPersistedActiveThread(workspaceId));
   const [threads, setThreads] = useState<ThreadListItem[]>(() => cachedThreads ?? []);
   const [activityItems, setActivityItems] = useState<ActivityProofItem[]>(() => cachedActivity ?? []);
-  const [pilotProof, setPilotProof] = useState<PilotProofSnapshot | null>(() => cachedPilotProof);
   const [activeFilter, setActiveFilter] = useState<ActivityFilterId>('all');
   const [traceIdFilter, setTraceIdFilter] = useState('');
   const [showAdminAudit, setShowAdminAudit] = useState(false);
@@ -715,7 +650,7 @@ export function WorkstationRunsPane() {
   const [stoppingComputerProofId, setStoppingComputerProofId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(HISTORY_PAGE_SIZE);
   const [isLoading, setIsLoading] = useState(() => cachedThreads === null || cachedActivity === null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
 
   const chatHref = useMemo(
     () => routeManifest.routeIndex.chat?.href ?? `/w/${encodeURIComponent(workspaceId)}/chat`,
@@ -727,15 +662,11 @@ export function WorkstationRunsPane() {
       setIsLoading(true);
     }
     setError(null);
-    const [threadsPayload, activityPayload, runsPayload, approvalsPayload, proofPayload, caseStudyPayload, investorMemoPayload, adsReadinessPayload] = await Promise.all([
+    const [threadsPayload, activityPayload, runsPayload, approvalsPayload] = await Promise.all([
       services.client.listThreads({ includeTurns: true, limit: 200 }),
       services.client.listActivityTimeline({ limit: 200 }).catch(() => ({ items: [] })),
       services.client.listRuns({ limit: 80 }).catch(() => ({ items: [] })),
       services.client.listApprovals({ limit: 80 }).catch(() => ({ items: [] })),
-      services.client.getPilotProofReadiness({ days: 30, limit: 1000 }).catch(() => null),
-      services.client.getPilotProofCaseStudy({ days: 30, limit: 1000 }).catch(() => null),
-      services.client.getPilotProofInvestorMemo({ days: 30, limit: 1000 }).catch(() => null),
-      services.client.getPilotProofAdsReadiness({ days: 30, limit: 1000 }).catch(() => null),
     ]);
     const threadRecords = normalizeThreadItems(threadsPayload);
     const nextThreads = toThreadListItems(threadRecords);
@@ -747,11 +678,8 @@ export function WorkstationRunsPane() {
     ]);
     threadsPaneCache.set(workspaceId, nextThreads);
     activityPaneCache.set(workspaceId, nextActivityItems);
-    const nextPilotProof = normalizePilotProofSnapshot(proofPayload, caseStudyPayload, investorMemoPayload, adsReadinessPayload);
-    pilotProofPaneCache.set(workspaceId, nextPilotProof);
     setThreads(nextThreads);
     setActivityItems(nextActivityItems);
-    setPilotProof(nextPilotProof);
     setVisibleCount(HISTORY_PAGE_SIZE);
     setIsLoading(false);
   };
@@ -760,14 +688,14 @@ export function WorkstationRunsPane() {
     let cancelled = false;
     void refresh(!hadInitialCache).catch((loadError) => {
       if (!cancelled) {
-        setError(loadError instanceof Error ? loadError.message : 'History is unavailable right now.');
+        setError(loadError);
         setIsLoading(false);
       }
     });
     const unsubscribe = subscribeWorkstationApprovalResolved(() => {
       void refresh(false).catch((loadError) => {
         if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : 'History is unavailable right now.');
+          setError(loadError);
           setIsLoading(false);
         }
       });
@@ -783,7 +711,7 @@ export function WorkstationRunsPane() {
       return;
     }
     void refresh(false).catch((loadError) => {
-      setError(loadError instanceof Error ? loadError.message : 'History is unavailable right now.');
+      setError(loadError);
       setIsLoading(false);
     });
   }, [activityVersion, workspaceId]);
@@ -861,7 +789,7 @@ export function WorkstationRunsPane() {
   return (
     <WorkstationSurfaceRoot surface="activity">
       <main className="app-runs-minimal-page" data-workstation-surface="activity-proof">
-        {error ? <div className="app-surface-inline-status">Activity could not refresh. Try again when ready.</div> : null}
+        {error ? <DataPaneError error={error} onRetry={() => void refresh(false)} label="Activity" /> : null}
         {isLoading ? (
           <div className="app-stack-3">
             <SkeletonBlock height="4rem" />

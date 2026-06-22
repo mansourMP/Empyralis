@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import { DataPaneError } from '@/lib/workspace/data-pane-error';
 import { DataBadge } from '@/lib/ui/data-table';
 import { SkeletonBlock } from '@/lib/ui/skeleton-block';
 import type { WorkstationSageHeartbeatRecord } from '@/lib/workspace/workstation-client';
@@ -333,7 +334,7 @@ export function WorkstationSageHeartbeatPane() {
   const streamState = useWorkstationStreamState();
   const [snapshot, setSnapshot] = useState<HeartbeatSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const activityRefreshTimerRef = useRef<number | null>(null);
 
   const refresh = async (showLoading = false) => {
@@ -350,7 +351,7 @@ export function WorkstationSageHeartbeatPane() {
     let cancelled = false;
     void refresh(true).catch((loadError) => {
       if (!cancelled) {
-        setError(loadError instanceof Error ? loadError.message : 'Tasks are unavailable right now.');
+        setError(loadError);
         setIsLoading(false);
       }
     });
@@ -440,7 +441,7 @@ export function WorkstationSageHeartbeatPane() {
   return (
     <WorkstationSurfaceRoot surface="sage-tasks">
       <main className="sage-work-board">
-        {error ? <WorkstationSurfaceNotice tone="warning">{error}</WorkstationSurfaceNotice> : null}
+        {error ? <DataPaneError error={error} onRetry={() => void refresh(false)} label="Tasks" /> : null}
 
         {isLoading || !snapshot ? (
           <div className="app-stack-3">
@@ -458,20 +459,20 @@ export function WorkstationSageHeartbeatPane() {
                 <div className="sage-work-hero__actions">
                   <button
                     type="button"
-                    className="app-link-button app-link-button--secondary"
+                    className="app-link-button"
                     onClick={() => {
                       void refresh(true).catch((loadError) => {
-                        setError(loadError instanceof Error ? loadError.message : 'Tasks are unavailable right now.');
+                        setError(loadError);
                         setIsLoading(false);
                       });
                     }}
                   >
                     Refresh
                   </button>
-                  <Link href={chatHref} className="app-link-button app-link-button--secondary">
+                  <Link href={chatHref} className="app-link-button">
                     Open chat
                   </Link>
-                  <Link href={approvalsHref} className="app-link-button app-link-button--secondary">
+                  <Link href={approvalsHref} className="app-link-button">
                     Approvals
                   </Link>
                 </div>
@@ -547,7 +548,7 @@ export function WorkstationSageHeartbeatPane() {
                         ))}
                       </div>
                     ) : (
-                      <p className="sage-worker-lane-card__empty">No active or queued work in this lane.</p>
+                      <WorkstationSurfaceNotice>No active or queued work in this lane.</WorkstationSurfaceNotice>
                     )}
                   </section>
                 ))}
@@ -586,7 +587,7 @@ export function WorkstationSageHeartbeatPane() {
                             ))}
                           </div>
                         ) : (
-                          <p className="sage-task-lane__empty">{row.description}</p>
+                          <WorkstationSurfaceNotice>{row.description}</WorkstationSurfaceNotice>
                         )}
                       </section>
                     );
@@ -640,7 +641,7 @@ export function WorkstationSageWorkCenterPane() {
   const streamState = useWorkstationStreamState();
   const [snapshot, setSnapshot] = useState<HeartbeatSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const activityRefreshTimerRef = useRef<number | null>(null);
 
   const refresh = async (showLoading = false) => {
@@ -657,7 +658,7 @@ export function WorkstationSageWorkCenterPane() {
     let cancelled = false;
     void refresh(true).catch((loadError) => {
       if (!cancelled) {
-        setError(loadError instanceof Error ? loadError.message : 'Tasks are unavailable right now.');
+        setError(loadError);
         setIsLoading(false);
       }
     });
@@ -710,7 +711,7 @@ export function WorkstationSageWorkCenterPane() {
   return (
     <WorkstationSurfaceRoot surface="sage-work-center">
       <main className="sage-work-board">
-        {error ? <WorkstationSurfaceNotice tone="warning">{error}</WorkstationSurfaceNotice> : null}
+        {error ? <DataPaneError error={error} onRetry={() => void refresh(false)} label="Tasks" /> : null}
 
         {isLoading || !snapshot ? (
           <div className="app-stack-3">
@@ -731,7 +732,7 @@ export function WorkstationSageWorkCenterPane() {
                     className="app-link-button"
                     onClick={() => {
                       void refresh(true).catch((loadError) => {
-                        setError(loadError instanceof Error ? loadError.message : 'Tasks are unavailable right now.');
+                        setError(loadError);
                         setIsLoading(false);
                       });
                     }}

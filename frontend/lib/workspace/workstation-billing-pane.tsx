@@ -9,8 +9,8 @@ import {
   FormGrid,
   FormInput,
 } from '@/lib/ui/form-controls';
+import { AppButton } from '@/lib/ui/primitives';
 import {
-  WorkstationActionButton,
   WorkstationSurfaceCard,
   WorkstationSurfaceList,
   WorkstationSurfaceListItem,
@@ -363,9 +363,9 @@ export function WorkstationBillingPane() {
         title="Usage ledger"
         description="Credit and runtime usage across Sage, Studio, mini-app invokes, and Cloud Computer sessions."
         actions={(
-          <WorkstationActionButton type="button" tone="secondary" onClick={reloadSummary}>
+          <AppButton type="button" tone="secondary" onClick={reloadSummary}>
             Refresh
-          </WorkstationActionButton>
+          </AppButton>
         )}
       >
         <WorkstationSurfaceStatGrid>
@@ -393,14 +393,14 @@ export function WorkstationBillingPane() {
             actions={(
               <>
                 {USAGE_LEDGER_FILTERS.map((item) => (
-                  <WorkstationActionButton
+                  <AppButton
                     key={item.id}
                     type="button"
                     tone={usageFilter === item.id ? 'primary' : 'secondary'}
                     onClick={() => chooseUsageFilter(item.id)}
                   >
                     {item.label}
-                  </WorkstationActionButton>
+                  </AppButton>
                 ))}
               </>
             )}
@@ -486,13 +486,13 @@ export function WorkstationBillingPane() {
             />
           </FormField>
           <div className="settings-action-row">
-            <WorkstationActionButton
+            <AppButton
               type="button"
               disabled={creditCapPending}
               onClick={saveHostedCreditCap}
             >
               {creditCapPending ? 'Saving…' : 'Save cap'}
-            </WorkstationActionButton>
+            </AppButton>
           </div>
         </FormGrid>
         <WorkstationSurfaceNotice tone="neutral">
@@ -500,7 +500,7 @@ export function WorkstationBillingPane() {
         </WorkstationSurfaceNotice>
         <FormGrid columns="repeat(4, 1fr)">
           {[5, 10, 25, 50].map((amount) => (
-            <WorkstationActionButton
+            <AppButton
               key={amount}
               type="button"
               tone="secondary"
@@ -508,7 +508,7 @@ export function WorkstationBillingPane() {
               onClick={() => startCreditPurchase(amount)}
             >
               ${amount}
-            </WorkstationActionButton>
+            </AppButton>
           ))}
         </FormGrid>
         <FormGrid columns="minmax(0, 1fr) auto">
@@ -524,7 +524,7 @@ export function WorkstationBillingPane() {
             />
           </FormField>
           <div className="settings-action-row">
-            <WorkstationActionButton
+            <AppButton
               type="button"
               disabled={creditPurchasePending || !creditPurchaseAmount}
               onClick={() => {
@@ -535,7 +535,7 @@ export function WorkstationBillingPane() {
               }}
             >
               {creditPurchasePending ? 'Purchasing…' : 'Purchase credits'}
-            </WorkstationActionButton>
+            </AppButton>
           </div>
         </FormGrid>
       </WorkstationSurfaceCard>
@@ -544,10 +544,10 @@ export function WorkstationBillingPane() {
         description="Canonical billing state for this workspace."
         actions={(
           <div className="app-inline-actions">
-            <WorkstationActionButton type="button" tone="secondary" onClick={reloadSummary}>
+            <AppButton type="button" tone="secondary" onClick={reloadSummary}>
               Refresh
-            </WorkstationActionButton>
-            <WorkstationActionButton
+            </AppButton>
+            <AppButton
               type="button"
               tone="secondary"
               disabled={!readBoolean(summary?.portal_available) || portalPending}
@@ -571,7 +571,7 @@ export function WorkstationBillingPane() {
               }}
             >
               Manage billing
-            </WorkstationActionButton>
+            </AppButton>
           </div>
         )}
       >
@@ -613,7 +613,7 @@ export function WorkstationBillingPane() {
                       ? 'Free is the default workspace plan and does not require checkout.'
                       : 'This plan needs a configured Stripe price before checkout can start.'}
                   actions={(
-                    <WorkstationActionButton
+                    <AppButton
                       type="button"
                       disabled={isCurrent || !checkoutEnabled || pendingPlanId === planId}
                       onClick={() => {
@@ -636,7 +636,7 @@ export function WorkstationBillingPane() {
                       }}
                     >
                       {isCurrent ? 'Current' : pendingPlanId === planId ? 'Starting…' : 'Upgrade'}
-                    </WorkstationActionButton>
+                    </AppButton>
                   )}
                 />
               );

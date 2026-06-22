@@ -18,6 +18,8 @@ import {
 import { useAppTheme } from '@/lib/ui/app-theme';
 import { FormGrid, FormReadout } from '@/lib/ui/form-controls';
 import { useAccountShell } from '@/lib/shell/account-shell-context';
+import { DataPaneError } from '@/lib/workspace/data-pane-error';
+import { SkeletonBlock } from '@/lib/ui/skeleton-block';
 import { useWorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
 import { useWorkspaceServices } from '@/lib/workspace/workspace-services';
 import { WorkstationPlatformAnalyticsPane } from '@/lib/workspace/workstation-platform-analytics-pane';
@@ -212,9 +214,6 @@ function formatAuthMethodLabel(method: AccountMethodRecord): string {
   }
   if (provider === 'google') {
     return 'Google';
-  }
-  if (provider === 'apple') {
-    return 'Apple';
   }
   if (provider === 'oidc') {
     return 'Single sign-on';
@@ -551,9 +550,9 @@ export function WorkstationSettingsPane() {
   const [authProviders, setAuthProviders] = useState<AuthProviderOptions>({
     email: { enabled: true },
     google: { enabled: false },
-    apple: { enabled: false },
   });
-  const [accountDetailsError, setAccountDetailsError] = useState<string | null>(null);
+  const [accountDetailsError, setAccountDetailsError] = useState<unknown>(null);
+  const [isLoadingAccountDetails, setIsLoadingAccountDetails] = useState(true);
   const [logoutPending, setLogoutPending] = useState(false);
 
   useEffect(() => {
@@ -575,9 +574,9 @@ export function WorkstationSettingsPane() {
     router.replace(nextQuery ? `${pathname}?${nextQuery}` : pathname, { scroll: false });
   };
 
-  useEffect(() => {
-    let cancelled = false;
+  const refreshAccountDetails = () => {
     setAccountDetailsError(null);
+    setIsLoadingAccountDetails(true);
 
     void Promise.allSettled([
       me(),
@@ -587,10 +586,6 @@ export function WorkstationSettingsPane() {
       services.client.getWorkspaceTransparencySettings(),
       listAuthProviders(),
     ]).then((results) => {
-      if (cancelled) {
-        return;
-      }
-
       const [
         profileResult,
         billingResult,
@@ -619,18 +614,18 @@ export function WorkstationSettingsPane() {
         setAuthProviders({
           email: { enabled: authProvidersResult.value?.email?.enabled !== false },
           google: { enabled: authProvidersResult.value?.google?.enabled === true },
-          apple: { enabled: authProvidersResult.value?.apple?.enabled === true },
         });
       }
-      const failed = results.some((result) => result.status === 'rejected');
-      if (failed) {
-        setAccountDetailsError('Some account details could not refresh. Showing the last known basics.');
+      const firstFailure = results.find((r) => r.status === 'rejected');
+      if (firstFailure) {
+        setAccountDetailsError(firstFailure.reason);
       }
+      setIsLoadingAccountDetails(false);
     });
+  };
 
-    return () => {
-      cancelled = true;
-    };
+  useEffect(() => {
+    refreshAccountDetails();
   }, [services.client]);
 
   const activeSection = SETTINGS_SECTIONS.find((section) => section.id === selectedSection) ?? SETTINGS_SECTIONS[0];
@@ -729,9 +724,16 @@ export function WorkstationSettingsPane() {
                   </AppButton>
                 </div>
               </section>
-              {accountDetailsError ? (
-                <AppNotice tone="warning">{accountDetailsError}</AppNotice>
+              {isLoadingAccountDetails ? (
+                <div className="app-stack-3">
+                  <SkeletonBlock height="5rem" />
+                  <SkeletonBlock height="4rem" />
+                  <SkeletonBlock height="7rem" />
+                </div>
               ) : null}
+              {accountDetailsError ? <DataPaneError error={accountDetailsError} onRetry={() => refreshAccountDetails()} label="Account details" /> : null}
+              {isLoadingAccountDetails ? null : (
+                <>
               <AppSurfaceStatGrid className="settings-account-stat-grid">
                 <AppSurfaceStat
                   label="Plan"
@@ -790,13 +792,10 @@ export function WorkstationSettingsPane() {
                     subtitle={authProviders.google?.enabled === true ? 'Available for this workspace' : 'Not enabled for this workspace'}
                     description="Google is the fastest sign-in path when this workspace has it enabled."
                   />
-                  <AppSurfaceListItem
-                    title="Apple sign-in"
-                    subtitle={authProviders.apple?.enabled === true ? 'Available for this workspace' : 'Coming soon on web'}
-                    description="Apple will appear here as a real method once the web sign-in path is enabled."
-                  />
                 </AppSurfaceList>
               </AppSurfaceCard>
+                </>
+              )}
             </div>
           ) : null}
 
