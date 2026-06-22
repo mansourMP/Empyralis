@@ -109,107 +109,70 @@ async def telegram_webhook(request: Request) -> dict:
 
     workspace_id = hosted.get_workspace_for_chat(chat_id)
     if workspace_id is None:
+        # Stale pair — the chat_id was paired but the workspace is gone.
+        # Tell the user so they don't stare at silence.
+        await hosted.send_message_safe(
+            chat_id,
+            "⚠️ This chat is no longer linked to a workspace. Please re-pair from Empyralis → Connections → Telegram.",
+            reply_to_message_id=parsed.get("message_id"),
+        )
         return {"ok": True}
 
-    try:
-        message_text = str(parsed.get("text") or "").strip()
+    # ── Channel-specific: media attachment resolution ──
+    message_text = str(parsed.get("text") or "").strip()
+    _attachments: list[dict] = []
+    _media = parsed.get("media")
+    if isinstance(_media, list) and _media:
+        for _m in _media:
+            _fid = str(_m.get("file_id") or "").strip()
+            if _fid:
+                try:
+                    _finfo = await hosted.get_file(_fid)
+                    _fpath = str(_finfo.get("file_path") or "").strip()
+                    _furl = hosted.build_file_url(_fpath) if _fpath else ""
+                    _attachments.append({
+                        "type": str(_m.get("type") or "file"),
+                        "url": _furl,
+                        "mime": str(_m.get("mime") or "application/octet-stream"),
+                        "filename": str(_m.get("filename") or ""),
+                        "file_id": _fid,
+                    })
+                except Exception:
+                    _attachments.append({"type": str(_m.get("type") or "file"), "file_id": _fid})
 
-        # ── Resolve media attachments (photo, document, voice) ──
-        _attachments: list[dict] = []
-        _media = parsed.get("media")
-        if isinstance(_media, list) and _media:
-            for _m in _media:
-                _fid = str(_m.get("file_id") or "").strip()
-                if _fid:
-                    try:
-                        _finfo = await hosted.get_file(_fid)
-                        _fpath = str(_finfo.get("file_path") or "").strip()
-                        _furl = hosted.build_file_url(_fpath) if _fpath else ""
-                        _attachments.append({
-                            "type": str(_m.get("type") or "file"),
-                            "url": _furl,
-                            "mime": str(_m.get("mime") or "application/octet-stream"),
-                            "filename": str(_m.get("filename") or ""),
-                            "file_id": _fid,
-                        })
-                    except Exception:
-                        _attachments.append({"type": str(_m.get("type") or "file"), "file_id": _fid})
-
-        # ── Shared command dispatcher ──
-        from server_modules.sage_command_dispatcher import dispatch_command
-        cmd_reply = await dispatch_command(
-            command=message_text,
-            workspace_id=workspace_id,
-            thread_id="sage-main",
-            channel_origin="telegram_hosted",
-            sender_id=str(chat_id),
+    # ── Shared command dispatcher ──
+    from server_modules.sage_command_dispatcher import dispatch_command
+    cmd_reply = await dispatch_command(
+        command=message_text,
+        workspace_id=workspace_id,
+        thread_id="sage-main",
+        channel_origin="telegram_hosted",
+        sender_id=str(chat_id),
+    )
+    if cmd_reply is not None:
+        await hosted.send_message_safe(
+            chat_id, cmd_reply,
+            reply_to_message_id=parsed.get("message_id"),
         )
-        if cmd_reply is not None:
-            await hosted.send_sage_reply(chat_id, cmd_reply)
-            return {"ok": True}
+        return {"ok": True}
 
-        await hosted.send_chat_action(chat_id, "typing")
+    # ── Route through shared-core reply dispatcher ──
+    # This ONE call owns: typing, execute_sage_turn, error classification,
+    # [SILENT] suppression, message splitting, guaranteed fallback.
+    # The TelegramHostedTransport provides only the raw send/typing/format primitives.
+    from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
 
-        # ── Route through unified Sage ingress ──
-        from server_modules.sage_turn_adapter import execute_sage_turn
-
-        result = await execute_sage_turn(
-            workspace_id=workspace_id,
-            message=message_text if message_text else "[Media]",
-            attachments=_attachments if _attachments else None,
-            channel_origin="telegram_hosted",
-            channel_sender_id=str(chat_id),
-            channel_sender_name=str(parsed.get("from_first_name", "")).strip(),
-        )
-
-        reply = str(result.message or "").strip()
-        if reply and not hosted._should_skip_reply(reply):
-            await hosted.send_sage_reply(
-                chat_id,
-                reply,
-                reply_to_message_id=parsed.get("message_id"),
-            )
-        elif not reply and result.error:
-            # Error captured in result (not raised) — map to generic reply
-            from server_modules.sage_command_dispatcher import (
-                SAGE_ERROR_REPLY as _res_err,
-                SAGE_AI_LIMIT_REPLY as _res_limit,
-                SAGE_AI_NEEDS_ATTENTION_REPLY as _res_attn,
-            )
-            from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH as _sp
-
-            _err_msg = str(result.error).lower()
-            _res_setup = f"/w/{workspace_id}{_sp}" if workspace_id else _sp
-            _res_hint = f"\n\n{_res_setup}"
-            if "limit" in _err_msg or "cap" in _err_msg:
-                await hosted.send_sage_reply(chat_id, _res_limit + _res_hint, reply_to_message_id=parsed.get("message_id"))
-            elif "attention" in _err_msg or "not available" in _err_msg or "not configured" in _err_msg:
-                await hosted.send_sage_reply(chat_id, _res_attn + _res_hint, reply_to_message_id=parsed.get("message_id"))
-            else:
-                await hosted.send_sage_reply(chat_id, _res_err, reply_to_message_id=parsed.get("message_id"))
-
-    except Exception as exc:
-        from server_modules.sage_command_dispatcher import (
-            SAGE_ERROR_REPLY as _err,
-            SAGE_AI_LIMIT_REPLY as _limit_err,
-            SAGE_AI_NEEDS_ATTENTION_REPLY as _attention_err,
-        )
-        from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
-
-        _msg = str(exc).lower()
-        # Build the AI & Setup link with workspace context
-        _setup_path = f"/w/{workspace_id}{_SAGE_AI_SETUP_PATH}" if workspace_id else _SAGE_AI_SETUP_PATH
-        _setup_hint = f"\n\n{_setup_path}"
-
-        if (
-            "reached your ai limit" in _msg or "ai limit" in _msg
-            or "cap_reached" in _msg
-        ):
-            await hosted.send_sage_reply(chat_id, _limit_err + _setup_hint, reply_to_message_id=parsed.get("message_id"))
-        elif "not available" in _msg or "no cloud provider" in _msg or "not configured" in _msg or "needs attention" in _msg:
-            await hosted.send_sage_reply(chat_id, _attention_err + _setup_hint, reply_to_message_id=parsed.get("message_id"))
-        else:
-            await hosted.send_sage_reply(chat_id, _err, reply_to_message_id=parsed.get("message_id"))
+    _transport = hosted.TelegramHostedTransport(str(chat_id))
+    await dispatch_sage_reply_safe(
+        transport=_transport,
+        workspace_id=workspace_id,
+        message=message_text if message_text else "[Media]",
+        attachments=_attachments if _attachments else None,
+        channel_origin="telegram_hosted",
+        sender_id=str(chat_id),
+        sender_name=str(parsed.get("from_first_name", "")).strip(),
+        reply_to_id=str(parsed.get("message_id") or ""),
+    )
 
     return {"ok": True}
 
@@ -231,96 +194,45 @@ async def dev_poll_once() -> dict:
             continue
         workspace_id = hosted.get_workspace_for_chat(chat_id)
         if workspace_id is None:
+            # Stale pair — tell the user
+            await hosted.send_message_safe(
+                chat_id,
+                "⚠️ This chat is no longer linked to a workspace. Please re-pair from Empyralis → Connections → Telegram.",
+            )
             processed += 1
             continue
-        try:
-            message_text = str(parsed.get("text") or "").strip()
+        message_text = str(parsed.get("text") or "").strip()
 
-            # Handle /compact in dev-poll path
-            if message_text.lower().startswith("/compact"):
-                from server_modules.compaction_service import (
-                    compact_turns, find_cut_point, should_compact, load_previous_summary,
-                    resolve_context_window,
-                )
-                from server_modules import thread_service
-                from server_modules.sage_agent_runtime_service import SAGE_THREAD_ID
-
-                tenant_id = "default"
-                await thread_service.ensure_master_thread(
-                    thread_id=SAGE_THREAD_ID,
-                    tenant_id=tenant_id,
-                    workspace_id=workspace_id,
-                    owner_user_id="sage",
-                    channel="sage",
-                )
-                thread_record = await thread_service.get_thread(
-                    SAGE_THREAD_ID, tenant_id=tenant_id,
-                    workspace_id=workspace_id, include_turns=True,
-                )
-                raw_turns = list(thread_record.get("turns") or []) if isinstance(thread_record, dict) else []
-                # Resolve workspace provider for real context window
-                _ws_provider = ""
-                try:
-                    from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
-                    from server_modules.control_plane_repository import get_workspace_by_id
-                    _ws_rec = await get_workspace_by_id(workspace_id)
-                    _ws_meta = dict((_ws_rec or {}).get("metadata") or {})
-                    _ws_defaults = workspace_admin_defaults_from_metadata(_ws_meta)
-                    _ws_provider = str(_ws_defaults.sage_ai_provider or "").strip().lower()
-                except Exception:
-                    _ws_provider = ""
-                _ctx_window = resolve_context_window(_ws_provider or None, None)
-                if raw_turns and should_compact(raw_turns, context_window=_ctx_window):
-                    cut_idx = find_cut_point(raw_turns, context_window=_ctx_window)
-                    if cut_idx > 0:
-                        prev = await load_previous_summary(workspace_id=workspace_id, tenant_id=tenant_id)
-                        await compact_turns(
-                            turns=raw_turns[:cut_idx],
-                            workspace_id=workspace_id,
-                            tenant_id=tenant_id,
-                            thread_id=SAGE_THREAD_ID,
-                            previous_summary=prev,
-                        )
-                    await hosted.send_sage_reply(chat_id, "Context compacted.")
-                else:
-                    await hosted.send_sage_reply(chat_id, "Nothing to compact — context is still small.")
-                continue
-
-            await hosted.send_chat_action(chat_id, "typing")
-            # ── Route through unified Sage ingress ──
-            from server_modules.sage_turn_adapter import execute_sage_turn as _est2
-
-            result = await _est2(
-                workspace_id=workspace_id,
-                message=message_text,
-                channel_origin="telegram_hosted",
-                channel_sender_id=str(chat_id),
-                channel_sender_name=str(parsed.get("from_first_name", "")).strip(),
+        # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
+        from server_modules.sage_command_dispatcher import dispatch_command
+        cmd_reply = await dispatch_command(
+            command=message_text,
+            workspace_id=workspace_id,
+            thread_id="sage-main",
+            channel_origin="telegram_hosted",
+            sender_id=str(chat_id),
+        )
+        if cmd_reply is not None:
+            await hosted.send_message_safe(
+                chat_id, cmd_reply,
+                reply_to_message_id=parsed.get("message_id"),
             )
-            reply = str(result.message or "").strip()
-            if reply:
-                await hosted.send_sage_reply(chat_id, reply, reply_to_message_id=parsed.get("message_id"))
-        except Exception as exc:
-            from server_modules.sage_command_dispatcher import (
-                SAGE_ERROR_REPLY as _err,
-                SAGE_AI_LIMIT_REPLY as _limit_err,
-                SAGE_AI_NEEDS_ATTENTION_REPLY as _attention_err,
-            )
-            from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
+            processed += 1
+            continue
 
-            _msg = str(exc).lower()
-            _setup_path = f"/w/{workspace_id}{_SAGE_AI_SETUP_PATH}" if workspace_id else _SAGE_AI_SETUP_PATH
-            _setup_hint = f"\n\n{_setup_path}"
+        # ── Route through shared-core reply dispatcher ──
+        from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
 
-            if (
-                "reached your ai limit" in _msg or "ai limit" in _msg
-                or "cap_reached" in _msg
-            ):
-                await hosted.send_sage_reply(chat_id, _limit_err + _setup_hint, reply_to_message_id=parsed.get("message_id"))
-            elif "not available" in _msg or "no cloud provider" in _msg or "not configured" in _msg or "needs attention" in _msg:
-                await hosted.send_sage_reply(chat_id, _attention_err + _setup_hint, reply_to_message_id=parsed.get("message_id"))
-            else:
-                await hosted.send_sage_reply(chat_id, _err, reply_to_message_id=parsed.get("message_id"))
+        _transport = hosted.TelegramHostedTransport(str(chat_id))
+        await dispatch_sage_reply_safe(
+            transport=_transport,
+            workspace_id=workspace_id,
+            message=message_text,
+            channel_origin="telegram_hosted",
+            sender_id=str(chat_id),
+            sender_name=str(parsed.get("from_first_name", "")).strip(),
+            reply_to_id=str(parsed.get("message_id") or ""),
+        )
         processed += 1
     return {"ok": True, "updates_processed": processed}
 

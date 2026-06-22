@@ -13,7 +13,9 @@ Implemented personal channel keys in
 - `telegram_personal`: provider `telegram_gramjs`, runtime lane
   `personal_gateway`, live capable.
 - `whatsapp_personal`: provider `whatsapp_baileys`, runtime lane
-  `personal_gateway`, live capable.
+  `personal_gateway`. **NOT a supported launch path.** Personal WhatsApp (Baileys/QR) gets banned by
+  the provider. WhatsApp Business Cloud API also blocks third-party general-purpose AI assistants
+  as of Jan 15, 2026. This lane is legacy code; it must not be exposed to customers.
 - `signal_personal`: provider `signal_local_bridge`, runtime lane
   `personal_gateway`, planned until the local bridge runtime is certified.
 - `imessage_personal`: provider `bluebubbles_local_bridge`, runtime lane
@@ -23,8 +25,16 @@ Implemented personal channel keys in
   `personal_gateway`, planned until the local bridge runtime is certified.
 
 All require Agent Computer and are `surface_support: ["sage"]` in the platform
-catalog. They are not launch-allowed Studio bindings. Only Telegram and
-WhatsApp are currently launch-live personal lanes. Signal, iMessage, and WeChat
+catalog. They are not launch-allowed Studio bindings.
+
+**Currently supported personal lane:** `telegram_personal` (GramJS, MTProto). This is technically
+implemented but fragile and advanced. It is not the recommended first path. The recommended
+Telegram path is the hosted bot (`sage_telegram_hosted` / `telegram_bot`), which requires no
+phone number and is the reliable production path for all customers.
+
+**WhatsApp is NOT a supported personal lane.** See `whatsapp_personal` entry above.
+
+Signal, iMessage, and WeChat
 have local bridge setup contracts and route plumbing, but the canonical
 connection catalog keeps them non-launch-certified until bridge health,
 inbound, outbound, restart, and replay certification is complete.
@@ -66,25 +76,27 @@ not the channel identity pairing code path. Gateway pairing is handled by
 and `/gateway/pairings/...` routes in `server_modules/routes_gateway.py`.
 
 There is also a separate channel identity connection service for
-Telegram/WhatsApp bot-style links.
+Telegram bot-style links (WhatsApp is not a supported channel).
 `frontend/lib/workspace/workspace-channel-pairing-surface.tsx`
 creates/list/revokes connection intents through `/api/channel-pairing/...`,
 while `server_modules/channel_pairing_service.py` issues one-time fallback
 codes, hashes stored codes, consumes legacy codes from inbound connector
 messages, and records security audit events. The primary product contract is
-platform-owned: if an unlinked Telegram/WhatsApp identity sends a message, the
+platform-owned: if an unlinked Telegram identity sends a message, the
 channel replies with an Empyralis `/continue?source=channel_connect...` link.
+(WhatsApp is not a supported channel.)
 Setup, account creation, relinking, and revocation stay inside Empyralis. This
 service is for external channel identity links; it is not the personal Agent
 Computer session store.
 
-WhatsApp setup accepts `phone_number` and `custom_pairing_code`. Telegram setup
-accepts `api_id`, `api_hash`, `phone_number`, `login_code`, and `password`.
+WhatsApp setup code (accepting `phone_number` and `custom_pairing_code`) exists in the repo
+but is **legacy/dead — do not expose this to customers.** WhatsApp personal is not a supported
+channel. Telegram setup accepts `api_id`, `api_hash`, `phone_number`, `login_code`, and `password`.
 Setup dispatch is sent to the gateway only after a Rust
 `gateway-service-decision` returns `dispatch_gateway_operation`. Source:
 `server_modules/personal_channels_service.py`.
 
-Gateway state sync stores WhatsApp and Telegram state in SQLite tables keyed by
+Gateway state sync stores Telegram (and legacy WhatsApp dead code) state in SQLite tables keyed by
 `gateway_id` and `channel_key`, including tenant, workspace, user, provider,
 status, linked identity fields, and metadata. Source:
 `server_modules/personal_channels_repository.py`.

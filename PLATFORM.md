@@ -38,8 +38,8 @@ Sage is the primary AI intelligence bound to each workspace. It maintains a pers
 
 - **Persistent Identity**: Sage maintains a stable identity bound to the workspace via Soul.md, Identity.md, and Heartbeat.md memory files.
 - **Layered Memory Architecture**: Four-tier memory system — Profile Memory (long-term), Episodic Memory (interactions), Local Private (on-device), Cloud Synced (encrypted). Memory is permissioned and private by design.
-- **Safety Control Plane**: Granular governance for every turn. Approval gates, audit streams, and egress policy enforcement. Quotas, entitlements, and policy-bound runtime placement.
-- **Provider Routing**: Model selection and provider routing with tier-based contracts. Empyralis credits always route to DeepSeek (best quality-to-price ratio). Users can bring their own API key for other providers via "My API Key" tier.
+- **Safety Control Plane**: Granular governance for every turn. The agent internalizes rules and judgment; consumers do not see approval buttons. Quotas, entitlements, and policy-bound runtime placement.
+- **Provider Routing**: Model selection and provider routing with tier-based contracts. Empyralis credits always route through the Platform AI engine. Users can bring their own API key for other providers via "My API Key" tier.
 - **Skills System**: Installable callable tools that extend Sage's capabilities. Skills are registered in a workspace-scoped registry.
 - **Transparency Timeline**: Every interaction produces a verifiable transparency record showing tool calls, memory loads, approvals, and provider decisions.
 - **Context Files**: Knowledge retrieval augmented generation with file upload support (.md, .txt, .csv, .json).
@@ -95,7 +95,7 @@ Each agent in the roster exposes a detail view with the following tabs:
 
 - **Agent Templates**: Pre-built agent configurations installable from the marketplace. Templates include proof-of-concept contracts with defined business behavior, channel requirements, data source needs, monetization models, and safety policies.
 - **Test Turns**: Sandbox environment for testing agent behavior before production deployment.
-- **Channel Bindings**: Bind agents to Telegram, WhatsApp, Slack, Discord, Email, Web Chat, and custom API channels.
+- **Channel Bindings**: Bind agents to Telegram (hosted bot), Slack, Discord, and custom API channels. WhatsApp is not a supported channel. Web Chat and Email are planned but not yet launch-ready.
 - **Business Insights**: Per-agent analytics including message volume, cost tracking, and quality ratings.
 - **Conversation Memory Policy**: Configurable retention and forgetting behavior per agent.
 - **Cost Caps**: Spending limits per agent with automatic enforcement.
@@ -311,19 +311,23 @@ The platform includes an AI-powered visual workflow builder that generates workf
 
 ## Channel Infrastructure
 
-The platform integrates with seven channel types, each with full ingress, routing, delivery, and safety infrastructure.
+The platform supports messaging channels that bring outside messages into the platform and send replies back. Channels are thin transports; channel-reliability logic lives in the shared core ingress layer.
 
 ### Supported Channels
 
-| Channel | Connector Module | Capabilities |
+| Channel | Status | Notes |
 |---|---|---|
-| **Telegram** | `telegram_connector` | Poll-based and webhook ingestion, media handling, inline menus, camera setup, space management, terminal service |
-| **WhatsApp** | `whatsapp_connector` | Webhook-based ingestion, transport service, run dispatch |
-| **Slack** | `slack_connector` | Message routing, channel management |
-| **Discord** | `discord_connector` | Bot runtime service, message handling |
-| **Email** | `smtp_connector` | SMTP-based message delivery |
-| **Web Chat** | Direct chat runtime | Hosted web chat widget with full turn support |
-| **API** | Runtime APIs | Programmatic access via REST and streaming endpoints |
+| **Telegram (Hosted Bot)** | Live | The reliable Telegram path. Shared platform bot; customers never need BotFather. |
+| **Discord** | Live when configured | Discord bot connector. |
+| **Slack** | Live when configured | Slack app connector. |
+| **Web Chat** | Planned | Not launch-ready; widget, ingress, and delivery proof still required. |
+| **API** | Live | Programmatic access via REST and streaming endpoints. |
+
+> **WhatsApp:** Not a supported channel. Personal WhatsApp (Baileys/QR) is banned by the provider. WhatsApp Business Cloud API bars third-party general-purpose AI assistants as of Jan 15, 2026. Do not present WhatsApp as working or coming soon.
+>
+> **iMessage, WeChat, Signal:** Require the user's own hardware bridge. These are not cloud features and are not offered on the base tier.
+>
+> **Telegram Personal (MTProto/phone-number login):** Fragile and advanced. It is not the recommended Telegram path. Use the hosted bot instead.
 
 ### Channel Services
 
@@ -335,7 +339,7 @@ Each channel is backed by a common service layer:
 - **Channel Memory Overlay**: Attaches channel-specific memory context to conversations.
 - **Channel Preflight Service**: Validates channel configuration before deployment.
 - **Channel Identity Service**: Manages channel-level identity and sender verification.
-- **Channel Pairing Service**: Links personal channels (WhatsApp, Telegram) to workspaces via pairing codes.
+- **Channel Pairing Service**: Links personal channels (Telegram hosted bot) to workspaces via pairing codes.
 - **Channel Blocking Policy**: Blocks or allows specific channels per workspace policy.
 - **Channel Concurrency**: Manages concurrent channel sessions and turn execution ordering.
 - **Channel Quota Policy**: Enforces per-channel usage quotas.
@@ -527,4 +531,4 @@ Platform screenshots are maintained in `docs/references/visuals/` (11 PNG files 
 
 ---
 
-*Document generated from codebase analysis of the `feature/website-portal` branch. Reflects platform state as of May 2026.*
+*Document last updated: 2026-06-23. Reflects platform state and ground-truth decisions current as of that date.*

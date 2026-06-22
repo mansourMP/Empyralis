@@ -16,10 +16,11 @@ enforcement work in later prompts.
    A deployed agent is deployment configuration layered on top of the canonical
    turn engine.
 
-2. Telegram, WhatsApp, web, and future channels are shells.
+2. Telegram (hosted bot), Discord, Slack, and future channels are shells.
    Channels own ingress normalization and egress formatting only.
    Channels do not own a separate product brain, policy engine, memory engine,
    or run engine.
+   Note: WhatsApp is not a supported channel (see channel ground truth decisions).
 
 3. `server_modules/agent_turn.py` is the canonical turn contract.
    All user-facing and system-facing work must become an
@@ -257,7 +258,7 @@ the canonical boundaries in later prompts.
    Compatibility callback names are allowed only when they resolve into
    `turn_runtime` run-start bridging or canonical channel routing.
    Current violations:
-   - `server_modules/connectors/whatsapp_webhook_service.py`
+   - `server_modules/connectors/whatsapp_webhook_service.py` (legacy dead code — WhatsApp channel is not supported)
    - `server_modules/connectors/discord_connector.py`
    - `server_modules/runs_execution.py`
 

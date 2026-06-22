@@ -14,8 +14,9 @@ Primary smoke path:
 
 Follow-up channel smoke:
 
-- Telegram or WhatsApp inbound message through the real channel connector.
+- Telegram inbound message through the real channel connector (hosted bot or personal MTProto).
 - Run only when live channel credentials and test numbers are available.
+- WhatsApp is not a supported channel. Do not include it in smoke testing.
 
 ## Prerequisites
 
@@ -79,9 +80,12 @@ Record these values before marking the smoke passed:
 
 ## Telegram/WhatsApp Follow-Up
 
-When live channel credentials are available, rerun the same flow with one Telegram or WhatsApp inbound message:
+When live channel credentials are available, rerun the same flow with one Telegram inbound message
+(via the hosted bot or Telegram personal MTProto if available):
 
 - Confirm the channel resolves to the correct owner workspace.
 - Confirm Sage returns a response with `trace_id`.
 - Confirm the same Activity/Safety trace links the inbound channel event to the Sage response.
 - Do not mark this follow-up as passed using mocked inbound messages.
+
+Note: WhatsApp is not a supported channel. Do not include WhatsApp in pilot smoke testing.

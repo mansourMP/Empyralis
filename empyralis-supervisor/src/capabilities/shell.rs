@@ -16,6 +16,116 @@ struct ShellArguments {
 
 const LOCAL_SYSTEM_INFO_PROBE_COMPACT: &str = r#"printf "===os===\n"; (sw_vers 2>/dev/null || uname -a); printf "\n===cpu===\n"; (sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m); printf "\n===ram_bytes===\n"; (sysctl -n hw.memsize 2>/dev/null || true); printf "\n===cores===\n"; (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || true); printf "\n===disk===\n"; (df -h / 2>/dev/null || true)"#;
 
+// ── Hard-blocked command patterns (NEVER bypassed, even in full_access) ──
+// These are catastrophic commands whose execution causes irreversible
+// destruction.  They are refused ALWAYS — before any policy check.
+// Principle: the agent can destroy its scope; it can NEVER destroy the
+// account, credentials, pairings, or runtime.
+const HARD_BLOCKED_COMMAND_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf /*",
+    "rm -fr /",
+    "rm -fr /*",
+    "rm -rf ~",
+    "rm -fr ~",
+    "rm -rf ~/",
+    "rm -fr ~/",
+    "rm -rf .",
+    "mkfs.",
+    "diskutil erasedisk",
+    "dd if=/dev/",
+    ":(){ :|:& };:",
+    "> /dev/sda",
+    "> /dev/nvme",
+    "chmod -r 000 /",
+    "chmod -r 777 /",
+    "chown -r ",
+    "shutdown -",
+    "reboot",
+    "halt",
+    "poweroff",
+];
+
+// ── Hard-protected path markers (NEVER bypassed) ──
+// Any shell command whose arguments include a path matching these markers
+// is refused outright.  These directories contain credentials, pairings,
+// runtime state, and worker config — losing them forces re-login,
+// re-pair, or re-setup.
+const HARD_PROTECTED_PATH_MARKERS: &[&str] = &[
+    "/.empyralis/state/vault",
+    "/.empyralis/state",
+    "/.ssh",
+    "/.gnupg",
+    "/etc/empyralis",
+    "/var/lib/empyralis/agent-computer",
+    "/.orion-stack",
+];
+
+fn hard_blocked_command(command: &str) -> bool {
+    let compact = command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if compact.is_empty() {
+        return false;
+    }
+    // Normalize repeated spaces for pattern matching
+    let normalized = compact.split_whitespace().collect::<Vec<_>>().join(" ");
+    for pattern in HARD_BLOCKED_COMMAND_PATTERNS {
+        if let Some(pos) = normalized.find(pattern) {
+            let after = normalized[pos + pattern.len()..].chars().next();
+            // End-of-string or space: exact token boundary → always match
+            if after.is_none() || after == Some(' ') {
+                return true;
+            }
+            // Path-root boundary check: patterns like "rm -rf /", "rm -rf ~",
+            // "rm -rf ~/" target a root/home path. They must NOT match when the
+            // path is a subdirectory (e.g. "rm -rf /tmp/scratch" or
+            // "rm -rf ~/workspace" — the agent CAN destroy its workspace scope).
+            // Other patterns (like "dd if=/dev/" or "mkfs.") are prefixes that
+            // SHOULD match longer forms.
+            if after != Some(' ') {
+                // Only apply boundary to rm-style patterns targeting a root path
+                if pattern.starts_with("rm -") &&
+                   (pattern.ends_with(" /") || pattern.ends_with(" ~") || pattern.ends_with(" ~/") || pattern.ends_with(" .")) {
+                    continue;
+                }
+            }
+            // For all other patterns (prefixes like "mkfs.", "shutdown -",
+            // "dd if=/dev/"), continue matching even if followed by more chars.
+            return true;
+        }
+    }
+    false
+}
+
+fn command_touches_protected_path(command: &str) -> bool {
+    for token in command.split_whitespace() {
+        let cleaned = token.trim_matches('"').trim_matches('\'').to_lowercase();
+        for marker in HARD_PROTECTED_PATH_MARKERS {
+            if cleaned.contains(marker) {
+                return true;
+            }
+        }
+        // Resolve symlinks: the token might be a symlink to a protected path
+        // (e.g. ln -s ~/.empyralis/state/vault ~/workspace/link; rm link)
+        if looks_like_path_argument(token) {
+            if let Ok(resolved) = resolve_path(token) {
+                if let Ok(canonical) = fs::canonicalize(&resolved) {
+                    let canonical_str = canonical.to_string_lossy().to_lowercase();
+                    for marker in HARD_PROTECTED_PATH_MARKERS {
+                        if canonical_str.contains(marker) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn execute(
     arguments: &Value,
     context: &ExecutionContext,
@@ -28,6 +138,19 @@ pub fn execute(
     if command.is_empty() {
         bail!("command is required");
     }
+
+    // ── Hard blocks — ALWAYS enforced, even in full_access ──
+    if hard_blocked_command(command) {
+        bail!(
+            "shell.execute command is permanently blocked — it could cause irreversible destruction of the runtime environment"
+        );
+    }
+    if command_touches_protected_path(command) {
+        bail!(
+            "shell.execute path is permanently protected — it contains credentials, pairings, or runtime state"
+        );
+    }
+
     if !trusted_execution {
         if !safe_shell_command(command) {
             bail!("shell.execute command is not allowed");
@@ -155,6 +278,9 @@ fn enforce_shell_path_policy(command: &str, allowed_roots: &[String]) -> Result<
             if sensitive_path(&path) {
                 bail!("shell.execute path is blocked by the Agent Computer policy");
             }
+            if hard_protected_root(&path) {
+                bail!("shell.execute path is permanently protected");
+            }
             enforce_path_policy(&path, allowed_roots)?;
         }
     }
@@ -273,11 +399,40 @@ fn sensitive_path(path: &Path) -> bool {
         || normalized.contains("/.local-dev-state/")
         || normalized.contains("token_cache")
         || normalized.contains("credentials")
+        || normalized.contains("/.empyralis/state/vault")
+        || normalized.contains("/.empyralis/state")
+        || normalized.contains("/etc/empyralis")
+        || normalized.contains("/var/lib/empyralis/agent-computer")
+}
+
+// ── Protected roots: ALWAYS enforced, NEVER bypassed by full_access ──
+fn hard_protected_root(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().to_lowercase();
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    // The vault encryption key file (named "key" without extension)
+    if name == "key"
+        && (normalized.contains("/.empyralis/state/vault")
+            || normalized.contains("/.orion-stack"))
+    {
+        return true;
+    }
+    for marker in HARD_PROTECTED_PATH_MARKERS {
+        if normalized.contains(marker) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{enforce_shell_path_policy, safe_shell_command, LOCAL_SYSTEM_INFO_PROBE_COMPACT};
+    use super::{
+        command_touches_protected_path, enforce_shell_path_policy, hard_blocked_command,
+        safe_shell_command, LOCAL_SYSTEM_INFO_PROBE_COMPACT,
+    };
 
     #[test]
     fn safe_shell_command_allows_known_read_only_system_probe() {
@@ -293,5 +448,102 @@ mod tests {
     #[test]
     fn safe_shell_policy_blocks_secret_paths() {
         assert!(enforce_shell_path_policy("cat .env", &[]).is_err());
+    }
+
+    // ── Hard-block tests (NEVER bypassed, even in full_access) ──
+
+    #[test]
+    fn hard_blocked_command_catches_rm_rf_root() {
+        assert!(hard_blocked_command("rm -rf /"));
+        assert!(hard_blocked_command("rm -rf /*"));
+        assert!(hard_blocked_command("rm -fr /"));
+        assert!(hard_blocked_command("rm -rf ~"));
+        assert!(hard_blocked_command("rm -rf ~/"));
+        // Normal space command should NOT be blocked
+        assert!(!hard_blocked_command("ls -la /tmp"));
+    }
+
+    #[test]
+    fn hard_blocked_command_allows_workspace_deletion() {
+        // Agent CAN destroy its workspace scope (rebuildable scratch)
+        assert!(!hard_blocked_command("rm -rf ~/workspace"));
+        assert!(!hard_blocked_command("rm -rf ~/workspace/output"));
+        assert!(!hard_blocked_command("rm -rf /tmp/scratch"));
+    }
+
+    #[test]
+    fn hard_blocked_command_catches_catastrophic_commands() {
+        for cmd in &[
+            "mkfs.ext4 /dev/sda",
+            "diskutil eraseDisk JHFS+ Empyralis /dev/disk0",
+            "dd if=/dev/zero of=/dev/sda",
+            ":(){ :|:& };:",
+            "shutdown -h now",
+            "reboot",
+            "halt",
+            "poweroff",
+        ] {
+            assert!(
+                hard_blocked_command(cmd),
+                "expected blocked: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_touches_protected_path_catches_vault_and_ssh() {
+        // Credential vault — must NEVER be reachable
+        assert!(command_touches_protected_path("rm -rf ~/.empyralis/state/vault"));
+        assert!(command_touches_protected_path("rm -rf ~/.empyralis/state/vault/credentials.json"));
+        assert!(command_touches_protected_path("cat ~/.empyralis/state/vault/key"));
+        // SSH keys
+        assert!(command_touches_protected_path("rm -rf ~/.ssh"));
+        assert!(command_touches_protected_path("rm ~/.ssh/id_rsa"));
+        // Worker config
+        assert!(command_touches_protected_path("rm /etc/empyralis/agent-computer.env"));
+        // Gateway state
+        assert!(command_touches_protected_path("rm -rf /var/lib/empyralis/agent-computer"));
+        // Runtime state
+        assert!(command_touches_protected_path("rm -rf ~/.empyralis/state"));
+        // Normal paths should NOT be blocked
+        assert!(!command_touches_protected_path("rm -rf /tmp/scratch"));
+        assert!(!command_touches_protected_path("rm ~/workspace/output.txt"));
+    }
+
+    #[test]
+    fn command_touches_protected_path_catches_symlink_bypass() {
+        // Agent creates ~/workspace/vault_link → ~/.empyralis/state/vault
+        // then runs "rm -rf ~/workspace/vault_link/credentials.json"
+        // The canonicalized path resolves to the vault — MUST be blocked.
+        use std::fs;
+        let root = std::env::temp_dir().join(format!(
+            "empyralis-supervisor-shell-symlink-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+
+        let vault_dir = root.join(".empyralis").join("state").join("vault");
+        fs::create_dir_all(&vault_dir).expect("create vault dir");
+        let cred_file = vault_dir.join("credentials.json");
+        fs::write(&cred_file, "secret").expect("write cred file");
+
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+        let link_path = workspace.join("vault_link");
+
+        // Create symlink: workspace/vault_link → .empyralis/state/vault
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&vault_dir, &link_path).expect("create symlink");
+
+        // Command targeting the symlink path should be blocked because
+        // canonicalization resolves it to the real protected path
+        let cmd = format!("rm -rf {}", link_path.join("credentials.json").to_string_lossy());
+        assert!(
+            command_touches_protected_path(&cmd),
+            "symlink bypass via shell must be blocked: {cmd}"
+        );
+
+        // Clean up
+        let _ = fs::remove_dir_all(&root);
     }
 }

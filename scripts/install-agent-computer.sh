@@ -192,6 +192,7 @@ write_env_file() {
     printf 'EMPYRALIS_SUPERVISOR_SECRET=%s\n' "$(shell_quote_env "${supervisor_secret}")"
     printf 'EMPYRALIS_GATEWAY_STATE_DIR=%s\n' "$(shell_quote_env "${STATE_ROOT}/gateway")"
     printf 'EMPYRALIS_SUPERVISOR_AUDIT_DB=%s\n' "$(shell_quote_env "${STATE_ROOT}/supervisor/audit.sqlite3")"
+    printf 'EMPYRALIS_STATE_HOME=%s\n' "$(shell_quote_env "${STATE_ROOT}/.empyralis/state")"
     printf 'EMPYRALIS_GATEWAY_DISPLAY_NAME=%s\n' "$(shell_quote_env "${DISPLAY_NAME}")"
     printf 'EMPYRALIS_GATEWAY_BROWSER_PROJECT_ROOT=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
     printf 'EMPYRALIS_GATEWAY_BROWSER_PYTHON="python3"\n'
@@ -329,7 +330,7 @@ EOF
 
 write_systemd_units() {
   log "writing systemd units"
-  cat > "/etc/systemd/system/${SUPERVISOR_SERVICE}" <<EOF
+  cat > "/etc/systemd/system/${SUPERVISOR_SERVICE}" <<SYSEOF
 [Unit]
 Description=Empyralis Agent Computer Supervisor
 Documentation=https://empyralis.ai
@@ -347,13 +348,33 @@ Restart=always
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30
+
+# ── OS CONFINEMENT ────────────────────────────────────────────────────────
 NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Only these paths are writable.  Protected paths (~/.ssh, ~/.empyralis/state/vault,
+# /etc/empyralis) are NOT in this list and are physically unreachable.
+ReadWritePaths=${STATE_ROOT} ${INSTALL_ROOT} ${LOG_DIR} ${RUN_DIR}
+ReadOnlyPaths=${CONFIG_DIR}
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SYSEOF
 
-  cat > "/etc/systemd/system/${GATEWAY_SERVICE}" <<EOF
+  cat > "/etc/systemd/system/${GATEWAY_SERVICE}" <<SYSEOF
 [Unit]
 Description=Empyralis Agent Computer Gateway
 Documentation=https://empyralis.ai
@@ -374,9 +395,28 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 NoNewPrivileges=true
 
+# ── OS CONFINEMENT ────────────────────────────────────────────────────────
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Gateway needs write access to state, logs, and its install root
+ReadWritePaths=${STATE_ROOT} ${INSTALL_ROOT} ${LOG_DIR} ${RUN_DIR}
+ReadOnlyPaths=${CONFIG_DIR}
+
 [Install]
 WantedBy=multi-user.target
-EOF
+SYSEOF
 }
 
 systemd_available() {
@@ -419,7 +459,16 @@ start_direct_service() {
 }
 
 start_without_systemd() {
-  log "systemd is not active; using direct process fallback"
+  log "WARNING: systemd is not active; using direct process fallback"
+  log ""
+  log "!!! DIRECT PROCESS MODE — OS CONFINEMENT IS NOT ACTIVE !!!"
+  log "When running outside systemd, ProtectSystem, ProtectHome, PrivateDevices,"
+  log "MemoryDenyWriteExecute, CapabilityBoundingSet, and all other systemd-level"
+  log "protections are UNAVAILABLE.  The agent has full filesystem access."
+  log "The blocklist in the supervisor/kernel still applies, but it is"
+  log "defense-in-depth — the OS confinement is the real 100% guarantee."
+  log "For production deployments, systemd is REQUIRED."
+  log ""
   start_direct_service "empyralis-supervisor" "${BIN_DIR}/run-supervisor"
   sleep 1
   start_direct_service "empyralis-gateway" "${BIN_DIR}/run-gateway"

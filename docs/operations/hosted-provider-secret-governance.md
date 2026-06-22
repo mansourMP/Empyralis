@@ -23,7 +23,12 @@ Platform-hosted provider secrets now resolve through:
 - `secrets_broker.resolve_hosted_provider_secret(...)`
 - `secrets_broker.resolve_hosted_openai_bearer(...)`
 
-The resolver prefers `EMPYRALIS_HOSTED_PROVIDER_SECRETS_JSON` (managed bundle path) and keeps explicit env fallback as a bootstrap compatibility path.
+The resolver prefers `EMPYRALIS_HOSTED_PROVIDER_SECRETS_JSON` (managed bundle path) and keeps an
+explicit env var fallback only as a bootstrap compatibility path for local development.
+
+**Security note:** Do not rely on plain environment variables for production secrets. Env vars are
+readable via `/proc/<pid>/environ`. Use the managed bundle path or a key file with `0600`
+permissions for production deployments.
 
 ## Audit path
 

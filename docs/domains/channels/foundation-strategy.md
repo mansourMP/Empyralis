@@ -4,10 +4,10 @@
 
 Implementation started. The cloud catalog, Agent Computer personal-channel
 runtime contract, generic personal-channel surface projection, and local-bridge
-adapter contract now exist. Telegram personal and WhatsApp personal are the
-current launch-live Sage personal channels. Signal, iMessage, and WeChat are
-planned/private bridge contracts until their local runtimes are certified
-end-to-end.
+adapter contract now exist. Telegram (hosted bot — recommended; or personal MTProto — advanced/fragile)
+is the live Sage personal channel. WhatsApp is NOT a supported channel.
+Signal, iMessage, and WeChat are planned/private bridge contracts until their local runtimes are
+certified end-to-end.
 
 ## Core Rule
 
@@ -19,12 +19,15 @@ but those surfaces remain separate in UI and permissions.
 
 ## Main Agent / Sage Channels
 
-- Live: Telegram personal and WhatsApp personal through the selected Agent Computer
+- Live (recommended path): Telegram via hosted bot — no phone number or BotFather required; shared platform bot for all customers.
+- Live (advanced/fragile): Telegram personal (MTProto/GramJS) through the selected Agent Computer. Not recommended as the default.
+- **WhatsApp: NOT SUPPORTED.** Personal WhatsApp (Baileys/QR) is banned by the provider. WhatsApp Business Cloud API bars third-party general-purpose AI assistants as of Jan 15, 2026. Remove any references to WhatsApp as a live or "coming soon" channel from customer-facing material.
 - Live when configured: Slack and Discord bot channels when connected as business/team channels
 - Partial: Email as an inbound channel; use Google Workspace or SMTP app actions for mailbox work until durable channel ingress is complete
 - Planned/private: Signal, iMessage, and WeChat through Agent Computer local bridges
 - Planned official business lane: Apple Messages for Business through an approved MSP/human-handoff adapter
-- Planned: Web Chat, WhatsApp Business, Webhook, Teams, Matrix, Zalo, voice
+- Planned: Web Chat, Webhook, Teams, Matrix, Zalo, voice
+  (WhatsApp Business is not viable — see NOT SUPPORTED note above)
 
 ## Signal Agent Computer Bridge
 
@@ -57,9 +60,10 @@ Studio business/customer channel. It remains Sage-only and Agent Computer-only.
 ## Agent Computer Doctor
 
 The gateway doctor treats personal messaging as a first-class Agent Computer
-readiness surface. It should aggregate Telegram and WhatsApp as live personal
-lanes, while Signal, iMessage, and WeChat remain planned/private bridge
-readiness items until their runtimes are certified.
+readiness surface. It should show Telegram personal (MTProto, advanced/fragile) and the
+hosted bot (recommended) as live Telegram lanes, while WhatsApp personal is disabled (not supported),
+and Signal, iMessage, and WeChat remain planned/private bridge readiness items until their runtimes
+are certified.
 
 This is the OpenClaw-style direction we should copy: every local channel or node
 reports a manifest, health snapshot, issues, and connected state. The platform
@@ -71,7 +75,8 @@ personal bridges are cloud customer channels.
 - Live when configured: Telegram Bot API, Discord Bot, Slack app
 - Live when configured as connected apps: Google Workspace, Microsoft 365, GitHub, Notion, Linear, Dropbox, Amazon S3, SMTP / IMAP, WeChat Work, Instagram Business
 - Partial: Generic Email as a durable inbound channel; use Google Workspace, Microsoft 365, or SMTP work-app connectors for launchable mailbox setup
-- Planned: Web Chat, WhatsApp Business / Twilio, Webhook, Teams, Matrix, Feishu/Lark, Zalo OA
+- Planned: Web Chat, Webhook, Teams, Matrix, Feishu/Lark, Zalo OA
+  (WhatsApp Business / Twilio is not viable: Meta bars third-party AI assistants from WhatsApp Business API as of Jan 15 2026)
 
 ## Channel Priority
 
@@ -80,7 +85,7 @@ personal bridges are cloud customer channels.
 1. Canonical catalog/UI alignment for live connected apps and channels
 2. Durable Email channel ingress with mailbox journaling and idempotency
 3. Web Chat widget/runtime proof before marking it launch-ready
-4. WhatsApp Business provider path before marking it launch-ready
+4. ~~WhatsApp Business provider path~~ — removed. Meta bars third-party AI assistants as of Jan 15 2026.
 
 ### Build next
 
@@ -104,19 +109,20 @@ personal bridges are cloud customer channels.
 
 ## Existing Personal Channels
 
-Keep Telegram personal and WhatsApp Baileys personal for Sage-only closed/local pilot use.
-Do not expose them as production Studio Agent channels.
-Label them as personal Agent Computer channels.
+**Telegram personal (MTProto/GramJS):** Acceptable for a single owner/operator in a closed/local pilot.
+Fragile and not the recommended customer path. Do not expose to external Studio Agent customers.
+The recommended customer path is the hosted bot.
 
-Telegram MTProto and WhatsApp Baileys are reverse-engineered protocols with TOS risk.
-They are acceptable for a closed pilot with a single owner/operator but must not be
-offered to external Studio Agent customers. Migrate WhatsApp to Cloud API before
-any Studio-facing launch.
+**WhatsApp Baileys:** DO NOT USE. This lane is dead. Personal WhatsApp via Baileys (QR/session)
+gets banned by the provider. WhatsApp Business Cloud API also bars third-party general-purpose AI
+assistants. This must not be offered or marketed to any customer. Remove from any customer-facing
+channel lists.
 
 ## Current Duplication Problem
 
-Telegram and WhatsApp personal runtimes share an interface (`PersonalChannelRuntime`)
-and a generic dispatch layer but duplicate ~2,000 lines of code across:
+Telegram personal runtime and the (dead) WhatsApp personal runtime share an interface
+(`PersonalChannelRuntime`) and a generic dispatch layer but duplicate ~2,000 lines of code across:
+(Note: WhatsApp personal runtime exists in the repo as legacy dead code — it is not a supported channel.)
 
 - Reconnect/backoff logic (identical delay math, policy constants)
 - Typing indicators (identical interval/TTL/start/stop)
@@ -130,8 +136,8 @@ and a generic dispatch layer but duplicate ~2,000 lines of code across:
 On the Python cloud side, `personal_channels_service.py` has structurally identical
 handlers for WhatsApp and Telegram (~80 lines each, duplicated across 5 function pairs).
 The generic `/personal-channels/gateways/{gateway_id}/channels` projection
-reports personal-channel manifests from Agent Computer. Telegram and WhatsApp
-have native local runtimes. Signal, iMessage, and WeChat must stay planned until
+reports personal-channel manifests from Agent Computer. Telegram has a native local runtime (the WhatsApp runtime is dead/legacy).
+Signal, iMessage, and WeChat must stay planned until
 bridge-specific runtime certification proves inbound durability, outbound
 approval, health reporting, and account lifecycle.
 
@@ -213,7 +219,8 @@ near-duplicate code.
 
 Agent Studio needs these per-channel UI elements:
 
-- Channel selector — Telegram Bot, Slack, Discord, Email, Web Chat, WhatsApp Business, Webhook
+- Channel selector — Telegram Bot, Slack, Discord, Email, Web Chat, Webhook
+  (WhatsApp Business must not appear in this selector — not a viable channel)
 - Channel type badge — Personal Gateway / Business Cloud / Webhook / Email
 - Runtime compatibility indicator — Cloud-only / Local gateway required / Self-hosted
 - Per-channel approval policy — auto-approve / require approval / require owner

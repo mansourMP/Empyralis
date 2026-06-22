@@ -71,7 +71,7 @@ still `telegram_bot`, which represents a customer bot-token connector.
 stay planned until official bot provisioning, pairing, signed inbound events,
 outbound replies, approvals, rate limits, and replay tests are certified.
 
-Channel-origin setup remains platform-owned. Telegram/WhatsApp users who start
+Channel-origin setup remains platform-owned. Telegram users who start
 from a bot or channel before linking should receive an Empyralis continue link,
 not chat-command setup instructions. After sign-in/signup, the continue intent
 lands on the workspace Connectors surface; provider credentials, relinking,
@@ -155,7 +155,10 @@ blocked by a `ChannelPlatformError`. Source:
 `server_modules/channel_platform_service.py`.
 
 Not launch-certified in the inspected code: a live Studio Web Chat widget
-launch flow; durable generic Email ingress marked launch-ready; WhatsApp
-Business launch-ready binding; Apple Messages for Business dispatch through a
-real MSP account; the `sage_telegram_hosted` runtime, pairing, and official bot
+launch flow; durable generic Email ingress marked launch-ready; Apple Messages for Business
+dispatch through a real MSP account; the `sage_telegram_hosted` runtime, pairing, and official bot
 operations path.
+
+Note: WhatsApp Business (`whatsapp_business` / `whatsapp_twilio`) is not a viable launch path.
+Meta bars third-party general-purpose AI assistants from WhatsApp Business Cloud API as of
+Jan 15 2026. Do not present WhatsApp Business as a planned or upcoming Studio channel.

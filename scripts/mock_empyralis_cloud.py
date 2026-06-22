@@ -12,9 +12,11 @@ Pre-loaded with test commands for shell_exec, file_read, file_write.
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -85,11 +87,36 @@ class RegisterPayload(BaseModel):
     root_policy: Optional[Dict[str, Any]] = None
     display_name: str = "Test VPS Node"
 
+
+class VaultBackupPutPayload(BaseModel):
+    node_session_token: str
+    vault_blob_base64: str
+    environment: str = "dev"
+    backup_version: str = "vault_blob_v1"
+
+
+class VaultBackupClaimPayload(BaseModel):
+    node_session_token: str
+
+
+# ── Vault backup storage (off-box — survives worker state wipe) ─────────────────
+
+_VAULT_BACKUP_DIR = Path(__file__).parent / ".mock-cloud-backups"
+
 # ── Auth helper ──────────────────────────────────────────────────────────────
 
-def _auth(token: Optional[str]) -> None:
-    if not token or token != NODE_SESSION_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid node session token")
+def _auth(token: Optional[str], request: Optional[Request] = None) -> None:
+    """Validate node session token from body or Authorization header."""
+    if token and token == NODE_SESSION_TOKEN:
+        return
+    # Also check Authorization: Bearer header
+    if request is not None:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            bearer = auth_header[7:].strip()
+            if bearer == NODE_SESSION_TOKEN:
+                return
+    raise HTTPException(status_code=401, detail="Invalid node session token")
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
@@ -119,9 +146,9 @@ async def register_node(profile_id: str, payload: RegisterPayload):
 
 
 @app.post("/runtime/self-hosted-nodes/{profile_id}/commands/claim")
-async def claim_commands(profile_id: str, payload: ClaimPayload):
+async def claim_commands(profile_id: str, payload: ClaimPayload, request: Request):
     """Claim pending commands for a self-hosted node."""
-    _auth(payload.node_session_token)
+    _auth(payload.node_session_token, request)
 
     # Ensure node exists
     if profile_id not in nodes:
@@ -148,9 +175,9 @@ async def claim_commands(profile_id: str, payload: ClaimPayload):
 
 
 @app.post("/runtime/self-hosted-nodes/{profile_id}/commands/{command_id}/result")
-async def complete_command(profile_id: str, command_id: str, payload: ResultPayload):
+async def complete_command(profile_id: str, command_id: str, payload: ResultPayload, request: Request):
     """Accept a command result from a self-hosted node."""
-    _auth(payload.node_session_token)
+    _auth(payload.node_session_token, request)
 
     cmd = commands.get(command_id)
     if not cmd:
@@ -205,6 +232,62 @@ async def reset_commands():
 async def list_nodes():
     """Debug endpoint: list registered nodes."""
     return {"nodes": nodes, "session_token": NODE_SESSION_TOKEN, "profile_id": PROFILE_ID}
+
+
+# ── Vault backup endpoints (off-box storage) ────────────────────────────────────
+
+
+@app.post("/runtime/self-hosted-nodes/{profile_id}/vault-backup")
+async def put_vault_backup(profile_id: str, payload: VaultBackupPutPayload, request: Request):
+    """Accept an encrypted vault blob from a self-hosted node."""
+    _auth(payload.node_session_token, request)
+    _VAULT_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    blob_path = _VAULT_BACKUP_DIR / f"{profile_id}.json"
+    record = {
+        "runtime_profile_id": profile_id,
+        "vault_blob_base64": payload.vault_blob_base64,
+        "environment": payload.environment,
+        "backup_version": payload.backup_version,
+        "stored_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "blob_size_bytes": len(payload.vault_blob_base64),
+    }
+    blob_path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(blob_path, 0o600)
+    except Exception:
+        pass
+    print(f"[mock] Vault backup stored: profile={profile_id} size={len(payload.vault_blob_base64)}", file=sys.stderr)
+    return {
+        "ok": True,
+        "status": "stored",
+        "runtime_profile_id": profile_id,
+        "blob_size_bytes": len(payload.vault_blob_base64),
+        "backup_version": payload.backup_version,
+    }
+
+
+@app.post("/runtime/self-hosted-nodes/{profile_id}/vault-backup/claim")
+async def claim_vault_backup(profile_id: str, payload: VaultBackupClaimPayload, request: Request):
+    """Return the encrypted vault blob for disaster recovery."""
+    _auth(payload.node_session_token, request)
+    blob_path = _VAULT_BACKUP_DIR / f"{profile_id}.json"
+    if not blob_path.exists():
+        return {"ok": False, "status": "not_found", "runtime_profile_id": profile_id}
+    try:
+        record = json.loads(blob_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "status": "read_error", "runtime_profile_id": profile_id, "error": str(exc)}
+    print(f"[mock] Vault backup claimed: profile={profile_id}", file=sys.stderr)
+    return {
+        "ok": True,
+        "status": "found",
+        "runtime_profile_id": profile_id,
+        "vault_blob_base64": str(record.get("vault_blob_base64") or ""),
+        "environment": str(record.get("environment") or ""),
+        "backup_version": str(record.get("backup_version") or ""),
+        "stored_at_iso": str(record.get("stored_at_iso") or ""),
+        "blob_size_bytes": int(record.get("blob_size_bytes") or 0),
+    }
 
 
 if __name__ == "__main__":

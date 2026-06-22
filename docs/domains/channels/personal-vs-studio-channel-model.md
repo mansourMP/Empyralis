@@ -20,7 +20,7 @@ business webhook infrastructure.
 | Session location | Local device | Cloud control plane / provider-managed webhook integration |
 | Auth material | Personal session files / local login state | API keys, bot tokens, webhook secrets, business connector credentials |
 | Ingress model | Local session event enters gateway first | Public/provider webhook or cloud polling path |
-| Example targets | WhatsApp personal, Telegram personal, Signal, iMessage, WeChat, local browser/app acting as the user | Telegram bot, Twilio WhatsApp, Slack, Discord, GitHub, Notion, Linear, email, phone |
+| Example targets | Telegram personal, Signal, iMessage, WeChat, local browser/app acting as the user (WhatsApp personal is not supported) | Telegram bot, Slack, Discord, GitHub, Notion, Linear, email, phone (Twilio WhatsApp is not supported) |
 | Delivery expectation | Feels like the user is acting from their own account | Business/deployed-agent messaging and support flows |
 | Failure mode | Device offline or local gateway offline | Cloud connector/webhook/provider offline |
 
@@ -45,8 +45,8 @@ Business/API-managed channels remain in:
 
 The existing cloud connector lane remains the right place for:
 - Telegram bot / webhook products
-- Twilio WhatsApp
 - Slack / Discord / GitHub / Notion / Linear / email / phone integrations
+- (Twilio WhatsApp is not viable — Meta bars third-party AI as of Jan 15 2026)
 - Connected app integrations such as Dropbox, Amazon S3, SMTP / IMAP, WeChat Work, and Instagram Business
 
 ### 3. Shared Lower Engine Does Not Remove The Boundary
@@ -66,20 +66,22 @@ They still differ in:
 - operator expectations
 - failure and privacy boundaries
 
-### 4. Twilio WhatsApp Is Not Personal WhatsApp
+### 4. WhatsApp Is Not A Supported Channel
 
-Cloud webhook WhatsApp support is not a substitute for:
-- personal WhatsApp session ownership
-- local QR/session state
-- local reconnect and device presence
+**WhatsApp is not a supported channel in any form.** Personal WhatsApp (Baileys/QR)
+is banned by the provider. WhatsApp Business Cloud API (Twilio or direct) bars third-party
+general-purpose AI assistants as of Jan 15 2026.
 
-The same warning applies to Telegram bot API vs Telegram personal MTProto.
+Historical note: this section previously distinguished "Twilio WhatsApp" (cloud API)
+from personal WhatsApp (Baileys). Neither path is viable. Do not build, market, or plan
+either path. The analogous Telegram distinction (bot API vs personal MTProto) remains valid;
+both Telegram paths are supported.
 
 ### 5. Personal Channel Sessions Must Not Depend On The Studio Webhook Stack
 
 Personal channels must not be implemented by stuffing more behavior into:
 - `routes_connectors.py`
-- existing Telegram/WhatsApp webhook bridge stacks
+- existing Telegram webhook bridge stacks (WhatsApp webhook stacks are legacy dead code)
 - business connector registries
 
 They need a dedicated local lane behind `empyralis-gateway`.
@@ -108,8 +110,8 @@ Implemented personal-gateway lane now exists through:
 - `server_modules/channel_lane_contract_service.py`
 
 Current implemented personal lane truth:
-- personal WhatsApp uses the gateway lane with local session state and
-  reconnect ownership
+- personal WhatsApp: gateway lane code exists in the repo but is dead/unsupported — do not
+  expose to customers. This channel is not viable (Baileys banned, WhatsApp Business API blocked).
 - personal Telegram uses the gateway lane with local session state and reconnect
   ownership
 - Signal, iMessage, and WeChat have an Agent Computer local-bridge contract and
@@ -124,8 +126,8 @@ Canonical launch truth:
 
 | Channel | Current state | Gateway required | Customer launch status |
 | --- | --- | --- | --- |
-| `telegram_personal` | GramJS gateway runtime | Yes | Launch-live |
-| `whatsapp_personal` | Baileys gateway runtime | Yes | Launch-live |
+| `telegram_personal` | GramJS gateway runtime | Yes | Advanced/fragile — not the recommended customer path; use hosted bot |
+| `whatsapp_personal` | Baileys gateway runtime | Yes | **DEAD — DO NOT USE.** Baileys gets banned; WhatsApp Business API bars third-party AI as of Jan 15 2026 |
 | `signal_personal` | local bridge contract plus signal-cli bridge code | Yes | Planned/locked until certified |
 | `imessage_personal` | local bridge contract plus BlueBubbles bridge code | Yes, Mac | Planned/locked until certified |
 | `wechat_personal` | generic local bridge contract | Yes | Planned/locked until certified |
@@ -184,8 +186,8 @@ Studio connector stack.
 ## Historical Rebuild Boundary
 
 The original Phase 0 version of this document froze only the channel-family
-boundary and did not implement the gateway, personal WhatsApp, personal
-Telegram, or Studio connector rewrites.
+boundary and did not implement the gateway, personal
+Telegram, or Studio connector rewrites. (Personal WhatsApp was not implemented — it is not supported.)
 
 The live repo now contains baseline gateway and personal-channel
 implementations. This document remains the product boundary: personal accounts

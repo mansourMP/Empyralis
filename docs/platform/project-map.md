@@ -1,18 +1,18 @@
 # Project Map
 
-Last verified: 2026-04-11
-Latest verified green commit: `b3eca81`
+Last verified: 2026-06-23
+Latest verified green commit: see git log
 
 ## Current Platform Shape
 
 The active platform is centered in:
-- `/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules`
-- `/Users/mansur/Multi_Agent_Orchestrator_Project/frontend`
-- `/Users/mansur/Multi_Agent_Orchestrator_Project/mobile`
-- `/Users/mansur/Multi_Agent_Orchestrator_Project/src-tauri`
-- `/Users/mansur/Multi_Agent_Orchestrator_Project/empyralis-supervisor`
+- `/Users/mansur/empyralis/server_modules`
+- `/Users/mansur/empyralis/frontend`
+- `/Users/mansur/empyralis/mobile`
+- `/Users/mansur/empyralis/src-tauri`
+- `/Users/mansur/empyralis/empyralis-supervisor`
 
-`/Users/mansur/Multi_Agent_Orchestrator_Project/backend` is a frozen legacy Nest control-plane sidecar. It is not part of the active launch path, and the default local stack now skips it until it is repaired.
+`/Users/mansur/empyralis/backend` is a frozen legacy Nest control-plane sidecar. It is not part of the active launch path, and the default local stack now skips it until it is repaired.
 
 The system is one runtime platform with multiple shells, not multiple product brains.
 
@@ -22,11 +22,13 @@ Shell classes are frozen as:
   - web
   - desktop
 - `channel_shell`
-  - Live personal Agent Computer channels: Telegram, WhatsApp
+  - Live Telegram path: hosted bot (recommended)
+  - Advanced/fragile personal Agent Computer channel: Telegram personal (MTProto)
+  - **WhatsApp: NOT SUPPORTED.** Baileys is banned; Business API bars third-party AI as of Jan 15 2026.
   - Planned personal Agent Computer bridge channels: Signal, iMessage, WeChat
   - Live when configured cloud/business channels: Telegram Bot, Slack, Discord
   - Email setup: Gmail through Google Workspace, Microsoft 365, or custom SMTP / IMAP
-  - Planned/partial channels: generic Email channel, Web Chat, WhatsApp Business, Webhook, Teams, Matrix, phone
+  - Planned/partial channels: generic Email channel, Web Chat, Webhook, Teams, Matrix, phone
 
 Channel shells may do:
 - conversation

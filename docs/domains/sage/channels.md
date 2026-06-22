@@ -29,10 +29,13 @@ implemented personal keys are:
 - `imessage_personal` via `bluebubbles_local_bridge`
 - `wechat_personal` via `wechat_local_bridge`
 
-Launch-live personal keys:
+Technically-implemented personal keys (not recommended as default paths):
 
-- `telegram_personal`
-- `whatsapp_personal`
+- `telegram_personal` — Advanced/fragile. Recommended Telegram path is the hosted bot (`telegram_bot` / `sage_telegram_hosted`).
+
+**Dead / unsupported — do not expose to customers:**
+
+- `whatsapp_personal` — WhatsApp Baileys is banned. WhatsApp Business API bars third-party AI assistants as of Jan 15 2026. This lane must not be offered or marketed.
 
 Bridge-contract keys with backend/gateway plumbing but locked customer setup:
 
@@ -85,11 +88,11 @@ inbound events, outbound replies, approvals, rate limits, and replay tests are
 certified. Do not overload `telegram_personal` for that purpose.
 
 For all cloud/personal message surfaces, setup stays inside Empyralis. Telegram
-or WhatsApp may send a platform connect link when a user starts a channel before
-linking, but they must not ask the user to configure Sage by chat commands. The
+may send a platform connect link when a user starts a channel before linking,
+but it must not ask the user to configure Sage by chat commands. The
 `/continue?source=channel_connect...` handoff preserves the channel intent
 through login/signup and routes the user back to the workspace Connectors
-surface.
+surface. (WhatsApp is not a supported channel.)
 
 Launchable channel setup surfaces:
 
@@ -99,8 +102,8 @@ Launchable channel setup surfaces:
 - `telegram_personal`: personal Telegram account through the selected Agent
   Computer. It must use the stepped phone / code / password flow returned by
   the gateway.
-- `whatsapp_personal`: personal WhatsApp through the selected Agent Computer.
-  It must stay in the personal lane and must not be exposed to Studio agents.
+- `whatsapp_personal`: **NOT SUPPORTED.** WhatsApp Baileys is banned and WhatsApp Business API bars
+  third-party AI assistants. Remove from any launchable setup list.
 - `slack`: cloud Slack bot/user-token connector. The setup panel collects the
   connector credentials that Sage or Studio can use for workspace messaging.
 - `discord_bot`: cloud Discord bot connector. The setup panel collects bot,

@@ -13,12 +13,39 @@ struct FilesystemArguments {
     overwrite: Option<bool>,
 }
 
+// ── Hard-protected path markers (NEVER bypassed, even in full_access) ──
+// These directories contain credentials, pairings, runtime state, and
+// worker config.  Deleting or overwriting files here forces re-login,
+// re-pair, or re-setup.  The agent can destroy its scope; it can NEVER
+// destroy the account.
+const HARD_PROTECTED_PATH_MARKERS: &[&str] = &[
+    "/.empyralis/state/vault",
+    "/.empyralis/state",
+    "/.ssh",
+    "/.gnupg",
+    "/etc/empyralis",
+    "/var/lib/empyralis/agent-computer",
+    "/.orion-stack",
+];
+
 pub fn read_write(arguments: &Value, full_access: bool, allowed_roots: &[String]) -> Result<Value> {
     let args: FilesystemArguments = serde_json::from_value(arguments.clone())
         .context("invalid filesystem.read_write arguments")?;
     let mode = args.mode.as_deref().unwrap_or("read").trim().to_lowercase();
     let target = resolve_path(&args.path)?;
     let display_path = target.to_string_lossy().to_string();
+
+    // ── Hard-protected roots — ALWAYS enforced, even in full_access ──
+    // Write/delete/append to protected paths is refused outright.
+    // Read is still allowed (the agent can see these paths exist but cannot
+    // mutate them).
+    if mode != "read" && hard_protected_root(&target) {
+        bail!(
+            "filesystem.{} path is permanently protected — it contains credentials, pairings, or runtime state that must survive agent actions",
+            mode
+        );
+    }
+
     if !full_access {
         enforce_path_policy(&target, allowed_roots)?;
     }
@@ -205,6 +232,52 @@ fn sensitive_path(path: &Path) -> bool {
         || normalized.contains("credentials")
 }
 
+// ── Protected roots: ALWAYS enforced, NEVER bypassed by full_access ──
+// These paths contain state whose loss forces re-login, re-pair, or
+// re-setup.  The agent can destroy its workspace scope; it can NEVER
+// destroy credentials, pairings, SSH keys, or worker config.
+fn hard_protected_root(path: &Path) -> bool {
+    // Resolve symlinks before checking — prevents bypass via
+    // ln -s ~/.empyralis/state/vault ~/workspace/link && rm -rf ~/workspace/link
+    let check_path = if path.exists() {
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else if let Some(parent) = path.parent() {
+        if parent.exists() {
+            // For not-yet-existing files, resolve the parent and join filename
+            match fs::canonicalize(parent) {
+                Ok(canonical_parent) => canonical_parent.join(
+                    path.file_name().unwrap_or_default()
+                ),
+                Err(_) => path.to_path_buf(),
+            }
+        } else {
+            path.to_path_buf()
+        }
+    } else {
+        path.to_path_buf()
+    };
+
+    let normalized = check_path.to_string_lossy().to_lowercase();
+    // Exact protected filenames (regardless of directory)
+    let name = check_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    // The vault encryption key file (named "key" without extension)
+    if name == "key"
+        && (normalized.contains("/.empyralis/state/vault")
+            || normalized.contains("/.orion-stack"))
+    {
+        return true;
+    }
+    for marker in HARD_PROTECTED_PATH_MARKERS {
+        if normalized.contains(marker) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::read_write;
@@ -275,6 +348,140 @@ mod tests {
         )
         .is_ok());
         assert!(!env_path.exists());
+    }
+
+    // ── Hard-protected root tests (NEVER bypassed, even in full_access) ──
+
+    fn temp_protected_dir(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "empyralis-supervisor-protected-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        root
+    }
+
+    #[test]
+    fn full_access_cannot_delete_files_in_vault_path() {
+        // Simulate a path containing ~/.empyralis/state/vault
+        let root = temp_protected_dir("vault");
+        let vault_subdir = root.join(".empyralis").join("state").join("vault");
+        fs::create_dir_all(&vault_subdir).expect("create vault dir");
+        let cred_file = vault_subdir.join("credentials.json");
+        fs::write(&cred_file, "secret").expect("write cred file");
+
+        // Read should be allowed even in protected dirs
+        assert!(read_write(
+            &json!({"mode": "read", "path": cred_file.to_string_lossy()}),
+            true,  // full_access
+            &[],
+        )
+        .is_ok());
+
+        // Write should be BLOCKED in protected dirs, even with full_access
+        let new_file = vault_subdir.join("new_credential.json");
+        assert!(read_write(
+            &json!({"mode": "write", "path": new_file.to_string_lossy(), "content": "malicious"}),
+            true,  // full_access
+            &[],
+        )
+        .is_err());
+
+        // Delete should be BLOCKED in protected dirs, even with full_access
+        assert!(read_write(
+            &json!({"mode": "delete", "path": cred_file.to_string_lossy()}),
+            true,  // full_access
+            &[],
+        )
+        .is_err());
+        // File should still exist
+        assert!(cred_file.exists());
+    }
+
+    #[test]
+    fn full_access_cannot_delete_files_in_ssh_path() {
+        let root = temp_protected_dir("ssh");
+        let ssh_dir = root.join(".ssh");
+        fs::create_dir_all(&ssh_dir).expect("create .ssh dir");
+        let key_file = ssh_dir.join("id_rsa");
+        fs::write(&key_file, "private-key").expect("write key file");
+
+        // Read allowed
+        assert!(read_write(
+            &json!({"mode": "read", "path": key_file.to_string_lossy()}),
+            true,
+            &[],
+        )
+        .is_ok());
+
+        // Delete blocked
+        assert!(read_write(
+            &json!({"mode": "delete", "path": key_file.to_string_lossy()}),
+            true,
+            &[],
+        )
+        .is_err());
+        assert!(key_file.exists());
+    }
+
+    #[test]
+    fn full_access_still_allows_rw_in_non_protected_scratch_paths() {
+        // The whole point: agent CAN destroy its workspace scope
+        let scratch = temp_dir("scratch");
+        let workspace = scratch.join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+        let data = workspace.join("output.txt");
+        fs::write(&data, "workspace data").expect("write data");
+
+        // Write allowed (not a protected path)
+        assert!(read_write(
+            &json!({"mode": "write", "path": data.to_string_lossy(), "content": "modified", "overwrite": true}),
+            true,
+            &[],
+        )
+        .is_ok());
+
+        // Delete allowed (not a protected path)
+        assert!(read_write(
+            &json!({"mode": "delete", "path": data.to_string_lossy()}),
+            true,
+            &[],
+        )
+        .is_ok());
+        assert!(!data.exists());
+    }
+
+    #[test]
+    fn symlink_bypass_to_vault_is_blocked() {
+        // Agent creates ~/workspace/vault_link → ~/.empyralis/state/vault
+        // then tries to delete ~/workspace/vault_link/credentials.json
+        // The canonicalized path resolves to the vault — MUST be blocked.
+        let root = temp_protected_dir("symlink");
+        let vault_dir = root.join(".empyralis").join("state").join("vault");
+        fs::create_dir_all(&vault_dir).expect("create vault dir");
+        let cred_file = vault_dir.join("credentials.json");
+        fs::write(&cred_file, "secret").expect("write cred file");
+
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace dir");
+        let link_path = workspace.join("vault_link");
+
+        // Create symlink: workspace/vault_link → .empyralis/state/vault
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&vault_dir, &link_path).expect("create symlink");
+
+        // Try to delete through the symlink — must be blocked
+        let target = link_path.join("credentials.json");
+        // The path must exist for canonicalize to work
+        assert!(target.exists());
+
+        let result = read_write(
+            &json!({"mode": "delete", "path": target.to_string_lossy()}),
+            true,  // full_access
+            &[],
+        );
+        assert!(result.is_err(), "symlink bypass to vault must be blocked");
+        assert!(cred_file.exists(), "original vault file must still exist");
     }
 }
 

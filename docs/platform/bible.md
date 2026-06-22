@@ -1,6 +1,6 @@
 # Bible
 
-Last verified: 2026-04-10
+Last verified: 2026-06-23
 
 ## Non-Negotiable Rules
 

@@ -109,7 +109,7 @@ Workspace routes live under `frontend/app/(account)/w/[workspaceId]`:
 Notes:
 
 - `trace-preview` is still a preview harness route, not canonical product IA.
-- The route tree still uses historical route ids; canonical IA is documented in [docs/decisions/architectural-decisions.md](/Users/mansur/Multi_Agent_Orchestrator_Project/docs/decisions/architectural-decisions.md).
+- The route tree still uses historical route ids; canonical IA is documented in [docs/decisions/architectural-decisions.md](/Users/mansur/empyralis/docs/decisions/architectural-decisions.md).
 
 ### Web BFF And Proxy Routes
 

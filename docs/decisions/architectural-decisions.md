@@ -12,7 +12,7 @@ Document the gap first, then change code deliberately.
 
 ## How To Use This File
 
-- Read this file together with [docs/platform/context.md](/Users/mansur/Multi_Agent_Orchestrator_Project/docs/platform/context.md), [docs/platform/canonical-architecture-contract.md](/Users/mansur/Multi_Agent_Orchestrator_Project/docs/platform/canonical-architecture-contract.md), and [deployment/cloud-runtime-baseline.md](/Users/mansur/Multi_Agent_Orchestrator_Project/deployment/cloud-runtime-baseline.md).
+- Read this file together with [docs/platform/context.md](/Users/mansur/empyralis/docs/platform/context.md), [docs/platform/canonical-architecture-contract.md](/Users/mansur/empyralis/docs/platform/canonical-architecture-contract.md), and [deployment/cloud-runtime-baseline.md](/Users/mansur/empyralis/deployment/cloud-runtime-baseline.md).
 - Treat this file as the architectural why, not as a file-by-file implementation guide.
 - If a future change reverses one of these decisions, update this file in the same change.
 
@@ -52,11 +52,11 @@ Boundary:
 ## ADR-002: The Shared Token Contract Is Canonical
 
 Decision:
-The single source of truth for design tokens is [shared/design-system/tokens.ts](/Users/mansur/Multi_Agent_Orchestrator_Project/shared/design-system/tokens.ts).
+The single source of truth for design tokens is [shared/design-system/tokens.ts](/Users/mansur/empyralis/shared/design-system/tokens.ts).
 
 Why:
 
-- The project currently carries token values in three places: [frontend/lib/ui/chrome.css](/Users/mansur/Multi_Agent_Orchestrator_Project/frontend/lib/ui/chrome.css), [frontend/lib/ui/tokens.ts](/Users/mansur/Multi_Agent_Orchestrator_Project/frontend/lib/ui/tokens.ts), and [mobile/src/ui/tokens.ts](/Users/mansur/Multi_Agent_Orchestrator_Project/mobile/src/ui/tokens.ts).
+- The project currently carries token values in three places: [frontend/lib/ui/chrome.css](/Users/mansur/empyralis/frontend/lib/ui/chrome.css), [frontend/lib/ui/tokens.ts](/Users/mansur/empyralis/frontend/lib/ui/tokens.ts), and [mobile/src/ui/tokens.ts](/Users/mansur/empyralis/mobile/src/ui/tokens.ts).
 - That duplication makes cross-surface consistency impossible to enforce.
 - The shared token file consolidates the values already in use instead of inventing a new palette or spacing scale.
 
@@ -76,7 +76,7 @@ Implementation note:
 ## ADR-003: Mobile Uses One Tab Shell, Not A Separate Product Contract
 
 Decision:
-The active mobile shell is the Expo route group under [mobile/app/(tabs)](/Users/mansur/Multi_Agent_Orchestrator_Project/mobile/app/(tabs)).
+The active mobile shell is the Expo route group under [mobile/app/(tabs)](/Users/mansur/empyralis/mobile/app/(tabs)).
 The shared route manifest still describes the cross-shell destination contract, but the currently mounted mobile shell is the `(tabs)` app route group, not a deleted or future `(workspace)` route group.
 
 Current implementation truth:
@@ -99,7 +99,7 @@ Boundary:
 ## ADR-004: Tauri Desktop Uses A Frameless Window With A Web Shell And Native Controls
 
 Decision:
-The supported desktop shell is the repo-local Tauri app in [src-tauri](/Users/mansur/Multi_Agent_Orchestrator_Project/src-tauri), backed by the same web shell and workspace contracts as the browser product.
+The supported desktop shell is the repo-local Tauri app in [src-tauri](/Users/mansur/empyralis/src-tauri), backed by the same web shell and workspace contracts as the browser product.
 
 Current window contract:
 
@@ -107,7 +107,7 @@ Current window contract:
 - Main window title is `Empyralis`.
 - Main window size is `1280x800`.
 - The main window is created hidden, shown after readiness, and is frameless via `decorations(false)`.
-- Window drag and native controls are exposed through the custom titlebar and Tauri bridge commands in [src-tauri/src/lib.rs](/Users/mansur/Multi_Agent_Orchestrator_Project/src-tauri/src/lib.rs) and [frontend/lib/workspace/workstation-titlebar.tsx](/Users/mansur/Multi_Agent_Orchestrator_Project/frontend/lib/workspace/workstation-titlebar.tsx).
+- Window drag and native controls are exposed through the custom titlebar and Tauri bridge commands in [src-tauri/src/lib.rs](/Users/mansur/empyralis/src-tauri/src/lib.rs) and [frontend/lib/workspace/workstation-titlebar.tsx](/Users/mansur/empyralis/frontend/lib/workspace/workstation-titlebar.tsx).
 - macOS windows are marked non-restorable.
 - A separate transparent overlay window exists for computer-control overlay work.
 
@@ -119,7 +119,7 @@ Why:
 
 Launch boundary:
 
-- The supported desktop target is the repo-local Tauri shell described in [deployment/cloud-runtime-baseline.md](/Users/mansur/Multi_Agent_Orchestrator_Project/deployment/cloud-runtime-baseline.md).
+- The supported desktop target is the repo-local Tauri shell described in [deployment/cloud-runtime-baseline.md](/Users/mansur/empyralis/deployment/cloud-runtime-baseline.md).
 - The supported contract expects built frontend/runtime artifacts, not an alternate host-dev fallback product.
 
 ## ADR-005: Billing State Is Provider-Agnostic Even Though Stripe Is The Only Implemented Provider
@@ -130,10 +130,10 @@ Stripe is the current concrete implementation, but Stripe is not the architectur
 
 Current proof points:
 
-- [server_modules/control_plane_repository.py](/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules/control_plane_repository.py) stores billing account and subscription rows with explicit `provider` fields.
-- [server_modules/runtime_config.py](/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules/runtime_config.py) resolves `EMPYRALIS_BILLING_PROVIDER`.
-- [server_modules/workspace_bootstrap_service.py](/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules/workspace_bootstrap_service.py) publishes canonical entitlement and billing plan state into workspace bootstrap payloads.
-- [frontend/lib/workspace/workstation-billing-pane.tsx](/Users/mansur/Multi_Agent_Orchestrator_Project/frontend/lib/workspace/workstation-billing-pane.tsx) consumes a normalized summary instead of embedding provider SDK logic.
+- [server_modules/control_plane_repository.py](/Users/mansur/empyralis/server_modules/control_plane_repository.py) stores billing account and subscription rows with explicit `provider` fields.
+- [server_modules/runtime_config.py](/Users/mansur/empyralis/server_modules/runtime_config.py) resolves `EMPYRALIS_BILLING_PROVIDER`.
+- [server_modules/workspace_bootstrap_service.py](/Users/mansur/empyralis/server_modules/workspace_bootstrap_service.py) publishes canonical entitlement and billing plan state into workspace bootstrap payloads.
+- [frontend/lib/workspace/workstation-billing-pane.tsx](/Users/mansur/empyralis/frontend/lib/workspace/workstation-billing-pane.tsx) consumes a normalized summary instead of embedding provider SDK logic.
 
 Why:
 
@@ -154,10 +154,10 @@ All shells and ingress paths converge on the same turn model and runtime switchb
 
 Current ownership model:
 
-- [server.py](/Users/mansur/Multi_Agent_Orchestrator_Project/server.py) is the composition root.
-- [server_modules/agent_turn.py](/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules/agent_turn.py) owns the canonical `AgentTurnRequest` contract and request normalization.
-- [server_modules/turn_runtime.py](/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules/turn_runtime.py) is the execution switchboard between direct chat and durable execution.
-- [server_modules/agent_channel_router.py](/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules/agent_channel_router.py) is the canonical external channel ingress adapter.
+- [server.py](/Users/mansur/empyralis/server.py) is the composition root.
+- [server_modules/agent_turn.py](/Users/mansur/empyralis/server_modules/agent_turn.py) owns the canonical `AgentTurnRequest` contract and request normalization.
+- [server_modules/turn_runtime.py](/Users/mansur/empyralis/server_modules/turn_runtime.py) is the execution switchboard between direct chat and durable execution.
+- [server_modules/agent_channel_router.py](/Users/mansur/empyralis/server_modules/agent_channel_router.py) is the canonical external channel ingress adapter.
 
 Why:
 
@@ -173,9 +173,9 @@ Frozen rules:
 
 Source documents:
 
-- [docs/platform/context.md](/Users/mansur/Multi_Agent_Orchestrator_Project/docs/platform/context.md)
-- [docs/platform/canonical-architecture-contract.md](/Users/mansur/Multi_Agent_Orchestrator_Project/docs/platform/canonical-architecture-contract.md)
-- [deployment/cloud-runtime-baseline.md](/Users/mansur/Multi_Agent_Orchestrator_Project/deployment/cloud-runtime-baseline.md)
+- [docs/platform/context.md](/Users/mansur/empyralis/docs/platform/context.md)
+- [docs/platform/canonical-architecture-contract.md](/Users/mansur/empyralis/docs/platform/canonical-architecture-contract.md)
+- [deployment/cloud-runtime-baseline.md](/Users/mansur/empyralis/deployment/cloud-runtime-baseline.md)
 
 ## ADR-007: Supported Runtime Shapes Stay Singular
 

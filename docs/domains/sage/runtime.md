@@ -75,7 +75,8 @@ Sage should route work in this order:
 - `cloud_computer`: use an isolated cloud computer for heavier jobs, code, files,
   terminal, or browser automation that does not need the user's machine.
 - `gateway_required`: use Agent Computer only for local files, local apps, local
-  browser profiles/cookies, personal Telegram/WhatsApp/iMessage/Signal/WeChat,
+  browser profiles/cookies, personal Telegram (personal MTProto)/iMessage/Signal/WeChat,
+  (Note: WhatsApp personal is not a supported channel)
   local network, SSH keys, secrets on the user's machine, desktop control, or
   dedicated hardware.
 

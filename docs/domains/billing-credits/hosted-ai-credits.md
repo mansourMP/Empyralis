@@ -36,9 +36,12 @@ policy, monthly cap USD, monthly cost USD, monthly remaining USD, credit balance
 total available credits, and reason. Chat tiers expose light/pro/max monthly
 credit caps.
 
-## Default Provider: DeepSeek
+## Default Provider: DeepSeek (Internal/Operator Doc)
 
-Empyralis credits always route to **DeepSeek**. All three platform tiers (light, pro, max) use DeepSeek internally — there is no other provider behind Empyralis credits.
+> **Consumer-facing surfaces must say "Platform AI," not the provider name.** The provider identity
+> is never exposed to consumers. This section is for operators and internal documentation only.
+
+Empyralis credits always route to **DeepSeek**. All three platform tiers (light, pro, max) use DeepSeek internally — there is no other provider behind Empyralis credits. There is NO fallback to other providers.
 
 **Why:** DeepSeek offers frontier-model quality at roughly 1/10th the cost of alternatives (Anthropic, OpenAI). This lets Empyralis offer affordable credit-based pricing while maintaining quality.
 

@@ -2783,6 +2783,7 @@ export function WorkstationSageConnectorsPane({
   const [telegramHostedPairingLoading, setTelegramHostedPairingLoading] = useState(false);
   const [telegramHostedPaired, setTelegramHostedPaired] = useState(false);
   const [telegramHostedPolling, setTelegramHostedPolling] = useState(false);
+  const [telegramHostedBotUsername, setTelegramHostedBotUsername] = useState<string | null>(null);
   const [whatsappChannelMode, setWhatsappChannelMode] = useState<ChannelRouteMode>('cloud');
   const [selectedIntegrationId, setSelectedIntegrationId] = useState<IntegrationWorkbenchCategoryId>(() => (
     normalizeIntegrationCategoryId(searchParams.get('section') ?? searchParams.get('connection'))
@@ -2943,6 +2944,31 @@ export function WorkstationSageConnectorsPane({
     setBillingCredits(nextState.billingCredits);
     setMcpServers(nextState.mcpServers);
     setConnectionStatusItems(nextState.connectionStatusItems);
+
+    // Load Telegram hosted bot pairing state so it survives page refresh.
+    // /pair/status returns { paired: boolean } — check it even when the
+    // main data load fails so a paired workspace always shows as connected.
+    try {
+      const pairStatusResp = await fetch(
+        `/api/sage/telegram-hosted/pair/status?workspace_id=${encodeURIComponent(workspaceId)}`,
+        { headers: buildCookieAuthHeaders('GET'), credentials: 'include' },
+      );
+      if (pairStatusResp.ok) {
+        const pairStatus = await pairStatusResp.json() as { paired: boolean; configured: boolean };
+        setTelegramHostedPaired(pairStatus.paired === true);
+      }
+    } catch { /* pairing check is best-effort */ }
+
+    // Load bot display info so the "Send a message to @..." text is accurate.
+    try {
+      const infoResp = await fetch('/api/sage/telegram-hosted/info', {
+        headers: buildCookieAuthHeaders('GET'), credentials: 'include',
+      });
+      if (infoResp.ok) {
+        const info = await infoResp.json() as { configured: boolean; username: string | null };
+        if (info.username) setTelegramHostedBotUsername(info.username);
+      }
+    } catch { /* info fetch is best-effort */ }
 
     if (catalogResult.status === 'rejected') {
       throw catalogResult.reason instanceof Error
@@ -3710,20 +3736,7 @@ export function WorkstationSageConnectorsPane({
             runtimeDependency: 'gateway_optional',
           }
         : null;
-      const whatsappCard: ExternalIntegrationCardRecord | null = showPersonalSurface && whatsappPersonal
-        ? {
-            id: 'whatsapp',
-            label: 'WhatsApp',
-            image: whatsappPersonal.image,
-            detail: 'Use WhatsApp Business or your personal WhatsApp account.',
-            statusLabel: whatsappPersonal.statusTone === 'connected' ? 'Personal connected' : 'Choose setup',
-            statusTone: whatsappPersonal.statusTone === 'connected' ? 'connected' : 'neutral',
-            summary: 'Choose WhatsApp Business for cloud setup, or Personal WhatsApp when Sage must use your logged-in account through Agent Computer.',
-            nextStep: null,
-            actionTarget: 'close',
-            runtimeDependency: 'gateway_optional',
-          }
-        : null;
+      const whatsappCard: ExternalIntegrationCardRecord | null = null; // WhatsApp personal deprecated — business Twilio path only
       const cloudChannelOrder = showPersonalSurface ? ['slack', 'discord_bot'] : ['slack', 'discord_bot', 'whatsapp_twilio'];
       const cloudCards = cloudChannelOrder
         .map((id) => connectorCards.find((card) => card.id === id) ?? null)
@@ -4882,10 +4895,11 @@ export function WorkstationSageConnectorsPane({
             ? 'Add API key'
             : 'Available';
     const actionLabel = isActive ? 'Selected' : connected ? 'Use' : requiresSecret ? 'Add key' : 'Use';
+    const isSubscriptionTransport = providerIsPersonalSubscriptionTransport(record);
     const detail = connected
       ? `${modelLabel} · ${providerPathLabel(record)}`
       : needsGateway
-        ? 'Connect a computer before using this provider.'
+        ? `Hardware only — ${isSubscriptionTransport ? 'uses your personal subscription through Agent Computer. Not available on cloud.' : 'connect a computer before using this provider.'}`
         : requiresSecret
           ? 'Add an API key to use this provider.'
           : providerPathLabel(record);
@@ -5662,6 +5676,7 @@ export function WorkstationSageConnectorsPane({
             }}
           >
             Personal
+            <span className="sage-channel-route-tab__hint" style={{ fontSize: 10, opacity: 0.6, marginLeft: 4 }}>unstable</span>
           </button>
         </div>
         {telegramChannelMode === 'bot' ? (
@@ -5698,7 +5713,9 @@ export function WorkstationSageConnectorsPane({
                       </button>
                     </div>
                     <p className="sage-unified-expand__text" style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
-                      Sage is now available on Telegram. Send a message to @EmpyralisSageBot.
+                      {telegramHostedBotUsername
+                        ? `Sage is now available on Telegram. Send a message to @${telegramHostedBotUsername}.`
+                        : 'Sage is now available on Telegram.'}
                     </p>
                   </div>
                 ) : telegramHostedPairing ? (
@@ -5750,6 +5767,16 @@ export function WorkstationSageConnectorsPane({
           </>
         ) : (
           <>
+            <AppNotice tone="warning">
+              Personal Telegram uses phone-number login through Agent Computer. Telegram may flag or ban MTProto accounts. Use the Bot tab for a reliable cloud connection.
+            </AppNotice>
+            {!telegramHostedPaired && !telegramHostedPairing ? (
+              <div className="sage-unified-expand__actions" style={{ marginTop: 8 }}>
+                <AppButton type="button" tone="secondary" onClick={() => setTelegramChannelMode('bot')}>
+                  ← Use Bot tab instead
+                </AppButton>
+              </div>
+            ) : null}
             {channelComputerIssue ? <AppNotice tone="warning">{channelComputerIssue.message}</AppNotice> : null}
             <div className="sage-unified-expand__actions">
               {channelComputerIssue ? (
@@ -5861,13 +5888,17 @@ export function WorkstationSageConnectorsPane({
               setPersonalChannelError(null);
             }}
           >
-            Hardware
+            Personal
+            <span className="sage-channel-route-tab__hint" style={{ fontSize: 10, opacity: 0.6, marginLeft: 4 }}>deprecated</span>
           </button>
         </div>
         {whatsappChannelMode === 'cloud' ? (
           renderFlatConnectorCredentialForm(businessSetupRecord)
         ) : (
           <>
+            <AppNotice tone="danger">
+              WhatsApp blocks third-party AI assistants as of January 2026. Personal WhatsApp via Agent Computer is unofficial and subject to bans. Business WhatsApp (Twilio) is the only supported path — use the Cloud tab above.
+            </AppNotice>
             {channelComputerIssue ? (
               <>
                 <AppNotice tone="warning">Agent Computer offline — connect Hardware first.</AppNotice>

@@ -32,6 +32,9 @@ const OPERATIONS: &[&str] = &[
     "save_mcp_server_registry",
     "save_installed_skill_registry",
     "write_vault_key_file",
+    "write_vault_blob_backup",
+    "read_vault_blob_backup",
+    "write_channel_pairings_backup",
     "write_jwt_secret_file",
     "persist_artifact_record",
     "write_hosted_sandbox_base_image",
@@ -564,6 +567,9 @@ fn normalize_operation(value: &str) -> String {
             "save_installed_skill_registry".to_string()
         }
         "write_vault_key_file" | "vault_key_file_write" => "write_vault_key_file".to_string(),
+        "write_vault_blob_backup" | "vault_blob_backup_write" => "write_vault_blob_backup".to_string(),
+        "read_vault_blob_backup" | "vault_blob_backup_read" => "read_vault_blob_backup".to_string(),
+        "write_channel_pairings_backup" | "channel_pairings_backup_write" => "write_channel_pairings_backup".to_string(),
         "write_jwt_secret_file" | "jwt_secret_file_write" => "write_jwt_secret_file".to_string(),
         "persist_artifact_record" | "artifact_record_persist" => {
             "persist_artifact_record".to_string()
@@ -768,7 +774,7 @@ fn default_state_class(operation: &str) -> &str {
         "upsert_sage_profile" => "sage_profile",
         "save_mcp_server_registry" => "mcp_server_registry",
         "save_installed_skill_registry" => "installed_skill_registry",
-        "write_vault_key_file" | "write_jwt_secret_file" => "secret_material",
+        "write_vault_key_file" | "write_vault_blob_backup" | "read_vault_blob_backup" | "write_channel_pairings_backup" | "write_jwt_secret_file" => "secret_material",
         "persist_artifact_record" => "artifact_records",
         "write_hosted_sandbox_base_image" => "execution_sandbox_image",
         "save_cli_companion_state" => "cli_companion_state",
@@ -848,6 +854,9 @@ fn requires_workspace(operation: &str) -> bool {
             | "save_mcp_server_registry"
             | "save_installed_skill_registry"
             | "write_vault_key_file"
+            | "write_vault_blob_backup"
+            | "read_vault_blob_backup"
+            | "write_channel_pairings_backup"
             | "write_jwt_secret_file"
             | "write_hosted_sandbox_base_image"
             | "write_hosted_worker_output"
@@ -887,6 +896,9 @@ fn requires_owner_access(operation: &str) -> bool {
             | "save_mcp_server_registry"
             | "save_installed_skill_registry"
             | "write_vault_key_file"
+            | "write_vault_blob_backup"
+            | "read_vault_blob_backup"
+            | "write_channel_pairings_backup"
             | "write_jwt_secret_file"
             | "persist_artifact_record"
             | "write_hosted_sandbox_base_image"
@@ -981,6 +993,8 @@ fn requires_payload(operation: &str) -> bool {
             | "save_mcp_server_registry"
             | "save_installed_skill_registry"
             | "write_vault_key_file"
+            | "write_vault_blob_backup"
+            | "write_channel_pairings_backup"
             | "write_jwt_secret_file"
             | "persist_artifact_record"
             | "write_hosted_sandbox_base_image"
@@ -1128,6 +1142,9 @@ fn next_action(operation: &str, decision: &str) -> &'static str {
         "save_mcp_server_registry" => "save_mcp_server_registry",
         "save_installed_skill_registry" => "save_installed_skill_registry",
         "write_vault_key_file" => "write_vault_key_file",
+        "write_vault_blob_backup" => "write_vault_blob_backup",
+        "read_vault_blob_backup" => "read_vault_blob_backup",
+        "write_channel_pairings_backup" => "write_channel_pairings_backup",
         "write_jwt_secret_file" => "write_jwt_secret_file",
         "persist_artifact_record" => "persist_artifact_record",
         "write_hosted_sandbox_base_image" => "write_hosted_sandbox_base_image",
@@ -2703,5 +2720,130 @@ mod run_approval_repository_state_store_tests {
         assert_eq!(decision["operation"], "delete_live_run");
         assert_eq!(decision["state"]["class"], "live_runs");
         assert_eq!(decision["next_action"], "delete_live_run_state");
+    }
+}
+
+#[cfg(test)]
+mod vault_blob_backup_state_store_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn write_vault_blob_backup_allows_owner_with_payload() {
+        let decision = runtime_state_store_decision_command(&json!({
+            "operation": "write_vault_blob_backup",
+            "state_class": "secret_material",
+            "actor_id": "system",
+            "status": "active",
+            "payload": {"vault_blob_base64": "dGVzdC1ibG9i", "environment": "dev", "backup_version": "vault_blob_v1"},
+            "payload_bytes": 32,
+            "workspace_access": true,
+            "owner_access": true,
+        }));
+
+        assert_eq!(decision["decision"], "allow");
+        assert_eq!(decision["operation"], "write_vault_blob_backup");
+        assert_eq!(decision["state"]["class"], "secret_material");
+        assert_eq!(decision["next_action"], "write_vault_blob_backup");
+    }
+
+    #[test]
+    fn write_vault_blob_backup_blocks_without_owner_access() {
+        let decision = runtime_state_store_decision_command(&json!({
+            "operation": "write_vault_blob_backup",
+            "state_class": "secret_material",
+            "actor_id": "member-1",
+            "status": "active",
+            "payload": {"vault_blob_base64": "dGVzdC1ibG9i"},
+            "payload_bytes": 12,
+            "workspace_access": true,
+            "owner_access": false,
+        }));
+
+        assert_eq!(decision["decision"], "block");
+        assert!(decision["reason"].as_str().unwrap_or("").contains("owner_access_denied"));
+    }
+
+    #[test]
+    fn write_vault_blob_backup_blocks_without_payload() {
+        let decision = runtime_state_store_decision_command(&json!({
+            "operation": "write_vault_blob_backup",
+            "state_class": "secret_material",
+            "actor_id": "system",
+            "status": "active",
+            "workspace_access": true,
+            "owner_access": true,
+        }));
+
+        assert_eq!(decision["decision"], "block");
+        assert!(decision["reason"].as_str().unwrap_or("").contains("payload_missing"));
+    }
+
+    #[test]
+    fn read_vault_blob_backup_allows_owner_without_payload() {
+        // read operations don't need a payload — they fetch from cloud
+        let decision = runtime_state_store_decision_command(&json!({
+            "operation": "read_vault_blob_backup",
+            "state_class": "secret_material",
+            "actor_id": "system",
+            "status": "active",
+            "workspace_access": true,
+            "owner_access": true,
+        }));
+
+        assert_eq!(decision["decision"], "allow");
+        assert_eq!(decision["operation"], "read_vault_blob_backup");
+        assert_eq!(decision["state"]["class"], "secret_material");
+        assert_eq!(decision["next_action"], "read_vault_blob_backup");
+    }
+
+    #[test]
+    fn read_vault_blob_backup_blocks_without_owner_access() {
+        let decision = runtime_state_store_decision_command(&json!({
+            "operation": "read_vault_blob_backup",
+            "state_class": "secret_material",
+            "actor_id": "member-1",
+            "status": "active",
+            "workspace_access": true,
+            "owner_access": false,
+        }));
+
+        assert_eq!(decision["decision"], "block");
+        assert!(decision["reason"].as_str().unwrap_or("").contains("owner_access_denied"));
+    }
+
+    #[test]
+    fn write_channel_pairings_backup_allows_owner_with_payload() {
+        let decision = runtime_state_store_decision_command(&json!({
+            "operation": "write_channel_pairings_backup",
+            "state_class": "secret_material",
+            "actor_id": "system",
+            "status": "active",
+            "payload": {"channel": "telegram", "pairings_blob_base64": "dGVzdA==", "backup_version": "channel_pairings_v1"},
+            "payload_bytes": 64,
+            "workspace_access": true,
+            "owner_access": true,
+        }));
+
+        assert_eq!(decision["decision"], "allow");
+        assert_eq!(decision["operation"], "write_channel_pairings_backup");
+        assert_eq!(decision["state"]["class"], "secret_material");
+        assert_eq!(decision["next_action"], "write_channel_pairings_backup");
+    }
+
+    #[test]
+    fn vault_blob_backup_does_not_require_workspace() {
+        // Vault operations are per-box, not per-workspace
+        let decision = runtime_state_store_decision_command(&json!({
+            "operation": "write_vault_blob_backup",
+            "state_class": "secret_material",
+            "actor_id": "system",
+            "status": "active",
+            "payload": {"vault_blob_base64": "dGVzdA=="},
+            "payload_bytes": 8,
+            "owner_access": true,
+        }));
+
+        assert_eq!(decision["decision"], "allow");
     }
 }

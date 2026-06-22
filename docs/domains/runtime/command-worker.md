@@ -7,15 +7,19 @@ hardware tool calls (shell, file, screenshot) for user-owned machines
 **Architecture:** dial-OUT — the node polls the cloud. Cloud never reaches
 in over SSH. See [ADR: Canonical hardware execution](../decisions/canonical-hardware-execution-dial-out-2026-06-21.md).
 
-## Quick Start
+## Deployment
+
+> **The systemd unit is the ONLY supported deployment method.** Running the worker process directly
+> bypasses ALL OS-level confinement (ProtectSystem, ProtectHome, PrivateDevices, etc.).
+> Direct invocation is unsupported and unsafe for any real use. See the Systemd Deployment section below.
+
+The quick-start below is for **local development or smoke-testing only**. Do not use it in production:
 
 ```bash
-# 1. Set required env vars
+# DEV ONLY — bypasses OS confinement; do not use in production
 export EMPYRALIS_CLOUD_URL=https://empyralis.com
 export EMPYRALIS_RUNTIME_PROFILE_ID=rp_xxxx
 export EMPYRALIS_NODE_SESSION_TOKEN=ns_xxxx
-
-# 2. Run
 python scripts/empyralis_self_hosted_command_worker.py
 ```
 
@@ -67,6 +71,32 @@ register/enroll (once, via cloud UI)
 ```
 
 ## Systemd Deployment
+
+This is the ONLY supported deployment method. The systemd unit applies OS-level confinement
+that makes it physically impossible for the agent to reach credentials, system directories,
+or other tenants: `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateDevices`,
+`ProtectProc=invisible`, `CapabilityBoundingSet=` (empty), and scoped `ReadWritePaths`.
+
+### Vault Key Security
+
+**Do NOT set `CREDENTIAL_VAULT_KEY` as a plain `Environment=` line in the unit file or shell.**
+Plain environment variables are readable via `/proc/<pid>/environ` by any process running as
+the same user. Use a key file with `0600` permissions instead:
+
+```bash
+# Create the key file (once, on first setup)
+install -m 0600 -o empyralis -g empyralis /dev/null \
+  /opt/empyralis/.empyralis/state/vault/worker.env
+echo "CREDENTIAL_VAULT_KEY=$(openssl rand -hex 32)" >> \
+  /opt/empyralis/.empyralis/state/vault/worker.env
+
+# Reference it in the unit via EnvironmentFile= (see deploy/empyralis-command-worker.service)
+```
+
+The cloud-managed / just-in-time secrets model is the end-state; the key file is the correct
+interim approach.
+
+### Install and Start
 
 ```bash
 sudo cp deploy/empyralis-command-worker.service /etc/systemd/system/

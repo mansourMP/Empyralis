@@ -12,13 +12,13 @@ stack.
 
 The active platform already has three relevant realities:
 
-1. `/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules` is the live
+1. `/Users/mansur/empyralis/server_modules` is the live
    cloud control-plane and run-engine surface.
-2. `/Users/mansur/Multi_Agent_Orchestrator_Project/empyralis-supervisor` is a
+2. `/Users/mansur/empyralis/empyralis-supervisor` is a
    real local loopback daemon for privileged device capabilities.
-3. `/Users/mansur/Multi_Agent_Orchestrator_Project/server_modules/connectors`
+3. `/Users/mansur/empyralis/server_modules/connectors`
    is the active cloud/business webhook connector stack.
-4. `/Users/mansur/Multi_Agent_Orchestrator_Project/empyralis-gateway` now
+4. `/Users/mansur/empyralis/empyralis-gateway` now
    exists as a real persistent local runtime process with local state,
    pairing/session bootstrap, personal-channel runtimes, and browser/runtime
    routing.
@@ -196,14 +196,14 @@ Does not own:
 These current pieces stay relevant:
 - `empyralis-gateway/src/index.ts`
   - boots the WSS client, journal/outbox/checkpoints, supervisor client,
-    WhatsApp personal runtime, Telegram personal runtime, local-bridge personal
-    runtimes, and gateway browser runtime
+    Telegram personal runtime, local-bridge personal
+    runtimes, and gateway browser runtime (WhatsApp personal runtime exists as legacy dead code)
 - `server_modules/routes_gateway.py`
   - exposes pairing, registration, token rotation/revocation, tool execution,
     approvals, doctor, event history, and browser control routes
 - `server_modules/routes_personal_channels.py`
-  - exposes the clean personal-channel routing lane for WhatsApp, Telegram,
-    Signal, iMessage, and WeChat
+  - exposes the clean personal-channel routing lane for Telegram,
+    Signal, iMessage, and WeChat (WhatsApp personal is not a supported channel)
 - `server_modules/channel_lane_contract_service.py`
   - enforces personal-vs-Studio execution-lane boundaries
 - `server_modules/runtime_attachment_service.py`
@@ -222,8 +222,9 @@ Implemented current-state truth:
 - `empyralis-gateway` already exists in the repo
 - the cloud-backed pairing/session/WSS path already exists
 - the supervisor already runs behind the gateway control path
-- personal WhatsApp and Telegram already terminate at the selected Agent
-  Computer gateway lane
+- personal Telegram already terminates at the selected Agent Computer gateway lane
+  (WhatsApp personal code exists in the repo but is not a supported channel — Baileys is banned
+  and WhatsApp Business API bars third-party AI assistants as of Jan 15 2026)
 - Signal, iMessage, and WeChat are planned/private Agent Computer bridge
   contracts until real-account setup, durable replay, outbound approval, health
   reporting, and account lifecycle are certified
@@ -237,11 +238,12 @@ implementation must continue to respect.
 ## Historical Phase Boundary
 
 The original Phase 0 version of this document did **not** implement the gateway,
-personal WhatsApp/Telegram, frontend UI, or marketplace/app changes. That is no
+personal Telegram, frontend UI, or marketplace/app changes. That is no
 longer the current repo truth.
 
 The live repo now contains baseline implementations for the selected Agent
-Computer gateway, personal WhatsApp/Telegram, local-bridge personal runtimes,
+Computer gateway, personal Telegram (personal WhatsApp code exists but the channel is not
+supported — see note above), local-bridge personal runtimes,
 browser/governed local capability routing, and the related UI surfaces. This
 document now serves as the boundary contract those live implementations must
 continue to respect.

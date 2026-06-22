@@ -9,7 +9,7 @@
 | Entry points | `workstation-chat-pane.tsx` → `handle_sage_chat` → `sage_turn_adapter.py:44` | frontend, server |
 | Runtime path | `agent_turn.py` → `turn_runtime.py` → direct chat or durable execution | `agent_turn.py:128-129` |
 | Memory access | `unified_memory_service.py` 8-layer payload, `conversation_memory_facade_service.py` | `unified_memory_service.py:804` |
-| Channel access | Personal WhatsApp/Telegram plus Signal/iMessage/WeChat local bridges through Gateway | `personal_channels_service.py`, `channel_lane_contract_service.py` |
+| Channel access | Personal Telegram (MTProto/hosted bot) plus Signal/iMessage/WeChat local bridges through Gateway. WhatsApp personal is not a supported channel. | `personal_channels_service.py`, `channel_lane_contract_service.py` |
 | Gateway access | Yes — tool.invoke via `gateway_execution_service.py` | `gateway_execution_service.py:24` |
 | Approval path | `gateway_approval_service.py`, interactive approvals in `agent_turn.py:476` | server |
 | Audit path | `activity_ledger_service.append_activity_event`, `security_audit_service.emit_security_audit_event` | multiple |
@@ -24,7 +24,7 @@
 | Entry points | Studio wizard (8 steps), test playground, channel webhooks | `workstation-deployed-agents-pane.tsx`, `agent_channel_router.py:304` |
 | Runtime modes | `text_agent`, `cloud_computer_agent`, `my_computer_agent`, `self_hosted_agent` | `deployed_agent_runtime_contract_service.py:65-68` |
 | Memory access | Isolated per install, `deployed_agent_memory_service` overlay | `agent_channel_router.py:439` |
-| Channel access | Business/official channels: Telegram Bot, Slack, Discord live when configured; Email/Microsoft 365 partial; Web Chat/WhatsApp Business/Webhook/Teams/Matrix planned | `channel_lane_contract_service.py` |
+| Channel access | Business/official channels: Telegram Bot, Slack, Discord live when configured; Email/Microsoft 365 partial; Web Chat/Webhook/Teams/Matrix planned. WhatsApp Business is not supported (Meta bars third-party AI assistants). | `channel_lane_contract_service.py` |
 | Gateway access | Only `my_computer_agent` mode | `deployed_agent_runtime_contract_service.py:119-133` |
 | Approval path | Owner approval for computer actions, interactive approvals | `deployed_agent_runtime_contract_service.py:418-431` |
 | Audit path | `activity_ledger_service`, `channel_activity_service.record_result` | multiple |

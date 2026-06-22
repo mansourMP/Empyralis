@@ -24,11 +24,13 @@ The lane split is enforced in
 `server_modules/channel_platform_service.py`, and
 `server_modules/agent_channel_router.py`.
 
-Channel setup is platform-owned. Telegram and WhatsApp message surfaces must
-not become setup consoles. If an unlinked user messages a Telegram/WhatsApp
+Channel setup is platform-owned. Telegram message surfaces must
+not become setup consoles. If an unlinked user messages a Telegram
 bot or channel, the runtime replies with an Empyralis `/continue` connect link;
 account creation, sign-in, relinking, and provider credentials stay inside the
 Empyralis web/native control plane.
+
+WhatsApp is not a supported channel (personal banned, Business API blocked by Meta as of Jan 15 2026).
 
 ## Code Catalog
 
@@ -40,17 +42,22 @@ platform channel keys:
 - Email and work-system connectors: `google_workspace`, `gmail`, `smtp_imap`,
   `microsoft_365`, `github`, `linear`, `notion`, `dropbox`, `s3`, `smtp`,
   `wechat_work`, `instagram_business`.
-- Sage personal Agent Computer channels: `telegram_personal`,
-  `whatsapp_personal`, `signal_personal`, `imessage_personal`,
-  `wechat_personal`.
+- Sage personal Agent Computer channels: `telegram_personal` (advanced/fragile; hosted bot is
+  preferred), `signal_personal`, `imessage_personal`, `wechat_personal` (all planned/locked).
+  **`whatsapp_personal` is dead:** Baileys is banned by the provider; WhatsApp Business API bars
+  third-party AI assistants as of Jan 15 2026. Do not expose this lane to customers.
 - Reserved private runtime items, not user-facing channel bindings:
   `voice_wake`, `mobile_nodes`, `plugin_marketplace`.
 
 `web_chat`, generic `email`, `smtp_imap` as a channel-platform record,
-`whatsapp_business`, `apple_messages_business`, `teams`, and `matrix` are
+`apple_messages_business`, `teams`, and `matrix` are
 present in the catalog but not launch-ready in the inspected code because their
 `launch_allowed`, `runtime_usable`, or `live_capable` flags are false. `smtp`
 as a work-app connector is separate and launchable when configured.
+
+`whatsapp_business` exists in the catalog as legacy code. It is not a viable launch path:
+Meta bars third-party general-purpose AI assistants from WhatsApp Business Cloud API
+as of Jan 15 2026. Do not present it as a planned future channel.
 
 The canonical connection catalog also exposes readiness proof fields:
 `readiness_status`, `certification_required`, and

@@ -1,8 +1,15 @@
 # Market Reference
 
+> **Stale channel assumptions — read before using this doc.**
+> This research was prepared 2026-04-18 and describes WhatsApp as a key channel.
+> **WhatsApp is no longer a supported Empyralis channel.** Personal WhatsApp (Baileys) is banned
+> by the provider. WhatsApp Business API bars third-party general-purpose AI assistants as of
+> Jan 15, 2026. Do not use this doc's WhatsApp framing in any customer-facing material.
+> The recommended reliable Telegram path is the hosted bot, not WhatsApp.
+
 Prepared: 2026-04-18
 
-Scope: current buyer alternatives for Telegram/WhatsApp chatbots, real small-business AI deployments, WhatsApp Business Platform access reality, and a realistic first paying-customer wedge for Empyralis in the next 30 days.
+Scope: competitive research — buyer alternatives for Telegram chatbots, real small-business AI deployments, and a realistic first paying-customer wedge for Empyralis. WhatsApp sections are now stale; see note above.
 
 ## 1. What Businesses Use Today for Telegram and WhatsApp Chatbots
 

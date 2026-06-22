@@ -29,7 +29,7 @@ Computer is selected only when Sage needs local/private computer access:
 - local files, folders, projects, apps, browser profiles, cookies, or desktop
   state;
 - local terminal, local network, SSH keys, machine secrets, or hardware;
-- personal Telegram/WhatsApp/iMessage/Signal/WeChat sessions;
+- personal Telegram/iMessage/Signal/WeChat sessions (WhatsApp personal is not a supported channel);
 - dedicated Agent Computer hardware intentionally assigned to Sage.
 
 Studio agents and external agents do not inherit Sage Full Access. External

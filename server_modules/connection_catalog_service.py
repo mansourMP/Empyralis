@@ -1496,6 +1496,17 @@ def status_items(
             connected = bool(aliases & vault_connector_ids)
             configured = connected
             health_status = "healthy" if connected else "not_configured"
+            # First-party bot pairing (e.g. hosted Telegram) — check in-memory
+            # pairing state rather than vault entries.
+            if not connected and item.get("setup_kind") == "first_party_bot_pairing":
+                try:
+                    from server_modules.sage_telegram_hosted_service import is_workspace_paired
+                    if is_workspace_paired(workspace_id):
+                        connected = True
+                        configured = True
+                        health_status = "healthy"
+                except Exception:
+                    pass
             if not connected and _oauth_setup_unconfigured(item):
                 effective_item["setup_available"] = False
                 health_status = "setup_missing"

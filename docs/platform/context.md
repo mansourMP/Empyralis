@@ -27,11 +27,13 @@ Shell classes are explicit:
   - web
   - desktop
 - `channel_shell`
-  - Live personal Agent Computer channels: Telegram, WhatsApp
+  - Live Telegram path: hosted bot (recommended — no phone number required)
+  - Advanced/fragile personal Agent Computer channel: Telegram personal (MTProto) — not the recommended path
+  - **WhatsApp: NOT SUPPORTED.** Baileys is banned; Business API bars third-party AI as of Jan 15 2026.
   - Planned personal Agent Computer bridge channels: Signal, iMessage, WeChat
   - Live when configured cloud/business channels: Telegram Bot, Slack, Discord
   - Live when configured connected apps: Google Workspace, Microsoft 365, GitHub, Notion, Linear, Dropbox, Amazon S3, SMTP / IMAP, WeChat Work, Instagram Business
-  - Partial/planned: generic Email channel, Webhook, Web Chat, WhatsApp Business, Teams, Matrix, phone
+  - Partial/planned: generic Email channel, Webhook, Web Chat, Teams, Matrix, phone
 
 Shell truth:
 - every shell shares the same captain identity
@@ -320,10 +322,11 @@ Intentional public ingress is limited to verified provider webhooks:
   - Discord signature, timestamp, and configured public key verification run before parse, dispatch, or run creation
 - `/channels/whatsapp/twilio/webhook`
   - configured `ORION_WHATSAPP_AUTOPILOT_WEBHOOK_SECRET` via query or header is required before Twilio form parse or inbound handling
+  - **Note:** WhatsApp is not a supported channel. This route is legacy code and must not be exposed or marketed as a live channel.
 
 Operational status and admin surfaces remain protected:
 - `/channels/telegram/autopilot/status`
-- `/channels/whatsapp/autopilot/status`
+- `/channels/whatsapp/autopilot/status` (legacy — WhatsApp not supported)
 - `/channels/autopilot/profiles`
 
 ## Surface Truth

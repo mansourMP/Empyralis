@@ -258,11 +258,119 @@ def enforce_command_governance(
 
 # ── Executors ─────────────────────────────────────────────────────────────────
 
+# ── Hard-blocked command patterns (defense-in-depth) ──
+# These mirror empyralis-runtime-kernel and empyralis-supervisor.
+# They are checked HERE in addition to the kernel governance gate so that
+# a direct call to execute_shell() (bypassing governance) is still blocked.
+
+_HARD_BLOCKED_COMMAND_PATTERNS = [
+    "rm -rf /",
+    "rm -rf /*",
+    "rm -fr /",
+    "rm -fr /*",
+    "rm -rf ~",
+    "rm -fr ~",
+    "rm -rf ~/",
+    "rm -fr ~/",
+    "rm -rf .",
+    "mkfs.",
+    "diskutil erasedisk",
+    "dd if=/dev/",
+    ":(){ :|:& };:",
+    "> /dev/sda",
+    "> /dev/nvme",
+    "chmod -r 000 /",
+    "chmod -r 777 /",
+    "chown -r ",
+    "shutdown -",
+    "reboot",
+    "halt",
+    "poweroff",
+]
+
+_HARD_PROTECTED_PATH_MARKERS = [
+    "/.empyralis/state/vault",
+    "/.empyralis/state",
+    "/.ssh",
+    "/.gnupg",
+    "/etc/empyralis",
+    "/var/lib/empyralis/agent-computer",
+    "/.orion-stack",
+]
+
+
+def _hard_blocked_command(command: str) -> bool:
+    """Check if command matches a hard-blocked catastrophic pattern."""
+    compact = " ".join(str(command or "").strip().lower().split())
+    if not compact:
+        return False
+    for pattern in _HARD_BLOCKED_COMMAND_PATTERNS:
+        if pattern in compact:
+            # Path-root boundary check: "rm -rf /" must NOT match "rm -rf /tmp/scratch"
+            # (agent CAN destroy workspace scope, canNOT destroy root/home).
+            pos = compact.find(pattern)
+            after = compact[pos + len(pattern):] if pos + len(pattern) < len(compact) else ""
+            next_char = after[0] if after else ""
+            if next_char and next_char != " ":
+                if pattern.startswith("rm -") and (pattern.endswith(" /") or pattern.endswith(" ~") or pattern.endswith(" ~/") or pattern.endswith(" .")):
+                    continue
+            return True
+    return False
+
+
+def _command_touches_protected_path(command: str) -> bool:
+    """Check if any token in command references a hard-protected path."""
+    for token in str(command or "").split():
+        cleaned = token.strip('"').strip("'").lower()
+        for marker in _HARD_PROTECTED_PATH_MARKERS:
+            if marker in cleaned:
+                return True
+    return False
+
+
+def _path_touches_protected(file_path: str) -> bool:
+    """Check if a filesystem path targets a hard-protected directory."""
+    import os as _os
+    try:
+        resolved = str(Path(file_path).expanduser().resolve())
+    except Exception:
+        resolved = str(file_path or "")
+    lower = resolved.lower()
+    for marker in _HARD_PROTECTED_PATH_MARKERS:
+        if marker in lower:
+            return True
+    # Also check the vault key file by name
+    name = _os.path.basename(resolved).lower()
+    if name == "key" and ("/.empyralis/state/vault" in lower or "/.orion-stack" in lower):
+        return True
+    return False
+
+
 def execute_shell(command: str, timeout_seconds: int = 30, cwd: Optional[str] = None) -> Dict[str, Any]:
     """Execute a shell command and return structured result."""
+    cmd = str(command or "").strip()
+    if not cmd:
+        return {"stdout": "", "stderr": "No command provided", "exit_code": -1, "status": "error"}
+
+    # ── Hard-blocks: defense-in-depth (kernel governance also checks these) ──
+    if _hard_blocked_command(cmd):
+        return {
+            "stdout": "",
+            "stderr": "shell.execute command is permanently blocked — it could cause irreversible destruction of the runtime environment",
+            "exit_code": -1,
+            "status": "blocked",
+        }
+    if _command_touches_protected_path(cmd):
+        return {
+            "stdout": "",
+            "stderr": "shell.execute path is permanently protected — it contains credentials, pairings, or runtime state",
+            "exit_code": -1,
+            "status": "blocked",
+        }
+
     try:
         proc = subprocess.run(
-            command,
+            cmd,
             shell=True,
             capture_output=True,
             text=True,
@@ -286,6 +394,16 @@ def execute_file_read(path: str, max_bytes: int = 1_000_000) -> Dict[str, Any]:
     p = Path(path).expanduser().resolve()
     if not p.exists():
         return {"content": "", "path": str(p), "size_bytes": 0, "status": "not_found", "error": f"File not found: {path}"}
+    # ── Hard-protected path check: read is allowed for visibility, but blocked
+    #     for credential/key/vault files specifically ──
+    if _path_touches_protected(str(p)):
+        return {
+            "content": "",
+            "path": str(p),
+            "size_bytes": 0,
+            "status": "blocked",
+            "error": "filesystem.read path is permanently protected — it contains credentials, pairings, or runtime state that must not be exposed to agent actions",
+        }
     try:
         content = p.read_text()[:max_bytes]
         size = p.stat().st_size
@@ -297,6 +415,12 @@ def execute_file_read(path: str, max_bytes: int = 1_000_000) -> Dict[str, Any]:
 def execute_file_write(path: str, content: str) -> Dict[str, Any]:
     """Write content to a file on the node filesystem."""
     p = Path(path).expanduser().resolve()
+    # ── Hard-protected path check ──
+    if _path_touches_protected(str(p)):
+        return {
+            "path": str(p), "size_bytes": 0, "status": "blocked",
+            "error": "filesystem.write path is permanently protected — it contains credentials, pairings, or runtime state that must survive agent actions",
+        }
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)

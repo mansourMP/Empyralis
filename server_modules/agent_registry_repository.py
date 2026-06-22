@@ -1243,6 +1243,99 @@ async def resolve_self_hosted_runtime_heartbeat(
     }
 
 
+# ── Vault blob backup storage ────────────────────────────────────────────────
+# Encrypted vault blobs from self-hosted nodes are stored here so they
+# survive node box loss.  The blobs are encrypted at rest (Fernet+PBKDF2)
+# before transmission — safe to store on the cloud side.
+
+import os as _os
+from pathlib import Path as _Path
+
+
+def _vault_blob_backup_dir() -> _Path:
+    from server_modules.runtime_config import EMPYRALIS_STATE_HOME
+    return _Path(EMPYRALIS_STATE_HOME) / "vault-backups"
+
+
+def _vault_backup_blob_path(runtime_profile_id: str) -> _Path:
+    return _vault_blob_backup_dir() / f"{runtime_profile_id}.json"
+
+
+async def store_vault_backup_blob(
+    *,
+    runtime_profile_id: str,
+    vault_blob_base64: str,
+    environment: str,
+    backup_version: str,
+) -> Dict[str, Any]:
+    """Store an encrypted vault blob from a self-hosted node."""
+    import time as _time
+    rp_id = str(runtime_profile_id or "").strip()
+    if not rp_id:
+        raise ValueError("runtime_profile_id is required")
+    blob = str(vault_blob_base64 or "").strip()
+    if not blob:
+        raise ValueError("vault_blob_base64 is required")
+    _vault_blob_backup_dir().mkdir(parents=True, exist_ok=True)
+    payload = {
+        "runtime_profile_id": rp_id,
+        "vault_blob_base64": blob,
+        "environment": str(environment or "dev").strip() or "dev",
+        "backup_version": str(backup_version or "vault_blob_v1").strip() or "vault_blob_v1",
+        "stored_at_iso": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "blob_size_bytes": len(blob),
+    }
+    path = _vault_backup_blob_path(rp_id)
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    try:
+        _os.chmod(path, 0o600)
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "status": "stored",
+        "runtime_profile_id": rp_id,
+        "blob_size_bytes": len(blob),
+        "backup_version": payload["backup_version"],
+    }
+
+
+async def retrieve_vault_backup_blob(
+    *,
+    runtime_profile_id: str,
+) -> Dict[str, Any]:
+    """Retrieve the encrypted vault blob for a self-hosted node."""
+    rp_id = str(runtime_profile_id or "").strip()
+    if not rp_id:
+        raise ValueError("runtime_profile_id is required")
+    path = _vault_backup_blob_path(rp_id)
+    if not path.exists():
+        return {
+            "ok": False,
+            "status": "not_found",
+            "runtime_profile_id": rp_id,
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "read_error",
+            "runtime_profile_id": rp_id,
+            "error": str(exc),
+        }
+    return {
+        "ok": True,
+        "status": "found",
+        "runtime_profile_id": rp_id,
+        "vault_blob_base64": str(payload.get("vault_blob_base64") or ""),
+        "environment": str(payload.get("environment") or ""),
+        "backup_version": str(payload.get("backup_version") or ""),
+        "stored_at_iso": str(payload.get("stored_at_iso") or ""),
+        "blob_size_bytes": int(payload.get("blob_size_bytes") or 0),
+    }
+
+
 def _self_hosted_runtime_node_id(profile: Dict[str, Any], metadata: Dict[str, Any]) -> str:
     return str(profile.get("runtime_id") or metadata.get("runtime_node_id") or "").strip()
 

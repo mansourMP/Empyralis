@@ -138,6 +138,17 @@ class SelfHostedNodeCommandResultPayload(BaseModel):
     error: Optional[str] = None
 
 
+class SelfHostedNodeVaultBackupPutPayload(BaseModel):
+    node_session_token: str = Field(min_length=1)
+    vault_blob_base64: str = Field(min_length=1)
+    environment: str = Field(default="dev")
+    backup_version: str = Field(default="vault_blob_v1")
+
+
+class SelfHostedNodeVaultBackupClaimPayload(BaseModel):
+    node_session_token: str = Field(min_length=1)
+
+
 class RuntimeHardwareActionExecutePayload(BaseModel):
     workspace_id: str = Field(min_length=1)
     action_id: str = Field(min_length=1)
@@ -1363,6 +1374,57 @@ def register_runtime_routes(app) -> None:
                 note=payload.note,
                 capabilities=payload.capabilities,
                 health_state=payload.health_state or "healthy",
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return result
+
+    @app.post("/runtime/self-hosted-nodes/{runtime_profile_id}/vault-backup")
+    async def put_self_hosted_node_vault_backup(runtime_profile_id: str, payload: SelfHostedNodeVaultBackupPutPayload):
+        """Accept an encrypted vault blob from a self-hosted node for off-box backup.
+
+        The blob is encrypted at rest (Fernet+PBKDF2) before transmission.
+        Without the vault key (CREDENTIAL_VAULT_KEY, box-only), the blob is
+        unreadable — safe to store on the cloud side.
+        """
+        _enforce_runtime_session_api_decision(
+            operation="self_hosted_vault_backup_put",
+            tenant_id="default",
+            workspace_id="default",
+            runtime_id=runtime_profile_id,
+            session_token=payload.node_session_token,
+            runtime_session_valid=True,
+        )
+        try:
+            result = await agent_registry_repository.store_vault_backup_blob(
+                runtime_profile_id=runtime_profile_id,
+                vault_blob_base64=payload.vault_blob_base64,
+                environment=payload.environment,
+                backup_version=payload.backup_version,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return result
+
+    @app.post("/runtime/self-hosted-nodes/{runtime_profile_id}/vault-backup/claim")
+    async def claim_self_hosted_node_vault_backup(runtime_profile_id: str, payload: SelfHostedNodeVaultBackupClaimPayload):
+        """Return the encrypted vault blob to a self-hosted node for disaster recovery.
+
+        The node must present a valid session token.  The blob is returned
+        encrypted — only a node with the correct CREDENTIAL_VAULT_KEY can
+        decrypt it.
+        """
+        _enforce_runtime_session_api_decision(
+            operation="self_hosted_vault_backup_claim",
+            tenant_id="default",
+            workspace_id="default",
+            runtime_id=runtime_profile_id,
+            session_token=payload.node_session_token,
+            runtime_session_valid=True,
+        )
+        try:
+            result = await agent_registry_repository.retrieve_vault_backup_blob(
+                runtime_profile_id=runtime_profile_id,
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error

@@ -44,8 +44,8 @@ python3 -m pytest \
 `server_modules/tests/test_personal_channels_service_rust_gate.py` covers:
 
 - personal gateway configure decisions requiring `dispatch_gateway_operation`
-- WhatsApp/Telegram/local-bridge sends blocking before dispatch on wrong Rust
-  next actions
+- Telegram/local-bridge sends blocking before dispatch on wrong Rust next actions
+  (WhatsApp tests are legacy — WhatsApp personal is not a supported channel)
 - automatic replies blocking before dispatch on wrong Rust next actions
 
 `server_modules/tests/test_routes_personal_channels_rust_gate.py` covers:
@@ -60,8 +60,8 @@ Not implemented or not covered in the required focused tests:
 - real provider webhook signature tests for every Studio channel in one
   command; they exist in connector-specific tests such as Discord, Slack, and
   routes connector security tests
-- end-to-end live personal account certification for Telegram, WhatsApp, Signal,
-  iMessage, or WeChat
+- end-to-end live personal account certification for Telegram personal (MTProto), Signal,
+  iMessage, or WeChat (WhatsApp personal is not a supported channel)
 - personal-channel media/attachment/voice/image ingestion, because the inspected
   handlers require text only
 - frontend channel pairing surface tests for

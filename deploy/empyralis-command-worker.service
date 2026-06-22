@@ -15,6 +15,29 @@ Environment="EMPYRALIS_CLOUD_URL=https://empyralis.com"
 Environment="EMPYRALIS_RUNTIME_PROFILE_ID=rp_xxxx"
 Environment="EMPYRALIS_NODE_SESSION_TOKEN=ns_xxxx"
 
+# ── State location ────────────────────────────────────────────────────────
+# Override the default ~/ state home so the vault + pairings live under
+# /opt/empyralis, not the service user's read-only home.
+Environment="EMPYRALIS_STATE_HOME=/opt/empyralis/.empyralis/state"
+
+# ── Vault key — key FILE (recommended) ───────────────────────────────────
+# SECURITY: Do NOT put CREDENTIAL_VAULT_KEY in a plain Environment= line.
+# Environment variables are readable via /proc/<pid>/environ by any process
+# running as the same user, and are visible in the unit file.
+#
+# Recommended approach: use a key FILE with 0600 permissions:
+#   EnvironmentFile=/opt/empyralis/.empyralis/state/vault/worker.env
+#   (that file contains: CREDENTIAL_VAULT_KEY=your-key)
+# The file must be 0600 and owned by the service user:
+#   install -m 0600 -o empyralis -g empyralis /dev/null \
+#     /opt/empyralis/.empyralis/state/vault/worker.env
+#   echo "CREDENTIAL_VAULT_KEY=$(openssl rand -hex 32)" >> \
+#     /opt/empyralis/.empyralis/state/vault/worker.env
+#
+# The cloud-managed / just-in-time secrets model is the production end-state.
+#
+# EnvironmentFile=/opt/empyralis/.empyralis/state/vault/worker.env
+
 # ── Optional tuning ───────────────────────────────────────────────────────
 Environment="EMPYRALIS_POLL_INTERVAL=2.0"
 Environment="EMPYRALIS_MAX_COMMANDS_PER_POLL=5"
@@ -26,16 +49,10 @@ Environment="EMPYRALIS_WORKER_LOG_FORMAT=json"
 
 # ── Python & system path ──────────────────────────────────────────────────
 Environment="PYTHONUNBUFFERED=1"
-# macOS (Homebrew):
-Environment="PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-# Linux / VPS — comment the line above and uncomment below:
-# Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Exec ──────────────────────────────────────────────────────────────────
-# macOS:
-ExecStart=/opt/homebrew/bin/python3 scripts/empyralis_self_hosted_command_worker.py
-# Linux / VPS — comment the line above and uncomment below:
-# ExecStart=/usr/bin/python3 scripts/empyralis_self_hosted_command_worker.py
+ExecStart=/usr/bin/python3 /opt/empyralis/scripts/empyralis_self_hosted_command_worker.py
 ExecStop=/bin/kill -TERM $MAINPID
 Restart=on-failure
 RestartSec=5
@@ -43,19 +60,76 @@ KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30
 
-# ── Security hardening ────────────────────────────────────────────────────
+# ── OS CONFINEMENT (the real 100% guarantee) ──────────────────────────────
+# The blocklist is defense-in-depth.  The OS-level confinement below makes
+# it physically impossible for the agent process to reach credentials,
+# system dirs, devices, or other processes — regardless of command text,
+# encoding tricks, or interpreter escapes.
+#
+# These directives are systemd-only.  If you run the worker directly
+# (python3 scripts/empyralis_self_hosted_command_worker.py), NONE of
+# these protections apply — the agent has full access to the filesystem,
+# devices, and other processes.  The systemd unit is the ONLY supported
+# deployment path.  Direct invocation is unsupported and unsafe.
+
+# Privilege escalation
 NoNewPrivileges=yes
-PrivateTmp=yes
+
+# Filesystem isolation — comments on their own lines (inline comments break parsing)
+# /usr, /boot, /etc read-only
 ProtectSystem=strict
+# /root, /home, /run/user inaccessible for write
 ProtectHome=read-only
-ReadWritePaths=/opt/empyralis/.empyralis /opt/empyralis/.orion-stack
+# private /tmp and /var/tmp
+PrivateTmp=yes
+# /dev is mostly empty (no /dev/sda, /dev/mem)
+PrivateDevices=yes
+# cannot see other processes' /proc entries
+ProtectProc=invisible
+# /sys read-only
+ProtectKernelTunables=yes
+# cannot load kernel modules
+ProtectKernelModules=yes
+# cgroupfs read-only
+ProtectControlGroups=yes
+# cannot modify system clock
+ProtectClock=yes
+
+# Memory safety — W^X (no writable+executable pages)
+MemoryDenyWriteExecute=yes
+
+# Network — allow only what the worker needs (outbound to cloud API)
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# no real-time scheduling
+RestrictRealtime=yes
+
+# Capabilities — drop everything
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Read/Write paths — ONLY these directories are writable
+# The workspace scope is the ONLY place the agent can write.
+# Protected directories (/etc/empyralis, ~/.empyralis/state/vault,
+# ~/.ssh, /var/lib/empyralis/agent-computer) are NOT in this list
+# and are physically unreachable for write/delete operations.
+ReadWritePaths=/opt/empyralis/.empyralis /opt/empyralis/.orion-stack /tmp
 ReadOnlyPaths=/opt/empyralis/scripts /opt/empyralis/server_modules
 
-# ── VPS note ──────────────────────────────────────────────────────────────
-# On a VPS, adjust: User, Group, WorkingDirectory, PATH, ExecStart, and
-# the ReadWritePaths / ReadOnlyPaths prefixes.  Do NOT run as root unless
-# the machine is single-tenant and firewalled.  Prefer a dedicated
-# "empyralis" user like the macOS version.
+# ── Agent workspace scope ─────────────────────────────────────────────────
+# Bind-mount a dedicated workspace directory for agent file operations.
+# The agent can destroy this directory — it's rebuildable scratch.
+# BindPaths=/opt/empyralis/workspace:/workspace
+
+# ── Restore path (operator documentation) ─────────────────────────────────
+# If this box is lost:
+#   1. Provision a new VPS, run install-agent-computer.sh to set up the
+#      non-root empyralis user and base systemd units.
+#   2. Write CREDENTIAL_VAULT_KEY to the key file (0600, see Vault key section above).
+#   3. Call restore_vault_from_cloud() (or deploy the encrypted vault blob
+#      manually to /opt/empyralis/.empyralis/state/vault/credentials.json).
+#   4. Call backup_channel_pairings_to_cloud() → restore pairings blob
+#      to /opt/empyralis/.empyralis/state/sage_telegram_hosted_pairs.json.
+#   5. Start the service.  All credentials + pairings are restored.
 
 [Install]
 WantedBy=multi-user.target

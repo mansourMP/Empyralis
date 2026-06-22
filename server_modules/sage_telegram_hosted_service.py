@@ -20,6 +20,12 @@ from server_modules import runtime_config as runtime_config
 PAIRING_CODE_LENGTH = 6
 PAIRING_TOKEN_BYTES = 24
 TELEGRAM_API_BASE = "https://api.telegram.org"
+_TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+_TYPING_REFRESH_SECONDS = 4.0  # re-send typing before Telegram's ~5s expiry
+
+# ── Typing indicator task registry ──
+# chat_id → asyncio.Task (running typing-refresh loop)
+_TYPING_TASKS: Dict[str, Any] = {}
 
 _SAGE_HOSTED_PAIRS: Dict[str, Dict[str, Any]] = {}  # chat_id → {workspace_id, paired_at}
 _PENDING_PAIRING_CODES: Dict[str, str] = {}  # code → workspace_id
@@ -216,7 +222,7 @@ def _to_telegram_markdown(text: str) -> str:
     # Special chars that need escaping in MarkdownV2 inline text.
     # Structural chars (# > | -) are NOT escaped — rich messages use them for headings, quotes, tables, lists.
     # $ is NOT escaped — used for inline math.
-    _ESCAPE_CHARS = r'_*[]()~`{}.!-'
+    _ESCAPE_CHARS = r'_*[]()~`{}.'
     _BOLD_OPEN = '\x01'
     _BOLD_CLOSE = '\x02'
     _ITL_OPEN = '\x03'
@@ -279,6 +285,243 @@ def _to_telegram_markdown(text: str) -> str:
 
 async def send_chat_action(chat_id: str, action: str = "typing") -> dict:
     return await _telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
+
+
+# ── Safe send (never raises) + message splitting ──
+
+def _split_long_message(text: str, max_len: int = _TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
+    """Split a message at paragraph/sentence boundaries to stay under Telegram's limit."""
+    text = str(text or "").strip()
+    if not text:
+        return [text]
+    if len(text) <= max_len:
+        return [text]
+
+    import re as _re
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_len:
+        # Try to split at nearest paragraph break
+        cut = remaining.rfind('\n\n', 0, max_len)
+        if cut < max_len // 2:
+            # No good paragraph break — try sentence end
+            cut = max(
+                remaining.rfind('. ', 0, max_len),
+                remaining.rfind('! ', 0, max_len),
+                remaining.rfind('? ', 0, max_len),
+                remaining.rfind('\n', 0, max_len),
+            )
+        if cut < max_len // 2:
+            # Still no good break — hard cut at a space near the limit
+            cut = remaining.rfind(' ', 0, max_len)
+        if cut < max_len // 2:
+            # No space at all — force cut at limit
+            cut = max_len - 1
+
+        chunks.append(remaining[:cut + 1].strip())
+        remaining = remaining[cut + 1:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def send_message_safe(chat_id: str, text: str, *, reply_to_message_id: Optional[int] = None) -> bool:
+    """Send a message — never raises. Returns True if at least one chunk was sent.
+
+    Automatically splits long messages over Telegram's 4096-char limit.
+    Tries MarkdownV2 first; falls back to plain text if parsing fails.
+    Failures are logged but never propagated.
+    """
+    if not str(text or "").strip():
+        return False
+    chunks = _split_long_message(str(text))
+    sent_any = False
+    for chunk in chunks:
+        success = await _send_chunk_markdown(chat_id, chunk, reply_to_message_id=reply_to_message_id)
+        if not success:
+            # MarkdownV2 parse error — fall back to plain text
+            success = await _send_chunk_plain(chat_id, chunk, reply_to_message_id=reply_to_message_id)
+        if success:
+            sent_any = True
+        reply_to_message_id = None  # only first chunk gets reply-to
+    return sent_any
+
+
+async def _send_chunk_markdown(chat_id: str, text: str, reply_to_message_id: Optional[int] = None) -> bool:
+    """Send a single chunk with MarkdownV2. Returns True on success."""
+    try:
+        formatted = _to_telegram_markdown(text)
+        result = await _telegram_api("sendMessage", {
+            "chat_id": chat_id,
+            "text": formatted,
+            "parse_mode": "MarkdownV2",
+            **( {
+                "reply_to_message_id": reply_to_message_id
+            } if reply_to_message_id is not None else {}),
+        })
+        return bool(result.get("ok"))
+    except Exception as exc:
+        LOGGER.warning("_send_chunk_markdown failed for chat_id=%s: %s", chat_id, exc)
+        return False
+
+
+async def _send_chunk_plain(chat_id: str, text: str, reply_to_message_id: Optional[int] = None) -> bool:
+    """Send a single chunk as plain text (no parse_mode). Returns True on success."""
+    try:
+        body: dict = {"chat_id": chat_id, "text": text[:4096]}
+        if reply_to_message_id is not None:
+            body["reply_to_message_id"] = reply_to_message_id
+        result = await _telegram_api("sendMessage", body)
+        return bool(result.get("ok"))
+    except Exception as exc:
+        LOGGER.warning("_send_chunk_plain failed for chat_id=%s: %s", chat_id, exc)
+        return False
+
+
+async def send_sage_reply(chat_id: str, text: str, *, reply_to_message_id: Optional[int] = None) -> dict:
+    """Send a Sage reply — splits long messages, never raises on send failure.
+
+    Returns the result of the first chunk (for API compatibility).
+    If all chunks fail, returns a dict with ok=False.
+    """
+    if not str(text or "").strip():
+        return {"ok": False, "description": "empty reply suppressed"}
+    chunks = _split_long_message(str(text))
+    first_result: dict = {"ok": False, "description": "no chunks sent"}
+    reply_to = reply_to_message_id
+    for i, chunk in enumerate(chunks):
+        try:
+            result = await send_message(chat_id, chunk, reply_to_message_id=reply_to)
+            if i == 0:
+                first_result = result
+            reply_to = None  # only first chunk gets reply-to
+        except Exception as exc:
+            LOGGER.warning(
+                "send_sage_reply: chunk %d/%d failed for chat_id=%s: %s",
+                i + 1, len(chunks), chat_id, exc,
+            )
+            if i == 0:
+                first_result = {"ok": False, "description": str(exc)[:200]}
+    return first_result
+
+
+# ── Typing indicator management ──
+
+async def _typing_loop(chat_id: str) -> None:
+    """Re-send typing action every _TYPING_REFRESH_SECONDS until cancelled."""
+    while True:
+        try:
+            await send_chat_action(chat_id, "typing")
+        except Exception:
+            pass  # typing is best-effort
+        await asyncio.sleep(_TYPING_REFRESH_SECONDS)
+
+
+def start_typing(chat_id: str) -> None:
+    """Start a background typing indicator for chat_id. Idempotent."""
+    key = str(chat_id)
+    existing = _TYPING_TASKS.get(key)
+    if existing is not None and not existing.done():
+        return  # already typing
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return
+    _TYPING_TASKS[key] = loop.create_task(_typing_loop(key))
+
+
+async def stop_typing(chat_id: str) -> None:
+    """Cancel the typing indicator for chat_id."""
+    key = str(chat_id)
+    task = _TYPING_TASKS.pop(key, None)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+# ── ChannelTransport implementation for Telegram Hosted bot ──
+
+from server_modules.channel_transport import ChannelTransport  # noqa: E402
+
+
+class TelegramHostedTransport(ChannelTransport):
+    """Thin transport over the Telegram Bot API.
+
+    Implements the ChannelTransport contract so the shared-core dispatcher
+    owns all reliability logic.  The transport only handles the Bot-API
+    primitives: send a chunk, typing start/stop, MarkdownV2 formatting.
+    """
+
+    max_message_length: int = _TELEGRAM_MAX_MESSAGE_LENGTH  # 4096
+    supports_typing_indicator: bool = True
+
+    def __init__(self, chat_id: str) -> None:
+        self.chat_id = str(chat_id)
+
+    # ── Required primitive ──
+
+    async def send_message(
+        self,
+        text: str,
+        *,
+        reply_to_id: Optional[str] = None,
+    ) -> bool:
+        """Send a SINGLE pre-split chunk.  Never raises.
+
+        Tries MarkdownV2 first; falls back to plain text on parse error.
+        """
+        if not str(text or "").strip():
+            return False
+
+        reply_to = int(reply_to_id) if reply_to_id is not None else None
+        formatted = self.format_text(text)
+        body: dict = {
+            "chat_id": self.chat_id,
+            "text": formatted,
+            "parse_mode": "MarkdownV2",
+        }
+        if reply_to is not None:
+            body["reply_to_message_id"] = reply_to
+
+        try:
+            result = await _telegram_api("sendMessage", body)
+            if result.get("ok"):
+                return True
+        except Exception:
+            pass
+
+        # Fallback: plain text (no parse_mode)
+        try:
+            body.pop("parse_mode", None)
+            body["text"] = text[: self.max_message_length]
+            result = await _telegram_api("sendMessage", body)
+            return bool(result.get("ok"))
+        except Exception as exc:
+            LOGGER.warning(
+                "TelegramHostedTransport.send_message failed for chat_id=%s: %s",
+                self.chat_id, exc,
+            )
+            return False
+
+    # ── Typing indicator primitives ──
+
+    async def start_typing(self) -> None:
+        """Idempotent — delegates to module-level start_typing."""
+        start_typing(self.chat_id)
+
+    async def stop_typing(self) -> None:
+        """Cancel typing — delegates to module-level stop_typing."""
+        await stop_typing(self.chat_id)
+
+    # ── Markdown conversion ──
+
+    def format_text(self, text: str) -> str:
+        """Convert common markdown to Telegram MarkdownV2."""
+        return _to_telegram_markdown(text)
 
 
 async def set_webhook(*, base_url: str) -> dict:
@@ -863,12 +1106,16 @@ async def _run_agent_machine_shortcut(
         return await _save_turn_and_return("I ran several tools. Let me know if you need anything else.")
 
 async def _process_update(update: dict) -> bool:
-    """Process a single Telegram update. Returns True if a Sage reply was sent."""
+    """Process a single Telegram update. Returns True if a Sage reply was sent.
+
+    GUARANTEED RESPONSE: every inbound message path ends with at least one
+    sent message — an answer, an honest error, or a plain fallback. Never silence.
+    All reliability logic is owned by the shared-core sage_reply_dispatcher.
+    """
     parsed = parse_telegram_update(update)
     if parsed is None:
         return False
     # Skip messages from the bot itself to prevent echo loops.
-    # The bot's user ID equals the numeric part of the bot token.
     _bot_own_id = str(os.getenv("SAGE_TELEGRAM_HOSTED_BOT_USER_ID", "8870032163")).strip()
     from_id = str(parsed.get("from_id", "")).strip()
     LOGGER.info("Sage Telegram hosted: from_id=%s bot_id=%s match=%s text=%s",
@@ -882,118 +1129,44 @@ async def _process_update(update: dict) -> bool:
         return False
     workspace_id = get_workspace_for_chat(chat_id)
     if workspace_id is None:
-        return False
-    try:
-        from server_modules.sage_agent_runtime_service import handle_sage_chat
-        from server_modules.channel_adapter import normalize_sage_inbound, filter_outbound_reply
-
-        message_text = str(parsed.get("text") or "").strip()
-
-        # Handle /compact command — trigger compaction without a full Sage turn
-        if message_text.lower().startswith("/compact"):
-            from server_modules.compaction_service import (
-                compact_turns, find_cut_point, should_compact, load_previous_summary,
-                resolve_context_window,
-            )
-            from server_modules import thread_service
-            from server_modules.sage_agent_runtime_service import SAGE_THREAD_ID
-
-            tenant_id = "default"
-            await thread_service.ensure_master_thread(
-                thread_id=SAGE_THREAD_ID,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                owner_user_id="sage",
-                channel="sage",
-            )
-            thread_record = await thread_service.get_thread(
-                SAGE_THREAD_ID,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                include_turns=True,
-            )
-            raw_turns = list(thread_record.get("turns") or []) if isinstance(thread_record, dict) else []
-            # Resolve workspace provider for real context window
-            _ws_provider = ""
-            try:
-                from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
-                from server_modules.control_plane_repository import get_workspace_by_id
-                _ws_rec = await get_workspace_by_id(workspace_id)
-                _ws_meta = dict((_ws_rec or {}).get("metadata") or {})
-                _ws_defaults = workspace_admin_defaults_from_metadata(_ws_meta)
-                _ws_provider = str(_ws_defaults.sage_ai_provider or "").strip().lower()
-            except Exception:
-                _ws_provider = ""
-            _ctx_window = resolve_context_window(_ws_provider or None, None)
-            if raw_turns and should_compact(raw_turns, context_window=_ctx_window):
-                cut_idx = find_cut_point(raw_turns, context_window=_ctx_window)
-                if cut_idx > 0:
-                    prev = await load_previous_summary(
-                        workspace_id=workspace_id, tenant_id=tenant_id,
-                        thread_id=SAGE_THREAD_ID,
-                    )
-                    await compact_turns(
-                        turns=raw_turns[:cut_idx],
-                        workspace_id=workspace_id,
-                        tenant_id=tenant_id,
-                        thread_id=SAGE_THREAD_ID,
-                        previous_summary=prev,
-                    )
-                await send_sage_reply(chat_id, "Context compacted.")
-            else:
-                await send_sage_reply(chat_id, "Nothing to compact — context is still small.")
-            return True
-
-        await send_chat_action(chat_id, "typing")
-        turn = normalize_sage_inbound(
-            workspace_id=workspace_id,
-            message=message_text,
-            surface="chat",
-            mode="owner_sage",
-            channel_origin="telegram_hosted",
-            channel_sender_id=str(chat_id),
-            channel_sender_name=str(parsed.get("from_first_name", "")).strip(),
+        # Stale pair — tell the user instead of going silent
+        await send_message_safe(
+            chat_id,
+            "⚠️ This chat is no longer linked to a workspace. Please re-pair from Empyralis → Connections → Telegram.",
         )
-        # ── AGENT MACHINE SHORTCUT: bypass full agent runtime stack in local dev ──
-        if False:  # shortcut retired - full runtime works  # DISABLED - testing full path
-            _shortcut_result = await _run_agent_machine_shortcut(
-                workspace_id=workspace_id,
-                message=message_text,
-                chat_id=chat_id,
-                parsed=parsed,
-            )
-            if _shortcut_result is not None:
-                reply = str(_shortcut_result.get("message") or "").strip()
-                filtered = filter_outbound_reply(reply)
-                if filtered:
-                    await send_sage_reply(chat_id, filtered, reply_to_message_id=parsed.get("message_id"))
-                    return True
-                else:
-                    LOGGER.info("Sage Telegram hosted: shortcut reply suppressed (silent/empty)")
-                    return False
-        # ── END SHORTCUT ──
-        result = await handle_sage_chat(
-            workspace_id=turn.workspace_id,
-            message=turn.message,
-            surface=turn.surface,
-            mode=turn.mode,
-            channel_origin=turn.channel_origin,
-        )
-        reply = str(result.get("message") or "").strip()
-        filtered = filter_outbound_reply(reply)
-        if filtered:
-            await send_sage_reply(chat_id, filtered, reply_to_message_id=parsed.get("message_id"))
-            return True
-        else:
-            LOGGER.info("Sage Telegram hosted: reply suppressed (silent/empty)")
-            return False
-    except Exception as exc:
-        LOGGER.warning("Sage Telegram hosted: error processing update: %s", exc)
-        try:
-            await send_sage_reply(chat_id, SAGE_ERROR_REPLY, reply_to_message_id=parsed.get("message_id"))
-        except Exception:
-            pass
-    return False
+        return True
+
+    message_text = str(parsed.get("text") or "").strip()
+    msg_id = str(parsed.get("message_id") or "")
+
+    # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
+    from server_modules.sage_command_dispatcher import dispatch_command
+    cmd_reply = await dispatch_command(
+        command=message_text,
+        workspace_id=workspace_id,
+        thread_id="sage-main",
+        channel_origin="telegram_hosted",
+        sender_id=str(chat_id),
+    )
+    if cmd_reply is not None:
+        await send_message_safe(chat_id, cmd_reply, reply_to_message_id=parsed.get("message_id"))
+        return True
+
+    # ── Route through shared-core reply dispatcher ──
+    # This ONE call owns: typing, execute_sage_turn, error classification,
+    # [SILENT] suppression, message splitting, guaranteed fallback.
+    from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
+
+    transport = TelegramHostedTransport(str(chat_id))
+    return await dispatch_sage_reply_safe(
+        transport=transport,
+        workspace_id=workspace_id,
+        message=message_text,
+        channel_origin="telegram_hosted",
+        sender_id=str(chat_id),
+        sender_name=str(parsed.get("from_first_name", "")).strip(),
+        reply_to_id=msg_id,
+    )
 
 
 async def _background_polling_loop() -> None:

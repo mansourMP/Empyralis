@@ -459,6 +459,137 @@ fn fail_run_decision(
     )
 }
 
+// ── Hard-blocked command patterns (ALWAYS enforced) ──
+// Mirrors empyralis-supervisor shell.rs HARD_BLOCKED_COMMAND_PATTERNS.
+// These catastrophic commands are NEVER allowed, even in full_access mode.
+const HARD_BLOCKED_COMMAND_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf /*",
+    "rm -fr /",
+    "rm -fr /*",
+    "rm -rf ~",
+    "rm -fr ~",
+    "rm -rf ~/",
+    "rm -fr ~/",
+    "rm -rf .",
+    "mkfs.",
+    "diskutil erasedisk",
+    "dd if=/dev/",
+    ":(){ :|:& };:",
+    "> /dev/sda",
+    "> /dev/nvme",
+    "chmod -r 000 /",
+    "chmod -r 777 /",
+    "chown -r ",
+    "shutdown -",
+    "reboot",
+    "halt",
+    "poweroff",
+];
+
+// ── Hard-protected path markers (ALWAYS enforced) ──
+// Any command targeting these paths is refused outright.
+const HARD_PROTECTED_PATH_MARKERS: &[&str] = &[
+    "/.empyralis/state/vault",
+    "/.empyralis/state",
+    "/.ssh",
+    "/.gnupg",
+    "/etc/empyralis",
+    "/var/lib/empyralis/agent-computer",
+    "/.orion-stack",
+];
+
+fn hard_blocked_command(command: &str) -> bool {
+    let compact = command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if compact.is_empty() {
+        return false;
+    }
+    let normalized = compact.split_whitespace().collect::<Vec<_>>().join(" ");
+    for pattern in HARD_BLOCKED_COMMAND_PATTERNS {
+        if let Some(pos) = normalized.find(pattern) {
+            let after = normalized[pos + pattern.len()..].chars().next();
+            // End-of-string or space: exact token boundary → always match
+            if after.is_none() || after == Some(' ') {
+                return true;
+            }
+            // Path-root boundary check: patterns like "rm -rf /", "rm -rf ~",
+            // "rm -rf ~/" target a root/home path. They must NOT match when the
+            // path is a subdirectory (e.g. "rm -rf /tmp/scratch" or
+            // "rm -rf ~/workspace" — the agent CAN destroy its workspace scope).
+            // Other patterns (like "dd if=/dev/" or "mkfs.") are prefixes that
+            // SHOULD match longer forms.
+            if after != Some(' ') {
+                // Only apply boundary to rm-style patterns targeting a root path
+                if pattern.starts_with("rm -") &&
+                   (pattern.ends_with(" /") || pattern.ends_with(" ~") || pattern.ends_with(" ~/") || pattern.ends_with(" .")) {
+                    continue;
+                }
+            }
+            // For all other patterns (prefixes like "mkfs.", "shutdown -",
+            // "dd if=/dev/"), continue matching even if followed by more chars.
+            return true;
+        }
+    }
+    false
+}
+
+fn command_touches_protected_path(command: &str) -> bool {
+    for token in command.split_whitespace() {
+        let cleaned = token.trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+        for marker in HARD_PROTECTED_PATH_MARKERS {
+            if cleaned.contains(marker) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn extract_shell_command(command_payload: &Value) -> Option<String> {
+    // Navigate command_payload → arguments → command
+    let arguments = command_payload.get("arguments")
+        .or_else(|| command_payload.get("args"));
+    if let Some(args) = arguments {
+        if let Some(cmd) = args.get("command").and_then(Value::as_str) {
+            let trimmed = cmd.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(cmd) = args.get("cmd").and_then(Value::as_str) {
+            let trimmed = cmd.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_filesystem_path(command_payload: &Value) -> Option<String> {
+    let arguments = command_payload.get("arguments")
+        .or_else(|| command_payload.get("args"));
+    if let Some(args) = arguments {
+        if let Some(path) = args.get("path").and_then(Value::as_str) {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(path) = args.get("file_path").and_then(Value::as_str) {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn execute_command_decision(
     input: &Value,
     workspace_id: Option<String>,
@@ -480,6 +611,31 @@ fn execute_command_decision(
     if string_field(input, "command_id").is_none() {
         return block("command_id_missing");
     }
+
+    // ── Hard-blocks: inspect command content for catastrophic/destructive ops ──
+    // These checks are NEVER bypassed regardless of autonomy mode or trust level.
+    let command_payload = input.get("command_payload").or_else(|| input.get("payload"));
+    if let Some(payload) = command_payload {
+        // Check shell commands for hard-blocked patterns
+        if let Some(cmd) = extract_shell_command(payload) {
+            if hard_blocked_command(&cmd) {
+                return block("destructive_command_permanently_blocked");
+            }
+            if command_touches_protected_path(&cmd) {
+                return block("protected_path_permanently_blocked");
+            }
+        }
+        // Check filesystem paths for protected markers
+        if let Some(path) = extract_filesystem_path(payload) {
+            let cleaned = path.to_ascii_lowercase();
+            for marker in HARD_PROTECTED_PATH_MARKERS {
+                if cleaned.contains(marker) {
+                    return block("protected_path_permanently_blocked");
+                }
+            }
+        }
+    }
+
     allow(
         "execute_command_allowed",
         "execute_command",
@@ -914,5 +1070,194 @@ mod local_worker_kernel_boundary_tests {
             decision.get("reason").and_then(|value| value.as_str()),
             Some("local_companion_disabled")
         );
+    }
+}
+
+#[cfg(test)]
+mod command_safety_tests {
+    use super::{hard_blocked_command, command_touches_protected_path,
+                extract_shell_command, extract_filesystem_path};
+
+    #[test]
+    fn hard_blocked_command_catches_rm_rf_root() {
+        assert!(hard_blocked_command("rm -rf /"));
+        assert!(hard_blocked_command("rm -rf /*"));
+        assert!(hard_blocked_command("rm -fr /"));
+        assert!(hard_blocked_command("rm -rf ~"));
+        assert!(hard_blocked_command("rm -rf ~/"));
+        // Normal commands pass
+        assert!(!hard_blocked_command("ls -la /tmp"));
+        assert!(!hard_blocked_command("python3 script.py"));
+    }
+
+    #[test]
+    fn hard_blocked_command_allows_workspace_deletion() {
+        // Agent CAN destroy its workspace scope (rebuildable scratch)
+        assert!(!hard_blocked_command("rm -rf ~/workspace"));
+        assert!(!hard_blocked_command("rm -rf ~/workspace/output"));
+        assert!(!hard_blocked_command("rm -rf /tmp/scratch"));
+    }
+
+    #[test]
+    fn hard_blocked_command_catches_catastrophic_commands() {
+        for cmd in &[
+            "mkfs.ext4 /dev/sda",
+            "diskutil eraseDisk JHFS+ Empyralis /dev/disk0",
+            "dd if=/dev/zero of=/dev/sda",
+            ":(){ :|:& };:",
+            "shutdown -h now",
+            "reboot",
+            "halt",
+            "poweroff",
+        ] {
+            assert!(hard_blocked_command(cmd), "expected blocked: {cmd}");
+        }
+    }
+
+    #[test]
+    fn command_touches_protected_path_catches_vault_and_ssh() {
+        assert!(command_touches_protected_path("rm -rf ~/.empyralis/state/vault"));
+        assert!(command_touches_protected_path("rm -rf ~/.empyralis/state/vault/credentials.json"));
+        assert!(command_touches_protected_path("cat ~/.empyralis/state/vault/key"));
+        assert!(command_touches_protected_path("rm -rf ~/.ssh"));
+        assert!(command_touches_protected_path("rm ~/.ssh/id_rsa"));
+        assert!(command_touches_protected_path("rm /etc/empyralis/agent-computer.env"));
+        assert!(command_touches_protected_path("rm -rf /var/lib/empyralis/agent-computer"));
+        // Normal paths pass
+        assert!(!command_touches_protected_path("rm -rf /tmp/scratch"));
+        assert!(!command_touches_protected_path("rm ~/workspace/output.txt"));
+    }
+
+    #[test]
+    fn extract_shell_command_from_payload() {
+        let payload = serde_json::json!({
+            "capability_id": "shell.execute",
+            "arguments": {
+                "command": "rm -rf /",
+                "timeout_seconds": 30
+            }
+        });
+        assert_eq!(extract_shell_command(&payload), Some("rm -rf /".to_string()));
+    }
+
+    #[test]
+    fn extract_filesystem_path_from_payload() {
+        let payload = serde_json::json!({
+            "capability_id": "filesystem.write",
+            "arguments": {
+                "path": "~/.empyralis/state/vault/credentials.json",
+                "content": "malicious"
+            }
+        });
+        assert_eq!(
+            extract_filesystem_path(&payload),
+            Some("~/.empyralis/state/vault/credentials.json".to_string())
+        );
+    }
+
+    // ── Integration: kernel blocks destructive commands ──
+
+    #[test]
+    fn execute_command_decision_blocks_rm_rf_root() {
+        let decision = super::local_worker_decision_command(&serde_json::json!({
+            "operation": "execute_command",
+            "workspace_id": "w1",
+            "command_id": "cmd-1",
+            "command_payload": {
+                "capability_id": "shell.execute",
+                "arguments": {
+                    "command": "rm -rf /"
+                }
+            }
+        }));
+        assert_eq!(decision["decision"], "block");
+        assert_eq!(decision["reason"], "destructive_command_permanently_blocked");
+    }
+
+    #[test]
+    fn execute_command_decision_blocks_vault_rm() {
+        // "rm -rf ~/.empyralis/state/vault" is caught by command_touches_protected_path
+        // (NOT by hard_blocked_command because "rm -rf ~" no longer matches "rm -rf ~/something")
+        let decision = super::local_worker_decision_command(&serde_json::json!({
+            "operation": "execute_command",
+            "workspace_id": "w1",
+            "command_id": "cmd-2",
+            "command_payload": {
+                "capability_id": "shell.execute",
+                "arguments": {
+                    "command": "rm -rf ~/.empyralis/state/vault"
+                }
+            }
+        }));
+        assert_eq!(decision["decision"], "block");
+        assert_eq!(decision["reason"], "protected_path_permanently_blocked");
+    }
+
+    #[test]
+    fn execute_command_decision_blocks_filesystem_write_to_vault() {
+        let decision = super::local_worker_decision_command(&serde_json::json!({
+            "operation": "execute_command",
+            "workspace_id": "w1",
+            "command_id": "cmd-3",
+            "command_payload": {
+                "capability_id": "filesystem.write",
+                "arguments": {
+                    "path": "~/.empyralis/state/vault/evil.json",
+                    "content": "pwned"
+                }
+            }
+        }));
+        assert_eq!(decision["decision"], "block");
+        assert_eq!(decision["reason"], "protected_path_permanently_blocked");
+    }
+
+    #[test]
+    fn execute_command_decision_allows_normal_commands() {
+        let decision = super::local_worker_decision_command(&serde_json::json!({
+            "operation": "execute_command",
+            "workspace_id": "w1",
+            "command_id": "cmd-4",
+            "command_payload": {
+                "capability_id": "shell.execute",
+                "arguments": {
+                    "command": "ls -la /tmp"
+                }
+            }
+        }));
+        assert_eq!(decision["decision"], "allow");
+    }
+
+    #[test]
+    fn execute_command_decision_allows_normal_filesystem_ops() {
+        let decision = super::local_worker_decision_command(&serde_json::json!({
+            "operation": "execute_command",
+            "workspace_id": "w1",
+            "command_id": "cmd-5",
+            "command_payload": {
+                "capability_id": "filesystem.write",
+                "arguments": {
+                    "path": "~/workspace/output.txt",
+                    "content": "hello"
+                }
+            }
+        }));
+        assert_eq!(decision["decision"], "allow");
+    }
+
+    #[test]
+    fn execute_command_decision_allows_workspace_deletion() {
+        // The agent CAN destroy its workspace scope — that's rebuildable scratch
+        let decision = super::local_worker_decision_command(&serde_json::json!({
+            "operation": "execute_command",
+            "workspace_id": "w1",
+            "command_id": "cmd-6",
+            "command_payload": {
+                "capability_id": "shell.execute",
+                "arguments": {
+                    "command": "rm -rf ~/workspace/build"
+                }
+            }
+        }));
+        assert_eq!(decision["decision"], "allow");
     }
 }

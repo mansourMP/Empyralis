@@ -42,8 +42,9 @@ Personal channel runtime context should map messages through a stable key:
 {channel_key}:{gateway_id}:{remote_jid}:{thread_alias}
 ```
 
-The helper `canonical_channel_thread_key()` sanitizes each part so Telegram,
-WhatsApp, and future private channels can share the same mapping shape.
+The helper `canonical_channel_thread_key()` sanitizes each part so Telegram
+personal and future personal channels can share the same mapping shape.
+(WhatsApp personal is not a supported channel — see channel ground truth decisions.)
 
 ## Product Meaning
 

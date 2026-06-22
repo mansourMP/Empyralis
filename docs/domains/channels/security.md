@@ -34,8 +34,9 @@ support/health before inbound handling. Source:
 
 ## Studio Webhook Authentication
 
-The lane contract lists public Studio webhook paths for Twilio WhatsApp,
-Telegram, Slack, GitHub, and Discord. Connector code contains provider-specific
+The lane contract lists public Studio webhook paths for Telegram, Slack, GitHub, and Discord.
+A legacy Twilio WhatsApp webhook path may exist in code but WhatsApp is not a supported channel;
+that path must not be exposed or marketed. Connector code contains provider-specific
 webhook auth/signature handling; for example GitHub requires a configured
 webhook secret and valid signature, Discord rejects missing or invalid signature
 headers, and Slack routes verified event payloads into the channel router.
