@@ -233,9 +233,22 @@ async def _handle_compact(workspace_id: str, thread_id: str) -> str:
     try:
         from server_modules.compaction_service import (
             compact_turns, find_cut_point, should_compact,
-            load_previous_summary, DEFAULT_CONTEXT_WINDOW,
+            load_previous_summary, resolve_context_window,
         )
         from server_modules import thread_service
+        from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
+        from server_modules.control_plane_repository import get_workspace_by_id
+
+        # Resolve the workspace's active provider to compute the real context window
+        _ws_provider: str = ""
+        try:
+            _ws_rec = await get_workspace_by_id(workspace_id)
+            _ws_meta = dict((_ws_rec or {}).get("metadata") or {})
+            _ws_defaults = workspace_admin_defaults_from_metadata(_ws_meta)
+            _ws_provider = str(_ws_defaults.sage_ai_provider or "").strip().lower()
+        except Exception:
+            _ws_provider = ""
+        _ctx_window = resolve_context_window(_ws_provider or None, None)
 
         tenant_id = "default"
         await thread_service.ensure_master_thread(
@@ -252,8 +265,8 @@ async def _handle_compact(workspace_id: str, thread_id: str) -> str:
             include_turns=True,
         )
         raw_turns = list(thread_record.get("turns") or []) if isinstance(thread_record, dict) else []
-        if raw_turns and should_compact(raw_turns, context_window=DEFAULT_CONTEXT_WINDOW):
-            cut_idx = find_cut_point(raw_turns)
+        if raw_turns and should_compact(raw_turns, context_window=_ctx_window):
+            cut_idx = find_cut_point(raw_turns, context_window=_ctx_window)
             if cut_idx > 0:
                 prev = await load_previous_summary(
                     workspace_id=workspace_id,

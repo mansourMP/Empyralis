@@ -2140,63 +2140,102 @@ async def _run_memory_flush_before_compaction(
     thread_id: str,
     provider: str = "",
     model: str | None = None,
-) -> None:
-    """B3: Silent memory flush turn before compaction.
-    
-    Injects a system message telling Sage to save important facts to MEMORY.md
-    before the conversation is summarized.
+) -> bool:
+    """B3: Memory flush turn before compaction — saves important facts to durable memory.
+
+    Returns True if the flush succeeded (Sage produced a reply) or if the
+    LLM call succeeded but returned empty (nothing to save). Returns False
+    only when the flush itself failed after a retry — callers MUST NOT
+    compact away turns when this returns False.
+
+    Retries once on failure. Logs a clear event on every failure path.
     """
-    try:
-        from server_modules.sage_instruction_compiler_service import build_sage_instruction_bundle
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
 
-        flush_prompt = (
-            "Before this conversation is summarized, save any important facts "
-            "about the user or ongoing tasks to MEMORY.md using memory_write in append mode. "
-            "Focus on: user preferences, decisions, ongoing projects, important context "
-            "that should survive across sessions. Be concise and factual. "
-            "Do NOT save casual conversation, greetings, or transient remarks."
-        )
+    async def _attempt_flush() -> tuple[str | None, str | None]:
+        """Single flush attempt. Returns (reply_or_None, error_string_or_None)."""
+        try:
+            from server_modules.sage_instruction_compiler_service import build_sage_instruction_bundle
 
-        instruction_bundle = build_sage_instruction_bundle(
-            workspace_id=workspace_id,
-            tenant_id=tenant_id,
-            user_id="sage",
-            message=flush_prompt,
-            provider=provider,
-            model=model,
-        )
-
-        import uuid as _uuid
-        context = {
-            "workspace_id": workspace_id,
-            "provider": provider,
-            "source": "memory_flush",
-            "surface": "chat",
-            "disable_provider_fallback": True,
-        }
-        metadata = {
-            "workspace_id": workspace_id,
-            "provider": provider,
-            "source": "memory_flush",
-            "surface": "chat",
-            "credentials": {},
-            "trace_id": "memory_flush_" + str(_uuid.uuid4()),
-        }
-
-        reply, _usage, _attempted, _error = generate_chat_reply_with_provider_fallback(
-            context,
-            metadata,
-            flush_prompt,
-            instruction_bundle.system_prompt,
-            prior_messages=[],
-        )
-        if reply:
-            import logging as _logging
-            _logging.getLogger(__name__).info(
-                "memory_flush: Sage wrote %d chars to memory before compaction", len(reply)
+            flush_prompt = (
+                "Before this conversation is summarized, save any important facts "
+                "about the user or ongoing tasks to MEMORY.md using memory_write in append mode. "
+                "Focus on: user preferences, decisions, ongoing projects, important context "
+                "that should survive across sessions. Be concise and factual. "
+                "Do NOT save casual conversation, greetings, or transient remarks."
             )
-    except Exception:
-        pass
+
+            instruction_bundle = build_sage_instruction_bundle(
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                user_id="sage",
+                message=flush_prompt,
+                provider=provider,
+                model=model,
+            )
+
+            import uuid as _uuid
+            context = {
+                "workspace_id": workspace_id,
+                "provider": provider,
+                "source": "memory_flush",
+                "surface": "chat",
+                "disable_provider_fallback": True,
+            }
+            metadata = {
+                "workspace_id": workspace_id,
+                "provider": provider,
+                "source": "memory_flush",
+                "surface": "chat",
+                "credentials": {},
+                "trace_id": "memory_flush_" + str(_uuid.uuid4()),
+            }
+
+            reply, _usage, _attempted, _error = generate_chat_reply_with_provider_fallback(
+                context,
+                metadata,
+                flush_prompt,
+                instruction_bundle.system_prompt,
+                prior_messages=[],
+            )
+            return (reply or "").strip() or None, None
+        except Exception as exc:
+            return None, str(exc)
+
+    # First attempt
+    reply, error = await _attempt_flush()
+    if reply:
+        _log.info("memory_flush: Sage wrote %d chars to memory before compaction", len(reply))
+        return True
+    if error is None:
+        # LLM call succeeded but returned empty — nothing to save, safe to compact
+        _log.info("memory_flush: Sage returned empty reply — nothing to save, safe to compact")
+        return True
+
+    # First attempt failed — retry once
+    _log.warning(
+        "memory_flush: first attempt failed (workspace=%s): %s — retrying once",
+        workspace_id, error,
+    )
+    reply, error2 = await _attempt_flush()
+    if reply:
+        _log.info(
+            "memory_flush: retry succeeded — Sage wrote %d chars to memory before compaction",
+            len(reply),
+        )
+        return True
+    if error2 is None:
+        _log.info("memory_flush: retry returned empty reply — safe to compact")
+        return True
+
+    # Both attempts failed — DO NOT compact
+    _log.error(
+        "memory_flush: FAILED after retry (workspace=%s, provider=%s, model=%s): "
+        "first_error=%s, retry_error=%s — SKIPPING compaction to avoid losing facts",
+        workspace_id, provider, model, error, error2 or "(empty reply)",
+    )
+    return False
 
 
 def resolve_canonical_sender(
@@ -2862,6 +2901,84 @@ async def handle_sage_chat(
     # ── B2: Overflow error recovery ──
     _compaction_retries = 0
     _MAX_COMPACTION_RETRIES = 2
+    reply = ""          # initialized here so break-on-flush-failure is safe
+    last_error = None
+
+    # ── B2 pre-flight: proactive token-budget check ──
+    # Estimate total tokens BEFORE the call. If we're over the model's real
+    # window, compact first so the call is likely to succeed. The reactive
+    # overflow recovery below remains as a backstop for edge cases.
+    from server_modules.compaction_service import (
+        estimate_tokens, COMPACTION_RESERVE_TOKENS,
+        resolve_context_window as _resolve_ctx_window,
+        compact_turns as _compact_now_proactive,
+    )
+    _proactive_ctx_window = _resolve_ctx_window(provider, requested_model or None)
+    _proactive_input_text = str(envelope.get("system_prompt") or "")
+    _proactive_input_text += str(envelope.get("user_message") or "")
+    for _pm in (prior_messages or []):
+        if isinstance(_pm, dict):
+            _proactive_input_text += str(_pm.get("content") or "")
+    _proactive_estimated = estimate_tokens(_proactive_input_text) + COMPACTION_RESERVE_TOKENS
+    if _proactive_estimated > _proactive_ctx_window:
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        _log.warning(
+            "sage_agent_runtime: proactive compaction triggered — "
+            "estimated %d tokens > window %d (provider=%s, model=%s)",
+            _proactive_estimated, _proactive_ctx_window, provider, requested_model,
+        )
+        try:
+            _flush_ok = await _run_memory_flush_before_compaction(
+                workspace_id=normalized_workspace_id,
+                tenant_id=effective_tenant_id,
+                thread_id=thread_id,
+                provider=provider,
+                model=requested_model,
+            )
+            if _flush_ok:
+                _thread_rec = await thread_service.get_thread(
+                    thread_id,
+                    tenant_id=effective_tenant_id,
+                    workspace_id=normalized_workspace_id,
+                    include_turns=True,
+                )
+                _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
+                await _compact_now_proactive(
+                    turns=_raw_turns,
+                    workspace_id=normalized_workspace_id,
+                    tenant_id=effective_tenant_id,
+                    thread_id=thread_id,
+                )
+                # Reload prior_messages from compacted thread so the
+                # subsequent LLM call uses the post-compaction context.
+                _thread_rec2 = await thread_service.get_thread(
+                    thread_id,
+                    tenant_id=effective_tenant_id,
+                    workspace_id=normalized_workspace_id,
+                    include_turns=True,
+                )
+                _raw_turns2 = list((_thread_rec2 or {}).get("turns") or []) if isinstance(_thread_rec2, dict) else []
+                prior_messages = [
+                    {"role": str(t.get("role") or "").strip().lower(),
+                     "content": str(t.get("content") or "").strip()}
+                    for t in _raw_turns2
+                    if isinstance(t, dict)
+                    and str(t.get("role") or "").strip().lower() in {"user", "assistant"}
+                    and str(t.get("content") or "").strip()
+                ][-50:]  # keep last 50 turns post-compaction
+            else:
+                _log.warning(
+                    "sage_agent_runtime: proactive compaction skipped — "
+                    "memory flush failed (facts preserved in raw turns)"
+                )
+        except Exception as _proactive_err:
+            _log.warning(
+                "sage_agent_runtime: proactive compaction failed: %s — falling through to reactive path",
+                _proactive_err,
+            )
+    # ── End pre-flight ──
+
     while True:
         try:
             reply, usage, attempted_providers, last_error = generate_chat_reply_with_provider_fallback(
@@ -2887,13 +3004,22 @@ async def handle_sage_chat(
                     )
                     try:
                         # Memory flush before compaction
-                        await _run_memory_flush_before_compaction(
+                        _flush_ok = await _run_memory_flush_before_compaction(
                             workspace_id=normalized_workspace_id,
                             tenant_id=effective_tenant_id,
                             thread_id=thread_id,
                             provider=provider,
                             model=requested_model,
                         )
+                        if not _flush_ok:
+                            # Flush failed after retry — skip compaction, let the
+                            # overflow error propagate. Facts we couldn't save
+                            # will still be in the raw turns.
+                            _log.error(
+                                "sage_agent_runtime: memory flush failed — skipping compaction, "
+                                "overflow error will propagate"
+                            )
+                            raise  # re-raise the original overflow exception
                         # Reload turns from DB for compaction (recent_messages is {role,content} only)
                         _thread_rec = await thread_service.get_thread(
                             thread_id,
@@ -3094,6 +3220,7 @@ async def handle_sage_chat(
     try:
         from server_modules.compaction_service import should_compact as _should_compact
         from server_modules.compaction_service import compact_turns as _auto_compact
+        from server_modules.compaction_service import resolve_context_window as _resolve_ctx_window
         import asyncio as _asyncio
         _ws = normalized_workspace_id
         _tid = effective_tenant_id
@@ -3102,7 +3229,7 @@ async def handle_sage_chat(
         _mod = requested_model
         async def _auto_compact_background():
             try:
-                from server_modules.compaction_service import DEFAULT_CONTEXT_WINDOW
+                _ctx_window = _resolve_ctx_window(_prov, _mod)
                 # Reload turns from DB for accurate token count
                 _thread_rec = await thread_service.get_thread(
                     thread_id,
@@ -3111,21 +3238,24 @@ async def handle_sage_chat(
                     include_turns=True,
                 )
                 _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
-                if _should_compact(_raw_turns, context_window=DEFAULT_CONTEXT_WINDOW):
+                if _should_compact(_raw_turns, context_window=_ctx_window):
                     # B3: Memory flush before compaction
-                    await _run_memory_flush_before_compaction(
+                    _flush_ok = await _run_memory_flush_before_compaction(
                         workspace_id=_ws,
                         tenant_id=_tid,
                         thread_id=_thid,
                         provider=_prov,
                         model=_mod,
                     )
-                    await _auto_compact(
-                        turns=_raw_turns,
-                        workspace_id=_ws,
-                        tenant_id=_tid,
-                        thread_id=_thid,
-                    )
+                    if _flush_ok:
+                        await _auto_compact(
+                            turns=_raw_turns,
+                            workspace_id=_ws,
+                            tenant_id=_tid,
+                            thread_id=_thid,
+                        )
+                    # else: flush failed after retry — skip compaction this round,
+                    # try again next turn. Do NOT discard turns we couldn't save.
             except Exception:
                 pass
         _asyncio.ensure_future(_auto_compact_background())

@@ -101,7 +101,7 @@ class ConversationMemoryPolicyTests(unittest.TestCase):
     def test_context_window_for_model_falls_back_safely(self) -> None:
         self.assertEqual(
             provider_profiles.context_window_for_model("deepseek", "deepseek-chat"),
-            128_000,
+            1_000_000,
         )
         self.assertEqual(
             provider_profiles.context_window_for_model("openai", "gpt-4.1"),

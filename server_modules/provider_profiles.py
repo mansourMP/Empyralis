@@ -1328,7 +1328,7 @@ PROVIDER_MODEL_CATALOG = {
         },
         "deepseek-chat": {
             "label": "DeepSeek Chat",
-            "context_window_tokens": 128000,
+            "context_window_tokens": 1000000,
             "input_cost_per_1k_usd": 0.00014,
             "output_cost_per_1k_usd": 0.00028,
             "supports_tools": True,

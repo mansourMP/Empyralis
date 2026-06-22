@@ -36,11 +36,36 @@ def estimate_turns_tokens(turns: List[Dict[str, Any]]) -> int:
 
 # ── Step 3: Compaction trigger ────────────────────────────────────────
 
-# Matches OpenClaw defaults
 COMPACTION_RESERVE_TOKENS = 16384
-KEEP_RECENT_TOKENS = 20000
 TOOL_RESULT_MAX_CHARS = 2000
 DEFAULT_CONTEXT_WINDOW = 128000  # fallback when model context window is unknown
+_KEEP_RECENT_CAP = 30000         # hard cap on keep-recent tokens regardless of window size
+_KEEP_RECENT_RATIO = 0.15        # fraction of context window to keep as recent turns
+
+
+def keep_recent_tokens_for_window(context_window: int) -> int:
+    """Return keep-recent token budget proportional to the context window.
+
+    ~15% of the window, capped at _KEEP_RECENT_CAP to avoid keeping
+    an unreasonable number of turns for 1M-window models.
+    """
+    proportional = int(context_window * _KEEP_RECENT_RATIO)
+    return min(proportional, _KEEP_RECENT_CAP)
+
+
+def resolve_context_window(
+    provider: str | None = None,
+    model: str | None = None,
+) -> int:
+    """Return the ACTUAL context window for a provider/model pair.
+
+    Falls back to DEFAULT_CONTEXT_WINDOW (128K) only when the provider/model
+    combination is unknown.
+    """
+    from server_modules.provider_profiles import context_window_for_model
+
+    window = context_window_for_model(provider, model)
+    return window if window else DEFAULT_CONTEXT_WINDOW
 
 
 def should_compact(
@@ -50,7 +75,7 @@ def should_compact(
     reserve_tokens: int = COMPACTION_RESERVE_TOKENS,
 ) -> bool:
     """Check if total turn tokens exceed the safe threshold.
-    
+
     Args:
         turns: list of turn dicts from agent_turns
         context_window: the ACTUAL context window of the model in use (REQUIRED — no default)
@@ -63,12 +88,22 @@ def should_compact(
 
 def find_cut_point(
     turns: List[Dict[str, Any]],
-    keep_recent_tokens: int = KEEP_RECENT_TOKENS,
+    keep_recent_tokens: int | None = None,
+    context_window: int | None = None,
 ) -> int:
     """Walk backwards from newest turn. Return index of first turn to KEEP.
     Turns BEFORE this index get summarized. Turns AT and AFTER stay raw.
     Returns 0 if everything fits (no cut needed).
+
+    If keep_recent_tokens is None, it's computed from context_window
+    (proportional, ~15%). If both are None, falls back to a reasonable default.
     """
+    if keep_recent_tokens is None:
+        keep_recent_tokens = (
+            keep_recent_tokens_for_window(context_window)
+            if context_window is not None
+            else keep_recent_tokens_for_window(DEFAULT_CONTEXT_WINDOW)
+        )
     accumulated = 0
     for i in range(len(turns) - 1, -1, -1):
         accumulated += estimate_turn_tokens(turns[i])
