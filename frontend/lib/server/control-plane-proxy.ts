@@ -136,6 +136,16 @@ function copyForwardableRequestHeaders(
     targetHeaders.set(name, value);
   }
 
+  // Next.js strips the cookie header from request.headers (cookies are
+  // available only via request.cookies). Reconstruct it so the upstream
+  // Python backend can read session tokens from forwarded cookies.
+  if (!targetHeaders.has('cookie')) {
+    const cookieHeader = request.cookies.toString();
+    if (cookieHeader) {
+      targetHeaders.set('cookie', cookieHeader);
+    }
+  }
+
   if (!targetHeaders.has('x-forwarded-host')) {
     const host = request.headers.get('host');
     if (host) {
