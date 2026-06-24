@@ -9,7 +9,6 @@ from server_modules import (
     channel_lane_contract_service,
     gateway_state_repository,
     gateway_execution_service,
-    gateway_approval_service,
     kill_switch_gate,
     personal_channel_sage_bridge_service,
     personal_channels_repository,
@@ -502,74 +501,6 @@ for _channel_key, _channel_spec in LOCAL_BRIDGE_PERSONAL_CHANNELS.items():
     )
 
 
-async def _mark_automatic_reply_pending(
-    *,
-    action: str,
-    registration: Dict[str, Any],
-    gateway_id: str,
-    channel_key: str,
-    provider: str,
-    detail_label: str,
-    inbound: Dict[str, Any],
-    outbound: Dict[str, Any],
-    external_message_id: str,
-    remote_jid: str,
-    duplicate: bool,
-    trace_id: str,
-    idempotency_key: str,
-) -> Dict[str, Any]:
-    approval = await gateway_approval_service.request_gateway_tool_approval(
-        registration=registration,
-        capability_id=f"channel.{detail_label.lower()}.personal.send"
-        if detail_label.lower() in {"whatsapp", "telegram"}
-        else f"{str(channel_key or '').strip()}.send",
-        arguments={
-            "channel_key": channel_key,
-            "provider": provider,
-            "remote_jid": remote_jid,
-            "text": str(outbound.get("text") or "").strip(),
-            "idempotency_key": idempotency_key,
-            "reply_to_external_message_id": external_message_id,
-            "source": "automatic_personal_reply",
-            "inbound_external_message_id": external_message_id,
-        },
-        run_id=f"personal-channel-auto-{channel_key}-{idempotency_key}",
-        trace_id=str(trace_id or "").strip() or f"personal-channel-auto-{channel_key}-{idempotency_key}",
-        request_id=idempotency_key,
-    )
-    refreshed_inbound = personal_channels_repository.mark_inbound_processed(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=channel_key,
-        external_message_id=external_message_id,
-        reply_idempotency_key=idempotency_key,
-    )
-    _emit_automatic_reply_audit(
-        action=action,
-        status="approval_required",
-        registration=registration,
-        gateway_id=gateway_id,
-        channel_key=channel_key,
-        provider=provider,
-        detail=f"Sage drafted a {detail_label} personal reply and is waiting for owner approval before dispatch.",
-        metadata={
-            "remote_jid": remote_jid,
-            "inbound_external_message_id": external_message_id,
-            "reply_text_length": len(str(outbound.get("text") or "")),
-            "outbound_status": str(outbound.get("status") or "pending").strip() or "pending",
-            "approval_required": True,
-            "approval_id": approval.get("approval_id"),
-        },
-        trace_id=trace_id,
-        idempotency_key=f"{action}.approval_required:{gateway_id}:{idempotency_key}",
-    )
-    return {
-        "duplicate": duplicate,
-        "inbound": refreshed_inbound or inbound,
-        "outbound": outbound,
-        "approval_required": True,
-        "approval": approval,
-        "normalized_approval": approval.get("normalized_approval"),
-    }
 
 
 def _sender_role_from_message(message: Dict[str, Any]) -> Optional[str]:
@@ -1234,21 +1165,53 @@ async def _deliver_whatsapp_personal_reply(
         )
         return {"duplicate": duplicate, "inbound": inbound, "outbound": outbound}
 
-    return await _mark_automatic_reply_pending(
+    _enforce_personal_channel_dispatch_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        registration=registration,
+        capability_id="channel.whatsapp.personal.send",
+        request_id=str(idempotency_key or "").strip(),
+    )
+    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        provider=WHATSAPP_PERSONAL_PROVIDER,
+        remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
+        text=str(outbound.get("text") or "").strip(),
+        idempotency_key=idempotency_key,
+        reply_to_external_message_id=external_message_id,
+    )
+    delivered = personal_channels_repository.mark_outbound_delivered(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        idempotency_key=idempotency_key,
+        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
+        metadata={"dispatch_result": dispatch_result},
+    )
+    personal_channels_repository.mark_inbound_processed(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        external_message_id=external_message_id,
+        reply_idempotency_key=idempotency_key,
+    )
+    _emit_automatic_reply_audit(
         action="personal_channel.whatsapp.automatic_reply",
+        status="delivered",
         registration=registration,
         gateway_id=gateway_id,
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
         provider=WHATSAPP_PERSONAL_PROVIDER,
-        detail_label="WhatsApp",
-        inbound=inbound,
-        outbound=outbound,
-        external_message_id=external_message_id,
-        remote_jid=remote_jid,
-        duplicate=duplicate,
+        detail="Automatic WhatsApp personal reply was dispatched immediately.",
+        metadata={
+            "remote_jid": remote_jid,
+            "inbound_external_message_id": external_message_id,
+            "reply_text_length": len(str(outbound.get("text") or "")),
+            "dispatched": True,
+            "dispatch_external_message_id": str(dispatch_result.get("external_message_id") or "").strip() or None,
+        },
         trace_id=trace_id,
-        idempotency_key=idempotency_key,
+        idempotency_key=f"personal_channel.whatsapp.automatic_reply.delivered:{gateway_id}:{idempotency_key}",
     )
+    return {"duplicate": duplicate, "inbound": inbound, "outbound": delivered or outbound}
 
 
 async def _handle_whatsapp_gateway_channel_inbound(
@@ -1472,21 +1435,53 @@ async def _handle_telegram_gateway_channel_inbound(
         )
         return {"duplicate": not created, "inbound": inbound, "outbound": outbound}
 
-    return await _mark_automatic_reply_pending(
+    _enforce_personal_channel_dispatch_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        registration=registration,
+        capability_id="channel.telegram.personal.send",
+        request_id=str(idempotency_key or "").strip(),
+    )
+    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        provider=TELEGRAM_PERSONAL_PROVIDER,
+        remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
+        text=str(outbound.get("text") or "").strip(),
+        idempotency_key=idempotency_key,
+        reply_to_external_message_id=external_message_id,
+    )
+    delivered = personal_channels_repository.mark_outbound_delivered(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        idempotency_key=idempotency_key,
+        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
+        metadata={"dispatch_result": dispatch_result},
+    )
+    personal_channels_repository.mark_inbound_processed(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        external_message_id=external_message_id,
+        reply_idempotency_key=idempotency_key,
+    )
+    _emit_automatic_reply_audit(
         action="personal_channel.telegram.automatic_reply",
+        status="delivered",
         registration=registration,
         gateway_id=gateway_id,
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
         provider=TELEGRAM_PERSONAL_PROVIDER,
-        detail_label="Telegram",
-        inbound=inbound,
-        outbound=outbound,
-        external_message_id=external_message_id,
-        remote_jid=remote_jid,
-        duplicate=not created,
+        detail="Automatic Telegram personal reply was dispatched immediately.",
+        metadata={
+            "remote_jid": remote_jid,
+            "inbound_external_message_id": external_message_id,
+            "reply_text_length": len(str(outbound.get("text") or "")),
+            "dispatched": True,
+            "dispatch_external_message_id": str(dispatch_result.get("external_message_id") or "").strip() or None,
+        },
         trace_id=trace_id,
-        idempotency_key=idempotency_key,
+        idempotency_key=f"personal_channel.telegram.automatic_reply.delivered:{gateway_id}:{idempotency_key}",
     )
+    return {"duplicate": not created, "inbound": inbound, "outbound": delivered or outbound}
 
 
 async def _deliver_local_bridge_personal_reply(
@@ -1578,21 +1573,53 @@ async def _deliver_local_bridge_personal_reply(
         )
         return {"duplicate": duplicate, "inbound": inbound, "outbound": outbound}
 
-    return await _mark_automatic_reply_pending(
+    _enforce_personal_channel_dispatch_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        registration=registration,
+        capability_id=f"{str(channel_key or '').strip()}.send",
+        request_id=str(idempotency_key or "").strip(),
+    )
+    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=channel_key,
+        provider=provider,
+        remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
+        text=str(outbound.get("text") or "").strip(),
+        idempotency_key=idempotency_key,
+        reply_to_external_message_id=external_message_id,
+    )
+    delivered = personal_channels_repository.mark_outbound_delivered(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=channel_key,
+        idempotency_key=idempotency_key,
+        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
+        metadata={"dispatch_result": dispatch_result},
+    )
+    personal_channels_repository.mark_inbound_processed(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=channel_key,
+        external_message_id=external_message_id,
+        reply_idempotency_key=idempotency_key,
+    )
+    _emit_automatic_reply_audit(
         action=f"personal_channel.{channel_key.split('_', 1)[0]}.automatic_reply",
+        status="delivered",
         registration=registration,
         gateway_id=gateway_id,
         channel_key=channel_key,
         provider=provider,
-        detail_label=label,
-        inbound=inbound,
-        outbound=outbound,
-        external_message_id=external_message_id,
-        remote_jid=remote_jid,
-        duplicate=duplicate,
+        detail=f"Automatic {label} personal reply was dispatched immediately.",
+        metadata={
+            "remote_jid": remote_jid,
+            "inbound_external_message_id": external_message_id,
+            "reply_text_length": len(str(outbound.get("text") or "")),
+            "dispatched": True,
+            "dispatch_external_message_id": str(dispatch_result.get("external_message_id") or "").strip() or None,
+        },
         trace_id=trace_id,
-        idempotency_key=idempotency_key,
+        idempotency_key=f"personal_channel.{channel_key.split('_', 1)[0]}.automatic_reply.delivered:{gateway_id}:{idempotency_key}",
     )
+    return {"duplicate": duplicate, "inbound": inbound, "outbound": delivered or outbound}
 
 
 async def _handle_local_bridge_gateway_channel_inbound(
