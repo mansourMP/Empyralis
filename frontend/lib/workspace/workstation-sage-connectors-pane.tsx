@@ -824,7 +824,7 @@ const CONNECTOR_DEFINITIONS: ConnectorCardDefinition[] = [
     capabilityTags: ['Custom bot', 'Advanced'],
     summary: 'Telegram Bot is the custom Studio bot-token path for teams that bring their own Telegram bot.',
     setupHint: 'Use hosted Sage on Telegram for the normal path. Custom Telegram bot setup belongs in Studio or Advanced.',
-    surfaceScope: 'studio_only',
+    surfaceScope: 'all',
   },
   {
     id: 'whatsapp_twilio',
@@ -834,7 +834,7 @@ const CONNECTOR_DEFINITIONS: ConnectorCardDefinition[] = [
     capabilityTags: ['Customer inbox', 'Business sends'],
     summary: 'Business WhatsApp stays in the Studio connector lane with provider-managed credentials and customer-facing delivery.',
     setupHint: 'Connect Twilio WhatsApp in Studio when deployed specialists need a reliable business channel.',
-    surfaceScope: 'studio_only',
+    surfaceScope: 'all',
   },
   {
     id: 'slack',
@@ -3715,7 +3715,7 @@ export function WorkstationSageConnectorsPane({
           }
         : null;
       const whatsappCard: ExternalIntegrationCardRecord | null = null; // WhatsApp personal deprecated — business Twilio path only
-      const cloudChannelOrder = showPersonalSurface ? ['slack', 'discord_bot'] : ['slack', 'discord_bot', 'whatsapp_twilio'];
+      const cloudChannelOrder = ['slack', 'discord_bot', 'whatsapp_twilio'];
       const cloudCards = cloudChannelOrder
         .map((id) => connectorCards.find((card) => card.id === id) ?? null)
         .filter((card): card is ConnectorCardRecord => Boolean(card))
