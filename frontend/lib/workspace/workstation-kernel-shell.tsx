@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 
-import { ArrowLeft, BookOpen, Brain, ChevronRight, Cpu, FolderOpen, LayoutGrid, Link2, ListTodo, Menu, MessageSquare, Monitor, Plus } from 'lucide-react';
+import { ArrowLeft, BookOpen, Brain, ChevronRight, Cpu, FolderOpen, Link2, ListTodo, Menu, MessageSquare, Plus } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { logout } from '@/lib/auth/auth-client';
@@ -220,16 +220,6 @@ function writePanelCollapsedPreference(collapsed: boolean): void {
     // Local storage preferences are non-critical.
   }
 }
-
-const SAGE_FOOTER_NAV_ITEMS: readonly {
-  id: 'agents' | 'hardware';
-  label: string;
-  routeId: WorkspaceRouteId;
-  icon: LucideIcon;
-}[] = [
-  { id: 'agents', label: 'Agents', routeId: 'studio', icon: LayoutGrid },
-  { id: 'hardware', label: 'Hardware', routeId: 'hardware', icon: Monitor },
-];
 
 function readString(value: unknown, fallback = ''): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
@@ -1418,12 +1408,6 @@ export function WorkstationKernelShell({
   const activePanelDestinationId: WorkspaceNavDestinationId = activeDestinationId === 'settings'
     ? 'settings'
     : 'sage';
-  const isFooterNavItemActive = (itemId: typeof SAGE_FOOTER_NAV_ITEMS[number]['id']): boolean => {
-    if (itemId === 'agents') {
-      return activeDestinationId === 'studio';
-    }
-    return activeDestinationId === 'gateway' || activeDestinationId === 'hardware';
-  };
   const panelLevel = panelStack[panelStack.length - 1] ?? 'assistant';
   const visiblePanelLevel: PanelStackLevel = activeDestinationId === 'settings'
     ? 'settings'
@@ -1628,32 +1612,6 @@ export function WorkstationKernelShell({
           </div>
 
           <div className="workstation-shell-left-panel__footer">
-            <nav className="workstation-shell-left-panel__footer-nav" aria-label="Workspace tools">
-              {SAGE_FOOTER_NAV_ITEMS.map((item) => {
-                const href = routeManifest.routeIndex[item.routeId]?.href
-                  ?? buildWorkspaceRouteHref(workspaceId, item.routeId);
-                const active = isFooterNavItemActive(item.id);
-                return (
-                  <Link
-                    key={item.id}
-                    href={href}
-                    prefetch
-                    aria-current={active ? 'page' : undefined}
-                    title={item.label}
-                    onClick={() => {
-                      replacePanelStack(item.id === 'agents' ? ['studio'] : ['assistant']);
-                    }}
-                    className={joinClassNames(
-                      'workstation-shell-panel__assistant-link',
-                      active && 'workstation-shell-panel__assistant-link--active',
-                    )}
-                  >
-                    <item.icon size={14} aria-hidden="true" />
-                    <span>{item.label}</span>
-                  </Link>
-                );
-              })}
-            </nav>
             <ShellAccountBlock
               displayName={accountDisplayName}
               email={accountEmail}
@@ -1673,7 +1631,6 @@ export function WorkstationKernelShell({
             surfaceControl={null}
             diagnosticsVisible={false}
             onToggleDiagnostics={() => {}}
-            leftAction={null}
             actions={(
               <>
                 <WorkstationHardwareStatus
@@ -1723,6 +1680,7 @@ export function WorkstationKernelShell({
         </div>
 
       </div>
+
     </div>
   );
 }

@@ -3489,6 +3489,8 @@ async def acp_turn_endpoint(
                 mode=turn.mode,
                 current_user=turn.current_user,
                 channel_origin=turn.channel_origin,
+                sender_name=(turn.current_user or {}).get("name") or (turn.current_user or {}).get("email") or "",
+                sender_id=(turn.current_user or {}).get("user_id") or "",
             )
             # Filter silent replies before ACP response
             raw_message = result.get("message") if isinstance(result, dict) else ""

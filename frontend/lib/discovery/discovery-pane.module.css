@@ -312,12 +312,3 @@
   font-size: var(--app-font-13);
 }
 
-@media (max-width: 760px) {
-  .shell {
-    padding: var(--app-space-4);
-  }
-
-  .feedGrid {
-    grid-template-columns: 1fr;
-  }
-}

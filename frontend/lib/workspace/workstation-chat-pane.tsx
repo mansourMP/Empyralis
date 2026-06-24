@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createPortal } from 'react-dom';
-import { ArrowDown, Check, ChevronDown, ChevronRight, Monitor, ShieldCheck } from 'lucide-react';
+import { ArrowDown, Check, ChevronDown, ChevronRight, Monitor } from 'lucide-react';
 
 import { CommandSheet } from '@/lib/ui/command-sheet';
 import { ConfirmDialog } from '@/lib/ui/confirm-dialog';
@@ -221,88 +221,6 @@ const SAGE_MODEL_PICKER_PROVIDERS = [
 ] as const;
 
 type SageModelPickerProviderId = (typeof SAGE_MODEL_PICKER_PROVIDERS)[number]['id'];
-type AgentComputerPermissionMode = 'default' | 'custom' | 'full_access';
-type AgentComputerMenuPanel = 'hardware' | 'permissions' | null;
-type AgentComputerHardwareSection = 'this_device' | 'other_computers' | 'ssh_server';
-
-const AGENT_COMPUTER_HARDWARE_ITEMS: Array<{
-  id: AgentComputerHardwareSection;
-  label: string;
-  detail: string;
-}> = [
-  {
-    id: 'this_device',
-    label: 'This device',
-    detail: 'Local Agent Computer',
-  },
-  {
-    id: 'other_computers',
-    label: 'Other computers',
-    detail: 'Connected machines',
-  },
-  {
-    id: 'ssh_server',
-    label: 'Server / VPS',
-    detail: 'Remote hardware',
-  },
-];
-
-const AGENT_COMPUTER_PERMISSION_MODE_ITEMS: Array<{
-  id: AgentComputerPermissionMode;
-  label: string;
-  detail: string;
-}> = [
-  {
-    id: 'default',
-    label: 'Default',
-    detail: 'Default access',
-  },
-  {
-    id: 'custom',
-    label: 'Custom',
-    detail: 'Default access, editable',
-  },
-  {
-    id: 'full_access',
-    label: 'Full Access',
-    detail: 'Sage controls this computer',
-  },
-];
-
-const AGENT_COMPUTER_FULL_ACCESS_WARNING_VERSION = '2026-06-06';
-
-function runtimeAccessModeForAgentComputerPermissionMode(mode: AgentComputerPermissionMode): string {
-  return mode === 'default' ? 'default_guarded' : mode;
-}
-
-function normalizeAgentComputerPermissionModeToken(value: unknown): AgentComputerPermissionMode {
-  const token = readString(value).toLowerCase().replace(/[-\s]+/g, '_');
-  if (token === 'full_access') {
-    return 'full_access';
-  }
-  if (token === 'custom') {
-    return 'custom';
-  }
-  return 'default';
-}
-
-function agentComputerPermissionModeLabel(mode: AgentComputerPermissionMode): string {
-  return AGENT_COMPUTER_PERMISSION_MODE_ITEMS.find((item) => item.id === mode)?.label ?? 'Default';
-}
-
-function agentComputerPermissionModeFromSelectionPayload(payload: unknown): AgentComputerPermissionMode {
-  const root = readObject(payload);
-  const gateway = readObject(root.gateway);
-  const gatewayMetadata = readObject(gateway.metadata);
-  const selection = readObject(root.selection);
-  const selectionMetadata = readObject(selection.metadata);
-  return normalizeAgentComputerPermissionModeToken(
-    readString(gateway.runtime_access_mode)
-    || readString(gatewayMetadata.runtime_access_mode)
-    || readString(selectionMetadata.runtime_access_mode),
-  );
-}
-
 const SAGE_MODEL_PICKER_PROVIDER_IMAGES: Record<SageModelPickerProviderId, string | null> = {
   empyralis: null,
   anthropic: '/brand-assets/providers/anthropic.svg?v=3',
@@ -709,8 +627,6 @@ export function WorkstationChatPane() {
   const [billingSummary, setBillingSummary] = useState<Record<string, unknown> | null>(null);
   const [workspaceAiRoute, setWorkspaceAiRoute] = useState<WorkspaceAiRoutePayload | null>(null);
   const [sageAgentComputerSelection, setSageAgentComputerSelection] = useState<Record<string, unknown> | null>(null);
-  const [agentComputerPermissionBusyMode, setAgentComputerPermissionBusyMode] = useState<AgentComputerPermissionMode | null>(null);
-  const [pendingFullAccessConfirmation, setPendingFullAccessConfirmation] = useState(false);
   const submitInFlightRef = useRef(false);
   const streamAbortHandleRef = useRef<WorkstationTurnStreamAbortHandle | null>(null);
   const streamAbortRequestedRef = useRef(false);
@@ -1748,7 +1664,7 @@ export function WorkstationChatPane() {
   const selectedModelOption = useMemo(
     () => modelOptions.find((option) => option.id === selectedModel) ?? modelOptions[0] ?? {
       id: 'default',
-      label: 'Auto route',
+      label: 'Platform AI',
       providerId: null,
       providerLabel: null,
       supportsReasoning: false,
@@ -2068,8 +1984,6 @@ export function WorkstationChatPane() {
   const [modelCanvasPickerOpen, setModelCanvasPickerOpen] = useState(false);
   const [modelPickerSubpanel, setModelPickerSubpanel] = useState<'model' | 'provider' | null>(null);
   const [hardwareCanvasPickerOpen, setHardwareCanvasPickerOpen] = useState(false);
-  const [hardwareActivePanel, setHardwareActivePanel] = useState<AgentComputerMenuPanel>(null);
-  const [selectedHardwareMenuItem, setSelectedHardwareMenuItem] = useState<AgentComputerHardwareSection | null>(null);
   const [activeModelPickerProviderId, setActiveModelPickerProviderId] = useState<SageModelPickerProviderId>('empyralis');
   const [expandedModelPickerProviderIds, setExpandedModelPickerProviderIds] = useState<readonly SageModelPickerProviderId[]>([]);
   const modelCanvasPickerRef = useRef<HTMLDivElement | null>(null);
@@ -2099,65 +2013,6 @@ export function WorkstationChatPane() {
     || readString(sageAgentComputerSelectionRecord.selected_gateway_id)
     || readString(sageAgentComputerSelection?.selected_gateway_id)
   );
-  const activeAgentComputerPermissionMode = normalizeAgentComputerPermissionModeToken(
-    readString(sageAgentComputerGatewayRecord.runtime_access_mode)
-    || readString(sageAgentComputerGatewayMetadata.runtime_access_mode)
-    || readString(sageAgentComputerSelectionMetadata.runtime_access_mode),
-  );
-  const applyAgentComputerPermissionMode = useCallback(async (
-    mode: AgentComputerPermissionMode,
-    options: { acknowledgedFullAccessWarning?: boolean } = {},
-  ) => {
-    if (!selectedSageAgentComputerId) {
-      setStatusMessage('Select an Agent Computer before changing permissions.');
-      return;
-    }
-    setAgentComputerPermissionBusyMode(mode);
-    try {
-      const isFullAccess = mode === 'full_access';
-      const payload = await services.client.setSageAgentComputerSelection({
-        selectedGatewayId: selectedSageAgentComputerId,
-        metadata: {
-          source: 'sage_agent_computer_permissions_menu',
-          agent_scope: 'sage',
-          runtime_access_mode: runtimeAccessModeForAgentComputerPermissionMode(mode),
-          autonomous_agent_setup_warning_acknowledged: isFullAccess
-            ? options.acknowledgedFullAccessWarning === true
-            : false,
-          ...(isFullAccess ? {
-            autonomous_agent_setup_warning_version: AGENT_COMPUTER_FULL_ACCESS_WARNING_VERSION,
-          } : {}),
-        },
-      });
-      const nextSelection = payload && typeof payload === 'object' ? payload : null;
-      const returnedMode = agentComputerPermissionModeFromSelectionPayload(nextSelection);
-      setSageAgentComputerSelection(nextSelection);
-      setPendingFullAccessConfirmation(false);
-      if (returnedMode === mode) {
-        setStatusMessage(`${agentComputerPermissionModeLabel(returnedMode)} applied to Sage Agent Computer.`);
-      } else {
-        setStatusMessage(
-          `Agent Computer stayed on ${agentComputerPermissionModeLabel(returnedMode)}. ${agentComputerPermissionModeLabel(mode)} was not applied.`,
-        );
-      }
-    } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : 'Could not update Agent Computer permissions.');
-    } finally {
-      setAgentComputerPermissionBusyMode(null);
-    }
-  }, [selectedSageAgentComputerId, services.client, setStatusMessage]);
-  const handleAgentComputerPermissionModeSelect = useCallback((mode: AgentComputerPermissionMode) => {
-    if (mode === activeAgentComputerPermissionMode) {
-      return;
-    }
-    if (mode === 'full_access') {
-      setHardwareCanvasPickerOpen(false);
-      setHardwareActivePanel(null);
-      setPendingFullAccessConfirmation(true);
-      return;
-    }
-    void applyAgentComputerPermissionMode(mode);
-  }, [activeAgentComputerPermissionMode, applyAgentComputerPermissionMode]);
   const localRuntimeTargetId = localCompanionOnline ? readString(localRuntimeTarget?.id) : null;
   const selectedHardwareRuntimeTarget = useMemo(() => {
     return localCompanionConnected && localRuntimeTargetId ? localRuntimeTargetId : 'cloud';
@@ -2220,7 +2075,7 @@ export function WorkstationChatPane() {
   const selectedCanvasModelLabel = useMemo(
     () => canvasModelOptions.find((option) => option.id === effectiveSelectedModel)?.label
       ?? selectedModelOption.label
-      ?? 'Auto',
+      ?? 'Platform AI',
     [canvasModelOptions, effectiveSelectedModel, selectedModelOption.label],
   );
   const modelPickerProviderPanels = useMemo<SageModelPickerProviderPanel[]>(
@@ -2360,7 +2215,6 @@ export function WorkstationChatPane() {
       setModelCanvasPickerOpen(false);
       setModelPickerSubpanel(null);
       setHardwareCanvasPickerOpen(false);
-      setHardwareActivePanel(null);
     };
     window.addEventListener('pointerdown', handlePointerDown);
     return () => {
@@ -3602,10 +3456,7 @@ export function WorkstationChatPane() {
             setModelPickerSubpanel(null);
             setHardwareCanvasPickerOpen((current) => {
               const nextOpen = !current;
-              if (!nextOpen) {
-                setHardwareActivePanel(null);
-              }
-              return nextOpen;
+                return nextOpen;
             });
           }}
         >
@@ -3617,123 +3468,15 @@ export function WorkstationChatPane() {
             role="dialog"
             aria-label="Agent Computer"
           >
-            <button
-              type="button"
-              className={`sage-canvas-hardware__option sage-canvas-hardware__option--has-submenu${hardwareActivePanel === 'hardware' ? ' sage-canvas-hardware__option--active' : ''}`}
-              aria-haspopup="menu"
-              aria-expanded={hardwareActivePanel === 'hardware'}
-              onPointerEnter={() => {
-                setHardwareActivePanel('hardware');
-              }}
-              onPointerMove={() => {
-                setHardwareActivePanel('hardware');
-              }}
-              onMouseEnter={() => {
-                setHardwareActivePanel('hardware');
-              }}
-              onFocus={() => {
-                setHardwareActivePanel('hardware');
-              }}
-              onClick={() => {
-                setHardwareActivePanel('hardware');
-              }}
-            >
+            <div className="sage-canvas-hardware__option sage-canvas-hardware__option--status">
               <span className="sage-canvas-hardware__option-copy">
                 <Monitor className="sage-canvas-hardware__option-icon" size={16} strokeWidth={1.9} aria-hidden="true" />
                 <span className="sage-canvas-hardware__option-label">
-                  <strong>Hardware</strong>
-                  <small>{agentComputerMenuStatus.label}</small>
+                  <strong>{agentComputerMenuStatus.label}</strong>
+                  <small>{agentComputerMenuStatus.detail}</small>
                 </span>
               </span>
-              <ChevronRight size={16} strokeWidth={1.9} aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              className={`sage-canvas-hardware__option sage-canvas-hardware__option--has-submenu${hardwareActivePanel === 'permissions' ? ' sage-canvas-hardware__option--active' : ''}`}
-              aria-haspopup="menu"
-              aria-expanded={hardwareActivePanel === 'permissions'}
-              onPointerEnter={() => {
-                setHardwareActivePanel('permissions');
-              }}
-              onPointerMove={() => {
-                setHardwareActivePanel('permissions');
-              }}
-              onMouseEnter={() => {
-                setHardwareActivePanel('permissions');
-              }}
-              onFocus={() => {
-                setHardwareActivePanel('permissions');
-              }}
-              onClick={() => {
-                setHardwareActivePanel('permissions');
-              }}
-            >
-              <span className="sage-canvas-hardware__option-copy">
-                <ShieldCheck className="sage-canvas-hardware__option-icon" size={16} strokeWidth={1.9} aria-hidden="true" />
-                <span className="sage-canvas-hardware__option-label">
-                  <strong>Permissions</strong>
-                  <small>{selectedSageAgentComputerId ? agentComputerPermissionModeLabel(activeAgentComputerPermissionMode) : 'Select Agent Computer'}</small>
-                </span>
-              </span>
-              <ChevronRight size={16} strokeWidth={1.9} aria-hidden="true" />
-            </button>
-            {hardwareActivePanel ? (
-              <div
-                className="sage-canvas-hardware__subpanel"
-                role="menu"
-                aria-label={hardwareActivePanel === 'hardware' ? 'Agent Computer hardware' : 'Agent Computer permissions'}
-              >
-                <div className="sage-canvas-hardware__subpanel-title">
-                  {hardwareActivePanel === 'hardware' ? 'Hardware' : 'Permissions'}
-                </div>
-                <div className="sage-canvas-hardware__subpanel-list" role="list">
-                  {hardwareActivePanel === 'hardware'
-                    ? AGENT_COMPUTER_HARDWARE_ITEMS.map((item) => {
-                        const selected = selectedHardwareMenuItem === item.id;
-                        return (
-                          <button
-                            key={item.id}
-                            type="button"
-                            className={`sage-canvas-hardware__subrow${selected ? ' sage-canvas-hardware__subrow--active' : ''}`}
-                            aria-pressed={selected}
-                            onClick={() => {
-                              setSelectedHardwareMenuItem(item.id);
-                              setHardwareActivePanel('hardware');
-                            }}
-                          >
-                            <Monitor className="sage-canvas-hardware__option-icon" size={16} strokeWidth={1.9} aria-hidden="true" />
-                            <span className="sage-canvas-hardware__subrow-copy">
-                              <strong>{item.label}</strong>
-                              <small>{item.detail}</small>
-                            </span>
-                          </button>
-                        );
-                      })
-                    : AGENT_COMPUTER_PERMISSION_MODE_ITEMS.map((mode) => {
-                        const selected = activeAgentComputerPermissionMode === mode.id;
-                        const busy = agentComputerPermissionBusyMode === mode.id;
-                        return (
-                          <button
-                            key={mode.id}
-                            type="button"
-                            className={`sage-canvas-hardware__subrow${selected ? ' sage-canvas-hardware__subrow--active' : ''}`}
-                            aria-pressed={selected}
-                            disabled={agentComputerPermissionBusyMode !== null}
-                            onClick={() => {
-                              handleAgentComputerPermissionModeSelect(mode.id);
-                            }}
-                          >
-                            <ShieldCheck className="sage-canvas-hardware__option-icon" size={16} strokeWidth={1.9} aria-hidden="true" />
-                            <span className="sage-canvas-hardware__subrow-copy">
-                              <strong>{mode.label}</strong>
-                              <small>{busy ? 'Saving...' : selected ? 'Active' : mode.detail}</small>
-                            </span>
-                          </button>
-                        );
-                      })}
-                </div>
-              </div>
-            ) : null}
+            </div>
           </div>
         ) : null}
       </div>
@@ -3902,16 +3645,6 @@ export function WorkstationChatPane() {
                   integrationsHref={integrationsHref}
                   onSelectPrompt={setDraft}
                 />
-              ) : null}
-
-              {chatActivityBusy ? (
-                <div className="app-chat-agent-status">
-                  {unifiedAgentActivityState === 'thinking' ? 'Thinking...' :
-                   unifiedAgentActivityState === 'connecting' ? 'Connecting...' :
-                   unifiedAgentActivityState === 'running_tool' ? 'Running tool...' :
-                   unifiedAgentActivityState === 'finalizing' ? 'Finalizing...' :
-                   'Working...'}
-                </div>
               ) : null}
 
               {visibleTranscriptCells.map((cell, index) => (
@@ -4276,30 +4009,6 @@ export function WorkstationChatPane() {
           </FormGrid>
         </FormSection>
       </CommandSheet>
-
-      <ConfirmDialog
-        open={pendingFullAccessConfirmation}
-        title="Full Access warning"
-        body={(
-          <span>
-            Full Access lets Sage run commands, read, write, delete files, and access secrets,
-            browser data, tokens, SSH keys, and connected accounts on this Agent Computer;
-            dedicated hardware is recommended.
-          </span>
-        )}
-        confirmLabel="Allow Full Access"
-        cancelLabel="Keep current access"
-        confirmTone="danger"
-        busy={agentComputerPermissionBusyMode === 'full_access'}
-        onConfirm={() => {
-          void applyAgentComputerPermissionMode('full_access', {
-            acknowledgedFullAccessWarning: true,
-          });
-        }}
-        onCancel={() => {
-          setPendingFullAccessConfirmation(false);
-        }}
-      />
 
       <ConfirmDialog
         open={Boolean(pendingDeleteMemory)}

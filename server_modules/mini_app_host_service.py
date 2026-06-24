@@ -62,10 +62,10 @@ def _normalized_text(value: Any) -> str:
 
 def _normalized_environment() -> str:
     return _normalized_text(
-        os.getenv("ORION_ENV")
-        or os.getenv("EMPYRALIS_ENV")
-        or os.getenv("APP_ENV")
-        or os.getenv("ENVIRONMENT")
+        os.getenv("EMPYRALIS_DEPLOY_ENV")
+        or os.getenv("ORION_ENV")
+        or os.getenv("ENV")
+        or os.getenv("NODE_ENV")
     ).lower()
 
 

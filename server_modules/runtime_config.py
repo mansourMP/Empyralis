@@ -381,7 +381,7 @@ except Exception:
 
 
 def _resolved_environment() -> str:
-    return str(os.getenv("ORION_ENV") or os.getenv("ENV") or "").strip().lower()
+    return str(os.getenv("EMPYRALIS_DEPLOY_ENV") or os.getenv("ORION_ENV") or os.getenv("ENV") or os.getenv("NODE_ENV") or "").strip().lower()
 
 
 def _should_load_dotenv() -> bool:

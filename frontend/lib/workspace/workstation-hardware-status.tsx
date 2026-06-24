@@ -59,6 +59,12 @@ type LocalTrayStatus = {
 
 const LOCAL_TRAY_STATUS_URL = 'http://127.0.0.1:7790/status';
 
+function shouldPollLocalAgentComputer(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+}
+
 function readString(value: unknown, fallback = ''): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
@@ -416,6 +422,10 @@ export function WorkstationHardwareStatus({
   useEffect(() => {
     let cancelled = false;
     const loadTrayStatus = async () => {
+      if (!shouldPollLocalAgentComputer()) {
+        setLocalTrayStatus(null);
+        return;
+      }
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 800);
       try {

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { ChevronLeft, RefreshCw } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 
 import {
   ListDetailPanel,
@@ -316,7 +316,6 @@ export function WorkstationDeployedAgentsPane({
   const [selectedAgentComputerId, setSelectedAgentComputerId] = useState<string | null>(() => cachedStudioPane?.selectedAgentComputerId ?? null);
   const [testChatSessionsByAgentId, setTestChatSessionsByAgentId] = useState<Record<string, DeployedAgentTestChatSessionState>>({});
   const [externalAgentChatSessionsById, setExternalAgentChatSessionsById] = useState<Record<string, ExternalAgentChatSessionState>>({});
-  const [mobileAgentDetailOpen, setMobileAgentDetailOpen] = useState(false);
   const [overlayAgentId, setOverlayAgentId] = useState<string | null>(null);
   const [overlayTab, setOverlayTab] = useState<SpecialistOverlayTabId>(() => (
     normalizeSpecialistOverlayTabId(searchParams.get('tab') || searchParams.get('studioTab'))
@@ -959,7 +958,6 @@ export function WorkstationDeployedAgentsPane({
     setSelectedAgentId(requestedAgentId);
     setSelectedExternalAgentId(null);
     setSelectedAgentComputerId(null);
-    setMobileAgentDetailOpen(!shouldStayInInbox);
     setOverlayAgentId(null);
   }, [agents, initialSubview, requestedAgentId]);
 
@@ -975,7 +973,6 @@ export function WorkstationDeployedAgentsPane({
     setSelectedAgentId(null);
     setSelectedAgentDetail(null);
     setSelectedAgentComputerId(null);
-    setMobileAgentDetailOpen(true);
     setOverlayAgentId(null);
     setOverlayTab('overview');
   }, [connectedExternalAgents, requestedExternalAgentId]);
@@ -992,7 +989,6 @@ export function WorkstationDeployedAgentsPane({
     setSelectedAgentId(null);
     setSelectedAgentDetail(null);
     setSelectedExternalAgentId(null);
-    setMobileAgentDetailOpen(true);
     setOverlayAgentId(null);
     setOverlayTab('overview');
   }, [requestedAgentComputerId, runtimeAttachments]);
@@ -1001,7 +997,6 @@ export function WorkstationDeployedAgentsPane({
     if (requestedAgentId || requestedExternalAgentId || requestedAgentComputerId) {
       return;
     }
-    setMobileAgentDetailOpen(false);
     setSelectedAgentId(null);
     setSelectedExternalAgentId(null);
     setSelectedAgentComputerId(null);
@@ -1235,7 +1230,6 @@ export function WorkstationDeployedAgentsPane({
     setAgents((current) => upsertAgentRecord(current, record));
     setSelectedAgentDetail(record);
     setSelectedAgentId(recordId || null);
-    setMobileAgentDetailOpen(true);
     setIsWizardOpen(false);
 
     if (wizardMode === 'create') {
@@ -1284,7 +1278,6 @@ export function WorkstationDeployedAgentsPane({
     setSelectedExternalAgentId(recordId);
     setOverlayAgentId(null);
     setOverlayTab('overview');
-    setMobileAgentDetailOpen(true);
     setIsWizardOpen(false);
     setCurrentStudioSubview('agents');
     setStatusMessage(`Connected external agent ${readString(record.name || record.label, 'external agent')}.`);
@@ -1810,7 +1803,6 @@ export function WorkstationDeployedAgentsPane({
           className={joinClassNames(
             'studio-agents-workbench',
             'studio-agents-workbench--shell-roster',
-            hasSelectedStudioObject && mobileAgentDetailOpen && 'studio-agents-workbench--detail-open',
           )}
         >
           {(currentStudioSubview === 'agents' || currentStudioSubview === 'deploy') && !hasSelectedStudioObject ? (
@@ -1850,23 +1842,6 @@ export function WorkstationDeployedAgentsPane({
           ) : null}
 
           {(currentStudioSubview === 'agents' || currentStudioSubview === 'deploy') && selectedAgent && (
-            <div className="app-stack-4">
-              <div className="studio-agent-mobile-return">
-                <AppButton
-                  type="button"
-                  tone="secondary"
-                  onClick={() => {
-                    setMobileAgentDetailOpen(false);
-                    closeSelectedAgentDetail();
-                  }}
-                >
-                  <ChevronLeft size={16} strokeWidth={2.1} aria-hidden="true" />
-                  Back
-                </AppButton>
-                <span className="studio-agent-mobile-return__agent-name">
-                  {studioAgentDisplayName(selectedAgent, 'Selected agent')}
-                </span>
-              </div>
               <AgentDetailView
                 selectedAgent={selectedAgent}
                 overlayTab={overlayTab}
@@ -1908,27 +1883,9 @@ export function WorkstationDeployedAgentsPane({
                 onTestChatSessionChange={handleSelectedAgentTestChatSessionChange}
                 onResetTestChatSession={handleResetSelectedAgentTestChatSession}
               />
-            </div>
           )}
 
           {(currentStudioSubview === 'agents' || currentStudioSubview === 'deploy') && selectedExternalAgent && (
-            <div className="app-stack-4">
-              <div className="studio-agent-mobile-return">
-                <AppButton
-                  type="button"
-                  tone="secondary"
-                  onClick={() => {
-                    setMobileAgentDetailOpen(false);
-                    closeSelectedAgentDetail();
-                  }}
-                >
-                  <ChevronLeft size={16} strokeWidth={2.1} aria-hidden="true" />
-                  Back
-                </AppButton>
-                <span className="studio-agent-mobile-return__agent-name">
-                  {selectedStudioObjectName}
-                </span>
-              </div>
               <ConnectedExternalAgentDetailView
                 externalAgent={selectedExternalAgent}
                 overlayTab={overlayTab}
@@ -1938,29 +1895,10 @@ export function WorkstationDeployedAgentsPane({
                 onChatSessionChange={handleSelectedExternalAgentChatSessionChange}
                 onExternalAgentUpdated={handleExternalAgentUpdated}
               />
-            </div>
           )}
 
           {(currentStudioSubview === 'agents' || currentStudioSubview === 'deploy') && selectedAgentComputer && (
-            <div className="app-stack-4">
-              <div className="studio-agent-mobile-return">
-                <AppButton
-                  type="button"
-                  tone="secondary"
-                  onClick={() => {
-                    setMobileAgentDetailOpen(false);
-                    closeSelectedAgentDetail();
-                  }}
-                >
-                  <ChevronLeft size={16} strokeWidth={2.1} aria-hidden="true" />
-                  Back
-                </AppButton>
-                <span className="studio-agent-mobile-return__agent-name">
-                  {selectedStudioObjectName}
-                </span>
-              </div>
               <AgentComputerDetailView computer={selectedAgentComputer} />
-            </div>
           )}
 
           {currentStudioSubview === 'inbox' && (

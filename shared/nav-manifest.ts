@@ -62,32 +62,9 @@ export type WorkspaceNavRouteDefinition = {
   web: {
     hiddenFromNavigation?: boolean;
   };
-  mobile?: {
-    screen: string;
-    screenName: string;
-    groupId: WorkspaceNavDestinationId;
-    tabLabel?: string;
-    includeInBottomTabs?: boolean;
-  };
-};
-
-export type WorkspaceMobileRouteDefinition = WorkspaceNavRouteDefinition & {
-  mobile: NonNullable<WorkspaceNavRouteDefinition['mobile']>;
-};
-
-export type WorkspaceMobileBottomTab = {
-  routeId: WorkspaceRouteId;
-  label: string;
-  screenName: string;
-  screen: string;
-  destinationId: WorkspaceNavDestinationId;
-  iconName: WorkspaceNavIconName;
 };
 
 import {
-  WORKSPACE_MOBILE_BOTTOM_TABS as runtimeWorkspaceMobileBottomTabs,
-  WORKSPACE_MOBILE_NAV_GROUP_LABELS as runtimeWorkspaceMobileNavGroupLabels,
-  WORKSPACE_MOBILE_ROUTE_DEFINITIONS as runtimeWorkspaceMobileRouteDefinitions,
   WORKSPACE_NAV_DESTINATIONS as runtimeWorkspaceNavDestinations,
   WORKSPACE_NAV_DESTINATION_INDEX as runtimeWorkspaceNavDestinationIndex,
   WORKSPACE_ROUTE_DEFINITIONS as runtimeWorkspaceRouteDefinitions,
@@ -108,14 +85,10 @@ export const WORKSPACE_NAV_DESTINATION_INDEX =
   runtimeWorkspaceNavDestinationIndex as Record<WorkspaceNavDestinationId, WorkspaceNavDestinationDefinition>;
 export const WORKSPACE_WEB_NAV_GROUP_LABELS =
   runtimeWorkspaceWebNavGroupLabels as Record<WorkspaceNavDestinationId, string>;
-export const WORKSPACE_MOBILE_NAV_GROUP_LABELS =
-  runtimeWorkspaceMobileNavGroupLabels as Record<WorkspaceNavDestinationId, string>;
 export const WORKSPACE_ROUTE_DEFINITIONS =
   runtimeWorkspaceRouteDefinitions as readonly WorkspaceNavRouteDefinition[];
 export const WORKSPACE_WEB_ROUTE_DEFINITIONS =
   runtimeWorkspaceWebRouteDefinitions as WorkspaceNavRouteDefinition[];
-export const WORKSPACE_MOBILE_ROUTE_DEFINITIONS =
-  runtimeWorkspaceMobileRouteDefinitions as WorkspaceMobileRouteDefinition[];
 export const WORKSPACE_ROUTE_ID_SET =
   runtimeWorkspaceRouteIdSet as Set<WorkspaceRouteId>;
 export const WORKSPACE_ROUTE_DEFINITION_INDEX =
@@ -146,6 +119,3 @@ export function resolveWorkspaceRouteIdFromSegment(
 ): WorkspaceRouteId | null {
   return runtimeResolveWorkspaceRouteIdFromSegment(segment) as WorkspaceRouteId | null;
 }
-
-export const WORKSPACE_MOBILE_BOTTOM_TABS =
-  runtimeWorkspaceMobileBottomTabs as readonly WorkspaceMobileBottomTab[];

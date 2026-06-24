@@ -953,32 +953,6 @@
   transform: translateY(-1px);
 }
 
-@media (max-width: 720px) {
-  .shell {
-    padding: var(--app-space-4);
-  }
-
-  .appsFeedShell {
-    margin-left: 0;
-  }
-
-  .appsFeedHeader {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .formGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .settingsGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .feedGrid {
-    grid-template-columns: 1fr;
-  }
-}
 
 .installedEmpty {
   display: grid;
@@ -1373,39 +1347,6 @@
   font-size: var(--app-font-12);
 }
 
-@media (max-width: 720px) {
-  .shell {
-    padding: 20px;
-  }
-
-  .shellOpen {
-    position: fixed;
-    inset: 0;
-    z-index: 80;
-    padding: 14px;
-  }
-
-  .catalogEmpty,
-  .installedEmpty,
-  .appStoreEmpty {
-    grid-template-columns: 1fr;
-  }
-
-  .grid,
-  .officialGrid {
-    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-    gap: 22px 14px;
-  }
-
-  .appsToolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .frame {
-    min-height: 64vh;
-  }
-}
 
 /* Focused application settings layer.
    This intentionally stays on the Applications surface: the launcher remains
@@ -1440,25 +1381,4 @@
   background: rgba(35, 31, 25, 0.18);
 }
 
-@media (max-width: 720px) {
-  .settingsPanel {
-    --apps-left-rail-space: 0px;
-    left: 0;
-    width: auto;
-    max-width: none;
-    max-height: none;
-    padding: 1.25rem;
-    border-radius: 0;
-  }
-}
 
-@media (max-width: 760px) {
-  .blueprintSummary {
-    grid-template-columns: 1fr;
-  }
-
-  .publicationActions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-}

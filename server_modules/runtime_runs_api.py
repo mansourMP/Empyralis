@@ -1312,7 +1312,7 @@ def register_run_routes(app) -> None:
             if isinstance(record, dict):
                 break
         if not isinstance(record, dict):
-            if str(thread_id or "").strip() == "primary":
+            if str(thread_id or "").strip() in ("primary", "sage-main"):
                 for workspace_id, access in workspace_access_map(current_user).items():
                     tenant_id = str((access or {}).get("tenant_id") or "").strip()
                     if not tenant_id:

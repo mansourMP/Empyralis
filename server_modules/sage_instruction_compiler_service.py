@@ -497,6 +497,7 @@ def _normalize_recent_messages(value: Sequence[Mapping[str, Any]] | None) -> lis
 # Keys match channel_origin values set by each ingress path.
 CHANNEL_FORMAT_HINTS: dict[ChannelOrigin, str] = {
     ChannelOrigin.WEB: "Full markdown and tables are supported. Longer responses are acceptable.",
+    ChannelOrigin.ACP: "Full markdown and tables are supported. Longer responses are acceptable.",
     ChannelOrigin.TELEGRAM_HOSTED: "Markdown is supported (no HTML). Keep responses concise — under ~800 chars unless detail is needed.",
     ChannelOrigin.TELEGRAM_PERSONAL: "Markdown is supported (no HTML). Keep responses concise — under ~800 chars unless detail is needed.",
     ChannelOrigin.WHATSAPP_PERSONAL: "Plain text preferred with minimal markdown. Keep responses short and conversational.",

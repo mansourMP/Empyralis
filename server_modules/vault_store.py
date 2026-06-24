@@ -101,7 +101,7 @@ def _safe_write_json(path: Path, payload: Dict[str, Any]):
 
 
 def _resolved_environment() -> str:
-    return str(os.getenv("ORION_ENV") or os.getenv("ENV") or "").strip().lower()
+    return str(os.getenv("EMPYRALIS_DEPLOY_ENV") or os.getenv("ORION_ENV") or os.getenv("ENV") or os.getenv("NODE_ENV") or "").strip().lower()
 
 
 def _vault_requires_explicit_env_key() -> bool:

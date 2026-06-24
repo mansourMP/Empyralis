@@ -1441,27 +1441,6 @@ function chunkItems<T>(items: T[], size: number): T[][] {
   return rows;
 }
 
-function useResponsiveColumns(): number {
-  const [columns, setColumns] = useState(4);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return undefined;
-    }
-    const mediaQuery = window.matchMedia('(max-width: 820px)');
-    const sync = () => {
-      setColumns(mediaQuery.matches ? 2 : 4);
-    };
-    sync();
-    mediaQuery.addEventListener('change', sync);
-    return () => {
-      mediaQuery.removeEventListener('change', sync);
-    };
-  }, []);
-
-  return columns;
-}
-
 function normalizeProviderCatalog(payload: unknown): ProviderSnapshot[] {
   const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
   const providers = Array.isArray(record.providers)
@@ -2754,7 +2733,6 @@ export function WorkstationSageConnectorsPane({
   const services = useWorkspaceServices();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const gridColumns = useResponsiveColumns();
   const cacheKey = `${bootstrap.workspace.id}:${surface}:connection-split-v2`;
   const cachedState = sageConnectorsPaneCache.get(cacheKey) ?? null;
   const workspaceId = bootstrap.workspace.id;
@@ -5221,14 +5199,14 @@ export function WorkstationSageConnectorsPane({
   }
 
   function renderProviderSkeletons() {
-    const rows = chunkItems(fallbackProviderCatalog(), gridColumns);
+    const rows = chunkItems(fallbackProviderCatalog(), 4);
     return (
       <section className="sage-unified-section">
         <p className="sage-unified-section__label">AI Models</p>
         {rows.map((row, rowIndex) => (
           <div
             key={`AI Models-skeleton-${rowIndex}`}
-            className={joinClassNames('sage-unified-grid', gridColumns === 2 ? 'sage-unified-grid--2' : 'sage-unified-grid--4')}
+            className="sage-unified-grid sage-unified-grid--4"
           >
             {row.map((provider) => (
               <div key={provider.id} className="sage-unified-card" aria-hidden="true">

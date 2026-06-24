@@ -130,7 +130,7 @@ def _normalize_connector_class(connector_class: Any) -> Optional[str]:
 
 
 def _resolved_environment() -> str:
-    return str(os.getenv("ORION_ENV") or os.getenv("ENV") or "").strip().lower()
+    return str(os.getenv("EMPYRALIS_DEPLOY_ENV") or os.getenv("ORION_ENV") or os.getenv("ENV") or os.getenv("NODE_ENV") or "").strip().lower()
 
 
 def _environment_requires_explicit_secret() -> bool:
