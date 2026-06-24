@@ -19,6 +19,7 @@ from server_modules.connectors.discord_connector import (
     event_matches_connector as discord_event_matches_connector,
     interaction_signature_headers as discord_interaction_signature_headers,
     parse_inbound_event as discord_parse_inbound_event,
+    send_dm as discord_send_dm,
     should_trigger_agent_run as discord_should_trigger_agent_run,
     verify_interaction_signature as discord_verify_interaction_signature,
 )
@@ -1321,6 +1322,59 @@ async def discord_webhook(request: Request):
                 continue
             goal = discord_build_run_goal_from_event(parsed)
             if not goal:
+                continue
+            # ── DM routing through unified Sage ingress ──
+            # Mirrors discord_bot_runtime_service.py pattern:
+            #   parse → dispatch_command → execute_sage_turn → filter_outbound_reply → send_dm
+            _message_type = str(parsed.get("message_type") or "").strip().lower()
+            if _message_type == "direct_message":
+                try:
+                    from server_modules.sage_command_dispatcher import dispatch_command
+                    from server_modules.sage_turn_adapter import execute_sage_turn
+                    from server_modules.channel_adapter import filter_outbound_reply
+
+                    _dm_user_id = str(parsed.get("user_id") or "").strip()
+                    _dm_text = str(parsed.get("text") or "").strip()
+                    if _dm_user_id and _dm_text:
+                        # Shared command dispatcher first
+                        _cmd_reply = await dispatch_command(
+                            command=_dm_text,
+                            workspace_id=workspace_id,
+                            thread_id="sage-main",
+                            channel_origin="discord_personal",
+                            sender_id=_dm_user_id or None,
+                        )
+                        if _cmd_reply is not None:
+                            discord_send_dm(
+                                credentials=dict(secret),
+                                user_id=_dm_user_id,
+                                content=_cmd_reply,
+                            )
+                            triggered += 1
+                            continue
+                        # Route through unified Sage ingress
+                        _sage_result = await execute_sage_turn(
+                            workspace_id=workspace_id,
+                            message=_dm_text,
+                            channel_origin="discord_personal",
+                            channel_sender_id=_dm_user_id,
+                            channel_sender_name=str(parsed.get("username") or "").strip() or None,
+                        )
+                        _sage_reply = str(_sage_result.message or "").strip()
+                        if _sage_reply:
+                            _filtered = filter_outbound_reply(_sage_reply)
+                            if _filtered:
+                                discord_send_dm(
+                                    credentials=dict(secret),
+                                    user_id=_dm_user_id,
+                                    content=_filtered,
+                                )
+                                triggered += 1
+                except Exception:
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "Discord webhook DM Sage ingress failed", exc_info=True
+                    )
                 continue
             route_result = await agent_channel_router.route_inbound_channel_message(
                 tenant_id=await _resolve_connector_tenant_id(row, workspace_id),
