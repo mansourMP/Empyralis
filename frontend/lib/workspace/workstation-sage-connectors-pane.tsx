@@ -2762,7 +2762,7 @@ export function WorkstationSageConnectorsPane({
   const [telegramHostedPaired, setTelegramHostedPaired] = useState(false);
   const [telegramHostedPolling, setTelegramHostedPolling] = useState(false);
   const [telegramHostedBotUsername, setTelegramHostedBotUsername] = useState<string | null>(null);
-  const [whatsappChannelMode, setWhatsappChannelMode] = useState<ChannelRouteMode>('cloud');
+  const [whatsappChannelMode, setWhatsappChannelMode] = useState<ChannelRouteMode>('hardware');
   const [selectedIntegrationId, setSelectedIntegrationId] = useState<IntegrationWorkbenchCategoryId>(() => (
     normalizeIntegrationCategoryId(searchParams.get('section') ?? searchParams.get('connection'))
     ?? (showProviders ? 'apps' : 'channels')
@@ -5853,7 +5853,7 @@ export function WorkstationSageConnectorsPane({
               setPersonalChannelError(null);
             }}
           >
-            Cloud
+            Business API
           </button>
           <button
             type="button"
@@ -5866,20 +5866,16 @@ export function WorkstationSageConnectorsPane({
               setPersonalChannelError(null);
             }}
           >
-            Personal
-            <span className="sage-channel-route-tab__hint" style={{ fontSize: 10, opacity: 0.6, marginLeft: 4 }}>deprecated</span>
+            Your WhatsApp
           </button>
         </div>
         {whatsappChannelMode === 'cloud' ? (
           renderFlatConnectorCredentialForm(businessSetupRecord)
         ) : (
           <>
-            <AppNotice tone="danger">
-              WhatsApp blocks third-party AI assistants as of January 2026. Personal WhatsApp via Agent Computer is unofficial and subject to bans. Business WhatsApp (Twilio) is the only supported path — use the Cloud tab above.
-            </AppNotice>
             {channelComputerIssue ? (
               <>
-                <AppNotice tone="warning">Agent Computer offline — connect Hardware first.</AppNotice>
+                <AppNotice tone="warning">Agent Computer is offline. Open Empyralis on your Mac to connect your personal WhatsApp.</AppNotice>
                 <div className="sage-unified-expand__actions">
                   <button type="button" className="app-button app-button--primary" onClick={openGatewaySurface}>
                     Go to Hardware
