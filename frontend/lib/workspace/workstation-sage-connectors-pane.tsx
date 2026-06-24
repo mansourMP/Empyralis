@@ -6032,7 +6032,7 @@ export function WorkstationSageConnectorsPane({
     if (record.id === 'telegram') {
       return renderTelegramChannelExpand(record, options);
     }
-    if (record.id === 'whatsapp') {
+    if (record.id === 'whatsapp' || record.id === 'connector_whatsapp_twilio') {
       return renderWhatsappChannelExpand(record, options);
     }
     if (record.id === 'signal_personal' || record.id === 'imessage_personal' || record.id === 'wechat_personal') {
