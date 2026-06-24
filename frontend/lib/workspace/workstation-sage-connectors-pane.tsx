@@ -828,12 +828,12 @@ const CONNECTOR_DEFINITIONS: ConnectorCardDefinition[] = [
   },
   {
     id: 'whatsapp_twilio',
-    label: 'WhatsApp Business',
+    label: 'WhatsApp',
     image: '/brand-assets/channels/whatsapp.svg?v=3',
     connectorIds: ['whatsapp_twilio'],
-    capabilityTags: ['Customer inbox', 'Business sends'],
-    summary: 'Business WhatsApp stays in the Studio connector lane with provider-managed credentials and customer-facing delivery.',
-    setupHint: 'Connect Twilio WhatsApp in Studio when deployed specialists need a reliable business channel.',
+    capabilityTags: ['Messaging', 'Customer chat'],
+    summary: 'Connect WhatsApp through your Gateway to use your own phone number, or through Twilio for a cloud business number.',
+    setupHint: 'Use Gateway for your personal WhatsApp. Use Twilio if you need a separate business number.',
     surfaceScope: 'all',
   },
   {
