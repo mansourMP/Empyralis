@@ -155,7 +155,9 @@ async def get_pool() -> Any:
         if bool(getattr(loop_obj, "is_closed", lambda: False)())
     ]
     for loop_key in stale_loop_keys:
-        _loop_obj, stale_pool, _dsn = _POOLS_BY_LOOP.pop(loop_key)
+        _loop_obj, stale_pool, _dsn = _POOLS_BY_LOOP.pop(loop_key, (None, None, None))
+        if _loop_obj is None:
+            continue
         _POOL_INIT_LOCKS_BY_LOOP.pop(loop_key, None)
         try:
             stale_pool.terminate()

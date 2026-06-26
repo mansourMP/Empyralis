@@ -1620,8 +1620,25 @@ def stream_provider_backed_direct_chat(
                 if trace_plan_failure is not None:
                     yield trace_plan_failure
                 yield services.thinking_step_payload(thinking_iteration, "error", public_error_reply)
-                llm_error = public_error_code
-                iteration_failed = True
+                if executed_any_tools and not final_reply and not iteration_tool_calls:
+                    # Nuclear fallback: DeepSeek drops synthesis after tool execution.
+                    # Build the fallback reply from actual tool results so the user sees real output.
+                    _tool_outputs = [
+                        str(m.get("content") or "").strip()
+                        for m in conversation_messages
+                        if isinstance(m, dict) and str(m.get("role") or "") == "tool"
+                    ]
+                    _tool_summary = "\n\n".join(_tool_outputs[-3:]) if _tool_outputs else ""
+                    final_reply = (
+                        f"Here are the results:\n\n{_tool_summary}"
+                        if _tool_summary
+                        else "I ran the requested commands but could not generate a summary. Please try again."
+                    )
+                    conversation_messages.append({"role": "assistant", "content": final_reply})
+                    llm_error = ""
+                else:
+                    llm_error = public_error_code
+                    iteration_failed = True
                 break
 
         if iteration_failed:
@@ -1630,6 +1647,98 @@ def stream_provider_backed_direct_chat(
             break
     else:
         llm_error = llm_error or f"max_tool_iterations_reached:{max_iterations}"
+
+    # Nuclear fallback: if tools ran and synthesis was injected, succeed instead of error
+    if executed_any_tools and final_reply and not llm_error:
+        actions: List[Dict[str, Any]] = []
+        effective_provider = str(actual_provider or context.get("provider") or "").strip() or None
+        effective_model = str(actual_model or "").strip() or None
+        platform_paid_identity = _platform_paid_ai_identity(
+            availability_payload=availability_payload,
+            metadata=metadata,
+            session_ctx=session_ctx,
+            requested_provider=normalized_requested_provider,
+            requested_model=normalized_requested_model,
+            effective_provider=effective_provider,
+            effective_model=effective_model,
+        )
+        final_response_payload = {
+            "reply": final_reply,
+            "actions": actions,
+            "interventions": [],
+            "suggestions": proactive_suggestions,
+            "mode": "answer",
+            "usage_masked": usage_masked,
+            "provider": actual_provider,
+            "model": actual_model,
+            "attempted_providers": attempted_providers,
+            "error": "",
+            "context_used": services.build_context_used(
+                workspace_id=normalized_workspace_id,
+                requested_provider=normalized_requested_provider,
+                effective_provider=effective_provider,
+                requested_model=normalized_requested_model,
+                effective_model=effective_model,
+                reasoning_effort=normalized_reasoning_effort,
+                connected_systems=connected_systems,
+                tool_capabilities=tool_capabilities,
+                prior_messages_used=prior_messages_used,
+                history_mode=history_mode,
+                run_created=False,
+                fallback_used=False,
+                fallback_reason=fallback_reason,
+            ),
+        }
+        yield {
+            "type": "final",
+            "payload": _mask_platform_paid_final_payload(final_response_payload, platform_paid_identity),
+        }
+        _finish_trace(trace_context, outcome="success", final_message_id=assistant_message_id)
+        try:
+            services.persist_direct_chat_memory_best_effort(
+                workspace_id=normalized_workspace_id,
+                provider=effective_provider,
+                model=effective_model,
+                credentials=direct_chat_credentials,
+                reasoning_effort=normalized_reasoning_effort,
+                prior_messages=compacted_prior_messages,
+                user_message=normalized_message,
+                assistant_reply=final_reply,
+            )
+            services.persist_direct_chat_transcript_best_effort(
+                workspace_id=normalized_workspace_id,
+                thread_id=normalized_thread_id,
+                provider=effective_provider,
+                model=effective_model,
+                messages=conversation_messages,
+                user_message=normalized_message,
+                assistant_reply=final_reply,
+            )
+            _persist_direct_chat_hosted_usage_with_reservation_guard(
+                services=services,
+                hosted_usage_reservation=hosted_usage_reservation,
+                usage_kwargs={
+                    "workspace_id": normalized_workspace_id,
+                    "thread_id": normalized_thread_id,
+                    "session_ctx": session_ctx,
+                    "availability_payload": availability_payload,
+                    "usage_masked": usage_masked,
+                    "requested_provider": normalized_requested_provider,
+                    "effective_provider": effective_provider,
+                    "requested_model": normalized_requested_model,
+                    "effective_model": effective_model,
+                },
+                release_kwargs={
+                    "workspace_id": normalized_workspace_id,
+                    "thread_id": normalized_thread_id,
+                    "session_ctx": session_ctx,
+                },
+            )
+        except Exception:
+            pass
+        finally:
+            services.clear_direct_tool_loop_state(tool_loop_session_key)
+        return
 
     actions = [] if executed_any_tools else services.suggest_actions(normalized_message, availability_payload)
     services.clear_direct_tool_loop_state(tool_loop_session_key)
