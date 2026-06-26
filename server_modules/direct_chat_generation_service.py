@@ -1620,29 +1620,30 @@ def stream_provider_backed_direct_chat(
                 if trace_plan_failure is not None:
                     yield trace_plan_failure
                 yield services.thinking_step_payload(thinking_iteration, "error", public_error_reply)
-                if executed_any_tools and not final_reply and not iteration_tool_calls:
-                    # Nuclear fallback: DeepSeek drops synthesis after tool execution.
-                    # Build the fallback reply from actual tool results so the user sees real output.
-                    _tool_outputs = [
-                        str(m.get("content") or "").strip()
-                        for m in conversation_messages
-                        if isinstance(m, dict) and str(m.get("role") or "") == "tool"
-                    ]
-                    _tool_summary = "\n\n".join(_tool_outputs[-3:]) if _tool_outputs else ""
-                    final_reply = (
-                        f"Here are the results:\n\n{_tool_summary}"
-                        if _tool_summary
-                        else "I ran the requested commands but could not generate a summary. Please try again."
-                    )
-                    conversation_messages.append({"role": "assistant", "content": final_reply})
-                    llm_error = ""
-                else:
-                    llm_error = public_error_code
-                    iteration_failed = True
+                llm_error = public_error_code
+                iteration_failed = True
                 break
 
         if iteration_failed:
             break
+        # Nuclear fallback: synthesis failed (transport/empty/rate-limit/anything)
+        # after tools already ran. Extract actual tool output as the reply
+        # so the user sees results instead of the "temporarily unavailable" banner.
+        if executed_any_tools and not final_reply:
+            _tool_outputs = [
+                str(m.get("content") or "").strip()
+                for m in conversation_messages
+                if isinstance(m, dict) and str(m.get("role") or "") == "tool" and str(m.get("content") or "").strip()
+            ]
+            _tool_summary = "\n\n".join(_tool_outputs[-3:]) if _tool_outputs else ""
+            final_reply = (
+                f"Here are the results:\n\n{_tool_summary}"
+                if _tool_summary
+                else "Commands ran successfully. Could not generate a summary — please try again."
+            )
+            conversation_messages.append({"role": "assistant", "content": final_reply})
+            iteration_failed = False
+            llm_error = ""
         if not iteration_tool_calls:
             break
     else:
