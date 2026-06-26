@@ -1626,30 +1626,31 @@ def stream_provider_backed_direct_chat(
 
         if iteration_failed:
             break
-        # Nuclear fallback: synthesis failed (transport/empty/rate-limit/anything)
-        # after tools already ran. Extract actual tool output as the reply
-        # so the user sees results instead of the "temporarily unavailable" banner.
-        if executed_any_tools and not final_reply:
-            _tool_outputs = [
-                str(m.get("content") or "").strip()
-                for m in conversation_messages
-                if isinstance(m, dict) and str(m.get("role") or "") == "tool" and str(m.get("content") or "").strip()
-            ]
-            _tool_summary = "\n\n".join(_tool_outputs[-3:]) if _tool_outputs else ""
-            final_reply = (
-                f"Here are the results:\n\n{_tool_summary}"
-                if _tool_summary
-                else "Commands ran successfully. Could not generate a summary — please try again."
-            )
-            conversation_messages.append({"role": "assistant", "content": final_reply})
-            iteration_failed = False
-            llm_error = ""
         if not iteration_tool_calls:
             break
     else:
         llm_error = llm_error or f"max_tool_iterations_reached:{max_iterations}"
 
-    # Nuclear fallback: if tools ran and synthesis was injected, succeed instead of error
+    # Nuclear fallback: synthesis failed (transport/empty/rate-limit/anything) after
+    # tools already ran. Runs here, OUTSIDE the for loop, so break cannot skip it.
+    # Extract actual tool output and reply directly — no banner, turn persists normally.
+    if executed_any_tools and not final_reply:
+        _tool_outputs = [
+            str(m.get("content") or "").strip()
+            for m in conversation_messages
+            if isinstance(m, dict) and str(m.get("role") or "") == "tool" and str(m.get("content") or "").strip()
+        ]
+        _tool_summary = "\n\n".join(_tool_outputs[-3:]) if _tool_outputs else ""
+        final_reply = (
+            f"Here are the results:\n\n{_tool_summary}"
+            if _tool_summary
+            else "Commands ran successfully. Could not generate a summary — please try again."
+        )
+        conversation_messages.append({"role": "assistant", "content": final_reply})
+        iteration_failed = False
+        llm_error = ""
+
+    # If tools ran and synthesis was injected, succeed instead of error
     if executed_any_tools and final_reply and not llm_error:
         actions: List[Dict[str, Any]] = []
         effective_provider = str(actual_provider or context.get("provider") or "").strip() or None
