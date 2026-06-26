@@ -5094,7 +5094,7 @@ body[data-emp-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: var(--app-font-13);
+  font-size: var(--app-font-15);
   font-weight: var(--app-weight-medium);
   text-align: left;
   cursor: pointer;
