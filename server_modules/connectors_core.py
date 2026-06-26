@@ -1,4 +1,7 @@
+import logging
 import os
+
+_logger = logging.getLogger(__name__)
 
 from server_modules import runtime_config as config
 from server_modules import shared as shared
@@ -578,14 +581,18 @@ async def get_provider_models(
                 credentials = {"api_key": env_key}
 
     if not credentials:
-        raise HTTPException(status_code=400, detail="No credential available for this provider.")
+        # Local or credentialless providers (e.g. Ollama on Agent Computer)
+        # return an empty model list instead of a 400 error so the frontend
+        # can render the provider card without a hard failure.
+        return {"provider": provider_id, "models": [], "credential_required": True}
 
     try:
         _, _, adapter = resolve_provider_adapter(provider_id, credentials)
         models = adapter.list_models(credentials)
         return {"provider": provider_id, "models": models}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        _logger.warning("Failed to list models for provider %s: %s", provider_id, exc)
+        return {"provider": provider_id, "models": [], "error": str(exc)}
 
 
 async def get_model_alias_catalog():

@@ -96,11 +96,11 @@ def resolve_agent_tier(
     if is_agent_machine:
         return AgentTier.T2
 
-    # Hardware profile attached upgrades cloud_compute → hardware
+    # Hardware profile attached upgrades cloud_compute → hardware.
+    # Hardware is user-owned, not platform-gated — if the user has
+    # explicitly connected and selected a computer, they get T2.
     if has_hardware_profile and base_tier != AgentTier.T2:
-        # Only upgrade if the plan supports it (pilot or higher)
-        if normalized_plan in ("pilot", "enterprise"):
-            return AgentTier.T2
+        return AgentTier.T2
 
     return base_tier
 

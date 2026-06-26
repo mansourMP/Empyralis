@@ -15,7 +15,7 @@ import { useWorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
 import { emitWorkstationProviderChanged } from '@/lib/workspace/workstation-provider-events';
 import { useWorkspaceServices } from '@/lib/workspace/workspace-services';
 import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
-import { DataPaneError } from '@/lib/workspace/data-pane-error';
+
 import { platformSafeImage, platformSafeLabel } from '@/lib/workspace/platform-brand';
 import { normalizeHostedCreditStateForChat } from '@/lib/workspace/workstation-chat-pane-model';
 import type { ChatHostedCreditState } from '@/lib/workspace/workstation-chat-pane-model';
@@ -1995,12 +1995,7 @@ function humanizeConnectionSetupError(error: unknown, label = 'This connection')
   if (errorMentionsMissingAccessToken(error) || errorMentionsMissingCredential(error)) {
     return `${label} is not connected yet. Click Connect to sign in with the provider.`;
   }
-  if (lower.includes('permission') || lower.includes('forbidden') || lower.includes('owner')) {
-    return `${label} can only be connected by a workspace owner.`;
-  }
-  if (lower.includes('not launch-ready') || lower.includes('not available yet')) {
-    return `${label} setup is not available in this environment yet.`;
-  }
+  // Empyralis is single-user — show raw backend error instead of role-based mislabeling.
   return normalized || `${label} could not start setup.`;
 }
 
@@ -2753,6 +2748,18 @@ export function WorkstationSageConnectorsPane({
   const [connectionStatusItems, setConnectionStatusItems] = useState<ConnectionStatusItem[]>(() => cachedState?.connectionStatusItems ?? []);
   const [isLoading, setIsLoading] = useState(() => cachedState === null);
   const [error, setError] = useState<unknown>(null);
+  const [cardErrors, setCardErrors] = useState<Record<string, string>>({});
+  const [oauthCallbackError, setOAuthCallbackError] = useState<{ message: string; provider: string } | null>(null);
+  function setCardError(cardId: string, message: string) {
+    setCardErrors((prev) => ({ ...prev, [cardId]: message }));
+  }
+  function clearCardError(cardId: string) {
+    setCardErrors((prev) => {
+      const next = { ...prev };
+      delete next[cardId];
+      return next;
+    });
+  }
   const [personalChannelError, setPersonalChannelError] = useState<string | null>(null);
   const [, setStatus] = useState<string | null>(null);
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
@@ -2762,6 +2769,12 @@ export function WorkstationSageConnectorsPane({
   const [telegramHostedPaired, setTelegramHostedPaired] = useState(false);
   const [telegramHostedPolling, setTelegramHostedPolling] = useState(false);
   const [telegramHostedBotUsername, setTelegramHostedBotUsername] = useState<string | null>(null);
+  const [discordPairingLoading, setDiscordPairingLoading] = useState(false);
+  const [discordPaired, setDiscordPaired] = useState(false);
+  const [discordPairingCode, setDiscordPairingCode] = useState<string | null>(null);
+  const [discordChannelMode, setDiscordChannelMode] = useState<'bot' | 'personal'>('bot');
+  const [discordPublicConfig, setDiscordPublicConfig] = useState<{ client_id: string; bot_user_id: string } | null>(null);
+  const [discordOAuthUrl, setDiscordOAuthUrl] = useState<string | null>(null);
   const [whatsappChannelMode, setWhatsappChannelMode] = useState<ChannelRouteMode>('hardware');
   const [selectedIntegrationId, setSelectedIntegrationId] = useState<IntegrationWorkbenchCategoryId>(() => (
     normalizeIntegrationCategoryId(searchParams.get('section') ?? searchParams.get('connection'))
@@ -2948,26 +2961,46 @@ export function WorkstationSageConnectorsPane({
       }
     } catch { /* info fetch is best-effort */ }
 
-    if (catalogResult.status === 'rejected') {
-      throw catalogResult.reason instanceof Error
-        ? catalogResult.reason
-        : new Error('Provider catalog is unavailable right now.');
-    }
+    // Load Discord pairing status so it survives page refresh.
+    try {
+      const discordStatusResp = await fetch(
+        `/api/sage/discord/pair/status?workspace_id=${encodeURIComponent(workspaceId)}`,
+        { headers: buildCookieAuthHeaders('GET'), credentials: 'include' },
+      );
+      if (discordStatusResp.ok) {
+        const discordStatus = await discordStatusResp.json() as { paired: boolean; has_pending_code: boolean };
+        setDiscordPaired(discordStatus.paired === true);
+      }
+      // Load public Discord identifiers (client_id, bot_user_id) for install URL + open-bot link.
+      const discordConfigResp = await fetch('/api/sage/discord/public-config', {
+        headers: buildCookieAuthHeaders('GET'), credentials: 'include',
+      });
+      if (discordConfigResp.ok) {
+        const config = await discordConfigResp.json() as { client_id: string; bot_user_id: string };
+        setDiscordPublicConfig(config);
+      }
+      // Load OAuth URL for one-click identify-bind.
+      const discordOAuthUrlResp = await fetch(
+        `/api/sage/discord/oauth/url?workspace_id=${encodeURIComponent(workspaceId)}`,
+        { headers: buildCookieAuthHeaders('GET'), credentials: 'include' },
+      );
+      if (discordOAuthUrlResp.ok) {
+        const oauthData = await discordOAuthUrlResp.json() as { url: string };
+        if (oauthData.url) setDiscordOAuthUrl(oauthData.url);
+      }
+    } catch { /* pairing check is best-effort */ }
+
+    // Catalog failure is non-fatal — the page still renders with an empty catalog.
+    // Per-card errors are handled individually via cardErrors state.
   }, [cacheKey, services.client, surface, workspaceId]);
 
   useEffect(() => {
     let cancelled = false;
     setIsLoading(sageConnectorsPaneCache.get(cacheKey) === null);
-    setError(null);
     void loadState()
-      .catch((loadError) => {
-        if (!cancelled) {
-          if (errorMentionsMissingCredential(loadError) || errorMentionsMissingAccessToken(loadError)) {
-            setError(null);
-            return;
-          }
-          setError(loadError);
-        }
+      .catch(() => {
+        // loadState is defensive; rejections only surface transport errors
+        // that individual cards handle via their own fetch paths.
       })
       .finally(() => {
         if (!cancelled) {
@@ -2980,17 +3013,67 @@ export function WorkstationSageConnectorsPane({
   }, [cacheKey, loadState]);
 
   useEffect(() => {
+    const connectedProvider = readString(searchParams.get('connected'));
     const callbackError = readString(searchParams.get('connection_error'));
-    if (!callbackError) {
-      return;
+
+    if (connectedProvider || callbackError) {
+      // Reload connection status so cards reflect the OAuth result immediately.
+      void loadState();
     }
-    setError(humanizeConnectionSetupError(new Error(callbackError), 'Connection'));
-    if (typeof window !== 'undefined') {
+
+    if (connectedProvider && typeof window !== 'undefined') {
       const nextUrl = new URL(window.location.href);
-      nextUrl.searchParams.delete('connection_error');
+      nextUrl.searchParams.delete('connected');
       window.history.replaceState(window.history.state, '', nextUrl.toString());
     }
-  }, [searchParams]);
+
+    if (callbackError) {
+      const errorMessage = humanizeConnectionSetupError(new Error(callbackError), 'Connection');
+      // Store the callback error so individual cards can display it.
+      // Cards match on their connection provider when expanded.
+      setOAuthCallbackError({ message: errorMessage, provider: '' });
+      if (typeof window !== 'undefined') {
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.delete('connection_error');
+        window.history.replaceState(window.history.state, '', nextUrl.toString());
+      }
+    }
+  }, [searchParams, loadState]);
+
+  // Detect Discord OAuth completion — both from popup postMessage and from URL query param.
+  useEffect(() => {
+    // Case 1: This window IS the OAuth popup (redirected back with ?discord=connected).
+    const discordStatus = readString(searchParams.get('discord'));
+    if (discordStatus === 'connected') {
+      setDiscordPaired(true);
+      // Notify the opener window so it can update its UI without a refresh.
+      if (typeof window !== 'undefined' && window.opener) {
+        try {
+          window.opener.postMessage({ type: 'discord-oauth-complete' }, window.location.origin);
+        } catch { /* cross-origin guard */ }
+      }
+      // Clean up the query param.
+      if (typeof window !== 'undefined') {
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.delete('discord');
+        nextUrl.searchParams.delete('dm');
+        window.history.replaceState(window.history.state, '', nextUrl.toString());
+      }
+    }
+
+    // Case 2: This window OPENED the popup and receives the postMessage.
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'discord-oauth-complete') {
+        setDiscordPaired(true);
+        // Re-fetch pair status to confirm server-side state.
+        void loadState();
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('message', handler);
+      return () => window.removeEventListener('message', handler);
+    }
+  }, [searchParams, loadState]);
 
   const localCompanionOnline = useMemo(
     () => bootstrap.runtime.runtimeTargets.some((target) => target.id === 'local_companion' && target.online),
@@ -3914,12 +3997,35 @@ export function WorkstationSageConnectorsPane({
     }
   }
 
+  async function startDiscordPairing() {
+    setDiscordPairingLoading(true);
+    try {
+      const resp = await fetch('/api/sage/discord/pair/start', {
+        method: 'POST',
+        headers: buildCookieAuthHeaders('POST', { 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ workspace_id: bootstrap.workspace.id }),
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error((errData as any)?.detail || 'Failed to start pairing');
+      }
+      const data = await resp.json() as { pairing_code: string; status: string };
+      setDiscordPairingCode(data.pairing_code || null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start Discord pairing.');
+    } finally {
+      setDiscordPairingLoading(false);
+    }
+  }
+
   async function handleConnectionSetupStart(record: ExternalIntegrationCardRecord) {
     const connectionId = readString(record.connectionId);
     if (!connectionId) {
-      setError('Connection setup is not available yet.');
+      setCardError(record.id, 'Connection setup is not available yet.');
       return;
     }
+    clearCardError(record.id);
     setBusyCardId(record.id);
     try {
       const response = await services.client.startConnectionSetup({
@@ -3971,7 +4077,10 @@ export function WorkstationSageConnectorsPane({
       setError(null);
       await loadState().catch(() => undefined);
     } catch (connectionError) {
-      setError(humanizeConnectionSetupError(connectionError, record.label));
+      const message = humanizeConnectionSetupError(connectionError, record.label);
+      setCardError(record.id, message);
+      // Keep the card expanded so the user can see the error and retry
+      setExpandedCardId(record.id);
     } finally {
       setBusyCardId(null);
     }
@@ -5796,6 +5905,213 @@ export function WorkstationSageConnectorsPane({
     );
   }
 
+  function renderDiscordChannelExpand(record: ExternalIntegrationCardRecord, options: { showClose?: boolean } = {}) {
+    const showClose = options.showClose !== false;
+    const botInstallUrl = discordPublicConfig?.client_id
+      ? `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(discordPublicConfig.client_id)}&scope=bot&permissions=2048`
+      : null;
+    const botUserUrl = discordPublicConfig?.bot_user_id
+      ? `https://discord.com/users/${encodeURIComponent(discordPublicConfig.bot_user_id)}`
+      : null;
+
+    return (
+      <div className="sage-unified-expand sage-channel-expand">
+        <div className="sage-unified-expand__header">
+          <div className="sage-channel-expand__identity">
+            <BrandLogo
+              id={record.id}
+              label={record.label}
+              src={record.image}
+              failedLogos={failedLogos}
+              onError={markLogoFailed}
+            />
+            <strong className="sage-unified-expand__title">{record.label}</strong>
+          </div>
+          {showClose ? (
+            <button
+              type="button"
+              className="sage-unified-expand__close"
+              onClick={() => setExpandedCardId(null)}
+              aria-label="Close Discord"
+            >
+              <X size={14} strokeWidth={1.9} aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
+        <div className="sage-channel-route-tabs" role="tablist" aria-label="Discord setup type">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={discordChannelMode === 'bot'}
+            className={joinClassNames('sage-channel-route-tab', discordChannelMode === 'bot' && 'sage-channel-route-tab--active')}
+            onClick={() => { setDiscordChannelMode('bot'); }}
+          >
+            Bot
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={discordChannelMode === 'personal'}
+            className={joinClassNames('sage-channel-route-tab', discordChannelMode === 'personal' && 'sage-channel-route-tab--active')}
+            onClick={() => { setDiscordChannelMode('personal'); }}
+          >
+            Personal
+            <span className="sage-channel-route-tab__hint" style={{ fontSize: 10, opacity: 0.6, marginLeft: 4 }}>unstable</span>
+          </button>
+        </div>
+        {discordChannelMode === 'bot' ? (
+          <>
+            <div className="sage-unified-expand__text">
+              Sage on Discord is the official Empyralis Discord bot. Connect your Discord account in one click and DM the bot to start messaging Sage instantly.
+            </div>
+            {!discordPaired ? (
+              <>
+                <div className="sage-unified-expand__actions">
+                  <button
+                    type="button"
+                    className="app-button app-button--primary"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                    onClick={async () => {
+                      let url = discordOAuthUrl;
+                      if (!url) {
+                        try {
+                          const resp = await fetch(
+                            `/api/sage/discord/oauth/url?workspace_id=${encodeURIComponent(bootstrap.workspace.id)}`,
+                            { headers: buildCookieAuthHeaders('GET'), credentials: 'include' },
+                          );
+                          if (resp.ok) {
+                            const data = await resp.json() as { url?: string };
+                            if (data.url) {
+                              url = data.url;
+                              setDiscordOAuthUrl(data.url);
+                            }
+                          } else {
+                            const txt = await resp.text().catch(() => '');
+                            alert(`Could not start Discord OAuth (${resp.status}). ${txt.slice(0, 200)}`);
+                            return;
+                          }
+                        } catch (err) {
+                          alert(`Could not reach Discord OAuth endpoint: ${err}`);
+                          return;
+                        }
+                      }
+                      if (!url) {
+                        alert('Discord OAuth URL is not available. Use the pairing code below as a fallback.');
+                        return;
+                      }
+                      window.location.href = url;
+                    }}
+                  >
+                    Connect with Discord
+                  </button>
+                </div>
+                <details style={{ marginTop: 12 }}>
+                  <summary style={{ fontSize: 13, opacity: 0.6, cursor: 'pointer' }}>
+                    Or use a pairing code instead
+                  </summary>
+                  <div style={{ marginTop: 8 }}>
+                    {discordPairingCode ? (
+                      <div className="sage-unified-expand__pairing">
+                        <div className="sage-unified-expand__pairing-code">
+                          <span className="sage-unified-expand__pairing-label">Pairing code</span>
+                          <code className="sage-unified-expand__pairing-value">{discordPairingCode}</code>
+                        </div>
+                        <p className="sage-unified-expand__text" style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
+                          DM @EmpyralisBot and send{' '}
+                          <code style={{ fontWeight: 600 }}>/pair {discordPairingCode}</code>
+                        </p>
+                        {botUserUrl ? (
+                          <a
+                            href={botUserUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="app-button app-button--primary"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 10 }}
+                          >
+                            Open @EmpyralisBot on Discord
+                          </a>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="app-button app-button--primary"
+                        disabled={discordPairingLoading}
+                        onClick={() => { void startDiscordPairing(); }}
+                      >
+                        {discordPairingLoading ? 'Generating code...' : 'Generate pairing code'}
+                      </button>
+                    )}
+                  </div>
+                </details>
+              </>
+            ) : (
+              <div className="sage-unified-expand__pairing">
+                <div className="sage-unified-expand__pairing-code" style={{ color: 'var(--app-color-success, #22c55e)' }}>
+                  <span className="sage-unified-expand__pairing-label">Status</span>
+                  <code className="sage-unified-expand__pairing-value" style={{ fontSize: 16 }}>✓ Connected to Discord DM</code>
+                </div>
+                <p className="sage-unified-expand__text" style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
+                  ✓ Connected! Open Discord and DM @EmpyralisBot to start.
+                </p>
+                <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    type="button"
+                    className="connector-disconnect-btn"
+                    onClick={async () => {
+                      try {
+                        await fetch(
+                          '/api/sage/discord/pair?workspace_id=' + encodeURIComponent(bootstrap.workspace.id),
+                          { method: 'DELETE', headers: buildCookieAuthHeaders('DELETE'), credentials: 'include' }
+                        );
+                      } catch { /* ignore */ }
+                      setDiscordPaired(false);
+                      setDiscordPairingCode(null);
+                    }}
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <AppNotice tone="warning">
+              Discord doesn't support real personal-account automation safely. Install the bot to your own Discord server instead — it will respond to @mentions and commands in any channel it can access.
+            </AppNotice>
+            <div className="sage-unified-expand__text">
+              Install Sage as a bot in your own Discord server. Sage will respond to @mentions and commands in any channel it can access.
+            </div>
+            {botInstallUrl ? (
+              <div className="sage-unified-expand__actions" style={{ marginTop: 8 }}>
+                <a
+                  href={botInstallUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="app-button app-button--primary"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                >
+                  Install in your server
+                </a>
+              </div>
+            ) : (
+              <AppNotice tone="warning">Discord Application ID is not configured. The install URL cannot be generated.</AppNotice>
+            )}
+            <p className="sage-unified-expand__text" style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
+              Bot installed? Check your Discord server — the bot starts responding automatically once added.
+            </p>
+            <div className="sage-unified-expand__actions" style={{ marginTop: 8 }}>
+              <AppButton type="button" tone="secondary" onClick={() => setDiscordChannelMode('bot')}>
+                ← Use Bot tab instead
+              </AppButton>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
   function renderWhatsappChannelExpand(record: ExternalIntegrationCardRecord, options: { showClose?: boolean } = {}) {
     const showClose = options.showClose !== false;
     const businessSetupRecord: ExternalIntegrationCardRecord = {
@@ -6035,6 +6351,9 @@ export function WorkstationSageConnectorsPane({
     if (record.id === 'whatsapp' || record.id === 'connector_whatsapp_twilio') {
       return renderWhatsappChannelExpand(record, options);
     }
+    if (record.id === 'connector_discord_bot') {
+      return renderDiscordChannelExpand(record, options);
+    }
     if (record.id === 'signal_personal' || record.id === 'imessage_personal' || record.id === 'wechat_personal') {
       return renderBridgeChannelExpand(record, options);
     }
@@ -6111,19 +6430,36 @@ export function WorkstationSageConnectorsPane({
           <AppNotice tone="warning">{record.consumerSetupMessage}</AppNotice>
         ) : null}
         {channelComputerIssue ? <AppNotice tone="warning">{channelComputerIssue.message}</AppNotice> : null}
+        {cardErrors[record.id] ? <AppNotice tone="danger">{cardErrors[record.id]}</AppNotice> : null}
+        {!cardErrors[record.id] && oauthCallbackError && record.connectionId ? (
+          <AppNotice tone="danger">{oauthCallbackError.message}</AppNotice>
+        ) : null}
         {showConnectorCredentialForm ? renderConnectorCredentialForm(record) : null}
         <div className="sage-unified-expand__actions">
           {connectedConnector && sourceConnector ? (
-            <AppButton
-              type="button"
-              tone="ghost"
-              disabled={busyCardId === sourceConnector.id}
-              onClick={() => {
-                void handleConnectorDisconnect(sourceConnector);
-              }}
-            >
-              {busyCardId === sourceConnector.id ? 'Disconnecting...' : 'Disconnect'}
-            </AppButton>
+            <>
+              <AppButton
+                type="button"
+                tone="ghost"
+                disabled={busyCardId === sourceConnector.id}
+                onClick={() => {
+                  void handleConnectorDisconnect(sourceConnector);
+                }}
+              >
+                {busyCardId === sourceConnector.id ? 'Disconnecting...' : 'Disconnect'}
+              </AppButton>
+              <AppButton
+                type="button"
+                tone="secondary"
+                disabled={busyCardId === record.id}
+                onClick={() => {
+                  clearCardError(record.id);
+                  void handleConnectionSetupStart(record);
+                }}
+              >
+                {busyCardId === record.id ? 'Reconnecting...' : 'Reconnect'}
+              </AppButton>
+            </>
           ) : null}
           {channelComputerIssue ? (
             <AppButton
@@ -6339,6 +6675,91 @@ export function WorkstationSageConnectorsPane({
           <>
             <div className="sage-unified-expand__text">{record.definition.summary}</div>
             <div className="sage-unified-expand__text">{record.definition.setupHint}</div>
+            {/* Discord pairing UI — OAuth identify-bind with pairing-code fallback */}
+            {record.id === 'discord_bot' && !discordPaired ? (
+              <div className="sage-unified-expand__pairing" style={{ marginTop: 12 }}>
+                <button
+                  type="button"
+                  className="app-button app-button--primary"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                  onClick={() => {
+                    if (discordOAuthUrl) {
+                      const popup = window.open(discordOAuthUrl, 'discord-oauth', 'width=500,height=700');
+                      if (!popup) window.location.href = discordOAuthUrl;
+                    }
+                  }}
+                >
+                  Connect with Discord
+                </button>
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{ fontSize: 13, opacity: 0.6, cursor: 'pointer' }}>
+                    Or use a pairing code instead
+                  </summary>
+                  <div style={{ marginTop: 8 }}>
+                    {discordPairingCode ? (
+                      <>
+                        <div className="sage-unified-expand__pairing-code">
+                          <span className="sage-unified-expand__pairing-label">Pairing code</span>
+                          <code className="sage-unified-expand__pairing-value">{discordPairingCode}</code>
+                        </div>
+                        <p className="sage-unified-expand__text" style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
+                          DM @EmpyralisBot and send{' '}
+                          <code style={{ fontWeight: 600 }}>/pair {discordPairingCode}</code>
+                        </p>
+                        {(discordPublicConfig?.bot_user_id) ? (
+                          <a
+                            href={`https://discord.com/users/${encodeURIComponent(discordPublicConfig.bot_user_id)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="app-button app-button--primary"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 10 }}
+                          >
+                            Open @EmpyralisBot on Discord
+                          </a>
+                        ) : null}
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="app-button app-button--primary"
+                        disabled={discordPairingLoading}
+                        onClick={() => { void startDiscordPairing(); }}
+                      >
+                        {discordPairingLoading ? 'Generating code...' : 'Generate pairing code'}
+                      </button>
+                    )}
+                  </div>
+                </details>
+              </div>
+            ) : record.id === 'discord_bot' && discordPaired ? (
+              <div className="sage-unified-expand__pairing" style={{ marginTop: 12 }}>
+                <div className="sage-unified-expand__pairing-code" style={{ color: 'var(--app-color-success, #22c55e)' }}>
+                  <span className="sage-unified-expand__pairing-label">Status</span>
+                  <code className="sage-unified-expand__pairing-value" style={{ fontSize: 16 }}>✓ Connected to Discord DM</code>
+                </div>
+                <p className="sage-unified-expand__text" style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
+                  ✓ Connected! Open Discord and DM @EmpyralisBot to start.
+                </p>
+                <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    type="button"
+                    className="connector-disconnect-btn"
+                    onClick={async () => {
+                      try {
+                        await fetch(
+                          '/api/sage/discord/pair?workspace_id=' + encodeURIComponent(bootstrap.workspace.id),
+                          { method: 'DELETE', headers: buildCookieAuthHeaders('DELETE'), credentials: 'include' }
+                        );
+                      } catch { /* ignore */ }
+                      setDiscordPaired(false);
+                      setDiscordPairingCode(null);
+                    }}
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </div>
+            ) : null}
             {renderConnectorConfigDetails(record)}
             <div className="sage-unified-expand__actions">
               <button
@@ -7238,7 +7659,7 @@ export function WorkstationSageConnectorsPane({
         ) : null}
         {renderSelectedIntegrationDetail()}
       </WorkstationSplitWorkbench>
-      {error ? <DataPaneError error={error} onRetry={() => void loadState()} label="Connections" /> : null}
+      {/* Global error banner removed — per-card errors are shown inline on each card */}
 
       {renderComputerConnectSheet()}
 

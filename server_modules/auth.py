@@ -5705,6 +5705,58 @@ def get_current_user(
     raise HTTPException(status_code=401, detail="Authentication required.")
 
 
+def resolve_oauth_user_from_state(user_id: str, workspace_id: str) -> Dict[str, Any]:
+    """Resolve user for OAuth callback when session cookie is unavailable.
+
+    Safari and other browsers block cross-site cookies on OAuth redirects
+    (discord.com → empyralis.ai).  The session cookie is missing so get_current_user
+    throws 401.  Instead we look up the user by the user_id that was stored in the
+    HMAC-signed OAuth state parameter during start_oauth.
+    """
+    clean_user_id = str(user_id or "").strip()
+    if not clean_user_id:
+        raise HTTPException(status_code=401, detail="User identity missing from OAuth state.")
+    user = _find_user_by_id(clean_user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found.")
+    email = str(user.get("email") or "").strip().lower()
+    membership_rows = _list_workspace_memberships(clean_user_id)
+    workspace_ids = [
+        _normalize_workspace_token(item.get("workspace_id"))
+        for item in membership_rows
+        if isinstance(item, dict) and str(item.get("workspace_id") or "").strip()
+    ]
+    clean_workspace_id = _normalize_workspace_token(workspace_id)
+    if clean_workspace_id not in workspace_ids and clean_workspace_id not in ("ws-1", "default"):
+        raise HTTPException(status_code=403, detail="Workspace is not accessible for this user.")
+    # Single-user platform — the user IS the owner.
+    workspace_access = _effective_workspace_access(
+        user_id=clean_user_id,
+        email=email,
+        role="owner",
+        auth_type="bearer",
+        is_admin=_has_auth_admin_identity(clean_user_id, email),
+        workspace_ids=workspace_ids,
+    )
+    return {
+        "user_id": clean_user_id,
+        "auth_type": "bearer",
+        "email": email or None,
+        "tenant_ids": [entry.get("tenant_id") for entry in workspace_access.values() if isinstance(entry, dict)],
+        "workspace_ids": workspace_ids,
+        "workspace_roles": {
+            wid: entry.get("role")
+            for wid, entry in workspace_access.items()
+            if isinstance(entry, dict)
+        },
+        "workspace_access": workspace_access,
+        "role": "owner",
+        "is_admin": _has_auth_admin_identity(clean_user_id, email),
+        "auth_admin": _has_auth_admin_identity(clean_user_id, email),
+        "identity_versions": {},
+    }
+
+
 def ensure_public_registration_enabled() -> bool:
     if not public_registration_enabled():
         raise HTTPException(status_code=404, detail="Public registration is disabled.")

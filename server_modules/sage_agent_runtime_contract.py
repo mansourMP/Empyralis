@@ -51,6 +51,7 @@ class SageTurnResult:
     blocked_tools: list[dict] = field(default_factory=list)
     approvals_required: list[dict] = field(default_factory=list)
     memory_updates: list[dict] = field(default_factory=list)
+    tool_progress_messages: list[str] = field(default_factory=list)
     proof_log: Optional[dict] = None
     proof_log_id: str = ""
     trace_id: str = ""
@@ -68,6 +69,7 @@ class SageTurnResult:
             "blocked_tools": list(self.blocked_tools),
             "approvals_required": list(self.approvals_required),
             "memory_updates": list(self.memory_updates),
+            "tool_progress_messages": list(self.tool_progress_messages),
             "proof_log": self.proof_log,
             "proof_log_id": self.proof_log_id,
             "trace_id": self.trace_id,

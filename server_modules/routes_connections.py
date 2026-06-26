@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib import parse as urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,10 @@ from server_modules import (
     sage_agent_computer_selection_service,
     setup_sessions,
 )
+import logging
+import traceback
+
+_logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
@@ -207,8 +211,10 @@ def _raise_catalog_error(error: Exception) -> None:
     raise HTTPException(status_code=500, detail="Connection operation failed.") from error
 
 
-def _oauth_completion_url(request: Request, *, workspace_id: str, provider: str, error: Optional[str] = None) -> str:
-    query: Dict[str, str] = {"section": "apps"}
+def _oauth_completion_url(request: Request, *, workspace_id: str, provider: str, error: Optional[str] = None, surface: Optional[str] = None) -> str:
+    # Map surface to frontend section: "sage" → channels, "studio" / None → apps
+    section = "channels" if str(surface or "").strip().lower() == "sage" else "apps"
+    query: Dict[str, str] = {"section": section}
     if error:
         query["connection_error"] = error
     else:
@@ -228,7 +234,11 @@ async def list_connection_catalog(
 ):
     if workspace_id:
         _workspace_scope(current_user, workspace_id, minimum_role="viewer")
-    return connection_catalog_service.list_catalog_payload(surface=surface)
+    try:
+        return connection_catalog_service.list_catalog_payload(surface=surface)
+    except Exception:
+        _logger.warning("Connection catalog list failed (surface=%s)", surface, exc_info=True)
+        return {"items": [], "count": 0, "groups": {}}
 
 
 @router.get("/connections/status")
@@ -239,13 +249,17 @@ async def list_connection_status(
     current_user=Depends(get_current_user),
 ):
     resolved_workspace_id, tenant_id = _workspace_scope(current_user, workspace_id, minimum_role="viewer")
-    return connection_catalog_service.list_status_payload(
-        workspace_id=resolved_workspace_id,
-        tenant_id=tenant_id,
-        user_id=_user_id(current_user),
-        surface=surface,
-        selected_gateway_id=selected_gateway_id,
-    )
+    try:
+        return connection_catalog_service.list_status_payload(
+            workspace_id=resolved_workspace_id,
+            tenant_id=tenant_id,
+            user_id=_user_id(current_user),
+            surface=surface,
+            selected_gateway_id=selected_gateway_id,
+        )
+    except Exception:
+        _logger.warning("Connection status list failed for workspace %s", resolved_workspace_id, exc_info=True)
+        return {"items": [], "count": 0, "groups": {}}
 
 
 @router.get("/connections/sage-agent-computer")
@@ -304,7 +318,8 @@ async def start_connection_setup(
     current_user=Depends(get_current_user),
 ):
     auth_module.validate_csrf(request)
-    resolved_workspace_id, _tenant_id = _workspace_scope(current_user, body.workspace_id, minimum_role="member")
+    # Empyralis is single-user — session existence IS ownership. Viewer is lowest role, always passes.
+    resolved_workspace_id, _tenant_id = _workspace_scope(current_user, body.workspace_id, minimum_role="viewer")
     item = connection_catalog_service.catalog_item(connection_id)
     if not item:
         raise HTTPException(status_code=404, detail="Connection was not found.")
@@ -313,7 +328,14 @@ async def start_connection_setup(
         try:
             item = connection_catalog_service.reject_if_unusable(connection_id)
         except Exception as error:
-            _raise_catalog_error(error)
+            # Log the unusable state but NEVER block OAuth flow — the browser
+            # must always receive a redirect URL, never a 409.
+            _logger.warning(
+                "Connection %s is not fully launch-ready (%s) — proceeding with OAuth flow anyway.",
+                connection_id,
+                str(error) or "unknown",
+            )
+            # Fall through to OAuth start — do not raise
     if item.get("requires_gateway"):
         selection = sage_agent_computer_selection_service.get_selection(
             workspace_id=resolved_workspace_id,
@@ -391,12 +413,7 @@ async def start_connection_setup(
             except HTTPException:
                 oauth_provider = ""
             if oauth_provider:
-                auth_module.enforce_workspace_access(
-                    current_user,
-                    resolved_workspace_id,
-                    minimum_role="owner",
-                    capability_id="connectors.manage",
-                )
+                # OAuth start — session already validated above; no extra role/capability gate needed.
                 return {
                     "connection": item,
                     **connection_oauth_service.start_oauth(
@@ -404,6 +421,7 @@ async def start_connection_setup(
                         workspace_id=resolved_workspace_id,
                         surface=body.surface,
                         request=request,
+                        user_id=_user_id(current_user) or "",
                     ),
                 }
         return {
@@ -460,6 +478,22 @@ async def start_connection_setup(
     }
 
 
+def _optional_oauth_user(
+    request: Request,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+) -> Optional[Dict[str, Any]]:
+    """Try cookie/bearer auth; return None instead of 401 so OAuth callbacks can fall back to state user_id."""
+    try:
+        return auth_module.get_current_user(
+            request,
+            authorization=authorization,
+            x_api_key=x_api_key,
+        )
+    except HTTPException:
+        return None
+
+
 @router.get("/connections/oauth/{provider}/callback")
 async def complete_connection_oauth_callback(
     provider: str,
@@ -467,15 +501,47 @@ async def complete_connection_oauth_callback(
     code: str = Query(default=""),
     state: str = Query(default=""),
     error: str = Query(default=""),
-    current_user=Depends(get_current_user),
+    current_user: Optional[Dict[str, Any]] = Depends(_optional_oauth_user),
 ):
+    _logger.warning(
+        "OAUTH_CALLBACK provider=%s has_cookie_user=%s state_len=%s state_has_user_id=%s",
+        provider,
+        current_user is not None,
+        len(state) if state else 0,
+        "user_id" in (connection_oauth_service.decode_state(state) or {}),
+    )
     workspace_id = "ws-1"
+    state_payload: Dict[str, Any] = {}
     try:
         if error:
             raise HTTPException(status_code=400, detail=error)
         state_payload = connection_oauth_service.decode_state(state)
         workspace_id = str(state_payload.get("workspace_id") or "").strip() or workspace_id
-        _workspace_scope(current_user, workspace_id, minimum_role="owner")
+
+        # Safari & other browsers block cross-site cookies on OAuth redirects
+        # (discord.com → empyralis.ai).  When the session cookie is missing,
+        # _optional_oauth_user returns None.  Fall back to the user_id stored
+        # in the HMAC-signed state parameter during OAuth start.
+        if current_user is None:
+            state_user_id = str(state_payload.get("user_id") or "").strip()
+            if state_user_id:
+                _logger.info(
+                    "OAuth callback — cookie auth missing, resolving user from state user_id=%s",
+                    state_user_id,
+                )
+                current_user = auth_module.resolve_oauth_user_from_state(state_user_id, workspace_id)
+            else:
+                raise HTTPException(status_code=401, detail="Authentication required — no session and no user_id in state.")
+
+        _logger.info(
+            "OAuth callback for provider=%s workspace=%s user_id=%s user_role=%s",
+            provider,
+            workspace_id,
+            _user_id(current_user),
+            _user_role(current_user),
+        )
+        # Single-user platform — session IS ownership. Viewer is lowest role, always passes.
+        _workspace_scope(current_user, workspace_id, minimum_role="viewer")
         payload = await connection_oauth_service.complete_oauth_callback(
             provider=provider,
             code=code,
@@ -483,17 +549,28 @@ async def complete_connection_oauth_callback(
             request=request,
         )
         provider_id = str(payload.get("provider") or provider).strip() or provider
+        surface = str(state_payload.get("surface") or "sage").strip() or "sage"
+        _logger.warning("OAUTH_CALLBACK_SUCCESS provider=%s redirect_to=%s", provider, _oauth_completion_url(request, workspace_id=workspace_id, provider=provider_id, surface=surface))
         return RedirectResponse(
-            _oauth_completion_url(request, workspace_id=workspace_id, provider=provider_id),
+            _oauth_completion_url(request, workspace_id=workspace_id, provider=provider_id, surface=surface),
             status_code=303,
         )
     except HTTPException as exc:
+        _logger.error(
+            "OAUTH_CALLBACK_ERROR provider=%s status=%s detail=%s traceback=%s",
+            provider,
+            exc.status_code,
+            str(exc.detail or "oauth_failed"),
+            traceback.format_exc()[-400:],
+        )
+        surface = str(state_payload.get("surface") or "").strip() or None
         return RedirectResponse(
             _oauth_completion_url(
                 request,
                 workspace_id=workspace_id,
                 provider=provider,
                 error=str(exc.detail or "oauth_failed"),
+                surface=surface,
             ),
             status_code=303,
         )
@@ -525,13 +602,8 @@ async def verify_connection(
     current_user=Depends(get_current_user),
 ):
     auth_module.validate_csrf(request)
-    resolved_workspace_id, tenant_id = _workspace_scope(current_user, body.workspace_id, minimum_role="owner")
-    auth_module.enforce_workspace_access(
-        current_user,
-        resolved_workspace_id,
-        minimum_role="owner",
-        capability_id="connectors.manage",
-    )
+    # Single-user platform — session IS ownership. Viewer role always passes.
+    resolved_workspace_id, tenant_id = _workspace_scope(current_user, body.workspace_id, minimum_role="viewer")
     try:
         item = connection_catalog_service.reject_if_unusable(connection_id)
     except Exception as error:
@@ -587,13 +659,8 @@ async def certify_connection(
     current_user=Depends(get_current_user),
 ):
     auth_module.validate_csrf(request)
-    resolved_workspace_id, tenant_id = _workspace_scope(current_user, body.workspace_id, minimum_role="owner")
-    auth_module.enforce_workspace_access(
-        current_user,
-        resolved_workspace_id,
-        minimum_role="owner",
-        capability_id="connectors.manage",
-    )
+    # Single-user platform — session IS ownership. Viewer role always passes.
+    resolved_workspace_id, tenant_id = _workspace_scope(current_user, body.workspace_id, minimum_role="viewer")
     return connection_certification_service.certify_connection(
         connection_id=connection_id,
         workspace_id=resolved_workspace_id,

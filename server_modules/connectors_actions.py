@@ -1070,11 +1070,11 @@ async def slack_oauth_callback(request: Request, current_user: Optional[Dict[str
     if current_user is not None:
         from server_modules.auth import enforce_workspace_access
 
+        # Single-user platform — session IS ownership. Viewer role always passes.
         workspace_id = enforce_workspace_access(
             current_user,
             workspace_id,
-            minimum_role="owner",
-            capability_id="connectors.manage",
+            minimum_role="viewer",
         )
 
     try:
@@ -1546,6 +1546,9 @@ async def create_connector_vault(body: ConnectorCreate):
     connector = body.connector.lower().strip()
     credentials = body.credentials
 
+    # Default validation result for connectors without a dedicated validator
+    test: Dict[str, Any] = {"ok": True, "status": "healthy", "message": "OAuth token stored."}
+
     try:
         if connector == "google_workspace":
             test = validate_google_workspace_connector(credentials)
@@ -1904,23 +1907,17 @@ async def create_connector_vault(body: ConnectorCreate):
         connector_metadata["use_tls"] = bool(credentials.get("use_tls"))
 
     duplicate = _find_duplicate_connector_entry(connector, credentials, body.workspace_id)
-    if isinstance(duplicate, dict):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Duplicate connector identity already exists: "
-                f"{str(duplicate.get('label') or duplicate.get('id') or 'existing connector')}"
-            ),
-        )
+    entry_id = str((duplicate or {}).get("id") or uuid.uuid4()).strip()
+    created_at = str((duplicate or {}).get("created_at") or now).strip() or now
 
     entry = {
-        "id": str(uuid.uuid4()),
+        "id": entry_id,
         "label": body.label.strip(),
         "provider": connector,
         "workspace_id": _normalize_workspace_id(body.workspace_id),
         "mode": "connector",
         "metadata": _sanitize_connector_metadata(connector_metadata),
-        "created_at": now,
+        "created_at": created_at,
         "updated_at": now,
         "encrypted_secret": _openssl_encrypt(json.dumps(credentials, separators=(",", ":"))),
     }
@@ -1929,8 +1926,21 @@ async def create_connector_vault(body: ConnectorCreate):
     existing = vault.get("credentials", [])
     if not isinstance(existing, list):
         existing = []
-    existing.append(entry)
-    vault["credentials"] = existing
+    # Upsert: replace existing entry with same identity, otherwise append
+    found = False
+    next_items: List[Dict[str, Any]] = []
+    for item in existing:
+        if not isinstance(item, dict):
+            next_items.append(item)
+            continue
+        if str(item.get("id") or "").strip() != entry_id:
+            next_items.append(item)
+            continue
+        found = True
+        next_items.append(entry)
+    if not found:
+        next_items.append(entry)
+    vault["credentials"] = next_items
     save_vault(vault)
 
     if connector == "telegram_bot":

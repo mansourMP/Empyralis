@@ -55,6 +55,65 @@ def _local_gateway_activity_payload(
     return payload
 
 
+def _humanize_tool_progress(tool_name: str) -> str:
+    """Map a tool name to a short human-readable progress phrase.
+
+    These are shown as transient messages in chat while tools execute,
+    so the user never faces dead air.  Keep them short (<40 chars).
+    """
+    _map: dict[str, str] = {
+        "memory__search": "Searching memory…",
+        "memory__get": "Loading memory…",
+        "memory__update": "Saving to memory…",
+        "memory__append": "Saving to memory…",
+        "memory__consolidate": "Consolidating memories…",
+        "web__search": "Searching the web…",
+        "web__fetch": "Reading that page…",
+        "shell__exec": "Running on your hardware…",
+        "file__write": "Writing file…",
+        "browser__navigate": "Opening browser…",
+        "screenshot__capture": "Taking screenshot…",
+        "computer__ocr": "Reading screen…",
+        "computer__click": "Clicking…",
+        "computer__type": "Typing…",
+        "computer__applescript": "Running script…",
+        "computer__clipboard": "Reading clipboard…",
+        "computer__notify": "Sending notification…",
+        "computer__list_apps": "Listing apps…",
+        "computer__launch_app": "Launching app…",
+        "computer__speak": "Speaking…",
+        "hardware__action": "Running on your hardware…",
+        "llm__task": "Thinking…",
+        "http_request": "Making request…",
+    }
+    name_lower = str(tool_name or "").strip().lower()
+    if name_lower in _map:
+        return _map[name_lower]
+    # Fallback: extract action from connector__action format
+    if "__" in name_lower:
+        parts = name_lower.rsplit("__", 1)
+        action = parts[1].replace("_", " ").strip()
+        if action:
+            return f"Running {action}…"
+    return "Working…"
+
+
+def _tool_timeout_seconds(connector_id: str, action_id: str = "") -> float:
+    """Per-category tool timeout in seconds — matches skills_service."""
+    cid = str(connector_id or "").strip().lower()
+    if cid == "shell":
+        return 120.0
+    if cid == "web":
+        return 30.0
+    if cid == "memory":
+        return 10.0
+    if cid in ("browser", "computer"):
+        return 60.0
+    if cid == "hardware":
+        return 120.0
+    return 30.0
+
+
 @dataclass(slots=True)
 class DirectChatGenerationServices:
     thinking_step_payload: Callable[[int, str, Optional[str]], Dict[str, Any]]
@@ -1074,17 +1133,41 @@ def stream_provider_backed_direct_chat(
                                 step_id=step_id,
                                 status="active",
                             )
-                            tool_result = services.execute_single_direct_tool_call(
-                                tool_call=tool_call,
-                                workspace_id=normalized_workspace_id,
-                                thread_id=normalized_thread_id,
-                                index=tool_index,
-                                provider=str(actual_provider or context.get("provider") or "").strip() or None,
-                                model=str(actual_model or "").strip() or None,
-                                credentials=direct_chat_credentials if isinstance(direct_chat_credentials, dict) else None,
-                                reasoning_effort=normalized_reasoning_effort or "",
-                                session_ctx=session_ctx,
-                            )
+                            # Notify the channel so the user sees progress, not dead air
+                            yield {
+                                "type": "tool_progress",
+                                "tool": tool_name,
+                                "message": _humanize_tool_progress(tool_name),
+                            }
+                            # Per-tool timeout — a hung tool must not block the loop.
+                            # shell=120s, web=30s, memory=10s, browser/computer=60s, default=30s.
+                            _tool_timeout_s = _tool_timeout_seconds(connector_id, action_id)
+                            try:
+                                import concurrent.futures as _cf
+                                with _cf.ThreadPoolExecutor(max_workers=1) as _tool_exec:
+                                    _tool_fut = _tool_exec.submit(
+                                        services.execute_single_direct_tool_call,
+                                        tool_call=tool_call,
+                                        workspace_id=normalized_workspace_id,
+                                        thread_id=normalized_thread_id,
+                                        index=tool_index,
+                                        provider=str(actual_provider or context.get("provider") or "").strip() or None,
+                                        model=str(actual_model or "").strip() or None,
+                                        credentials=direct_chat_credentials if isinstance(direct_chat_credentials, dict) else None,
+                                        reasoning_effort=normalized_reasoning_effort or "",
+                                        session_ctx=session_ctx,
+                                    )
+                                    tool_result = _tool_fut.result(timeout=_tool_timeout_s)
+                            except _cf.TimeoutError:
+                                import json as _json
+                                tool_result = _json.dumps({
+                                    "error": "timeout",
+                                    "message": (
+                                        f"The tool '{tool_name}' timed out after {_tool_timeout_s:.0f}s. "
+                                        "Try a different approach — a smaller scope, a different tool, or "
+                                        "ask the user for more specific guidance."
+                                    ),
+                                })
                             executed_any_tools = True
                             tool_result_for_context = sanitize_tool_result_for_context(
                                 tool_result,
@@ -1141,12 +1224,28 @@ def stream_provider_backed_direct_chat(
                                 ),
                             }
                             if completed_hardware_local_gateway:
+                                _hw_labels = {
+                                    ("hardware", "shell_exec"): "Shell command",
+                                    ("hardware", "file_read"): "Read file",
+                                    ("hardware", "file_write"): "Write file",
+                                    ("hardware", "computer_use"): "Computer action",
+                                    ("hardware", "screenshot"): "Screenshot",
+                                    ("hardware", "web_search"): "Web search",
+                                    ("hardware", "browse_web"): "Browse web",
+                                }
+                                _hw_action = str(action_id or "").strip().lower()
+                                _hw_label = _hw_labels.get((connector_id, _hw_action)) or (
+                                    f"Shell command" if "shell" in _hw_action
+                                    else f"Read file" if _hw_action == "file_read"
+                                    else f"Write file" if _hw_action == "file_write"
+                                    else str(tool_name or "Tool").strip() or "Tool"
+                                )
                                 tool_result_data["connector_id"] = "hardware_runtime"
                                 tool_result_data["state"] = "completed"
                                 tool_result_data["agent_activity"] = _local_gateway_activity_payload(
                                     tool_call_id=tool_call_id,
                                     activity_type="done",
-                                    label="Done",
+                                    label=_hw_label,
                                     status="completed",
                                     detail=result_summary,
                                 )
@@ -1206,7 +1305,9 @@ def stream_provider_backed_direct_chat(
                             )
                         else:
                             current_prompt = ""
-                        break
+                        # Feed tool results back to the model in the next iteration
+                        # so it can reason about them and call more tools if needed.
+                        continue
                     except Exception as exc:
                         llm_error = str(exc).strip() or "connector_action_failed"
                         services.capture_exception(exc)

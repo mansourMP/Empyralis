@@ -163,12 +163,13 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_id": ("EMPYRALIS_DISCORD_APPLICATION_ID", "DISCORD_CLIENT_ID"),
             "client_secret": ("DISCORD_CLIENT_SECRET",),
         },
-        scopes=("identify",),
+        scopes=("bot", "identify"),
         auth_url="https://discord.com/oauth2/authorize",
         token_url="https://discord.com/api/oauth2/token",
         auth_method="authorization_code",
         token_parser="standard",
         profile_probe="https://discord.com/api/users/@me",
+        auth_params={"permissions": "274877908992"},
     ),
     "figma": OAuthProviderConfig(
         label="Figma",
@@ -869,6 +870,7 @@ def start_oauth(
     workspace_id: str,
     surface: str | None,
     request: Request,
+    user_id: str = "",
 ) -> Dict[str, Any]:
     config = _provider_config(provider)
     client_id, _client_secret = ensure_oauth_configured(provider)
@@ -877,6 +879,7 @@ def start_oauth(
         "provider": provider,
         "workspace_id": workspace_id,
         "surface": str(surface or "sage").strip() or "sage",
+        "user_id": str(user_id or "").strip(),
     }
     code_verifier = ""
     if config.auth_method == "pkce":
@@ -1221,25 +1224,39 @@ def _exchange_discord(code: str, redirect_uri: str) -> Dict[str, Any]:
     access_token = str(payload.get("access_token") or "").strip()
     if not access_token:
         raise RuntimeError(str(payload.get("error_description") or payload.get("error") or "Discord token exchange failed."))
-    # Call /users/@me to get the Discord user ID
+    # When bot scope is used, Discord returns the guild the bot was installed to.
+    guild = payload.get("guild") if isinstance(payload.get("guild"), dict) else {}
+    guild_id = str(guild.get("id") or "").strip()
+    guild_name = str(guild.get("name") or "").strip()
+    if not guild_id:
+        raise RuntimeError(
+            "Discord bot was not installed to a server. "
+            "Make sure you select a server in the Discord authorization page."
+        )
+    # The bot token is a static credential configured in .env — OAuth only
+    # authorizes the bot to operate in a specific server (guild).
+    bot_token = str(os.getenv("DISCORD_BOT_TOKEN") or "").strip()
+    if not bot_token:
+        raise RuntimeError("DISCORD_BOT_TOKEN is not configured in the server environment.")
+    # Call /users/@me to get the bot's Discord user ID for display.
     me_req = urlrequest.Request(
         "https://discord.com/api/users/@me",
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers={"Authorization": f"Bot {bot_token}"},
     )
     try:
         with urlrequest.urlopen(me_req, timeout=15) as resp:
             me_data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        raise RuntimeError(f"Discord user lookup failed: {exc}") from exc
-    discord_user_id = str(me_data.get("id") or "").strip()
-    if not discord_user_id:
-        raise RuntimeError("Discord user ID not found in profile response.")
-    discord_username = str(me_data.get("username") or "").strip()
+        raise RuntimeError(f"Discord bot user lookup failed: {exc}") from exc
+    bot_id = str(me_data.get("id") or "").strip()
+    bot_username = str(me_data.get("username") or "").strip()
     return {
         "auth_mode": "oauth",
-        "access_token": access_token,
-        "discord_user_id": discord_user_id,
-        "discord_username": discord_username,
+        "bot_token": bot_token,
+        "guild_id": guild_id,
+        "guild_name": guild_name,
+        "bot_id": bot_id,
+        "bot_username": bot_username,
         "scope": str(payload.get("scope") or "").strip(),
         "token_type": str(payload.get("token_type") or "Bearer").strip() or "Bearer",
     }
@@ -1295,10 +1312,12 @@ async def complete_oauth_callback(
             credentials = _exchange_standard_oauth(normalized_provider, normalized_code, redirect_uri, code_verifier=code_verifier)
         else:
             raise HTTPException(status_code=409, detail="This connection does not have a one-click OAuth setup yet.")
+        # Map OAuth provider → vault connector name (Discord OAuth == discord_bot connector).
+        vault_connector = "discord_bot" if normalized_provider == "discord" else normalized_provider
         result = await connectors_actions.create_connector_vault(
             ConnectorCreate(
                 label=_connector_label(normalized_provider),
-                connector=normalized_provider,
+                connector=vault_connector,
                 workspace_id=workspace_id,
                 credentials=credentials,
                 metadata={

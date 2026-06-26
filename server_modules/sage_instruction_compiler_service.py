@@ -475,7 +475,10 @@ def _message_needs_workspace_state(message: str) -> bool:
     return any(marker in compact for marker in markers)
 
 
-def _normalize_recent_messages(value: Sequence[Mapping[str, Any]] | None) -> list[dict[str, str]]:
+def _normalize_recent_messages(
+    value: Sequence[Mapping[str, Any]] | None,
+    current_channel: str = "",
+) -> list[dict[str, str]]:
     normalized: list[dict[str, str]] = []
     for item in list(value or [])[-16:]:
         if not isinstance(item, Mapping):
@@ -488,6 +491,13 @@ def _normalize_recent_messages(value: Sequence[Mapping[str, Any]] | None) -> lis
         content = _coerce_text(item.get("content"))
         if not content:
             continue
+        # Tag messages from other channels so Sage knows which channel
+        # each turn originated from — essential for cross-channel continuity.
+        msg_channel = _coerce_text(
+            (item.get("metadata") or {}).get("channel", "")
+        )
+        if msg_channel and current_channel and msg_channel != current_channel:
+            content = f"[via {msg_channel}] {content}"
         normalized.append({"role": role, "content": content[:4000]})
     return normalized
 
@@ -536,7 +546,7 @@ def build_sage_instruction_bundle(
         )
     capability_manifest = build_model_capability_manifest(capability_payload)
     root_sections, root_diagnostics = build_root_memory_brief_sections(root_context_files)
-    prior_messages = _normalize_recent_messages(recent_messages)
+    prior_messages = _normalize_recent_messages(recent_messages, current_channel=channel_origin)
 
     section_char_counts: dict[str, int] = {}
     truncated_sections: list[str] = []
@@ -636,7 +646,24 @@ def build_sage_instruction_bundle(
     # If there are prior messages, add a brief note to system prompt so the model
     # treats this as a continuing conversation rather than a fresh interaction.
     if prior_messages:
-        system_prompt += "\n\n## Ongoing Conversation\nThe messages above are your recent conversation with this user. Maintain continuity — remember what was just discussed, what tools ran, and what the user said. Do not reintroduce yourself or act like this is a new chat."
+        _cross_note = "\n\n## Ongoing Conversation\nThe messages above are your recent conversation with this user. Maintain continuity — remember what was just discussed, what tools ran, and what the user said. Do not reintroduce yourself or act like this is a new chat."
+        # If any turns came from a different channel, explain the [via ...] prefix
+        # convention so Sage can reference where past info originated.
+        _all_chs: set[str] = set()
+        for _t in (recent_messages or []):
+            if isinstance(_t, dict):
+                _tc = _coerce_text((_t.get("metadata") or {}).get("channel", ""))
+                if _tc:
+                    _all_chs.add(_tc)
+        _other = sorted(c for c in _all_chs if c and c != _ch)
+        if _other:
+            _cross_note += (
+                f" Messages prefixed with [via ...] are from other channels"
+                f" ({', '.join(_other)}). Messages from your current channel"
+                f" ({_ch}) are unmarked. You can naturally reference where past"
+                f" information came from (e.g., \"you mentioned Tokyo on Telegram earlier\")."
+            )
+        system_prompt += _cross_note
     messages = [
         {"role": "system", "content": system_prompt},
         *prior_messages,

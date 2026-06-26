@@ -721,9 +721,12 @@ function ToolTraceCard({ cell }: { cell: TraceActivityCellRecord }) {
   }
   const status = traceActivityStatus(cell);
   const label = traceActivityLabel(cell);
-  const input = traceActivityInput(cell);
+  // For agent_activity, input and result are the same field (detail).
+  // Show detail only once — as the expandable result, not as the code input block.
+  const isAgentActivity = cell.kind === 'agent_activity';
+  const input = isAgentActivity ? null : traceActivityInput(cell);
   const result = traceActivityResult(cell);
-  const isLongResult = Boolean(result && result.length > 300);
+  const isLongResult = Boolean(result && result.length > 200);
   const showInlineResult = Boolean(result && !isLongResult);
   const showExpandableResult = Boolean(result && isLongResult);
   const terminalText = cell.kind === 'exec'
@@ -789,8 +792,8 @@ export function ExecutionTraceCell({ cell }: { cell: ExecutionTraceCellRecord })
     },
     [cell.isStreaming, toolActivities],
   );
-  const hasTrace = Boolean(thinkingCell) || toolActivities.length > 0 || cell.isStreaming;
-  const showTrace = (Boolean(thinkingCell) || toolActivities.length > 0) && expanded;
+  const hasThinking = Boolean(thinkingCell) || cell.isStreaming;
+  const showThinking = Boolean(thinkingCell) && expanded;
 
   useEffect(() => {
     if (cell.isStreaming) {
@@ -803,7 +806,7 @@ export function ExecutionTraceCell({ cell }: { cell: ExecutionTraceCellRecord })
       data-chat-role={cell.response ? 'assistant' : 'system'}
       className={`app-agent-trace-turn${cell.isStreaming ? ' app-agent-trace-turn--streaming' : ''}${cell.dimmed ? ' app-agent-trace-turn--dimmed' : ''}`}
     >
-      {hasTrace ? (
+      {hasThinking ? (
         <button
           type="button"
           className="app-agent-trace-summary"
@@ -818,13 +821,14 @@ export function ExecutionTraceCell({ cell }: { cell: ExecutionTraceCellRecord })
           />
           <span>{summary}</span>
         </button>
+      ) : toolActivities.length > 0 ? (
+        <span className="app-agent-trace-summary app-agent-trace-summary--static">
+          <span>{summary}</span>
+        </span>
       ) : null}
-      {showTrace ? (
+      {showThinking && thinkingCell ? (
         <div className="app-agent-trace-stack">
-          {thinkingCell ? <ThoughtProcessPanel cell={thinkingCell} /> : null}
-          {toolActivities.map((activity) => (
-            <ToolTraceCard key={`${activity.kind}:${activity.id}`} cell={activity} />
-          ))}
+          <ThoughtProcessPanel cell={thinkingCell} />
         </div>
       ) : null}
       {cell.response ? <AssistantCell cell={cell.response} /> : null}

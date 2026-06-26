@@ -213,8 +213,15 @@ def _discord_api_call(
             return {"items": body}
         return {}
     body = response.get("json") if isinstance(response.get("json"), dict) else {}
-    detail = str(body.get("message") or response.get("text") or "").strip()
-    raise RuntimeError(detail or f"Discord API call failed with status {status}.")
+    raw_text = str(response.get("text") or "")[:200]
+    detail = str(body.get("message") or "").strip()
+    discord_code = body.get("code", "")
+    raise RuntimeError(
+        f"Discord API {method} {path} → HTTP {status}"
+        + (f" (Discord code {discord_code})" if discord_code else "")
+        + (f": {detail}" if detail else "")
+        + (f"\n  body: {raw_text}" if raw_text and raw_text != detail else "")
+    )
 
 
 def _normalize_file_list(files: Optional[Sequence[Any]]) -> List[Any]:
@@ -945,6 +952,103 @@ def dispatch_inbound_event(
     return {"ok": True, "triggered": bool(run_id), "run_id": run_id or None}
 
 
+async def _handle_dm_via_gateway(message: Any) -> None:
+    """Process a direct-message through Sage and reply via the gateway WebSocket.
+
+    Uses ``message.channel.send()`` (the native discord.py method) instead of
+    the REST API, which means no ``_discord_api_call`` / bot-token HTTP calls.
+    """
+    import logging as _hdlr_log
+
+    _text = str(getattr(message, "content", "") or "").strip()
+    _author_id = str(getattr(getattr(message, "author", None), "id", "") or "").strip()
+    _author_name = str(getattr(getattr(message, "author", None), "name", "") or "").strip()
+
+    if not _text or not _author_id:
+        return
+
+    _reply: str = ""
+    try:
+        # ── /pair <code> — link Discord user to workspace ──
+        _pair_match = re.match(r"^/pair\s+(\S+)", _text)
+        if _pair_match:
+            _code = _pair_match.group(1).strip()
+            from server_modules.sage_telegram_hosted_service import consume_pairing_code
+            from server_modules.discord_pairing_service import (
+                pair_discord_workspace,
+            )
+            _wid = consume_pairing_code(_code)
+            if _wid:
+                pair_discord_workspace(_author_id, _wid)
+                _reply = (
+                    "✅ Connected to Empyralis! Your workspace is now linked. "
+                    "Try sending a message."
+                )
+            else:
+                _reply = (
+                    "Invalid or expired pairing code. "
+                    "Generate a new one at empyralis.ai → Connections → Discord."
+                )
+            if _reply:
+                await message.channel.send(_reply)
+            return
+
+        # ── Workspace lookup ──
+        from server_modules.discord_pairing_service import (
+            get_workspace_for_discord_user,
+        )
+        _workspace_id = get_workspace_for_discord_user(_author_id)
+        if not _workspace_id:
+            await message.channel.send(
+                "Send `/pair CODE` to connect your workspace. "
+                "Get a code at empyralis.ai → Connections → Discord."
+            )
+            return
+
+        # ── Command dispatch ──
+        from server_modules.sage_command_dispatcher import dispatch_command as _dc
+        _cmd_reply = await _dc(
+            command=_text,
+            workspace_id=_workspace_id,
+            thread_id="sage-main",
+            channel_origin="discord_personal",
+            sender_id=_author_id or None,
+        )
+        if _cmd_reply is not None:
+            _reply = _cmd_reply
+        else:
+            # ── Sage ingress ──
+            from server_modules.sage_turn_adapter import execute_sage_turn as _est
+            _result = await _est(
+                workspace_id=_workspace_id,
+                message=_text,
+                channel_origin="discord_personal",
+                channel_sender_id=_author_id,
+                channel_sender_name=_author_name or None,
+                thread_id="sage-main",
+            )
+            _raw = str(_result.message or "").strip()
+            if _raw:
+                from server_modules.channel_adapter import filter_outbound_reply as _filt
+                _reply = _filt(_raw) or ""
+    except Exception as _exc:
+        _hdlr_log.getLogger("discord_bot").warning(
+            "DM gateway handler failed: %s", _exc
+        )
+        _reply = "Sorry, something went wrong. Try again."
+
+    if _reply:
+        try:
+            await message.channel.send(_reply)
+            _hdlr_log.getLogger("discord_bot").info(
+                "DM reply sent via gateway: %s", _reply[:80]
+            )
+        except Exception as _send_exc:
+            _hdlr_log.getLogger("discord_bot").warning(
+                "DM gateway send failed: %s", _send_exc
+            )
+
+
 class DiscordGatewayListener:
     def __init__(
         self,
@@ -967,13 +1071,40 @@ class DiscordGatewayListener:
         self._register_handlers()
 
     def _register_handlers(self) -> None:
+        import logging as _disc_log
+
+        @self._client.event
+        async def on_ready() -> None:
+            _disc_log.getLogger("discord_bot").warning(
+                "DISCORD_READY user=%s id=%s guilds=%s",
+                str(getattr(self._client, "user", None)),
+                str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+                [str(g.id) for g in getattr(self._client, "guilds", []) or []],
+            )
+
         @self._client.event
         async def on_message(message: Any) -> None:
+            _disc_log.getLogger("discord_bot").warning(
+                "DISCORD_ON_MESSAGE author=%s author_id=%s channel=%s guild=%s content=%s bot=%s",
+                getattr(getattr(message, "author", None), "name", "?"),
+                str(getattr(getattr(message, "author", None), "id", "") or ""),
+                str(getattr(message.channel, "id", "") or ""),
+                str(getattr(getattr(message, "guild", None), "id", "") or ""),
+                str(getattr(message, "content", "") or "")[:80],
+                getattr(message.author, "bot", False),
+            )
             if getattr(message.author, "bot", False):
                 return
             channel_id = str(getattr(message.channel, "id", "") or "").strip()
             if self._allowed_channel_ids and channel_id not in self._allowed_channel_ids:
                 return
+
+            # ── DM: reply directly via gateway WebSocket (no REST API) ──
+            is_dm = getattr(message, "guild", None) is None
+            if is_dm:
+                await _handle_dm_via_gateway(message)
+                return
+
             parsed = parse_inbound_event(
                 {
                     "t": "MESSAGE_CREATE",

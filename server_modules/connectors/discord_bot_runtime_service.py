@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -165,15 +166,37 @@ class DiscordBotRuntimeService:
     def start(self, *, block: bool = False) -> Dict[str, Any]:
         rows = self.connector_rows()
         if not rows:
-            self._statuses = [
-                DiscordBotRuntimeStatus(
-                    connector_id="",
-                    workspace_id="default",
-                    status="idle",
-                    reason="no_registered_discord_bot_connectors",
-                )
+            # ── Discord chatbot v1 fallback: use DISCORD_BOT_TOKEN from env ──
+            # No vault connector needed — the bot just listens for DMs and
+            # routes them to Sage via execute_sage_turn(channel_origin="discord_personal").
+            import os as _os
+            _env_token = str(_os.getenv("DISCORD_BOT_TOKEN") or "").strip()
+            if not _env_token:
+                self._statuses = [
+                    DiscordBotRuntimeStatus(
+                        connector_id="",
+                        workspace_id="default",
+                        status="idle",
+                        reason="no_registered_discord_bot_connectors",
+                    )
+                ]
+                return {"ok": True, "started": 0, "statuses": self.statuses()}
+            # Synthesize a virtual connector entry so the listener loop below works.
+            rows = [
+                {
+                    "id": "discord_env_bot",
+                    "workspace_id": "default",
+                    "provider": "discord_bot",
+                    "metadata": {},
+                }
             ]
-            return {"ok": True, "started": 0, "statuses": self.statuses()}
+            # Patch credential resolution for this synthetic row.
+            _orig_resolve = self.resolve_vault_credential
+            def _env_credential(_cid: str, _wid: str, _orig=_orig_resolve, _tok=_env_token) -> dict:
+                if _cid == "discord_env_bot":
+                    return {"bot_token": _tok}
+                return _orig(_cid, _wid)
+            self.resolve_vault_credential = _env_credential
 
         started = 0
         self._statuses = []
@@ -299,15 +322,52 @@ class DiscordBotRuntimeService:
         message_type = str(parsed.get("message_type") or "").strip().lower()
         if message_type == "direct_message":
             try:
-                from server_modules.connectors.discord_connector import send_dm as _send_dm
+                from server_modules.connectors.discord_connector import send_message as _send_msg
 
                 _discord_user_id = str(parsed.get("user_id") or "").strip()
+                _discord_channel_id = str(parsed.get("channel_id") or "").strip()
                 _push_name = str(parsed.get("username") or "").strip()
                 _text = str(parsed.get("text") or "").strip()
-                _workspace_id = _normalize_workspace_id(connector_entry.get("workspace_id"))
 
                 if not _discord_user_id or not _text:
                     return {"ok": True, "handled": True, "triggered": False, "reason": "empty_dm"}
+
+                # ── /pair <code> — link Discord user to workspace ──
+                _pair_match = re.match(r"^/pair\s+(\S+)", _text)
+                if _pair_match:
+                    _code = _pair_match.group(1).strip()
+                    from server_modules.sage_telegram_hosted_service import consume_pairing_code
+                    from server_modules.discord_pairing_service import (
+                        pair_discord_workspace,
+                    )
+                    _pair_wid = consume_pairing_code(_code)
+                    if _pair_wid:
+                        pair_discord_workspace(_discord_user_id, _pair_wid)
+                        _send_msg(
+                            credentials=dict(credentials),
+                            channel_id=_discord_channel_id,
+                            content="✅ Connected to Empyralis! Your workspace is now linked. Try sending a message.",
+                        )
+                    else:
+                        _send_msg(
+                            credentials=dict(credentials),
+                            channel_id=_discord_channel_id,
+                            content="Invalid or expired pairing code. Generate a new one at empyralis.ai → Connections → Discord.",
+                        )
+                    return {"ok": True, "handled": True, "triggered": True, "reason": "pair_command"}
+
+                # ── Workspace lookup ──
+                from server_modules.discord_pairing_service import (
+                    get_workspace_for_discord_user,
+                )
+                _workspace_id = get_workspace_for_discord_user(_discord_user_id)
+                if not _workspace_id:
+                    _send_msg(
+                        credentials=dict(credentials),
+                        channel_id=_discord_channel_id,
+                        content="Send `/pair CODE` to connect your workspace. Get a code at empyralis.ai → Connections → Discord.",
+                    )
+                    return {"ok": True, "handled": True, "triggered": True, "reason": "unpaired_discord_user"}
 
                 # ── Shared command dispatcher ──
                 from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
@@ -319,9 +379,9 @@ class DiscordBotRuntimeService:
                     sender_id=_discord_user_id or None,
                 )
                 if _cmd_reply is not None:
-                    _send_dm(
+                    _send_msg(
                         credentials=dict(credentials),
-                        user_id=_discord_user_id,
+                        channel_id=_discord_channel_id,
                         content=_cmd_reply,
                     )
                     return {"ok": True, "handled": True, "triggered": True, "reason": "command_dispatched"}
@@ -335,6 +395,7 @@ class DiscordBotRuntimeService:
                     channel_origin="discord_personal",
                     channel_sender_id=_discord_user_id,
                     channel_sender_name=_push_name or None,
+                    thread_id="sage-main",
                 )
 
                 _sage_reply = str(result.message or "").strip()
@@ -342,16 +403,20 @@ class DiscordBotRuntimeService:
                     from server_modules.channel_adapter import filter_outbound_reply
                     _filtered = filter_outbound_reply(_sage_reply)
                     if _filtered:
-                        _send_dm(
+                        _send_msg(
                             credentials=dict(credentials),
-                            user_id=_discord_user_id,
+                            channel_id=_discord_channel_id,
                             content=_filtered,
                         )
                         return {"ok": True, "handled": True, "triggered": True, "reason": "sage_ingress_dm_replied"}
                 return {"ok": True, "handled": True, "triggered": True, "reason": "sage_ingress_dm_no_reply"}
             except Exception as _dm_exc:
-                import logging as _logging
-                _logging.getLogger(__name__).warning("Discord Sage ingress DM failed: %s", _dm_exc)
+                import logging as _logging2
+                import traceback as _tb
+                _logging2.getLogger(__name__).warning(
+                    "Discord Sage ingress DM failed: %s\nTRACEBACK:\n%s",
+                    _dm_exc, _tb.format_exc(),
+                )
                 return {"ok": True, "handled": True, "triggered": False, "reason": f"sage_ingress_dm_error: {_dm_exc}"}
 
         goal = build_run_goal_from_event(parsed)

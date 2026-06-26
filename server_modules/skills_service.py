@@ -539,10 +539,10 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
         ),
         ToolDescriptor(
             tool_name="computer__applescript",
-            label="Computer AppleScript",
+            label="Run Script",
             connector_id="computer",
             action_id="applescript",
-            description="Run AppleScript on macOS",
+            description="Execute a system script on your computer",
             capability_id="computer_control.applescript",
             requires_runtime=True,
             parameters={"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]},
@@ -1707,7 +1707,7 @@ def build_direct_local_tool_config(
             return "computer", {
                 "action": "applescript",
                 "script": script,
-                "summary": "Run AppleScript.",
+                "summary": "Run script.",
             }
         if action_id == "clipboard_read":
             return "computer", {
@@ -3003,6 +3003,39 @@ def _execute_custom_connector_tool_call_sync(
     return callbacks.format_direct_tool_result(result)
 
 
+def _tool_timeout_seconds(connector_id: str, action_id: str = "") -> float:
+    """Per-category tool timeout in seconds.
+
+    Prevents a hung tool from blocking the agent forever.  The model
+    receives a timeout error it can reason about and adapt to.
+    """
+    cid = str(connector_id or "").strip().lower()
+    if cid == "shell":
+        return 120.0
+    if cid == "web":
+        return 30.0
+    if cid == "memory":
+        return 10.0
+    if cid in ("browser", "computer"):
+        return 60.0
+    if cid == "hardware":
+        return 120.0
+    return 30.0
+
+
+def _timeout_tool_result(*, tool_name: str, timeout: float) -> str:
+    """Return a structured error result so the model can adapt to the timeout."""
+    import json as _json
+    return _json.dumps({
+        "error": "timeout",
+        "message": (
+            f"The tool '{tool_name}' timed out after {timeout:.0f}s. "
+            "Try a different approach — a smaller scope, a different tool, or "
+            "ask the user for more specific guidance."
+        ),
+    })
+
+
 async def execute_single_direct_tool_call_async(
     *,
     tool_call: Dict[str, Any],
@@ -3027,61 +3060,94 @@ async def execute_single_direct_tool_call_async(
     etc.) are dispatched through asyncio.to_thread() to avoid blocking the Uvicorn
     event loop with urllib.request.urlopen. Built-in connectors (memory, web,
     browser, etc.) continue to use the sync path which is safe (callback-based).
+
+    All tool executions are wrapped with asyncio.wait_for() using per-category
+    timeouts so a hung tool never blocks the agent forever.
     """
     if callbacks is None:
         from server_modules.direct_chat_operator_binding_service import _direct_tool_execution_callbacks as _get_cb
         callbacks = _get_cb()
 
     connector_id, action_id = callbacks.parse_tool_name(str(tool_call.get("name") or ""))
+    timeout = _tool_timeout_seconds(connector_id, action_id)
+
+    import asyncio as _asyncio
 
     # Hardware-bound connectors: async path (handled below)
     if connector_id not in {"hardware", "file", "shell", "screenshot", "computer"}:
         if connector_id in _BUILTIN_DIRECT_TOOL_IDS:
-            # Built-in connectors (memory, web, browser, image, etc.): use the
-            # sync path — these are callback-based and do not perform blocking I/O.
-            return execute_single_direct_tool_call(
-                tool_call=tool_call,
-                workspace_id=workspace_id,
-                thread_id=thread_id,
-                index=index,
-                provider=provider,
-                model=model,
-                credentials=credentials,
-                reasoning_effort=reasoning_effort,
-                session_ctx=session_ctx,
-                callbacks=callbacks,
-            )
+            # Built-in connectors (memory, web, browser, image, etc.): execute in
+            # a thread so we can apply a timeout.
+            try:
+                return await _asyncio.wait_for(
+                    _asyncio.to_thread(
+                        execute_single_direct_tool_call,
+                        tool_call=tool_call,
+                        workspace_id=workspace_id,
+                        thread_id=thread_id,
+                        index=index,
+                        provider=provider,
+                        model=model,
+                        credentials=credentials,
+                        reasoning_effort=reasoning_effort,
+                        session_ctx=session_ctx,
+                        callbacks=callbacks,
+                    ),
+                    timeout=timeout,
+                )
+            except _asyncio.TimeoutError:
+                return _timeout_tool_result(
+                    tool_name=str(tool_call.get("name") or f"{connector_id}__{action_id}"),
+                    timeout=timeout,
+                )
         # Custom OAuth connectors (GitHub, Notion, Linear, Dropbox, Google
         # Workspace, and any future connector): execute in a thread to avoid
         # blocking the Uvicorn event loop with urllib.request.urlopen.
-        import asyncio as _asyncio
-        return await _asyncio.to_thread(
-            _execute_custom_connector_tool_call_sync,
-            tool_call=tool_call,
-            workspace_id=workspace_id,
-            thread_id=thread_id,
-            index=index,
-            provider=provider,
-            model=model,
-            credentials=credentials,
-            reasoning_effort=reasoning_effort,
-            session_ctx=session_ctx,
-            callbacks=callbacks,
-            connector_id=connector_id,
-            action_id=action_id,
-        )
+        try:
+            return await _asyncio.wait_for(
+                _asyncio.to_thread(
+                    _execute_custom_connector_tool_call_sync,
+                    tool_call=tool_call,
+                    workspace_id=workspace_id,
+                    thread_id=thread_id,
+                    index=index,
+                    provider=provider,
+                    model=model,
+                    credentials=credentials,
+                    reasoning_effort=reasoning_effort,
+                    session_ctx=session_ctx,
+                    callbacks=callbacks,
+                    connector_id=connector_id,
+                    action_id=action_id,
+                ),
+                timeout=timeout,
+            )
+        except _asyncio.TimeoutError:
+            return _timeout_tool_result(
+                tool_name=str(tool_call.get("name") or f"{connector_id}__{action_id}"),
+                timeout=timeout,
+            )
 
     argument_payload = callbacks.tool_arguments_payload(tool_call.get("arguments"))
     session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
 
     if connector_id == "hardware" and action_id == "action":
-        return await _execute_hardware_action_tool_call_async(
-            argument_payload=argument_payload if isinstance(argument_payload, dict) else {},
-            workspace_id=workspace_id,
-            thread_id=thread_id,
-            index=index,
-            session_ctx=session_ctx,
-        )
+        try:
+            return await _asyncio.wait_for(
+                _execute_hardware_action_tool_call_async(
+                    argument_payload=argument_payload if isinstance(argument_payload, dict) else {},
+                    workspace_id=workspace_id,
+                    thread_id=thread_id,
+                    index=index,
+                    session_ctx=session_ctx,
+                ),
+                timeout=timeout,
+            )
+        except _asyncio.TimeoutError:
+            return _timeout_tool_result(
+                tool_name=str(tool_call.get("name") or f"{connector_id}__{action_id}"),
+                timeout=timeout,
+            )
 
     if connector_id in {"file", "shell", "screenshot", "computer"}:
         normalized_connector = str(connector_id or "").strip().lower()
@@ -3150,28 +3216,37 @@ async def execute_single_direct_tool_call_async(
                 or f"trace_{uuid.uuid4().hex}"
             )
             approval_override = False
-            gateway_response = await _execute_direct_tool_via_gateway_async(
-                gateway_id=gateway_id,
-                capability_id=gateway_capability_id,
-                arguments=gateway_arguments,
-                run_id=gateway_run_id,
-                trace_id=gateway_trace_id,
-                workspace_id=str(workspace_id or "default").strip() or "default",
-                runtime_target=_runtime_target_from_direct_tool_context(
-                    gateway_id=gateway_id,
-                    session_ctx=session_ctx,
-                ),
-                runtime_access_mode=_runtime_access_mode_from_direct_tool_context(
-                    gateway_id=gateway_id,
-                    session_ctx=session_ctx,
-                ),
-                agent_scope=_agent_scope_from_direct_tool_context(session_ctx),
-                tenant_id=tenant_id,
-                thread_id=str(thread_id or "").strip(),
-                request_id=gateway_request_id,
-                session_ctx=session_ctx,
-                require_approval=approval_override,
-            )
+            try:
+                gateway_response = await _asyncio.wait_for(
+                    _execute_direct_tool_via_gateway_async(
+                        gateway_id=gateway_id,
+                        capability_id=gateway_capability_id,
+                        arguments=gateway_arguments,
+                        run_id=gateway_run_id,
+                        trace_id=gateway_trace_id,
+                        workspace_id=str(workspace_id or "default").strip() or "default",
+                        runtime_target=_runtime_target_from_direct_tool_context(
+                            gateway_id=gateway_id,
+                            session_ctx=session_ctx,
+                        ),
+                        runtime_access_mode=_runtime_access_mode_from_direct_tool_context(
+                            gateway_id=gateway_id,
+                            session_ctx=session_ctx,
+                        ),
+                        agent_scope=_agent_scope_from_direct_tool_context(session_ctx),
+                        tenant_id=tenant_id,
+                        thread_id=str(thread_id or "").strip(),
+                        request_id=gateway_request_id,
+                        session_ctx=session_ctx,
+                        require_approval=approval_override,
+                    ),
+                    timeout=timeout,
+                )
+            except _asyncio.TimeoutError:
+                return _timeout_tool_result(
+                    tool_name=str(tool_call.get("name") or f"{connector_id}__{action_id}"),
+                    timeout=timeout,
+                )
             return _format_gateway_direct_local_tool_result(
                 connector_id=normalized_connector,
                 action_id=normalized_action,

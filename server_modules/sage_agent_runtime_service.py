@@ -145,7 +145,7 @@ _SAGE_TOOL_RESULT_MAX_CHARS = 4000
 _SAGE_ACTION_LOOP_VERSION = "v2"
 _SAGE_OPERATOR_LOOP_VERSION = "v3"
 _SAGE_ACTION_LOOP_MAX_TOOL_CALLS = 25
-_SAGE_OPERATOR_LOOP_MAX_ITERATIONS = 25
+_SAGE_OPERATOR_LOOP_MAX_ITERATIONS = 5  # Cap at 5 to prevent runaway; most tasks finish in 1-3
 _SAGE_TASK_ROUTE_MODES = {
     "chat_only",
     "connector_api",
@@ -1369,6 +1369,7 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
     ordered_tool_ids: list[str] = []
     blocked_tools: list[dict[str, Any]] = []
     trace_events: list[dict[str, Any]] = []
+    tool_progress_messages: list[str] = []  # transient progress shown before final reply
 
     def _tool_entry(tool_call_id: str, tool_name: str = "") -> dict[str, Any]:
         key = _coerce_text(tool_call_id) or f"toolcall-{len(ordered_tool_ids) + 1}"
@@ -1390,6 +1391,11 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
         if not isinstance(event, dict):
             continue
         event_type = _coerce_text(event.get("type")).lower()
+        if event_type == "tool_progress":
+            msg = _coerce_text(event.get("message"))
+            if msg and len(tool_progress_messages) < 3:  # cap at 3 per turn
+                tool_progress_messages.append(msg)
+            continue
         if event_type == "final" and isinstance(event.get("payload"), dict):
             final_payload = dict(event.get("payload") or {})
             continue
@@ -1483,6 +1489,7 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
         "approvals_required": approvals_required,
         "action_execution_mode": action_mode,
         "trace_events": trace_events,
+        "tool_progress_messages": tool_progress_messages,
         "loop_budget": {
             "max_iterations": _SAGE_OPERATOR_LOOP_MAX_ITERATIONS,
             "observed_events": len(events),
@@ -1516,15 +1523,7 @@ async def _run_sage_action_loop_v3(
     if _rc.AGENT_MACHINE_MODE == "agent":
         blocked = None  # agent machine mode: hardware tools always available
     else:
-        from server_modules import runtime_config as _rc_check
-    if _rc_check.AGENT_MACHINE_MODE == "agent":
-        blocked = None
-    else:
-        from server_modules import runtime_config as _rc_check
-        if _rc_check.AGENT_MACHINE_MODE == "agent":
-            blocked = None
-        else:
-            blocked = _blocked_agent_computer_tool_for_message(message, availability)
+        blocked = _blocked_agent_computer_tool_for_message(message, availability)
     route_decision = _build_sage_route_decision(
         message=message,
         tools=tools,
@@ -1762,6 +1761,7 @@ async def _run_sage_action_loop_v3(
         "loop_budget": collected["loop_budget"],
         "raw_final_payload": final_payload,
         "trace_events": collected["trace_events"],
+        "tool_progress_messages": collected.get("tool_progress_messages", []),
     }
 
 
@@ -2465,7 +2465,9 @@ async def handle_sage_chat(
         # ── Build policy context (internalized governance) ──
         _policy_context = ""
         try:
-            # Resolve hardware profile status (async-safe)
+            # Resolve hardware profile status (async-safe).
+            # Two sources: (1) runtime attachments (traditional VPS worker),
+            # (2) Sage Agent Computer selection (Empyralis Gateway via WebSocket).
             _has_hardware = False
             try:
                 from server_modules import runtime_attachment_service
@@ -2482,6 +2484,21 @@ async def handle_sage_chat(
                             break
             except Exception:
                 pass
+            # Fallback: check if the user has explicitly selected a Sage Agent
+            # Computer (Empyralis Gateway). A gateway connected via WebSocket
+            # creates a registration but NOT a runtime attachment — we must
+            # detect it here so the agent gets the Hardware tier and tools.
+            if not _has_hardware:
+                try:
+                    from server_modules import sage_agent_computer_selection_service
+                    _selection = sage_agent_computer_selection_service.get_selection(
+                        workspace_id=normalized_workspace_id,
+                        user_id=actor_user_id,
+                    )
+                    if isinstance(_selection, dict) and str(_selection.get("selected_gateway_id") or "").strip():
+                        _has_hardware = True
+                except Exception:
+                    pass
 
             from server_modules import kill_switch_gate
             _kill_active = False
@@ -2499,7 +2516,7 @@ async def handle_sage_chat(
 
             _policy_context = build_agent_policy_context(
                 workspace_id=normalized_workspace_id,
-                plan_id="",  # resolved inside build_agent_policy_context_from_workspace
+                plan_id="",
                 has_hardware_profile=_has_hardware,
                 is_agent_machine=_is_agent_machine,
                 kill_switch_active=_kill_active,
@@ -2595,25 +2612,26 @@ async def handle_sage_chat(
         system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{sage_surface_guardrails}{attachment_context}{mcp_tool_inventory}",
     )
 
-    action_result = None
     action_loop_message = _normalized_sage_action_loop_message(normalized_message, prior_messages)
-    if _message_might_need_sage_action_loop(normalized_message, prior_messages=prior_messages):
-        action_result = await _run_sage_action_loop_v3(
-            workspace_id=normalized_workspace_id,
-            tenant_id=normalized_tenant_id,
-            message=action_loop_message,
-            provider=provider,
-            model=requested_model,
-            credentials=credentials,
-            trace_id=trace_id,
-            actor_user_id=actor_user_id,
+    # Always run the action loop — the LLM decides whether tools are needed.
+    # A keyword heuristic gate would silently skip tools for messages that don't
+    # match exact tokens, causing "let me check..." promises with no follow-up.
+    action_result = await _run_sage_action_loop_v3(
+        workspace_id=normalized_workspace_id,
+        tenant_id=normalized_tenant_id,
+        message=action_loop_message,
+        provider=provider,
+        model=requested_model,
+        credentials=credentials,
+        trace_id=trace_id,
+        actor_user_id=actor_user_id,
 
-            system_prompt=envelope["system_prompt"],
-            channel_origin=channel_origin,
-            attachments=attachments,
-            prior_messages=prior_messages,
-            sender_id=sender_id,
-        )
+        system_prompt=envelope["system_prompt"],
+        channel_origin=channel_origin,
+        attachments=attachments,
+        prior_messages=prior_messages,
+        sender_id=sender_id,
+    )
     if action_result is not None:
         if "sage_action_loop" not in used_context:
             used_context.append("sage_action_loop")
@@ -2685,6 +2703,7 @@ async def handle_sage_chat(
                     reply=reply,
                     status="completed",
                     run_id=trace_id,
+                    metadata={"channel": channel_origin or "sage"},
                 )
         except Exception:
             pass  # never break a reply just because persistence failed
@@ -2762,6 +2781,7 @@ async def handle_sage_chat(
                     reply=reply,
                     status="completed",
                     run_id=trace_id,
+                    metadata={"channel": channel_origin or "sage"},
                 )
         except Exception:
             pass  # never break a reply just because persistence failed
@@ -2883,6 +2903,7 @@ async def handle_sage_chat(
             "blocked_tools": blocked_tools,
             "approvals_required": approvals_required,
             "memory_updates": [],
+            "tool_progress_messages": list(action_result.get("tool_progress_messages") or []),
             "action_execution_mode": action_execution_mode,
             "route_decision": route_decision,
             "trace_id": trace_id,
@@ -3097,6 +3118,7 @@ async def handle_sage_chat(
                 reply=reply,
                 status="completed",
                 run_id=trace_id,
+                metadata={"channel": channel_origin or "sage"},
             )
     except Exception as _exc:
         import logging as _logging
@@ -3271,6 +3293,7 @@ async def handle_sage_chat(
         "blocked_tools": [],
         "approvals_required": [],
         "memory_updates": [],
+        "tool_progress_messages": [],
         "action_execution_mode": action_execution_mode,
         "route_decision": route_decision,
         "trace_id": trace_id,

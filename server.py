@@ -259,16 +259,36 @@ from server_modules.routes_workspaces import router as workspaces_router
 from server_modules.routes_workflows import router as workflows_router
 from server_modules.routes_doctor import router as doctor_router
 from server_modules.routes_sage_telegram_hosted import router as sage_telegram_hosted_router
+from server_modules.connectors.discord_bot_runtime_service import DiscordBotRuntimeService
 
 
 docs_url = "/docs" if os.getenv("ENV") == "development" else None
 redoc_url = "/redoc" if os.getenv("ENV") == "development" else None
 openapi_url = "/openapi.json" if os.getenv("ENV") == "development" else None
 
+def _launch_discord_bot_runtime() -> None:
+    """Start Discord bot gateway listener(s) in daemon threads.
+
+    Falls back to DISCORD_BOT_TOKEN from env when no vault connector
+    exists.  Failures are logged but never crash the server.
+    """
+    try:
+        svc = DiscordBotRuntimeService()
+        result = svc.start(block=False)
+        LOGGER.info(
+            "DiscordBotRuntime started=%s statuses=%s",
+            result.get("started"), result.get("statuses"),
+        )
+    except Exception:
+        LOGGER.exception("DiscordBotRuntime failed to start — continuing without bot.")
+
+
 @asynccontextmanager
 async def runtime_app_lifespan(app_instance: FastAPI):
     await control_plane_repository.ensure_control_plane_schema()
     runs_core.initialize_runtime_services()
+    # ── Discord chatbot v1: persistent gateway listener for DM→Sage ──
+    _launch_discord_bot_runtime()
     async with shared.app_lifespan(app_instance):
         yield
 
@@ -364,6 +384,10 @@ app.include_router(health_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(connections_router, prefix="/api")
 app.include_router(gateway_router, prefix="/api")
+# Fallback: gateway registration without /api prefix — some gateway builds
+# construct the URL differently.  Same handler, no-auth (pairing token is auth).
+from server_modules.routes_gateway import register_gateway as _register_gateway_fallback
+app.post("/gateway/registrations")(_register_gateway_fallback)
 app.include_router(personal_channels_router, prefix="/api")
 app.include_router(workspaces_router, prefix="/api")
 app.include_router(mini_apps_router, prefix="/api")

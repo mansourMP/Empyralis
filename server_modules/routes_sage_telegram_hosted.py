@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
+import secrets
 
 from server_modules import auth as auth_module
 from server_modules import sage_telegram_hosted_service as hosted
@@ -253,3 +255,332 @@ async def unpair(
     )
     count = hosted.unpair_workspace(workspace_id)
     return {"unpaired": True, "removed": count}
+
+
+# ── Discord pairing endpoints ──
+# Reuse the same pairing-code generator as Telegram.  Codes are
+# workspace-scoped and consumable from any channel (first to claim wins).
+
+
+@router.post("/sage/discord/pair/start")
+async def discord_start_pairing(
+    body: PairingStartRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    # Session check only — no role enforcement. The platform has no roles.
+    workspace_id = str(body.workspace_id or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required")
+    _tenant_id = auth_module.workspace_tenant_id(current_user, workspace_id)
+    _allowed = auth_module.allowed_tenant_ids(current_user)
+    if _allowed is not None and _tenant_id not in _allowed:
+        raise HTTPException(status_code=403, detail="Workspace is not accessible")
+    if not hosted.is_configured():
+        raise HTTPException(status_code=503, detail="Discord bot not configured")
+
+    # Reuse the same pending code if one already exists for this workspace
+    existing_code = hosted.pairing_code_for_workspace(workspace_id)
+    if existing_code:
+        return {
+            "pairing_code": existing_code,
+            "status": "active",
+            "oauth_url": _build_discord_oauth_url(workspace_id),
+        }
+
+    code = hosted.generate_pairing_code(workspace_id=workspace_id)
+    return {
+        "pairing_code": code,
+        "status": "active",
+        "oauth_url": _build_discord_oauth_url(workspace_id),
+    }
+
+
+@router.get("/sage/discord/pair/status")
+async def discord_pairing_status(
+    workspace_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    # Session check only — no role enforcement. The platform has no roles.
+    workspace_id = str(workspace_id or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required")
+    _tenant_id = auth_module.workspace_tenant_id(current_user, workspace_id)
+    _allowed = auth_module.allowed_tenant_ids(current_user)
+    if _allowed is not None and _tenant_id not in _allowed:
+        raise HTTPException(status_code=403, detail="Workspace is not accessible")
+    pending_code = hosted.pairing_code_for_workspace(workspace_id)
+    from server_modules import discord_pairing_service as _dps
+    paired = _dps.is_workspace_paired(workspace_id)
+    return {
+        "has_pending_code": pending_code is not None,
+        "paired": paired,
+    }
+
+
+@router.delete("/sage/discord/pair")
+async def discord_unpair(
+    workspace_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    # Session check only — no role enforcement. The platform has no roles.
+    workspace_id = str(workspace_id or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required")
+    _tenant_id = auth_module.workspace_tenant_id(current_user, workspace_id)
+    _allowed = auth_module.allowed_tenant_ids(current_user)
+    if _allowed is not None and _tenant_id not in _allowed:
+        raise HTTPException(status_code=403, detail="Workspace is not accessible")
+    from server_modules import discord_pairing_service as _dps
+    count = _dps.unpair_workspace(workspace_id)
+    return {"unpaired": True, "removed": count}
+
+
+# ── Discord public config (no auth needed) ──
+
+_discord_public_config_cache: dict | None = None
+
+
+@router.get("/sage/discord/public-config")
+async def discord_public_config() -> dict:
+    """Return public Discord identifiers — client_id and bot_user_id.
+
+    These are public: the client_id appears in the OAuth install URL and the
+    bot_user_id in the "Open bot on Discord" link.  No secrets are returned.
+    """
+    global _discord_public_config_cache
+    if _discord_public_config_cache is not None:
+        return _discord_public_config_cache
+
+    import os as _os
+
+    _client_id = ""
+    for _key in ("EMPYRALIS_DISCORD_APPLICATION_ID", "DISCORD_CLIENT_ID"):
+        _val = str(_os.getenv(_key, "") or "").strip()
+        if _val:
+            _client_id = _val
+            break
+
+    _bot_user_id = str(_os.getenv("DISCORD_BOT_USER_ID", "") or "").strip()
+    if not _bot_user_id:
+        _token = str(_os.getenv("DISCORD_BOT_TOKEN", "") or "").strip()
+        if _token:
+            try:
+                import httpx
+                _resp = httpx.get(
+                    "https://discord.com/api/users/@me",
+                    headers={"Authorization": f"Bot {_token}"},
+                    timeout=10,
+                )
+                if _resp.status_code == 200:
+                    _bot_user_id = str((_resp.json() or {}).get("id") or "").strip()
+            except Exception as _exc:
+                import logging
+                _log = logging.getLogger(__name__)
+                _log.warning("Failed to fetch Discord bot user ID: %s", _exc)
+
+    _discord_public_config_cache = {
+        "client_id": _client_id,
+        "bot_user_id": _bot_user_id,
+    }
+    return _discord_public_config_cache
+
+
+# ── Discord OAuth identify-bind ──
+# Replaces the pairing-code round-trip with a standard OAuth2 code-grant flow.
+# User clicks "Connect with Discord" → authorizes (identify + applications.commands)
+# → we exchange the code → fetch their Discord user ID → bind to workspace.
+# The pairing-code path is kept as a fallback under a <details> element in the UI.
+
+import time as _time
+
+_OAUTH_STATES: dict = {}  # state_token → {workspace_id, created_at}
+_OAUTH_STATE_MAX_AGE_S = 600  # 10 minutes
+
+
+def _get_discord_client_id() -> str:
+    import os as _os
+    for _key in ("EMPYRALIS_DISCORD_APPLICATION_ID", "DISCORD_CLIENT_ID"):
+        _val = str(_os.getenv(_key, "") or "").strip()
+        if _val:
+            return _val
+    return ""
+
+
+def _get_discord_client_secret() -> str:
+    import os as _os
+    return str(_os.getenv("DISCORD_CLIENT_SECRET", "") or "").strip()
+
+
+def _get_frontend_origin() -> str:
+    from server_modules.runtime_config import FRONTEND_ORIGINS
+    _origins = [o.strip() for o in str(FRONTEND_ORIGINS or "").split(",") if o.strip()]
+    # Prefer an HTTPS origin for OAuth redirects (Discord requires public URLs).
+    for _o in _origins:
+        if _o.startswith("https://"):
+            return _o
+    return _origins[0] if _origins else "https://empyralis.ai"
+
+
+def _build_discord_oauth_url(workspace_id: str) -> str:
+    """Build a Discord OAuth2 authorize URL for the identify-bind flow."""
+    import urllib.parse as _up
+    _client_id = _get_discord_client_id()
+    if not _client_id:
+        return ""
+    _state = secrets.token_urlsafe(32)
+    _OAUTH_STATES[_state] = {"workspace_id": str(workspace_id).strip(), "created_at": _time.time()}
+    # Clean up expired states
+    _now = _time.time()
+    for _k in list(_OAUTH_STATES.keys()):
+        if _now - _OAUTH_STATES[_k]["created_at"] > _OAUTH_STATE_MAX_AGE_S:
+            _OAUTH_STATES.pop(_k, None)
+    _redirect_uri = f"{_get_frontend_origin()}/api/sage/discord/oauth/callback"
+    return (
+        f"https://discord.com/oauth2/authorize"
+        f"?client_id={_up.quote(_client_id)}"
+        f"&redirect_uri={_up.quote(_redirect_uri)}"
+        f"&response_type=code"
+        f"&scope={_up.quote('identify applications.commands')}"
+        f"&state={_up.quote(_state)}"
+    )
+
+
+@router.get("/sage/discord/oauth/url")
+async def discord_oauth_url_endpoint(
+    workspace_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Return the Discord OAuth2 URL for one-click identify-bind.
+
+    Session check only — no role enforcement.  The platform has no roles.
+    """
+    _wid = str(workspace_id or "").strip()
+    if not _wid:
+        raise HTTPException(status_code=400, detail="workspace_id is required")
+    # Verify the user can access this workspace (tenant membership only, no role gate)
+    _tenant_id = auth_module.workspace_tenant_id(current_user, _wid)
+    _allowed = auth_module.allowed_tenant_ids(current_user)
+    if _allowed is not None and _tenant_id not in _allowed:
+        raise HTTPException(status_code=403, detail="Workspace is not accessible")
+    _url = _build_discord_oauth_url(_wid)
+    if not _url:
+        raise HTTPException(status_code=503, detail="Discord client ID is not configured")
+    return {"url": _url}
+
+
+@router.get("/sage/discord/oauth/callback")
+async def discord_oauth_callback(code: str, state: str):
+    """Handle the Discord OAuth2 redirect after the user authorizes.
+
+    Public endpoint — no auth required (Discord redirects the user's browser here).
+    Exchanges the code for an access token, fetches the user's Discord ID,
+    binds it to the workspace, and sends a best-effort welcome DM.
+    Redirects back to the frontend on completion.
+    """
+    import logging as _logging
+    import json as _json
+    import urllib.parse as _up
+    _log = _logging.getLogger(__name__)
+
+    # Resolve the state token to get the workspace_id
+    _entry = _OAUTH_STATES.pop(str(state).strip(), None)
+    if _entry is None:
+        _frontend = _get_frontend_origin()
+        return RedirectResponse(url=f"{_frontend}?discord=error&reason=invalid_state")
+
+    _wid = str(_entry.get("workspace_id") or "").strip()
+    _frontend = _get_frontend_origin()
+
+    if not _wid:
+        return RedirectResponse(url=f"{_frontend}?discord=error&reason=missing_workspace")
+
+    _client_id = _get_discord_client_id()
+    _client_secret = _get_discord_client_secret()
+
+    if not _client_id or not _client_secret:
+        _log.error("Discord OAuth: client_id or client_secret missing")
+        return RedirectResponse(url=f"{_frontend}?discord=error&reason=not_configured")
+
+    _redirect_uri = f"{_frontend}/api/sage/discord/oauth/callback"
+
+    # ── Exchange code for access token ──
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as _client:
+            _token_resp = await _client.post(
+                "https://discord.com/api/oauth2/token",
+                data={
+                    "client_id": _client_id,
+                    "client_secret": _client_secret,
+                    "grant_type": "authorization_code",
+                    "code": str(code).strip(),
+                    "redirect_uri": _redirect_uri,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if _token_resp.status_code != 200:
+                _log.warning("Discord OAuth: token exchange failed status=%s body=%s",
+                             _token_resp.status_code, (_token_resp.text or "")[:200])
+                return RedirectResponse(url=f"{_frontend}?discord=error&reason=token_exchange_failed")
+            _token_data = _token_resp.json()
+            _access_token = str(_token_data.get("access_token") or "").strip()
+            if not _access_token:
+                return RedirectResponse(url=f"{_frontend}?discord=error&reason=no_access_token")
+    except Exception as _exc:
+        _log.exception("Discord OAuth: token exchange error")
+        return RedirectResponse(url=f"{_frontend}?discord=error&reason=token_exchange_error")
+
+    # ── Fetch Discord user ID ──
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as _client:
+            _user_resp = await _client.get(
+                "https://discord.com/api/users/@me",
+                headers={"Authorization": f"Bearer {_access_token}"},
+            )
+            if _user_resp.status_code != 200:
+                _log.warning("Discord OAuth: user fetch failed status=%s", _user_resp.status_code)
+                return RedirectResponse(url=f"{_frontend}?discord=error&reason=user_fetch_failed")
+            _user_data = _user_resp.json()
+            _discord_user_id = str(_user_data.get("id") or "").strip()
+            if not _discord_user_id:
+                return RedirectResponse(url=f"{_frontend}?discord=error&reason=no_user_id")
+    except Exception as _exc:
+        _log.exception("Discord OAuth: user fetch error")
+        return RedirectResponse(url=f"{_frontend}?discord=error&reason=user_fetch_error")
+
+    # ── Bind Discord user → workspace ──
+    from server_modules import discord_pairing_service as _dps
+    _dps.pair_discord_workspace(_discord_user_id, _wid)
+    _log.info("Discord OAuth: paired user %s → workspace %s", _discord_user_id, _wid)
+
+    # ── Best-effort welcome DM ──
+    _dm_ok = False
+    try:
+        import os as _os
+        import httpx
+        _bot_token = str(_os.getenv("DISCORD_BOT_TOKEN", "") or "").strip()
+        if _bot_token:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as _client:
+                _dm_resp = await _client.post(
+                    "https://discord.com/api/v10/users/@me/channels",
+                    json={"recipient_id": _discord_user_id},
+                    headers={"Authorization": f"Bot {_bot_token}"},
+                )
+                if _dm_resp.status_code == 200:
+                    _dm_data = _dm_resp.json()
+                    _channel_id = str(_dm_data.get("id") or "").strip()
+                    if _channel_id:
+                        await _client.post(
+                            f"https://discord.com/api/v10/channels/{_channel_id}/messages",
+                            json={"content": "✅ You're now connected to Empyralis! Your workspace is linked. Send me any message to start."},
+                            headers={"Authorization": f"Bot {_bot_token}"},
+                        )
+                        _dm_ok = True
+    except Exception as _exc:
+        _log.warning("Discord OAuth: welcome DM failed for user %s (best-effort, proceeding): %s",
+                     _discord_user_id, _exc)
+
+    # ── Redirect to frontend ──
+    _params = "section=channels&discord=connected" if _dm_ok else "section=channels&discord=connected&dm=pending"
+    return RedirectResponse(url=f"{_frontend}/w/{_up.quote(_wid)}/integrations?{_params}")
