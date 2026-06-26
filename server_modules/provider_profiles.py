@@ -1478,7 +1478,7 @@ PROVIDER_LIMIT_POLICY = {
         "supports_retry_after": True,
     },
     "deepseek": {
-        "max_output_tokens": 1400,
+        "max_output_tokens": 2400,
         "max_retry_attempts": 3,
         "backoff_base_seconds": 1.0,
         "backoff_max_seconds": 10.0,

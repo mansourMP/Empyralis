@@ -2105,6 +2105,16 @@ def iter_openai_compatible_chat_events(
                     "tool_calls": tool_calls,
                 }
                 return
+            # DeepSeek known bug: returns empty content when tool messages are in context.
+            # Retry without tools to force a plain-text synthesis response.
+            if (
+                str(provider or "").strip().lower() == "deepseek"
+                and "tools" in payload
+                and attempt + 1 < max_attempts
+            ):
+                payload = {k: v for k, v in payload.items() if k not in ("tools", "tool_choice", "parallel_tool_calls")}
+                last_error = "empty_content"
+                continue
             yield {"type": "error", "error": "empty_content", "model": model}
             return
         except Exception as exc:

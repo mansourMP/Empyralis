@@ -1289,12 +1289,15 @@ def stream_provider_backed_direct_chat(
                                     }
                                 )
                             else:
+                                _tool_content = tool_result_for_context
+                                if len(_tool_content) > 4000:
+                                    _tool_content = _tool_content[:3800] + f"\n...[truncated {len(_tool_content) - 3800} chars]"
                                 conversation_messages.append(
                                     {
                                         "role": "tool",
                                         "tool_call_id": tool_call_id,
                                         "name": str(tool_call.get("name") or f"{connector_id}__{action_id}"),
-                                        "content": tool_result_for_context,
+                                        "content": _tool_content,
                                     }
                                 )
                         if effective_iteration_provider == "codex_cli":
@@ -1304,7 +1307,10 @@ def stream_provider_backed_direct_chat(
                                 "Otherwise provide the final answer to the user."
                             )
                         else:
-                            current_prompt = ""
+                            current_prompt = (
+                                "Based on the tool results above, provide a clear and helpful answer to the user. "
+                                "If you need more information, use another tool now. Otherwise respond directly."
+                            )
                         # Feed tool results back to the model in the next iteration
                         # so it can reason about them and call more tools if needed.
                         continue

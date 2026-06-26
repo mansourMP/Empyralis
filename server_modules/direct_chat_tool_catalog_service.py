@@ -292,7 +292,7 @@ _LOCAL_SYSTEM_INFO_ACTION_TOKENS = (
 )
 
 _LOCAL_SYSTEM_INFO_TARGET_PATTERNS = (
-    r"\b(?:my|this|local|current)\s+(?:hardware|machine|computer|device|mac|macbook|laptop|system)\b",
+    r"\b(?:my|this|local|current|the)\s+(?:hardware|machine|computer|device|mac|macbook|laptop|system)\b",
     r"\b(?:device|machine|system)\s+(?:info|information|specs|specifications|details|profile)\b",
     r"\b(?:hardware|device|machine|system)\s+(?:info|information|specs|specifications|details|profile)\b.*\b(?:my|this|local|current)\s+(?:machine|computer|device|mac|macbook|laptop|system)\b",
     r"\b(?:cpu|ram|memory|disk|storage|os)\s+(?:info|information|specs|details|usage|size)\b",
