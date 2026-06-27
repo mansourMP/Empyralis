@@ -1601,6 +1601,7 @@ def collect_tool_capable_provider_response(events: Iterator[Dict[str, Any]]) -> 
             provider_error = str(event.get("error") or "unknown_error").strip() or "unknown_error"
             break
 
+    print(f"[TOOL_CAPABLE_FAIL] error={provider_error!r} deltas_count={len(streamed_parts)} model={final_model!r}", flush=True)
     return {
         "ok": False,
         "text": "",
@@ -2112,13 +2113,16 @@ def iter_openai_compatible_chat_events(
                 and "tools" in payload
                 and attempt + 1 < max_attempts
             ):
+                print(f"[DS_SYNTH_RETRY] attempt={attempt} stripping tools (had {len(payload.get('tools', []))} tools) final_text={final_text!r} tool_calls_count={len(tool_calls)}", flush=True)
                 payload = {k: v for k, v in payload.items() if k not in ("tools", "tool_choice", "parallel_tool_calls")}
                 last_error = "empty_content"
                 continue
+            print(f"[DS_EMPTY_CONTENT] attempt={attempt} tools_in_payload={'tools' in payload} final_text={final_text!r} tool_calls_count={len(tool_calls)}", flush=True)
             yield {"type": "error", "error": "empty_content", "model": model}
             return
         except Exception as exc:
             last_error = format_provider_error(exc)
+            print(f"[DS_HTTP_ERROR] attempt={attempt}/{max_attempts} error={last_error!r}", flush=True)
             normalized_error = str(last_error or "").strip().lower()
             if attempt + 1 >= max_attempts:
                 break

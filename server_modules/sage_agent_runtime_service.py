@@ -319,6 +319,7 @@ async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
     There is NO tier that scans vault keys as a fallback.  A vault key
     is only used when it IS the explicit ``sage_ai_provider``.
     """
+    print(f"[TRACE_PROVIDER] _resolve_cloud_provider called ws={workspace_id}", flush=True)
     from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
     from server_modules.control_plane_repository import get_workspace_by_id as _load_workspace
 
@@ -338,6 +339,7 @@ async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
     if active_provider:
         credentials = direct_chat_credentials(normalized_ws, active_provider)
         if supports_direct_message_native_chat(active_provider, credentials):
+            print(f"[TRACE_PROVIDER_OK] returning provider={active_provider} (explicit)", flush=True)
             return active_provider, credentials
         # Explicit provider is unavailable — HARD STOP.
         raise RuntimeError(
@@ -356,9 +358,11 @@ async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
             hosted_sage_ai_access_state_for_workspace_id as _hosted_access,
         )
         _access = _hosted_access(workspace_id=normalized_ws)
+        print(f"[TRACE_ENTITLE] ws={normalized_ws} allowed={_access.get('allowed')} reason={_access.get('reason')} message={str(_access.get('message') or '')[:120]}", flush=True)
         if _access.get("allowed"):
             credentials = direct_chat_credentials(normalized_ws, "deepseek")
             if supports_direct_message_native_chat("deepseek", credentials):
+                print(f"[TRACE_PROVIDER_OK] returning provider=deepseek (platform)", flush=True)
                 return "deepseek", credentials
             raise RuntimeError(
                 "Platform AI credentials could not be validated. "
@@ -370,9 +374,43 @@ async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
 
     credentials = direct_chat_credentials(normalized_ws, "deepseek")
     if supports_direct_message_native_chat("deepseek", credentials):
+        print(f"[TRACE_PROVIDER_OK] returning provider=deepseek (fallback, no entitlements)", flush=True)
         return "deepseek", credentials
 
     raise RuntimeError("No cloud provider is configured for Sage.")
+
+
+async def get_persisted_model_preference(workspace_id: str) -> str:
+    """Read the workspace-persisted model preference (survives restart)."""
+    from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
+    from server_modules.control_plane_repository import get_workspace_by_id as _load_workspace
+    try:
+        ws_record = await _load_workspace(str(workspace_id or "default").strip() or "default")
+        ws_metadata = dict((ws_record or {}).get("metadata") or {})
+        admin_defaults = workspace_admin_defaults_from_metadata(ws_metadata)
+        return str(admin_defaults.sage_ai_model or "").strip()
+    except Exception:
+        return ""
+
+
+async def set_persisted_model_preference(workspace_id: str, model: str, provider: str = "") -> bool:
+    """Persist the workspace model preference so it survives server restarts."""
+    from server_modules.control_plane_repository import update_workspace_admin_defaults_metadata
+    try:
+        payload = {}
+        if provider:
+            payload["sage_ai_provider"] = str(provider).strip().lower()
+        if model:
+            payload["sage_ai_model"] = str(model).strip()
+        if not payload:
+            return False
+        result = await update_workspace_admin_defaults_metadata(
+            str(workspace_id or "default").strip() or "default",
+            payload,
+        )
+        return result is not None
+    except Exception:
+        return False
 
 
 def _load_profile_context(*, workspace_id: str) -> str:
@@ -2320,6 +2358,9 @@ async def handle_sage_chat(
     if not normalized_message:
         raise ValueError("message must not be empty")
 
+    import sys as _sys
+    print(f"[TRACE_SAGE_ENTRY] ws={normalized_workspace_id} channel={channel_origin or 'sage'} surface={normalized_surface} message_preview={normalized_message[:80]}", flush=True, file=_sys.stderr)
+
     trace_id = str(uuid.uuid4())
     actor_user_id = _coerce_text((current_user or {}).get("user_id"))
     actor_email = _coerce_text((current_user or {}).get("email"))
@@ -2424,6 +2465,12 @@ async def handle_sage_chat(
     if channel_origin:
         metadata["channel_origin"] = channel_origin
     requested_model = resolve_requested_model(context, metadata, provider)
+    # ── Persisted model preference from workspace metadata (survives restart) ──
+    _persisted_model = await get_persisted_model_preference(normalized_workspace_id)
+    if _persisted_model:
+        requested_model = _persisted_model
+        import sys as _sys_model
+        print(f"[TRACE_MODEL_PERSISTED] ws={normalized_workspace_id} model={requested_model}", flush=True, file=_sys_model.stderr)
 
     # --- Build Sage prompt/context before any model-backed action loop ---
     # --- Load recent conversation turns from shared thread store ---

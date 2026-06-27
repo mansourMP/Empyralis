@@ -46,17 +46,27 @@ async def execute_agent_turn_request(
     trace_context: Optional[Any] = None,
 ) -> dict[str, Any]:
     # Internal delegate. Not an alternate turn engine. Called only from agent_turn().
-    durable_execution = await run_service.execute_durable_agent_turn_dispatch(
-        turn_request=turn_request,
-        current_user=current_user,
-        services=services.run_execution,
-        base_request=run_request,
-        trace_context=trace_context,
-        execute_durable_turn_request_fn=execute_durable_turn_request,
-    )
-    if durable_execution is not None:
-        return durable_execution
+    import sys as _sys
+    _exec_mode = str(getattr(turn_request, 'execution_mode', '') or '').strip().lower()
+    print(f"[TRACE_TURN_RUNTIME] entry channel={turn_request.channel} message_preview={str(turn_request.message)[:80]} execution_mode={_exec_mode}", flush=True, file=_sys.stderr)
 
+    # ── Durable runs are EXPLICIT, never the default ──
+    # A conversational message ALWAYS takes the streaming chat loop.
+    # Durable/background runs only trigger when explicitly requested.
+    if _exec_mode == "durable":
+        durable_execution = await run_service.execute_durable_agent_turn_dispatch(
+            turn_request=turn_request,
+            current_user=current_user,
+            services=services.run_execution,
+            base_request=run_request,
+            trace_context=trace_context,
+            execute_durable_turn_request_fn=execute_durable_turn_request,
+        )
+        if durable_execution is not None:
+            print(f"[TRACE_TURN_RUNTIME] path=DURABLE channel={turn_request.channel}", flush=True, file=_sys.stderr)
+            return durable_execution
+
+    print(f"[TRACE_TURN_RUNTIME] path=DIRECT_CHAT channel={turn_request.channel}", flush=True, file=_sys.stderr)
     body = dict(chat_body or {})
     return await execute_direct_chat_turn_request(
         turn_request=turn_request,

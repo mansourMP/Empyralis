@@ -1,0 +1,532 @@
+🔬 OpenClaw Architecture — Full Forensic Audit
+
+Source: /opt/homebrew/lib/node_modules/openclaw/ (npm install v2026.5.27)
+GitHub: https://github.com/openclaw/openclaw
+License: MIT
+Runtime: Node.js ≥22.19
+
+---
+STEP 8 — SESSION / THREAD MANAGEMENT
+
+Session Key format: agent:<agentId>:<sessionKey> or unscoped sessionKey
+
+Session resolution: session-D_iBBJQp.js:173 resolveSession(opts) calls resolveSessionKeyForRequest(opts) which:
+1. Loads session store from disk (JSON file)
+2. Resolves sessionKey from channel context (channel:accountId:chatId:threadId)
+3. Checks reset policy (via resolveSessionResetPolicy)
+4. Returns { sessionKey, sessionStore, sessionEntry }
+
+Session store is a flat JSON file at ~/.openclaw/sessions/<agentId>/store.json.
+
+Sessions are NOT cross-channel — each channel has its own session key derivation. But sessions CAN be spawned across agents via sessions_spawn tool.
+
+---
+FULL PIPELINE (ASCII)
+
+┌──────────────────────┐
+│  CHANNEL ADAPTER     │  bot-Cg3cHBMq.js:6854 (Telegram processMessage)
+│  - Telegram Bot API  │  provider-CiI2mFp8.js (Discord, etc.)
+│  - Discord Gateway   │  Each channel has own extension in
+│  - Signal, iMessage, │  extensions/<channel>/ directory
+│  - Slack, Mattermost │
+│  - IRC, Webchat,     │
+│    Tlon/Urbit        │
+└──────┬───────────────┘
+       │ Normalized ctxPayload with:
+       │   From, To, RawBody, SessionKey,
+       │   ChatType, InboundEventKind, MediaType
+       │
+       ▼
+┌──────────────────────┐
+│  INGRESS AUTH        │  bot-Cg3cHBMq.js:310-368
+│  createChannelIngress│  (extensions/telegram/src/ingress.ts)
+│  Resolver.event()    │  Checks allowlist, DM policy, group policy
+│  Resolver.command()  │  Distinguishes "event" from "command" ingress
+└──────┬───────────────┘
+       │ Authorized ingress result with sessionKey
+       │
+       ▼
+┌──────────────────────┐
+│  MESSAGE CONTEXT     │  bot-Cg3cHBMq.js:6860
+│  buildTelegramMessage│  Resolves chat context, thread binding,
+│  Context()           │  history, allowlists, group config
+└──────┬───────────────┘
+       │ ctxPayload with resolved SessionKey
+       │
+       ▼
+┌──────────────────────┐
+│  DISPATCH            │  bot-Cg3cHBMq.js:5714
+│  dispatchTelegram    │  Streaming draft lanes (answer, reasoning)
+│  Message()           │  Tool progress, reply fencing, quote handling
+└──────┬───────────────┘
+       │ Calls runChannelInboundEvent()
+       │
+       ▼
+┌──────────────────────┐
+│  INBOUND EVENT       │  inbound-reply-dispatch-Cyw7nhJQ.js
+│  runChannelInbound   │  Wraps channel event into followup run
+│  Event()             │  Enqueues into reply pipeline
+└──────┬───────────────┘
+       │
+       ▼
+┌──────────────────────┐
+│  REPLY PIPELINE      │  reply-pipeline-C3CPjsQr.js
+│  createChannelReply  │  Queue/debounce → followup-runner
+│  Pipeline()          │  Resolves session, model, tools, skills
+└──────┬───────────────┘
+       │ followupRun with: prompt, sessionKey, defaultModel
+       │
+       ▼
+┌──────────────────────┐
+│  AGENT RUNNER        │  agent-runner.runtime-CQGHXG44.js:2861
+│  runReplyAgent()     │  Heartbeat check → queue mode → steering
+│                      │  → preflight compaction → memory flush
+│                      │  → tool selection → LLM call
+└──────┬───────────────┘
+       │ Resolves model via resolveDefaultModelForAgent()
+       │ model-selection-DF4MbMUd.js:91
+       │
+       ▼
+┌──────────────────────┐
+│  PROVIDER CLIENT     │  provider-CiI2mFp8.js / extensions/<ai>/
+│  (Anthropic, OpenAI, │  Transport policy, streaming, tool-use
+│  DeepSeek, Ollama,   │  Each provider is an extension plugin
+│  Groq, OpenRouter)   │  API call via provider contract
+└──────┬───────────────┘
+       │ LLM response (tool calls or text)
+       │
+       ▼
+┌──────────────────────┐
+│  TOOL EXECUTION      │  run-attempt-CnazfKzC.js
+│  Embedded Pi / Codex │  Tool call → sandboxed execution
+│  App Server          │  Code execution, file ops, web, etc.
+└──────┬───────────────┘
+       │ Tool results fed back to LLM (agentic loop)
+       │ Loop: tool calls → execute → feed back → more tools
+       │
+       ▼
+┌──────────────────────┐
+│  REPLY DELIVERY      │  delivery.runtime.js / reply-dispatch
+│  dispatchReplyWith   │  Text rendering (Markdown → Telegram HTML)
+│  Dispatcher()        │  Chunking, streaming, reply threading
+└──────┬───────────────┘
+       │ Outbound message through channel adapter
+       │ bot.api.sendMessage() / discord message / etc.
+       │
+       ▼
+┌──────────────────────┐
+│  CHANNEL RESPONSE    │  Each channel plugin's send methods
+│  (Telegram, Discord, │  Telegram: sendMessageTelegram()
+│   etc.)              │  Discord: message.send() / interaction.reply()
+└──────────────────────┘
+
+---
+STEP 2 — MESSAGE ENTRY
+
+Telegram
+
+File: bot-Cg3cHBMq.js:6854 (in dist/)
+Source: extensions/telegram/src/bot-message.ts
+
+The function createTelegramMessageProcessor() creates the main message handler. Every Telegram update flows through:
+
+// bot-Cg3cHBMq.js:6845 (simplified)
+const createTelegramMessageProcessor = (deps) => {
+  return async (primaryCtx, allMedia, storeAllowFrom, options,
+                  replyMedia, replyChain, promptContext, lifecycle) => {
+    // STEP 1: Build normalized message context
+    const context = await buildTelegramMessageContext({
+      primaryCtx, allMedia, replyMedia, replyChain,
+      promptContext, storeAllowFrom, options,
+      bot, cfg, account, historyLimit, groupHistories,
+      dmPolicy, allowFrom, groupAllowFrom, ...
+    });
+    if (!context) return false; // dropped
+
+    // STEP 2: Log and send typing indicator
+    telegramInboundLog.info(formatTelegramInboundLogLine({...}));
+
+    // STEP 3: Dispatch
+    await dispatchTelegramMessage({
+      context, bot, cfg, runtime, replyToMode,
+      streamMode, textLimit, telegramCfg, telegramDeps, opts
+    });
+  };
+};
+
+Normalization: buildTelegramMessageContext() (called from processMessage) normalizes into a ctxPayload object:
+- From — sender ID/name
+- To — recipient
+- RawBody — message text
+- SessionKey — derived session identifier
+- ChatType — "direct" or "group"
+- InboundEventKind — "message" or "room_event"
+- MediaType — optional media content type
+
+Ingress Authorization
+
+File: bot-Cg3cHBMq.js:310-368 (source: extensions/telegram/src/ingress.ts)
+
+Before processing, every message goes through ingress authorization:
+
+// bot-Cg3cHBMq.js:310
+const telegramIngressIdentity = defineStableChannelIngressIdentity({
+    key: "telegram-user-id",
+    normalize: (value) => {
+        const normalized = normalizeAllowFrom([value]);
+        return normalized.entries[0] ??
+               (normalized.hasWildcard ? "*" : null);
+    },
+    sensitivity: "pii"
+});
+
+// For events (regular messages):
+async function resolveTelegramEventIngressAuthorization(params) {
+    return (await createTelegramIngressResolver({
+        accountId: params.accountId
+    }).event({
+        subject: createTelegramIngressSubject(params.senderId),
+        conversation: telegramConversation(params),
+        event: { kind: params.eventKind, authMode: "inbound" },
+        dmPolicy: params.dmPolicy,
+        groupPolicy: params.enforceGroupAuthorization ? "allowlist" : "open",
+        allowFrom: telegramAllowEntries(params.effectiveDmAllow),
+        groupAllowFrom: params.enforceGroupAuthorization ?
+            telegramAllowEntries(params.effectiveGroupAllow) : []
+    })).ingress;
+}
+
+YES, it uses the SAME handoff function for every channel
+
+Every channel plugin implements the same contract via channel-entry-contract-DfWF0KEA.js:
+
+// channel-entry-contract (simplified from types)
+defineBundledChannelEntry({
+    id: "telegram",      // unique channel ID
+    name: "Telegram",
+    description: "Telegram channel plugin",
+    plugin: { specifier: "./channel-plugin-api.js", ... },
+    secrets: { specifier: "./secret-contract-api.js", ... },
+    runtime: { specifier: "./runtime-setter-api.js", ... },
+    accountInspect: { specifier: "./account-inspect-api.js", ... }
+})
+
+Each channel's runtime-api.js exports the same interface. The dispatch path for each channel converges at runChannelInboundEvent() → reply-pipeline → runReplyAgent().
+
+---
+STEP 3 — THE CORE ENGINE
+
+Model Selection
+
+File: model-selection-DF4MbMUd.js:91
+
+function resolveDefaultModelForAgent(params) {
+    // 1. Check agent-level model override
+    const agentModelOverride = params.agentId ?
+        resolveAgentEffectiveModelPrimary(params.cfg, params.agentId) : void 0;
+
+    // 2. Fall back to global defaults
+    // 3. Resolve from configured model catalog
+    const resolved = resolveModelRefFromString({
+        raw: agentModelOverride ?? globalDefault,
+        defaultProvider: DEFAULT_PROVIDER,
+        catalog: buildConfiguredModelCatalog(cfg)
+    });
+
+    return {
+        provider: resolved.provider,
+        model: resolved.model,
+        thinkingLevel: resolved.thinkingLevel
+    };
+}
+
+Provider catalog is built in provider-CiI2mFp8.js — it scans the config for models.providers entries and plugin-registered providers. Each provider is a plugin extension in extensions/<name>/.
+
+Tool Selection
+
+File: openclaw-tools-BUQsixTe.js
+
+Tools are selected in the agent runner before LLM call:
+
+1. Core tools defined in tool-catalog-Bxn5jw8h.js — CORE_TOOL_DEFINITIONS array
+2. Each tool has: id, label, description, sectionId, profiles[]
+3. At runtime, normalizeAgentRuntimeTools() filters based on:
+  - Agent config (agents.defaults.tools)
+  - Session capabilities
+  - Channel capabilities
+  - Tool policy (allow/deny lists)
+  - Inherited tool restrictions (for subagents)
+4. Tools are sent as function/tool definitions in the LLM API call
+5. The LLM decides which tool to call — there is NO regex/keyword matching
+
+System Prompt Building
+
+The system prompt is built from multiple sources:
+- Agent identity (IDENTITY.md, USER.md templates)
+- Skills (loaded from skills/ directory)
+- Bootstrap files (from agent workspace)
+- Memory context (from memory search)
+- Channel context (from channel event)
+- Session history (compacted transcript)
+
+Agentic Loop
+
+File: agent-runner.runtime-CQGHXG44.js:2861 (runReplyAgent)
+
+runReplyAgent:
+  1. Check heartbeat/isActive
+  2. Steering (inject into running stream if active)
+  3. Queue management (enqueue vs drop vs followup)
+  4. Preflight compaction (if context too large)
+  5. Memory flush (if memory needs saving)
+  6. LLM call via provider
+  7. Tool execution (if LLM returns tool calls)
+  8. Feed tool results back to LLM
+  9. Loop until LLM returns final text
+  10. Deliver reply
+
+The actual LLM call + tool loop is handled by run-attempt-CnazfKzC.js which wraps @earendil-works/pi-ai (the embedded agent runtime).
+
+---
+STEP 10 — GATEWAY ARCHITECTURE
+
+Gateway is a PROCESS — spawned by openclaw gateway run.
+
+The gateway:
+- Listens on an HTTP + WebSocket port
+- Provides the control UI (control-ui/ — a SPA served from dist)
+- Routes messages between channels and the agent engine
+- Manages session state, cron jobs, node connections
+- Broadcasts events to connected WebSocket clients
+
+Entry point: gateway-entrypoint-CA3xEreb.js
+
+// gateway-entrypoint-CA3xEreb.js:38
+export {
+    resolveGatewayInstallEntrypoint,
+    findFirstAccessibleGatewayEntrypoint,
+    isGatewayDistEntrypointPath,
+    buildGatewayDistEntrypointCandidates
+};
+
+Agent-Channel Binding: Configured via channels config. Each channel account is bound to one or more agents. The resolveAgentRoute() function determines which agent handles a given message.
+
+Outbound Reply Routing: The reply goes back through the ORIGINATING channel's send API. Reply context is stored in the session, including OriginatingChannel, accountId, chatId, threadId. The delivery pipeline unwraps this to route the reply.
+
+---
+STEP 6 — TERMINAL / CLI MODE
+
+Entry: entry.js — invoked via openclaw terminal or openclaw tui or openclaw chat.
+
+From entry.js:183-184:
+const INTERACTIVE_TTY_COMMANDS = new Set([
+    "tui",
+    "terminal",
+    "chat"
+]);
+
+The CLI mode goes through the SAME agentCommandFromIngress() pipeline:
+
+// agent-command-l6N_480Y.js:1406
+async function agentCommandFromIngress(opts, runtime, deps) {
+    // Same code path as channel messages
+    // ingressOpts with channel="terminal"
+}
+
+Or via the gateway:
+// agent-via-gateway-BDchs9k_.js:283
+async function agentViaGatewayCommand(opts, runtime, signalBridge) {
+    // Talks to running gateway over HTTP/WS
+}
+
+---
+STEP 4 — TOOLS AND SKILLS
+
+Tool Definitions
+
+Defined in tool-catalog-Bxn5jw8h.js as CORE_TOOL_DEFINITIONS array:
+
+const CORE_TOOL_DEFINITIONS = [
+    { id: "read",        label: "read",        description: "Read file contents",     sectionId: "fs", profiles: ["coding"] },
+    { id: "write",       label: "write",       description: "Create or overwrite files", sectionId: "fs", profiles: ["coding"] },
+    { id: "edit",        label: "edit",        description: "Make precise edits",     sectionId: "fs", profiles: ["coding"] },
+    { id: "exec",        label: "exec",        description: "Run shell now.",         sectionId: "runtime", profiles: ["coding"] },
+    { id: "process",     label: "process",     description: "Inspect/control exec sessions.", sectionId: "runtime", profiles: ["coding"] },
+    { id: "code_execution", label: "code_execution", description: "Run sandboxed remote analysis", sectionId: "runtime", profiles: ["coding"] },
+    { id: "web_search",  label: "web_search",  description: "Search the web",        sectionId: "web", profiles: ["coding"] },
+    { id: "web_fetch",   label: "web_fetch",   description: "Fetch web content",     sectionId: "web", profiles: ["coding"] },
+    { id: "x_search",    label: "x_search",    description: "Search X posts",        sectionId: "web", profiles: ["coding"] },
+    { id: "memory_search", label: "memory_search", description: "Semantic search",   sectionId: "memory", profiles: ["coding"] },
+    { id: "memory_get",  label: "memory_get",  description: "Read memory files",     sectionId: "memory", profiles: ["coding"] },
+    { id: "sessions_list",   label: "sessions_list",   description: "List visible sessions...",   sectionId: "sessions" },
+    { id: "sessions_history", label: "sessions_history", description: "Read sanitized session history...", sectionId: "sessions" },
+    { id: "sessions_send",   label: "sessions_send",   description: "Message session...",       sectionId: "sessions" },
+    { id: "sessions_spawn",  label: "sessions_spawn",  description: "Spawn subagent...",         sectionId: "sessions" },
+    { id: "session_status",  label: "session_status",  description: "Show session status...",    sectionId: "sessions" },
+    { id: "update_plan",     label: "update_plan",     description: "Track short work plan.",    sectionId: "sessions" },
+    { id: "cron",            label: "cron",            description: "Schedule reminders...",     sectionId: "automation" },
+    { id: "message_action",  label: "message_action",  description: "Cross-channel message actions", sectionId: "messaging" },
+    // ... more tools
+];
+
+Tool Registration
+
+Tools are registered through:
+1. Core tools — built into CORE_TOOL_DEFINITIONS
+2. Plugin tools — via resolvePluginTools() from each plugin's register() hook
+3. MCP tools — from MCP server connections
+4. Channel-specific tools — like message_action for cross-channel messaging
+
+Skills vs Tools
+
+Skills are Markdown-based instruction files in skills/<name>/SKILL.md. They are loaded at runtime and injected into the system prompt. Skills are NOT tools — they're instructions/context that teach the LLM how to use specific CLI tools or services.
+
+Tools are compiled JS functions that the LLM calls via function-calling. They're registered with schemas, execute real code, and return results.
+
+Tool Execution (Sandboxing)
+
+File: run-attempt-CnazfKzC.js
+
+Tool execution uses:
+- @earendil-works/pi-ai (complete() function) for LLM calls
+- @earendil-works/pi-coding-agent (createReadTool, createWriteTool, createEditTool) for file operations
+- Sandbox paths enforced via assertSandboxPath()/sandbox-paths-U414eGG1.js
+- For code execution: Codex App Server (optional remote sandbox) or local embedded Pi runner
+- Timeouts enforced via buildTimeoutAbortSignal()
+
+---
+STEP 5 — /COMMANDS
+
+All Known Commands
+
+Found in commands-registry.data-BTTJ3_K_.js via defineChatCommand():
+
+┌──────────┬─────────────┬──────────────┬──────────────────────────────┐
+│ Command  │ Native Name │  Text Alias  │         Description          │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ help     │ help        │ /help        │ Show available commands      │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ commands │ commands    │ /commands    │ List all slash commands      │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ tools    │ tools       │ /tools       │ List available runtime tools │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ skill    │ skill       │ /skill       │ Run a skill by name          │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ new      │ new         │ /new, /reset │ Start fresh session          │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ model    │ model       │ /model       │ Show/change AI model         │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ think    │ think       │ /think       │ Set thinking level           │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ status   │ status      │ /status      │ Show session/model status    │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ compact  │ compact     │ /compact     │ Compact conversation         │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ stop     │ stop        │ /stop        │ Stop current generation      │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ continue │ continue    │ /continue    │ Continue last response       │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ system   │ system      │ /system      │ System message context       │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ config   │ config      │ /config      │ View/change config           │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ agents   │ agents      │ /agents      │ Manage agents                │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ bind     │ bind        │ /bind        │ Bind session to thread       │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ unbind   │ unbind      │ /unbind      │ Unbind from thread           │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ mcp      │ mcp         │ /mcp         │ MCP tools status             │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ plugins  │ plugins     │ /plugins     │ Manage plugins               │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ queue    │ queue       │ /queue       │ Queue configuration          │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ exec     │ exec        │ /exec        │ Shell execution config       │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ debug    │ debug       │ /debug       │ Debug info                   │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ usage    │ usage       │ /usage       │ Token usage info             │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ speech   │ speech      │ /speech      │ TTS/voice settings           │
+├──────────┼─────────────┼──────────────┼──────────────────────────────┤
+│ context  │ context     │ /context     │ Context window info          │
+└──────────┴─────────────┴──────────────┴──────────────────────────────┘
+
+Command Dispatch
+
+File: commands-registry-Brl2piP4.js
+
+Commands can come in two forms:
+1. Native — Telegram bot commands (/help as bot command)
+2. Text — Text message starting with /
+
+Dispatch flow:
+1. Message received → text checked for /command prefix
+2. findCommandByNativeName() or text alias matching
+3. parseCommandArgs() extracts arguments
+4. Command handler executed (model switch, config change, etc.)
+
+Model switch via /model propagates to ALL channels because it writes to the SESSION ENTRY in the session store. When any session (regardless of channel) loads, it reads from the same session store entry and picks up the model override.
+
+---
+STEP 7 — WEB UI
+
+Yes, OpenClaw has a web UI — called "OpenClaw Control."
+
+Frontend: SPA in dist/control-ui/ serving:
+- index.html — main shell (supports themes: claw, knot, dash)
+- assets/channels-DLznpXsV.js — channel management
+- assets/agents-DRRMzlPn.js — agent management
+- assets/cron-BVzi_5UI.js — cron job management
+- assets/debug-CTBS8fG0.js — debug panel
+- assets/config-runtime-CCw2hptH.js — config editor
+
+Connection: The gateway serves this UI. The gateway runs an HTTP server with WebSocket for real-time events. The web UI connects via WebSocket to the same gateway that channel plugins connect to.
+
+Same Pipeline: NO — the web UI is a CONTROL interface, not a chat interface. For chat, the gateway exposes a webchat channel which DOES go through the same pipeline. But the control UI manages configuration, not messages.
+
+---
+STEP 9 — PROVIDER / MODEL MANAGEMENT
+
+Provider extensions: Each AI provider is a plugin in extensions/<name>/:
+- extensions/anthropic/ — Claude (Anthropic)
+- extensions/openai/ — OpenAI (GPT, Codex)
+- extensions/deepseek/ — DeepSeek
+- extensions/ollama/ — Ollama (local)
+- extensions/groq/ — Groq
+- extensions/openrouter/ — OpenRouter
+- extensions/google/ — Google (Gemini)
+- extensions/xai/ — xAI (Grok)
+- extensions/mistral/ — Mistral
+- extensions/perplexity/ — Perplexity
+- extensions/github-copilot/ — GitHub Copilot
+- extensions/lmstudio/ — LM Studio
+- extensions/vllm/ — vLLM
+- ... and 25+ more
+
+ONE place where active model is stored: The session entry's modelOverride and providerOverride fields in the session store JSON file.
+
+Model switch propagation: When a user runs /model gpt-5, it writes modelOverride: "gpt-5" to the session entry. On next message, resolveDefaultModelForAgent() checks resolveStoredModelOverride() before falling back to defaults. This propagates across channels because the SAME session entry is read regardless of which channel the next message comes from.
+
+Fallback: model-fallback--w47Y_pS.js provides runWithModelFallback() which retries with fallback models on failure. Fallbacks are configured per-agent via agents.defaults.model.fallbacks.
+
+---
+STEP 1 — SOURCE LOCATIONS
+
+OpenClaw source was found at:
+- /opt/homebrew/lib/node_modules/openclaw/ — npm install (v2026.5.27) — PRIMARY SOURCE
+- /Users/mansur/empyralis/_archive/reference/openclaw/openclaw-src/ — archive reference (partial, incomplete)
+- /Users/mansur/.openclaw/ — runtime config/cache (not source)
+
+The main source is compiled TypeScript → minified JS in dist/. The original .ts source files are not on this machine (the archive reference only has vendor files).
+
+---
+KEY ARCHITECTURAL INSIGHTS
+
+1. Plugin Architecture: Everything is a plugin — channels, providers, tools, commands, skills. Each is registered via definePluginEntry()/defineBundledChannelEntry().
+2. Pi/Codex Runtime: The actual LLM conversation loop runs inside @earendil-works/pi-ai (the "Pi" embedded agent runner), with optional Codex App Server for sandboxed code execution.
+3. Session-Centric: Everything revolves around sessions. A session binds a conversation to a channel, stores model preference, history, usage stats, and task state.
+4. Gateway as Central Hub: The gateway process runs an HTTP+WS server that serves the control UI, proxies agent commands, manages cron, broadcasts events, and routes node connections.
+5. Agent-Channel Model: Agents are independent identities bound to channels. One agent can serve multiple channels. Channels can have multiple accounts.
+6. No Regex/KW Matching: Tool selection is 100% LLM-driven via function calling. There's no fallback regex or keyword-based tool dispatch.

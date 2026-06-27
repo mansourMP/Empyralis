@@ -573,6 +573,7 @@ def stream_provider_backed_direct_chat(
     direct_tool_result_summary_system_message: str,
     assistant_plan_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Iterator[Dict[str, Any]]:
+    print(f"[DG_ENTRY] provider={metadata.get('provider')!r} model={metadata.get('model')!r} message_len={len(normalized_message)} tools_count={len(tools)} max_iter={resolved_chat_max_iterations}", flush=True)
     usage_masked: Dict[str, Any] = {}
     attempted_providers = ""
     llm_error = ""
@@ -794,7 +795,20 @@ def stream_provider_backed_direct_chat(
 
     for iteration in range(max_iterations):
         thinking_iteration = iteration + 1
+        print(f"[DG_ITER] iteration={iteration} thinking_iteration={thinking_iteration} conv_msgs={len(conversation_messages)} executed_any_tools={executed_any_tools}", flush=True)
         yield services.thinking_step_payload(thinking_iteration, "active")
+
+        # Strip tools for synthesis so DeepSeek does not receive tool definitions
+        # alongside tool_result messages (known DeepSeek bug: empty content when
+        # tools + tool-result messages coexist in the payload).
+        if executed_any_tools:
+            print(f"[TRACE_STRIP] stripping tools from metadata and context iteration={iteration}", flush=True)
+            if isinstance(metadata, dict) and metadata.get("tools"):
+                print(f"[DG_STRIP_TOOLS] stripping {len(metadata['tools'])} tools from metadata for synthesis iteration={iteration}", flush=True)
+                metadata = {**metadata, "tools": []}
+            if isinstance(context, dict) and context.get("tools"):
+                print(f"[DG_STRIP_TOOLS] stripping {len(context['tools'])} tools from context for synthesis iteration={iteration}", flush=True)
+                context = {**context, "tools": []}
 
         iteration_reply = ""
         iteration_raw_reply = ""
@@ -840,6 +854,7 @@ def stream_provider_backed_direct_chat(
                 actual_provider = str(event.get("provider") or actual_provider or "").strip() or actual_provider
                 actual_model = str(event.get("model") or actual_model or "").strip() or actual_model
                 iteration_tool_calls = event.get("tool_calls") if isinstance(event.get("tool_calls"), list) else []
+                print(f"[DG_RESULT] iteration={iteration} reply_len={len(final_reply)} error={llm_error!r} tool_calls_count={len(iteration_tool_calls)} provider={actual_provider} model={actual_model}", flush=True)
                 if not iteration_tool_calls:
                     final_reply, assistant_shell_plan_tool_calls = _extract_assistant_shell_plan_tool_call(
                         final_reply,
@@ -1597,6 +1612,7 @@ def stream_provider_backed_direct_chat(
             if event_type == "failure":
                 attempted_providers = str(event.get("attempted_providers") or "").strip()
                 llm_error = str(event.get("error") or "").strip()
+                print(f"[DG_FAILURE] iteration={iteration} llm_error={llm_error!r} attempted_providers={attempted_providers!r}", flush=True)
                 public_error_reply = _public_generation_error_reply(services, llm_error)
                 public_error_code = _public_generation_error_code(llm_error)
                 if hosted_usage_reservation:
@@ -1625,18 +1641,21 @@ def stream_provider_backed_direct_chat(
                 break
 
         if iteration_failed:
+            print(f"[DG_LOOP_END] broke with iteration_failed=True llm_error={llm_error!r} executed_any_tools={executed_any_tools}", flush=True)
             break
         if not iteration_tool_calls:
+            print(f"[DG_LOOP_END] broke with no tool_calls llm_error={llm_error!r} executed_any_tools={executed_any_tools} final_reply_len={len(final_reply)}", flush=True)
             break
     else:
         llm_error = llm_error or f"max_tool_iterations_reached:{max_iterations}"
 
     # Nuclear fallback: synthesis failed (transport/empty/rate-limit/anything) after
     # tools already ran. Runs here, OUTSIDE the for loop, so break cannot skip it.
-    # Condition is llm_error (not "not final_reply") because DeepSeek often emits a
-    # pre-tool text snippet that sets final_reply before calling the tool — so final_reply
-    # is truthy even though synthesis never completed.
-    if executed_any_tools and llm_error:
+    # Condition expanded to also catch empty-reply edge case (no error but no text).
+    missing_reply = not final_reply.strip()
+    print(f"[TRACE_NUCLEAR_CHECK] executed_any_tools={executed_any_tools} llm_error={llm_error!r} final_reply_len={len(final_reply or '')}", flush=True)
+    print(f"[DG_NUCLEAR_CHECK] executed_any_tools={executed_any_tools} llm_error={llm_error!r} final_reply_len={len(final_reply)} missing_reply={missing_reply}", flush=True)
+    if executed_any_tools and (llm_error or missing_reply):
         _tool_outputs = [
             str(m.get("content") or "").strip()
             for m in conversation_messages
@@ -1648,6 +1667,7 @@ def stream_provider_backed_direct_chat(
             if _tool_summary
             else "Commands ran successfully. Could not generate a summary — please try again."
         )
+        print(f"[NUCLEAR_FALLBACK] llm_error={llm_error!r} tool_outputs={len(_tool_outputs)} reply_len={len(final_reply)} reply_preview={final_reply[:200]!r}", flush=True)
         conversation_messages.append({"role": "assistant", "content": final_reply})
         iteration_failed = False
         llm_error = ""

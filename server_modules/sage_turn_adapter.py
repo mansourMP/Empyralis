@@ -155,7 +155,24 @@ async def execute_sage_turn(
             channel_sender_name=resolved_sender_name,
         )
 
-    from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
+    from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH, set_persisted_model_preference
+
+    # ── /model command: persist to workspace metadata (survives restart, applies to all channels) ──
+    _msg = str(resolved_message or "").strip()
+    if _msg.startswith("/model"):
+        _model_arg = _msg[len("/model"):].strip()
+        if not _model_arg:
+            result = {"message": "Usage: /model <name>\nExample: /model deepseek-chat", "surface": resolved_surface}
+        else:
+            _persisted = await set_persisted_model_preference(resolved_workspace_id, _model_arg)
+            if _persisted:
+                result = {"message": f"Model set to {_model_arg} for this workspace.\n(This setting persists across server restarts and applies to all channels.)", "surface": resolved_surface}
+            else:
+                result = {"message": f"Model preference noted: {_model_arg}\n(Note: Could not persist — workspace metadata may be read-only.)", "surface": resolved_surface}
+        return SageTurnResult(
+            message=result.get("message", ""),
+            ai_setup_url=f"/w/{resolved_workspace_id}{_SAGE_AI_SETUP_PATH}" if resolved_workspace_id else _SAGE_AI_SETUP_PATH,
+        )
 
     result = await handle_sage_chat(
         workspace_id=turn.workspace_id,

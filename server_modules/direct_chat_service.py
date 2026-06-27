@@ -296,19 +296,117 @@ async def execute_direct_chat_turn_request(
     workspace_id = str(turn_request.workspace_id or body.get("workspace_id") or "default").strip() or "default"
     session_key, thread_id, client_request_id = services.chat_stream_key(current_user, body)
 
+    # ── UNIFIED ENTRY: route web chat through the SAME handle_sage_chat() that channels use ──
+    import sys as _sys_turn
+    print(f"[TRACE_UNIFIED_ENTRY] ws={workspace_id} channel={turn_request.channel} routing through handle_sage_chat (unified entry)", flush=True, file=_sys_turn.stderr)
+
     def producer():
-        return build_direct_chat_event_producer(
-            current_user=current_user,
-            body=body,
-            message=turn_request.message,
-            workspace_id=workspace_id,
-            session_key=session_key,
-            thread_id=thread_id,
-            client_request_id=client_request_id,
-            services=services,
-            agent_turn_request=turn_request,
-            trace_context=trace_context,
-        )
+        """Producer that routes through the unified Sage entry, wrapping result as SSE events."""
+        import asyncio as _asyncio
+        import threading as _threading
+
+        # Resolve actor info from turn_request
+        actor = getattr(turn_request, 'actor', None)
+        if isinstance(actor, dict):
+            sender_id = str(actor.get('id') or '').strip()
+            sender_name = str(actor.get('display_name') or '').strip()
+        else:
+            sender_id = ''
+            sender_name = ''
+
+        # Call handle_sage_chat in a thread (it's async, but producer must be sync)
+        result_container: dict = {}
+        error_container: dict = {}
+
+        def _run_sage():
+            try:
+                _loop = _asyncio.new_event_loop()
+                _asyncio.set_event_loop(_loop)
+                from server_modules.sage_turn_adapter import execute_sage_turn
+                sage_result = _loop.run_until_complete(execute_sage_turn(
+                    workspace_id=workspace_id,
+                    message=str(turn_request.message or ''),
+                    surface='web',
+                    mode='owner_sage',
+                    current_user=current_user if isinstance(current_user, dict) else None,
+                    channel_origin=str(turn_request.channel or 'web'),
+                    channel_sender_id=sender_id,
+                    channel_sender_name=sender_name,
+                    attachments=list(turn_request.attachments) if getattr(turn_request, 'attachments', None) else None,
+                    thread_id=thread_id,
+                ))
+                _loop.close()
+                result_container['value'] = sage_result
+            except BaseException as _err:
+                error_container['error'] = _err
+
+        _thread = _threading.Thread(target=_run_sage, daemon=True)
+        _thread.start()
+        _thread.join()
+
+        if 'error' in error_container:
+            raise error_container['error']
+
+        sage_result = result_container.get('value')
+        if not isinstance(sage_result, dict) and hasattr(sage_result, '__dict__'):
+            sage_result = {
+                'message': getattr(sage_result, 'message', ''),
+                'error': getattr(sage_result, 'error', None),
+                'tool_calls': list(getattr(sage_result, 'tool_calls', [])),
+                'provider': getattr(sage_result, 'provider', ''),
+                'model': getattr(sage_result, 'model', None),
+            }
+
+        # Convert sage result to SSE-compatible event stream (single final event)
+        reply_text = str((sage_result or {}).get('message') or '').strip()
+        error_text = str((sage_result or {}).get('error') or '').strip()
+
+        # Yield a "step" event to indicate processing
+        yield {
+            "type": "step",
+            "label": "Agent is thinking",
+            "detail": "",
+            "status": "active",
+            "kind": "thinking",
+            "id": "unified-sage-turn",
+        }
+
+        if error_text and not reply_text:
+            yield {
+                "type": "step",
+                "label": "Agent encountered an error",
+                "detail": error_text[:120],
+                "status": "done",
+                "kind": "error",
+                "id": "unified-sage-turn",
+            }
+            yield {
+                "type": "final",
+                "payload": {
+                    "reply": error_text,
+                    "actions": [],
+                    "mode": "error",
+                    "error": error_text,
+                },
+            }
+        else:
+            yield {
+                "type": "step",
+                "label": "Agent replied",
+                "detail": reply_text[:120] if reply_text else "Done",
+                "status": "done",
+                "kind": "thinking",
+                "id": "unified-sage-turn",
+            }
+            yield {
+                "type": "final",
+                "payload": {
+                    "reply": reply_text,
+                    "actions": [],
+                    "mode": "answer",
+                    "error": "",
+                },
+            }
 
     return {
         "kind": "direct_chat_stream",
