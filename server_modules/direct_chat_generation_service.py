@@ -1633,8 +1633,10 @@ def stream_provider_backed_direct_chat(
 
     # Nuclear fallback: synthesis failed (transport/empty/rate-limit/anything) after
     # tools already ran. Runs here, OUTSIDE the for loop, so break cannot skip it.
-    # Extract actual tool output and reply directly — no banner, turn persists normally.
-    if executed_any_tools and not final_reply:
+    # Condition is llm_error (not "not final_reply") because DeepSeek often emits a
+    # pre-tool text snippet that sets final_reply before calling the tool — so final_reply
+    # is truthy even though synthesis never completed.
+    if executed_any_tools and llm_error:
         _tool_outputs = [
             str(m.get("content") or "").strip()
             for m in conversation_messages
