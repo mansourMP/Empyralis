@@ -348,12 +348,12 @@ async def execute_direct_chat_turn_request(
             raise error_container['error']
 
         sage_result = result_container.get('value')
-        if not isinstance(sage_result, dict) and hasattr(sage_result, '__dict__'):
+        if not isinstance(sage_result, dict):
             sage_result = {
-                'message': getattr(sage_result, 'message', ''),
+                'message': getattr(sage_result, 'message', '') or '',
                 'error': getattr(sage_result, 'error', None),
-                'tool_calls': list(getattr(sage_result, 'tool_calls', [])),
-                'provider': getattr(sage_result, 'provider', ''),
+                'tool_calls': list(getattr(sage_result, 'tool_calls', None) or []),
+                'provider': getattr(sage_result, 'provider', '') or '',
                 'model': getattr(sage_result, 'model', None),
             }
 
