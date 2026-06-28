@@ -1278,6 +1278,125 @@ const CONNECTOR_DEFINITIONS: ConnectorCardDefinition[] = [
   },
 ];
 
+type ConnectorDetailEntry = {
+  description: string;
+  examplePrompts: string[];
+  suggestedToolNames: string[];
+};
+
+const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
+  gmail: {
+    description:
+      'Connect Gmail to let your agent read, search, draft, and send emails on your behalf. Your agent can triage your inbox, find important threads, compose replies for your approval, and keep you on top of follow-ups — all without leaving your workflow.',
+    examplePrompts: [
+      'Search my Gmail for emails from last week about the product launch',
+      'Summarize my unread emails from my team since yesterday',
+      'Draft a reply to the latest email from Sarah about the budget review',
+      'Find any emails with attachments related to the Q3 report',
+    ],
+    suggestedToolNames: ['gmail.search', 'gmail.read', 'gmail.send', 'gmail.draft', 'gmail.modify', 'gmail.label'],
+  },
+  google_calendar: {
+    description:
+      'Connect Google Calendar so your agent can check your schedule, create events, find open slots, and help you prepare for meetings. It reads your availability and can propose times, send invites, and summarize your day.',
+    examplePrompts: [
+      'What meetings do I have tomorrow?',
+      'Create a 30-minute event for project sync next Tuesday at 2pm',
+      'Find a free hour this week for a team brainstorm',
+      'Cancel my 3pm meeting and notify attendees',
+    ],
+    suggestedToolNames: ['calendar.list', 'calendar.create', 'calendar.update', 'calendar.delete', 'calendar.search'],
+  },
+  github: {
+    description:
+      'Connect GitHub to let your agent read repositories, triage issues, review pull requests, and draft code changes. It can search across your repos, summarize PR discussions, and help you stay on top of engineering work.',
+    examplePrompts: [
+      'Show me open pull requests that need my review',
+      'Search for issues labeled "bug" created this week',
+      'Summarize the discussion on PR #342',
+      'Create a new issue for tracking the API migration',
+    ],
+    suggestedToolNames: ['search_repositories', 'get_issue', 'create_issue', 'list_pull_requests', 'get_pull_request', 'search_code'],
+  },
+  notion: {
+    description:
+      'Connect Notion to let your agent search, read, and create pages across your workspace. It can find notes, summarize docs, update databases, and create new pages from conversations — turning your Notion workspace into an extension of your agent.',
+    examplePrompts: [
+      'Search my Notion workspace for notes about the design system',
+      'Summarize the project spec page for the new onboarding flow',
+      'Create a new page in my tasks database for the Q4 planning',
+      'Find all pages tagged with "engineering" updated this month',
+    ],
+    suggestedToolNames: ['notion.search', 'notion.read_page', 'notion.create_page', 'notion.update_page', 'notion.query_database'],
+  },
+  linear: {
+    description:
+      'Connect Linear to let your agent read, create, and update issues across your teams. It can triage incoming bugs, summarize sprint progress, create tasks from conversations, and help you keep engineering work organized.',
+    examplePrompts: [
+      'Show me high-priority issues assigned to me this sprint',
+      'Create a new bug from this conversation and assign it to the platform team',
+      'What issues have been stuck in review for more than 3 days?',
+      'Summarize the status of the current cycle',
+    ],
+    suggestedToolNames: ['linear.search_issues', 'linear.get_issue', 'linear.create_issue', 'linear.update_issue', 'linear.get_teams'],
+  },
+  slack: {
+    description:
+      'Connect Slack to let your agent read channels, search messages, and send updates. It can summarize threads, surface decisions from channel history, draft messages for your review, and keep you connected to your team without switching contexts.',
+    examplePrompts: [
+      'Summarize the #engineering channel from the last 2 hours',
+      'Search Slack for messages about the deployment from yesterday',
+      'Draft a status update for the #general channel',
+      'Find messages where someone asked me a question I haven\'t replied to',
+    ],
+    suggestedToolNames: ['slack.search_messages', 'slack.read_channel', 'slack.send_message', 'slack.list_channels', 'slack.get_user'],
+  },
+  figma: {
+    description:
+      'Connect Figma to let your agent read design files, extract components, and surface design context. When you discuss features or review UI, your agent can pull in the latest designs, find relevant components, and reference design decisions.',
+    examplePrompts: [
+      'Find my latest Figma designs for the onboarding flow',
+      'Extract the color tokens from the design system file',
+      'Show me recent comments on the checkout page design',
+      'List all components in the shared library',
+    ],
+    suggestedToolNames: ['figma.get_file', 'figma.get_comments', 'figma.search_files', 'figma.get_me', 'figma.get_file_nodes'],
+  },
+  canva: {
+    description:
+      'Connect Canva to let your agent search, read, and manage your designs and brand assets. It can find templates, browse folders, export designs, and help you keep brand materials organized and accessible.',
+    examplePrompts: [
+      'Find my Canva designs related to the marketing campaign',
+      'Search for brand templates in the shared folder',
+      'Export the latest version of the social media banner',
+      'List all designs in the product launch folder',
+    ],
+    suggestedToolNames: ['canva.search', 'canva.read_design', 'canva.export', 'canva.list_folders', 'canva.create_folder'],
+  },
+  dropbox: {
+    description:
+      'Connect Dropbox to let your agent browse, search, and manage your files and folders. It can find documents, create shared links, check file metadata, and help you organize your cloud storage without opening the Dropbox app.',
+    examplePrompts: [
+      'Find the latest version of the contract in Dropbox',
+      'List all files shared with me this week',
+      'Create a shared link for the Q3 report',
+      'Search my Dropbox for any files named "proposal"',
+    ],
+    suggestedToolNames: ['dropbox.list_folder', 'dropbox.search', 'dropbox.get_file', 'dropbox.create_folder', 'dropbox.share'],
+  },
+  todoist: {
+    description:
+      'Connect Todoist to let your agent manage your tasks and projects. It can create tasks from conversations, reschedule overdue items, summarize your day, and help you stay organized — turning natural language into structured task management.',
+    examplePrompts: [
+      'Add "Review Q3 budget" to my tasks for tomorrow',
+      'What tasks are overdue this week?',
+      'Move all tasks from the old project to the new one',
+      'Show me tasks labeled "urgent" across all projects',
+    ],
+    suggestedToolNames: ['todoist.get_tasks', 'todoist.create_task', 'todoist.update_task', 'todoist.get_projects', 'todoist.quick_add'],
+  },
+};
+
 const CONNECTOR_AUTH_FIELD_FALLBACKS: Record<string, string[]> = {
   s3: ['aws_access_key_id', 'aws_secret_access_key', 'region'],
   smtp: ['host', 'port', 'username', 'password', 'use_tls'],
@@ -5182,10 +5301,32 @@ export function WorkstationSageConnectorsPane({
         <span className="sage-unified-card__detail">{record.detail}</span>
         <span className={joinClassNames('sage-unified-card__status', personalStatusClassName(record))}>
           {record.statusTone === 'connected' ? <span className="sage-unified-card__dot" aria-hidden="true" /> : null}
-          {record.statusLabel}
+          {renderCardActionLabel(record)}
         </span>
       </button>
     );
+  }
+
+  function renderCardActionLabel(record: ExternalIntegrationCardRecord): string {
+    if (record.locked) {
+      return record.statusLabel;
+    }
+    if (record.statusTone === 'connected') {
+      return 'Connected';
+    }
+    if (record.consumerSetupState === 'oauth_ready') {
+      return 'Connect';
+    }
+    if (record.consumerSetupState === 'oauth_not_wired') {
+      return 'Connect';
+    }
+    if (record.actionTarget === 'connection' && (record.connectionAuthFields ?? []).length > 0) {
+      return 'Set up';
+    }
+    if (record.actionTarget === 'connection' && !(record.connectionAuthFields ?? []).length) {
+      return 'Connect';
+    }
+    return record.statusLabel;
   }
 
   function renderProviderExpand(record: ProviderCardRecord, options: { showClose?: boolean } = {}) {
@@ -6419,6 +6560,7 @@ export function WorkstationSageConnectorsPane({
             </button>
           ) : null}
         </div>
+        {renderAppDetailContent(record, connectedConnector)}
         {connectedConnector ? (
           <div className="sage-unified-expand__text">
             {`${record.label} is connected${accountLabel ? ` as ${accountLabel}` : ''}.`}
@@ -6523,6 +6665,89 @@ export function WorkstationSageConnectorsPane({
           ) : null}
         </div>
         {channel && channelDraft && configOpen && !channelComputerIssue ? renderPersonalChannelConfig(channel, channelDraft, channelBusy) : null}
+      </div>
+    );
+  }
+
+  function renderAppDetailContent(record: ExternalIntegrationCardRecord, connected: boolean) {
+    const detailEntry = CONNECTOR_DETAIL_MAP[record.id];
+    const sourceConnector = record.connectorCardId
+      ? connectorCards.find((card) => card.id === record.connectorCardId) ?? null
+      : null;
+    const sourceServer = mcpServers.find(
+      (s) => readString(s.id).toLowerCase() === readString(record.id).toLowerCase()
+    );
+    const tools = Array.isArray(sourceServer?.tools) ? (sourceServer.tools as McpToolRecord[]) : [];
+    const isAppCard = record.actionTarget === 'connection' && !record.channel;
+    if (!isAppCard) return null;
+    return (
+      <div className="sage-app-detail">
+        {detailEntry && detailEntry.examplePrompts.length > 0 ? (
+          <div className="sage-app-detail__prompts-strip">
+            <p className="sage-app-detail__label">Try asking</p>
+            <div className="sage-app-detail__prompts-scroll">
+              {detailEntry.examplePrompts.map((prompt, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className="sage-app-detail__prompt-chip"
+                  onClick={() => {
+                    const query = encodeURIComponent(prompt);
+                    window.open(`/?query=${query}`, '_blank');
+                  }}
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {detailEntry ? (
+          <div className="sage-app-detail__section">
+            <p className="sage-unified-expand__text">{detailEntry.description}</p>
+          </div>
+        ) : null}
+        <div className="sage-app-detail__section">
+          <div className="sage-app-detail__section-header">
+            <p className="sage-app-detail__label">
+              Tools{' '}
+              <span className="sage-app-detail__badge">
+                {tools.length > 0 ? tools.length : (detailEntry?.suggestedToolNames.length ?? 0)}
+              </span>
+            </p>
+          </div>
+          <div className="sage-app-detail__tools">
+            {tools.length > 0 ? (
+              tools.map((tool, idx) => (
+                <span key={idx} className="sage-app-detail__tool-pill">
+                  {readString(tool.name) || readString(tool.label) || `tool-${idx}`}
+                </span>
+              ))
+            ) : detailEntry ? (
+              <>
+                {detailEntry.suggestedToolNames.map((name, idx) => (
+                  <span key={idx} className="sage-app-detail__tool-pill sage-app-detail__tool-pill--placeholder">
+                    {name}
+                  </span>
+                ))}
+                {!connected ? (
+                  <span className="sage-app-detail__tool-note">
+                    After connecting, exact tools will be auto-discovered
+                  </span>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        </div>
+        {sourceServer ? (
+          <details className="sage-app-detail__details">
+            <summary className="sage-app-detail__details-toggle">Connection details</summary>
+            <div className="sage-app-detail__details-body">
+              <p>Endpoint: {readString(sourceServer.endpoint) || '—'}</p>
+              <p>Authenticated with your {record.label} account</p>
+            </div>
+          </details>
+        ) : null}
       </div>
     );
   }
@@ -7217,17 +7442,10 @@ export function WorkstationSageConnectorsPane({
       <>
         {renderExternalCollection(
           'Apps',
-          'Connect work apps here. These are external services Sage can read or act inside.',
+          'Connect work apps here. These are external services Sage can read or act inside. Tools are auto-discovered after connecting.',
           appCards,
           'No app connectors are available for this surface yet.',
         )}
-        <section className="sage-unified-section">
-          <p className="sage-unified-section__label">MCP Apps</p>
-          <p className="sage-unified-section__description">
-            Install more apps through MCP servers — Canva, Figma, Slack, Jira, and 30+ more. Tools are auto-discovered after install.
-          </p>
-          {renderMcpMarketplace()}
-        </section>
       </>
     );
   }
