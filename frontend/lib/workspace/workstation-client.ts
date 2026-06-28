@@ -1288,6 +1288,17 @@ export type WorkstationClient = {
     selectedGatewayId?: string | null;
     metadata?: Record<string, unknown> | null;
   }) => Promise<Record<string, unknown> | null>;
+  /** Phase 1 bridge: completes an app OAuth flow and registers MCP servers with credential injection.
+   *  Calls POST /apps/{provider}/oauth/complete on the backend.
+   *  TODO: This should be called by the backend OAuth callback (routes_connections.py
+   *        complete_connection_oauth_callback) AFTER the token exchange — not from the
+   *        frontend, because the frontend never sees the OAuth authorization code. */
+  completeAppOAuthForMcp: (options: {
+    provider: string;
+    code: string;
+    redirectUri: string;
+    workspaceId: string;
+  }) => Promise<Record<string, unknown> | null>;
   testConnection: (options: {
     connectionId: string;
     surface?: string | null;
@@ -3562,6 +3573,20 @@ export function createWorkstationClient(
             surface,
             selected_gateway_id: selectedGatewayId,
             metadata: metadata ?? {},
+          }),
+        },
+        policy: WRITE_REQUEST_POLICY,
+      }),
+    completeAppOAuthForMcp: ({ provider, code, redirectUri, workspaceId }) =>
+      requestJson<Record<string, unknown>>({
+        path: `/api/apps/${encodeURIComponent(provider)}/oauth/complete`,
+        init: {
+          method: 'POST',
+          headers: mergeJsonHeaders(),
+          body: JSON.stringify({
+            code,
+            redirect_uri: redirectUri,
+            workspace_id: workspaceId,
           }),
         },
         policy: WRITE_REQUEST_POLICY,

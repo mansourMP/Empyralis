@@ -464,259 +464,6 @@ const DEFAULT_MCP_SERVER_DRAFT: McpServerDraft = {
   endpoint: '',
 };
 
-type McpMarketplaceApp = {
-  serverId: string;
-  name: string;
-  description: string;
-  endpoint: string;
-  toolCount: string;
-  authType: string;
-  apiKey?: boolean;
-};
-
-const MCP_MARKETPLACE_APPS: McpMarketplaceApp[] = [
-  {
-    serverId: 'canva',
-    name: 'Canva',
-    description: 'Search, read, export, and generate designs. Create folders, manage assets, and more.',
-    endpoint: 'https://server.smithery.ai/canva/mcp',
-    toolCount: '17+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'figma',
-    name: 'Figma',
-    description: 'Extract design tokens, discover components, export assets, analyze design files.',
-    endpoint: 'https://server.smithery.ai/figma/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'slack',
-    name: 'Slack',
-    description: 'Send messages, read channels, search history, manage workspace.',
-    endpoint: 'https://server.smithery.ai/slack/mcp',
-    toolCount: '12+',
-    authType: 'OAuth',
-  },
-  {
-    serverId: 'discord',
-    name: 'Discord',
-    description: 'Read and send messages, manage channels, interact with servers.',
-    endpoint: 'https://server.smithery.ai/discord/mcp',
-    toolCount: '8+',
-    authType: 'Bot token',
-  },
-  {
-    serverId: 'jira',
-    name: 'Jira',
-    description: 'Create and search issues, manage projects, read boards and sprints.',
-    endpoint: 'https://server.smithery.ai/jira/mcp',
-    toolCount: '15+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'stripe',
-    name: 'Stripe',
-    description: 'Read charges, manage customers, create invoices, search payments.',
-    endpoint: 'https://server.smithery.ai/stripe/mcp',
-    toolCount: '20+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'hubspot',
-    name: 'HubSpot',
-    description: 'Manage contacts, deals, tickets, and read CRM data.',
-    endpoint: 'https://server.smithery.ai/hubspot/mcp',
-    toolCount: '15+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'salesforce',
-    name: 'Salesforce',
-    description: 'Query objects, manage leads, opportunities, and accounts.',
-    endpoint: 'https://server.smithery.ai/salesforce/mcp',
-    toolCount: '20+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'gitlab',
-    name: 'GitLab',
-    description: 'Manage repos, MRs, pipelines, issues, and CI/CD.',
-    endpoint: 'https://server.smithery.ai/gitlab/mcp',
-    toolCount: '15+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'confluence',
-    name: 'Confluence',
-    description: 'Read and search pages, manage spaces, create content.',
-    endpoint: 'https://server.smithery.ai/confluence/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'miro',
-    name: 'Miro',
-    description: 'Read and create boards, manage widgets, export content.',
-    endpoint: 'https://server.smithery.ai/miro/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'asana',
-    name: 'Asana',
-    description: 'Manage tasks, projects, teams, and portfolios.',
-    endpoint: 'https://server.smithery.ai/asana/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'clickup',
-    name: 'ClickUp',
-    description: 'Manage tasks, docs, goals, and workspaces.',
-    endpoint: 'https://server.smithery.ai/clickup/mcp',
-    toolCount: '12+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'monday',
-    name: 'monday.com',
-    description: 'Manage boards, items, groups, and workspaces.',
-    endpoint: 'https://server.smithery.ai/monday/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'todoist',
-    name: 'Todoist',
-    description: 'Create and manage tasks, projects, and filters.',
-    endpoint: 'https://server.smithery.ai/todoist/mcp',
-    toolCount: '8+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'airtable',
-    name: 'Airtable',
-    description: 'Read and write bases, tables, records, and views.',
-    endpoint: 'https://server.smithery.ai/airtable/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'zoom',
-    name: 'Zoom',
-    description: 'Schedule meetings, manage participants, list recordings.',
-    endpoint: 'https://server.smithery.ai/zoom/mcp',
-    toolCount: '8+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'calendly',
-    name: 'Calendly',
-    description: 'Manage scheduling, read event types, list scheduled events.',
-    endpoint: 'https://server.smithery.ai/calendly/mcp',
-    toolCount: '6+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'mailchimp',
-    name: 'Mailchimp',
-    description: 'Manage campaigns, lists, audiences, and analytics.',
-    endpoint: 'https://server.smithery.ai/mailchimp/mcp',
-    toolCount: '12+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'webflow',
-    name: 'Webflow',
-    description: 'Manage sites, collections, CMS items, and publishing.',
-    endpoint: 'https://server.smithery.ai/webflow/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'intercom',
-    name: 'Intercom',
-    description: 'Manage conversations, contacts, articles, and help center.',
-    endpoint: 'https://server.smithery.ai/intercom/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'zendesk',
-    name: 'Zendesk',
-    description: 'Manage tickets, users, articles, and support workflows.',
-    endpoint: 'https://server.smithery.ai/zendesk/mcp',
-    toolCount: '12+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'docusign',
-    name: 'Docusign',
-    description: 'Send envelopes, manage signatures, check document status.',
-    endpoint: 'https://server.smithery.ai/docusign/mcp',
-    toolCount: '8+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'quickbooks',
-    name: 'QuickBooks',
-    description: 'Manage invoices, customers, payments, and accounting.',
-    endpoint: 'https://server.smithery.ai/quickbooks/mcp',
-    toolCount: '15+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'xero',
-    name: 'Xero',
-    description: 'Manage accounting, invoices, bank transactions, contacts.',
-    endpoint: 'https://server.smithery.ai/xero/mcp',
-    toolCount: '12+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'vercel',
-    name: 'Vercel',
-    description: 'Manage deployments, projects, domains, and team config.',
-    endpoint: 'https://server.smithery.ai/vercel/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-  {
-    serverId: 'box',
-    name: 'Box',
-    description: 'Manage files, folders, collaborations, and content.',
-    endpoint: 'https://server.smithery.ai/box/mcp',
-    toolCount: '10+',
-    authType: 'API key',
-    apiKey: true,
-  },
-];
 
 const SAMPLE_PROVIDER_IDS = [
   'deepseek',
@@ -1282,6 +1029,10 @@ type ConnectorDetailEntry = {
   description: string;
   examplePrompts: string[];
   suggestedToolNames: string[];
+  /** Official MCP server endpoint for this app (from APP_MCP_SERVER_MAP in connection_oauth_service.py).
+   *  When set, the Connect button triggers OAuth → credential vault → MCP server registration.
+   *  When undefined, the app uses credential vault only (no MCP tool discovery). */
+  mcpEndpoint?: string;
 };
 
 const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
@@ -1295,6 +1046,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Find any emails with attachments related to the Q3 report',
     ],
     suggestedToolNames: ['gmail.search', 'gmail.read', 'gmail.send', 'gmail.draft', 'gmail.modify', 'gmail.label'],
+    mcpEndpoint: 'https://gmailmcp.googleapis.com/mcp/v1',
   },
   google_calendar: {
     description:
@@ -1306,6 +1058,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Cancel my 3pm meeting and notify attendees',
     ],
     suggestedToolNames: ['calendar.list', 'calendar.create', 'calendar.update', 'calendar.delete', 'calendar.search'],
+    mcpEndpoint: 'https://calendarmcp.googleapis.com/mcp/v1',
   },
   github: {
     description:
@@ -1317,6 +1070,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Create a new issue for tracking the API migration',
     ],
     suggestedToolNames: ['search_repositories', 'get_issue', 'create_issue', 'list_pull_requests', 'get_pull_request', 'search_code'],
+    mcpEndpoint: 'https://api.githubcopilot.com/mcp/',
   },
   notion: {
     description:
@@ -1328,6 +1082,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Find all pages tagged with "engineering" updated this month',
     ],
     suggestedToolNames: ['notion.search', 'notion.read_page', 'notion.create_page', 'notion.update_page', 'notion.query_database'],
+    mcpEndpoint: 'https://mcp.notion.com/mcp',
   },
   linear: {
     description:
@@ -1339,6 +1094,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Summarize the status of the current cycle',
     ],
     suggestedToolNames: ['linear.search_issues', 'linear.get_issue', 'linear.create_issue', 'linear.update_issue', 'linear.get_teams'],
+    mcpEndpoint: 'https://mcp.linear.app/mcp',
   },
   slack: {
     description:
@@ -1350,6 +1106,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Find messages where someone asked me a question I haven\'t replied to',
     ],
     suggestedToolNames: ['slack.search_messages', 'slack.read_channel', 'slack.send_message', 'slack.list_channels', 'slack.get_user'],
+    mcpEndpoint: 'https://mcp.slack.com/mcp',
   },
   figma: {
     description:
@@ -1361,6 +1118,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'List all components in the shared library',
     ],
     suggestedToolNames: ['figma.get_file', 'figma.get_comments', 'figma.search_files', 'figma.get_me', 'figma.get_file_nodes'],
+    mcpEndpoint: 'https://mcp.figma.com/mcp',
   },
   canva: {
     description:
@@ -1383,6 +1141,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Search my Dropbox for any files named "proposal"',
     ],
     suggestedToolNames: ['dropbox.list_folder', 'dropbox.search', 'dropbox.get_file', 'dropbox.create_folder', 'dropbox.share'],
+    mcpEndpoint: 'https://mcp.dropbox.com/mcp',
   },
   todoist: {
     description:
@@ -1394,6 +1153,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Show me tasks labeled "urgent" across all projects',
     ],
     suggestedToolNames: ['todoist.get_tasks', 'todoist.create_task', 'todoist.update_task', 'todoist.get_projects', 'todoist.quick_add'],
+    mcpEndpoint: 'https://ai.todoist.net/mcp',
   },
 };
 
@@ -4170,6 +3930,32 @@ export function WorkstationSageConnectorsPane({
         if (!authorizationUrl) {
           throw new Error('Provider login did not return a redirect URL.');
         }
+        // ── TODO: Phase 1 bridge — OAuth callback wiring ──────────────────────
+        // The OAuth flow redirects to the provider, then the provider redirects
+        // BACK to the backend at GET /api/connections/oauth/{provider}/callback
+        // (routes_connections.py:497, complete_connection_oauth_callback).
+        //
+        // Currently that callback calls complete_oauth_callback() which stores
+        // the credential in the vault but does NOT register any MCP servers.
+        //
+        // For apps that have an mcpEndpoint (declared in CONNECTOR_DETAIL_MAP),
+        // the callback should instead call connect_app_via_oauth_to_mcp()
+        // (connection_oauth_service.py:1342) which does:
+        //   1. Exchange OAuth code → token
+        //   2. Store credential in vault
+        //   3. Look up MCP server URLs from APP_MCP_SERVER_MAP
+        //   4. Register MCP servers with credential injection
+        //   5. Discover tools from the MCP servers
+        //
+        // The endpoint is already registered at POST /api/apps/{provider}/oauth/complete
+        // (routes_connectors.py:520).  The frontend CANNOT call it because we
+        // never see the OAuth authorization code — the backend exchanges it.
+        //
+        // Fix: In routes_connections.py complete_connection_oauth_callback,
+        // after decoding the state, call connect_app_via_oauth_to_mcp() instead of
+        // complete_oauth_callback() (or call both in sequence). The bridge function
+        // handles all the MCP server registration automatically.
+        // ───────────────────────────────────────────────────────────────────────
         setStatus('Opening provider sign-in...');
         window.location.assign(authorizationUrl);
         return;
@@ -6670,18 +6456,55 @@ export function WorkstationSageConnectorsPane({
   }
 
   function renderAppDetailContent(record: ExternalIntegrationCardRecord, connected: boolean) {
-    const detailEntry = CONNECTOR_DETAIL_MAP[record.id];
+    // Look up detail entry by connectorCardId (the bare connector name like "gmail"
+    // or "github"), not by record.id (which is prefixed like "connector_gmail").
+    const lookupKey = record.connectorCardId || record.id.replace(/^connector_/, '');
+    const detailEntry = CONNECTOR_DETAIL_MAP[lookupKey];
     const sourceConnector = record.connectorCardId
       ? connectorCards.find((card) => card.id === record.connectorCardId) ?? null
       : null;
+    // Find the MCP server registered for this app.  Match by the server's endpoint
+    // against the mcpEndpoint declared in CONNECTOR_DETAIL_MAP, or fall back to
+    // matching by server id against the connectorCardId.
+    const declaredEndpoint = detailEntry?.mcpEndpoint;
     const sourceServer = mcpServers.find(
-      (s) => readString(s.id).toLowerCase() === readString(record.id).toLowerCase()
-    );
+      (s) => {
+        const serverEndpoint = readString(s.endpoint);
+        if (declaredEndpoint && serverEndpoint === declaredEndpoint) return true;
+        const serverId = readString(s.id).toLowerCase();
+        return serverId === lookupKey.toLowerCase();
+      }
+    ) ?? null;
     const tools = Array.isArray(sourceServer?.tools) ? (sourceServer.tools as McpToolRecord[]) : [];
     const isAppCard = record.actionTarget === 'connection' && !record.channel;
     if (!isAppCard) return null;
+
+    const hasMcpEndpoint = Boolean(declaredEndpoint);
+    const hasDiscoveredTools = tools.length > 0;
+    const toolBadgeCount = hasDiscoveredTools ? tools.length : (detailEntry?.suggestedToolNames.length ?? 0);
+
     return (
       <div className="sage-app-detail">
+        {/* Connection status banner */}
+        {connected ? (
+          <div className="sage-app-detail__status-banner" style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '8px 12px', borderRadius: 6,
+            background: 'var(--sage-surface-raised)',
+            marginBottom: 8, fontSize: 13,
+          }}>
+            <span className="sage-unified-card__dot" aria-hidden="true" style={{ color: 'var(--app-color-success, #22c55e)' }} />
+            <strong style={{ color: 'var(--app-color-success, #22c55e)' }}>Connected</strong>
+            {hasMcpEndpoint ? (
+              <span style={{ opacity: 0.7 }}>
+                — MCP tools auto-discovered via {hasDiscoveredTools ? `${tools.length} live tools` : 'MCP server'}
+              </span>
+            ) : (
+              <span style={{ opacity: 0.7 }}>— Credential stored in vault</span>
+            )}
+          </div>
+        ) : null}
+
         {detailEntry && detailEntry.examplePrompts.length > 0 ? (
           <div className="sage-app-detail__prompts-strip">
             <p className="sage-app-detail__label">Try asking</p>
@@ -6711,13 +6534,11 @@ export function WorkstationSageConnectorsPane({
           <div className="sage-app-detail__section-header">
             <p className="sage-app-detail__label">
               Tools{' '}
-              <span className="sage-app-detail__badge">
-                {tools.length > 0 ? tools.length : (detailEntry?.suggestedToolNames.length ?? 0)}
-              </span>
+              <span className="sage-app-detail__badge">{toolBadgeCount}</span>
             </p>
           </div>
           <div className="sage-app-detail__tools">
-            {tools.length > 0 ? (
+            {hasDiscoveredTools ? (
               tools.map((tool, idx) => (
                 <span key={idx} className="sage-app-detail__tool-pill">
                   {readString(tool.name) || readString(tool.label) || `tool-${idx}`}
@@ -6732,7 +6553,13 @@ export function WorkstationSageConnectorsPane({
                 ))}
                 {!connected ? (
                   <span className="sage-app-detail__tool-note">
-                    After connecting, exact tools will be auto-discovered
+                    {hasMcpEndpoint
+                      ? 'Connect to auto-discover tools via MCP'
+                      : 'After connecting, exact tools will be auto-discovered'}
+                  </span>
+                ) : hasMcpEndpoint && !hasDiscoveredTools ? (
+                  <span className="sage-app-detail__tool-note">
+                    MCP server registered — tool discovery pending. Reconnect or refresh to discover.
                   </span>
                 ) : null}
               </>
@@ -6745,6 +6572,14 @@ export function WorkstationSageConnectorsPane({
             <div className="sage-app-detail__details-body">
               <p>Endpoint: {readString(sourceServer.endpoint) || '—'}</p>
               <p>Authenticated with your {record.label} account</p>
+            </div>
+          </details>
+        ) : connected && hasMcpEndpoint ? (
+          <details className="sage-app-detail__details">
+            <summary className="sage-app-detail__details-toggle">MCP endpoint</summary>
+            <div className="sage-app-detail__details-body">
+              <p>Endpoint: {declaredEndpoint}</p>
+              <p>MCP server will be registered when you connect via OAuth.</p>
             </div>
           </details>
         ) : null}
@@ -7448,91 +7283,6 @@ export function WorkstationSageConnectorsPane({
         )}
       </>
     );
-  }
-
-  function renderMcpMarketplace() {
-    const installedServerIds = new Set(
-      mcpServers.map((s) => readString(s.id).toLowerCase().replace(/[^a-z0-9]/g, '_'))
-    );
-    const marketplaceApps = MCP_MARKETPLACE_APPS.filter(
-      (app) => !installedServerIds.has(app.serverId)
-    );
-    if (marketplaceApps.length === 0) {
-      return (
-        <div className="sage-integrations-detail-card">
-          <strong>All MCP apps installed</strong>
-          <span>Browse the MCP section under Advanced to manage installed servers and discover more.</span>
-        </div>
-      );
-    }
-    return (
-      <div className="sage-unified-grid sage-unified-grid--3">
-        {marketplaceApps.map((app) => {
-          const isBusy = busyCardId === `mcp:marketplace:${app.serverId}`;
-          const alreadyInstalled = installedServerIds.has(app.serverId);
-          return (
-            <article key={app.serverId} className="sage-integrations-detail-card" style={{ opacity: alreadyInstalled ? 0.5 : 1 }}>
-              <strong>{app.name}</strong>
-              <span>{app.description}</span>
-              <div className="sage-unified-card__tags" aria-label={`${app.name} details`}>
-                {app.toolCount ? <span>{app.toolCount} tools</span> : null}
-                <span>{app.authType}</span>
-              </div>
-              {alreadyInstalled ? (
-                <span style={{ fontSize: '0.85em', color: 'var(--sage-text-secondary)' }}>Installed</span>
-              ) : (
-                <AppButton
-                  type="button"
-                  tone="secondary"
-                  disabled={isBusy}
-                  onClick={() => {
-                    void installMcpMarketplaceApp(app);
-                  }}
-                >
-                  {isBusy ? 'Installing...' : app.apiKey ? 'Set up' : 'Install'}
-                </AppButton>
-              )}
-            </article>
-          );
-        })}
-      </div>
-    );
-  }
-
-  async function installMcpMarketplaceApp(app: typeof MCP_MARKETPLACE_APPS[number]) {
-    setBusyCardId(`mcp:marketplace:${app.serverId}`);
-    setError(null);
-    try {
-      const result = await services.client.saveMcpServer({
-        serverId: app.serverId,
-        label: app.name,
-        endpoint: app.endpoint,
-        discoverTools: true,
-      });
-      // Auto-approve all discovered tools from the save response
-      const tools = result && typeof result === 'object'
-        ? (result as Record<string, unknown>).tools
-        : null;
-      if (Array.isArray(tools)) {
-        for (const tool of tools) {
-          const toolName = tool && typeof tool === 'object'
-            ? readString((tool as Record<string, unknown>).name || (tool as Record<string, unknown>).toolName)
-            : '';
-          if (toolName) {
-            try {
-              await services.client.approveMcpTool({ serverId: app.serverId, toolName });
-            } catch {
-              // Individual tool approval failure shouldn't block the whole install
-            }
-          }
-        }
-      }
-      await refreshAfterMutation(`${app.name} installed. Tools are auto-approved. Sage can use them now.`);
-    } catch (installError) {
-      setError(installError instanceof Error ? installError.message : `${app.name} could not be installed.`);
-    } finally {
-      setBusyCardId(null);
-    }
   }
 
   function renderRecipesOverview() {
