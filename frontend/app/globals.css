@@ -262,7 +262,7 @@ main {
   max-width: 260px;
   padding: 0.625rem 0.875rem;
   border-radius: var(--app-radius-md);
-  background: var(--app-surface-subtle, var(--app-bg-inset));
+  background: var(--app-surface-2, var(--app-surface-hover));
   border: 1px solid var(--app-border-subtle);
   font-size: var(--app-font-13);
   line-height: 1.4;
