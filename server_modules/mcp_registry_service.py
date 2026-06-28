@@ -19,10 +19,11 @@ from server_modules.url_security import assert_safe_outbound_url
 
 try:
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
+    from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 except Exception:  # pragma: no cover - optional until dependency is installed
     ClientSession = None  # type: ignore[assignment]
     streamable_http_client = None  # type: ignore[assignment]
+    create_mcp_http_client = None  # type: ignore[assignment]
 
 _log = logging.getLogger(__name__)
 
@@ -335,6 +336,29 @@ def _tool_items_from_list_result(result: Any, *, server_id: str) -> List[Dict[st
     return tool_items
 
 
+def _resolve_mcp_credential(server: Dict[str, Any], workspace_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve the credential dict for an MCP server from the vault, if credential_id is set.
+
+    Also triggers an OAuth token refresh if the credential is expired or about to expire.
+    """
+    credential_id = str(server.get("credential_id") or "").strip()
+    if not credential_id:
+        return None
+    try:
+        # Attempt token refresh before resolving (no-op if not needed)
+        try:
+            from server_modules.connection_oauth_service import refresh_oauth_token_if_needed
+            refresh_oauth_token_if_needed(credential_id)
+        except Exception:
+            pass  # refresh is best-effort; proceed with existing credential
+        from server_modules.vault_store import _openssl_decrypt, load_vault
+        from server_modules.vault_helpers import resolve_vault_credential
+        return resolve_vault_credential(load_vault, _openssl_decrypt, credential_id, workspace_id=workspace_id)
+    except Exception:
+        _log.warning("Failed to resolve credential %s for MCP server %s", credential_id, server.get("id"))
+        return None
+
+
 def _mcp_result_payload(result: Any) -> Any:
     if isinstance(result, dict):
         return result
@@ -385,16 +409,53 @@ def _run_async_from_sync(coro_factory: Any) -> Any:
 async def _list_tools_streamable_http_async(
     *,
     endpoint: str,
+    http_client: Any = None,
     client_session_cls: Any = ClientSession,
     streamable_http_client_fn: Any = streamable_http_client,
 ) -> List[Dict[str, Any]]:
     if client_session_cls is None or streamable_http_client_fn is None:
         raise RuntimeError("The MCP client dependency is not installed.")
-    async with streamable_http_client_fn(endpoint) as (read_stream, write_stream, _):
+    async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
         async with client_session_cls(read_stream, write_stream) as session:
             await session.initialize()
             result = await session.list_tools()
     return _tool_items_from_list_result(result, server_id="temporary")
+
+
+def _build_mcp_auth_headers(credential: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Build HTTP Authorization headers from a credential dict for MCP client injection.
+
+    Supports:
+    - OAuth2: credential with ``access_token`` → ``Authorization: Bearer <token>``
+    - API key: credential with ``api_key`` → ``Authorization: ApiKey <key>``
+    - Bot token: credential with ``bot_token`` → ``Authorization: Bot <token>``
+    """
+    if not isinstance(credential, dict) or not credential:
+        return {}
+    access_token = str(credential.get("access_token") or "").strip()
+    if access_token:
+        return {"Authorization": f"Bearer {access_token}"}
+    api_key = str(credential.get("api_key") or "").strip()
+    if api_key:
+        return {"Authorization": f"ApiKey {api_key}"}
+    bot_token = str(credential.get("bot_token") or "").strip()
+    if bot_token:
+        return {"Authorization": f"Bot {bot_token}"}
+    return {}
+
+
+def _build_mcp_http_client(credential: Optional[Dict[str, Any]]) -> Any:
+    """Build an httpx.AsyncClient with MCP defaults and auth headers from a credential.
+
+    Returns None if no credential is provided or if the SDK is not installed.
+    Callers MUST use the returned client as an async context manager.
+    """
+    if create_mcp_http_client is None:
+        return None
+    headers = _build_mcp_auth_headers(credential)
+    if not headers:
+        return None
+    return create_mcp_http_client(headers=headers)
 
 
 def discover_mcp_server_tools(
@@ -402,14 +463,17 @@ def discover_mcp_server_tools(
     transport: McpTransport,
     endpoint: str,
     server_id: str,
+    credential: Optional[Dict[str, Any]] = None,
     client_session_cls: Any = ClientSession,
     streamable_http_client_fn: Any = streamable_http_client,
 ) -> List[Dict[str, Any]]:
     if transport != "streamable_http":
         raise RuntimeError(f"Unsupported MCP transport '{transport}'.")
+    mcp_http_client = _build_mcp_http_client(credential)
     tools = _run_async_from_sync(
         lambda: _list_tools_streamable_http_async(
             endpoint=endpoint,
+            http_client=mcp_http_client,
             client_session_cls=client_session_cls,
             streamable_http_client_fn=streamable_http_client_fn,
         )
@@ -422,13 +486,16 @@ async def discover_mcp_server_tools_async(
     transport: McpTransport,
     endpoint: str,
     server_id: str,
+    credential: Optional[Dict[str, Any]] = None,
     client_session_cls: Any = ClientSession,
     streamable_http_client_fn: Any = streamable_http_client,
 ) -> List[Dict[str, Any]]:
     if transport != "streamable_http":
         raise RuntimeError(f"Unsupported MCP transport '{transport}'.")
+    mcp_http_client = _build_mcp_http_client(credential)
     tools = await _list_tools_streamable_http_async(
         endpoint=endpoint,
+        http_client=mcp_http_client,
         client_session_cls=client_session_cls,
         streamable_http_client_fn=streamable_http_client_fn,
     )
@@ -445,6 +512,7 @@ def _normalize_server_payload(
     tools: Any,
     metadata: Any,
     existing: Optional[Dict[str, Any]] = None,
+    credential_id: Any = None,
 ) -> Dict[str, Any]:
     normalized_server_id = _normalize_server_id(server_id)
     if not normalized_server_id:
@@ -459,6 +527,7 @@ def _normalize_server_payload(
                 continue
             normalized_tools.append(_normalize_tool_payload(raw_tool, server_id=normalized_server_id))
     current = dict(existing) if isinstance(existing, dict) else {}
+    normalized_credential_id = str(credential_id or "").strip() or None if credential_id is not None else current.get("credential_id")
     return {
         "id": normalized_server_id,
         "label": str(label or normalized_server_id).strip()[:160] or normalized_server_id,
@@ -466,6 +535,7 @@ def _normalize_server_payload(
         "endpoint": normalized_endpoint,
         "enabled": bool(enabled if enabled is not None else current.get("enabled", True)),
         "advanced_only": True,
+        "credential_id": normalized_credential_id,
         "tools": normalized_tools or (current.get("tools") if isinstance(current.get("tools"), list) else []),
         "metadata": dict(metadata) if isinstance(metadata, dict) else {},
         "last_synced_at": current.get("last_synced_at"),
@@ -520,6 +590,7 @@ def upsert_workspace_mcp_server(
     tools: Any = None,
     metadata: Any = None,
     discover_tools: bool = False,
+    credential_id: Any = None,
 ) -> Dict[str, Any]:
     normalized_workspace_id = str(workspace_id or "").strip()
     if not normalized_workspace_id:
@@ -541,6 +612,7 @@ def upsert_workspace_mcp_server(
         tools=tools,
         metadata=metadata,
         existing=existing,
+        credential_id=credential_id,
     )
     if discover_tools:
         existing_approvals = {
@@ -548,10 +620,12 @@ def upsert_workspace_mcp_server(
             for tool in (existing.get("tools") if isinstance(existing, dict) and isinstance(existing.get("tools"), list) else [])
             if isinstance(tool, dict) and _normalize_tool_name(tool.get("name"))
         }
+        discovery_credential = _resolve_mcp_credential(payload, normalized_workspace_id)
         discovered = discover_mcp_server_tools(
             transport=payload["transport"],
             endpoint=payload["endpoint"],
             server_id=payload["id"],
+            credential=discovery_credential,
         )
         if discovered:
             for tool in discovered:
@@ -583,6 +657,7 @@ async def upsert_workspace_mcp_server_async(
     tools: Any = None,
     metadata: Any = None,
     discover_tools: bool = False,
+    credential_id: Any = None,
 ) -> Dict[str, Any]:
     normalized_workspace_id = str(workspace_id or "").strip()
     if not normalized_workspace_id:
@@ -604,6 +679,7 @@ async def upsert_workspace_mcp_server_async(
         tools=tools,
         metadata=metadata,
         existing=existing,
+        credential_id=credential_id,
     )
     if discover_tools:
         existing_approvals = {
@@ -611,10 +687,12 @@ async def upsert_workspace_mcp_server_async(
             for tool in (existing.get("tools") if isinstance(existing, dict) and isinstance(existing.get("tools"), list) else [])
             if isinstance(tool, dict) and _normalize_tool_name(tool.get("name"))
         }
+        discovery_credential = _resolve_mcp_credential(payload, normalized_workspace_id)
         discovered = await discover_mcp_server_tools_async(
             transport=payload["transport"],
             endpoint=payload["endpoint"],
             server_id=payload["id"],
+            credential=discovery_credential,
         )
         if discovered:
             for tool in discovered:
@@ -664,7 +742,67 @@ def approve_mcp_tool(*, workspace_id: str, server_id: str, tool_name: str) -> Di
         tools=tools,
         metadata=server.get("metadata"),
         discover_tools=False,
+        credential_id=server.get("credential_id"),
     )
+
+
+def deny_mcp_tool(*, workspace_id: str, server_id: str, tool_name: str) -> Dict[str, Any]:
+    """Deny (revoke approval of) a single MCP tool for execution."""
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_server_id = _normalize_server_id(server_id)
+    normalized_tool_name = _normalize_tool_name(tool_name)
+    if not normalized_workspace_id or not normalized_server_id or not normalized_tool_name:
+        raise ValueError("workspace_id, server_id, and tool_name are required.")
+    server = get_workspace_mcp_server(normalized_workspace_id, normalized_server_id)
+    if server is None:
+        raise FileNotFoundError(f"MCP server '{server_id}' not found in workspace.")
+    tools = server.get("tools") if isinstance(server.get("tools"), list) else []
+    found = False
+    for tool in tools:
+        if _normalize_tool_name(tool.get("name")) == normalized_tool_name:
+            tool["approved"] = False
+            found = True
+            break
+    if not found:
+        raise FileNotFoundError(f"MCP tool '{tool_name}' not found on server '{server_id}'.")
+    return upsert_workspace_mcp_server(
+        workspace_id=normalized_workspace_id,
+        server_id=normalized_server_id,
+        label=server.get("label"),
+        transport=server.get("transport"),
+        endpoint=server.get("endpoint"),
+        enabled=server.get("enabled", True),
+        tools=tools,
+        metadata=server.get("metadata"),
+        discover_tools=False,
+        credential_id=server.get("credential_id"),
+    )
+
+
+def list_mcp_server_tools(*, workspace_id: str, server_id: str) -> List[Dict[str, Any]]:
+    """Return all discovered tools for a server with their approval status."""
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_server_id = _normalize_server_id(server_id)
+    if not normalized_workspace_id or not normalized_server_id:
+        return []
+    server = get_workspace_mcp_server(normalized_workspace_id, normalized_server_id)
+    if server is None:
+        raise FileNotFoundError(f"MCP server '{server_id}' not found in workspace.")
+    tools = server.get("tools") if isinstance(server.get("tools"), list) else []
+    return [
+        {
+            "name": _normalize_tool_name(tool.get("name")),
+            "label": str(tool.get("label") or tool.get("name") or "").strip(),
+            "description": str(tool.get("description") or "").strip(),
+            "action_class": _normalize_action_class(tool.get("action_class")),
+            "risk_level": _normalize_risk_level(tool.get("risk_level"), action_class=_normalize_action_class(tool.get("action_class"))),
+            "approved": bool(tool.get("approved", False)),
+            "enabled": bool(tool.get("enabled", True)),
+            "input_schema": _normalize_input_schema(tool.get("input_schema")),
+        }
+        for tool in tools
+        if isinstance(tool, dict)
+    ]
 
 
 def refresh_workspace_mcp_server_tools(*, workspace_id: str, server_id: str) -> Dict[str, Any]:
@@ -850,12 +988,13 @@ async def _call_streamable_http_tool_async(
     endpoint: str,
     tool_name: str,
     arguments: Dict[str, Any],
+    http_client: Any = None,
     client_session_cls: Any = ClientSession,
     streamable_http_client_fn: Any = streamable_http_client,
 ) -> Any:
     if client_session_cls is None or streamable_http_client_fn is None:
         raise RuntimeError("The MCP client dependency is not installed.")
-    async with streamable_http_client_fn(endpoint) as (read_stream, write_stream, _):
+    async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
         async with client_session_cls(read_stream, write_stream) as session:
             await session.initialize()
             return await session.call_tool(tool_name, arguments)
@@ -934,6 +1073,8 @@ def invoke_workspace_mcp_skill(
         )
         raise
     arguments = _parse_goal_arguments(goal, tool_payload)
+    credential = _resolve_mcp_credential(server, workspace_id)
+    mcp_http_client = _build_mcp_http_client(credential)
     common_event = {
         "tenant_id": tenant_id,
         "workspace_id": workspace_id,
@@ -968,6 +1109,7 @@ def invoke_workspace_mcp_skill(
                 endpoint=str(server.get("endpoint") or "").strip(),
                 tool_name=parsed["tool_name"],
                 arguments=arguments,
+                http_client=mcp_http_client,
                 client_session_cls=client_session_cls,
                 streamable_http_client_fn=streamable_http_client_fn,
             )
@@ -1089,6 +1231,8 @@ async def invoke_workspace_mcp_skill_async(
         )
         raise
     arguments = _parse_goal_arguments(goal, tool_payload)
+    credential = _resolve_mcp_credential(server, workspace_id)
+    mcp_http_client = _build_mcp_http_client(credential)
     common_event = {
         "tenant_id": tenant_id,
         "workspace_id": workspace_id,
@@ -1122,6 +1266,7 @@ async def invoke_workspace_mcp_skill_async(
             endpoint=str(server.get("endpoint") or "").strip(),
             tool_name=parsed["tool_name"],
             arguments=arguments,
+            http_client=mcp_http_client,
             client_session_cls=client_session_cls,
             streamable_http_client_fn=streamable_http_client_fn,
         )

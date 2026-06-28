@@ -57,6 +57,7 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "profile",
             "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/drive.file",
         ),
         auth_url="https://accounts.google.com/o/oauth2/v2/auth",
         token_url="https://oauth2.googleapis.com/token",
@@ -1260,6 +1261,362 @@ def _exchange_discord(code: str, redirect_uri: str) -> Dict[str, Any]:
         "scope": str(payload.get("scope") or "").strip(),
         "token_type": str(payload.get("token_type") or "Bearer").strip() or "Bearer",
     }
+
+
+# Each provider can map to one or more MCP server registrations.
+# Each entry has: server_id (unique per workspace), label, endpoint (URL or None).
+# When endpoint is None, that server is skipped — credential stored but no tools available.
+APP_MCP_SERVER_MAP: Dict[str, List[Dict[str, Optional[str]]]] = {
+    "google_workspace": [
+        {
+            "server_id": "google-gmail",
+            "label": "Google Gmail (MCP)",
+            "endpoint": "https://gmailmcp.googleapis.com/mcp/v1",
+        },
+        {
+            "server_id": "google-calendar",
+            "label": "Google Calendar (MCP)",
+            "endpoint": "https://calendarmcp.googleapis.com/mcp/v1",
+        },
+        {
+            "server_id": "google-drive",
+            "label": "Google Drive (MCP)",
+            "endpoint": "https://drivemcp.googleapis.com/mcp/v1",
+        },
+    ],
+    # GitHub: official remote MCP server. Requires GitHub Copilot or Copilot Enterprise seat.
+    # Auth: OAuth. Source: github.blog/ai-and-ml/generative-ai/a-practical-guide-on-how-to-use-the-github-mcp-server
+    "github": [
+        {"server_id": "github", "label": "GitHub (MCP)", "endpoint": "https://api.githubcopilot.com/mcp/"},
+    ],
+    # Slack: official remote MCP server. GA Feb 2026. Auth: OAuth 2.0. Streamable HTTP only.
+    # Source: github.com/slackapi/slack-mcp-plugin
+    "slack": [
+        {"server_id": "slack", "label": "Slack (MCP)", "endpoint": "https://mcp.slack.com/mcp"},
+    ],
+    # Notion: official remote MCP server. GA since 2025. Auth: OAuth 2.0 + PKCE.
+    # Source: developers.notion.com/guides/mcp
+    "notion": [
+        {"server_id": "notion", "label": "Notion (MCP)", "endpoint": "https://mcp.notion.com/mcp"},
+    ],
+    # Linear: official remote MCP server. May 2025. Auth: OAuth 2.1 OR Bearer token.
+    # Source: linear.app/docs/mcp
+    "linear": [
+        {"server_id": "linear", "label": "Linear (MCP)", "endpoint": "https://mcp.linear.app/mcp"},
+    ],
+    # Microsoft 365: official Agent 365 MCP servers (Frontier preview). Tenant-specific URLs.
+    # No single public endpoint yet — each service has its own URL under agent365.svc.cloud.microsoft.
+    # Checked 2026-06-28 — watch for GA announcement with unified endpoint.
+    # Source: github.com/bap-microsoft/MCP-Platform
+    "microsoft_365": [
+        {"server_id": "microsoft-365", "label": "Microsoft 365 (MCP)", "endpoint": None},
+    ],
+    # Dropbox: two official remote MCP servers. Auth: OAuth 2.0 + DCR.
+    # Source: help.dropbox.com/integrations/connect-dropbox-mcp-server
+    "dropbox": [
+        {"server_id": "dropbox", "label": "Dropbox (MCP)", "endpoint": "https://mcp.dropbox.com/mcp"},
+    ],
+    # Figma: official remote MCP server. Auth: OAuth (Figma account).
+    # Source: developers.figma.com/docs/figma-mcp-server
+    "figma": [
+        {"server_id": "figma", "label": "Figma (MCP)", "endpoint": "https://mcp.figma.com/mcp"},
+    ],
+    # Atlassian: official remote MCP server for Jira + Confluence. Auth: OAuth / API tokens.
+    # Source: pypi.org/project/mcp-atlassian/ (official remote endpoint)
+    "jira": [
+        {"server_id": "atlassian", "label": "Atlassian Jira + Confluence (MCP)", "endpoint": "https://mcp.atlassian.com/v1/mcp"},
+    ],
+    # HubSpot: official remote MCP server. GA April 2026. Auth: OAuth 2.1 + PKCE.
+    # Source: developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server
+    "hubspot": [
+        {"server_id": "hubspot", "label": "HubSpot (MCP)", "endpoint": "https://mcp.hubspot.com"},
+    ],
+    # Todoist: official remote MCP server by Doist. GA Feb 2025. Auth: OAuth.
+    # Source: todoist.com/help/articles/use-chatgpt-with-todoist
+    "todoist": [
+        {"server_id": "todoist", "label": "Todoist (MCP)", "endpoint": "https://ai.todoist.net/mcp"},
+    ],
+}
+
+
+async def connect_app_via_oauth_to_mcp(
+    *,
+    workspace_id: str,
+    provider: str,
+    oauth_code: str,
+    redirect_uri: str,
+) -> Dict[str, Any]:
+    """Bridge function: OAuth code → credential vault → MCP server registration.
+
+    1. Exchanges the OAuth code for tokens using the existing OAuth service.
+    2. Stores the access_token + refresh_token in the vault.
+    3. Looks up the MCP server URL for the provider.
+    4. Registers the MCP server with credential injection.
+    5. Returns the list of discovered tools (empty if no MCP server URL yet).
+    """
+    import uuid
+    import time as _time
+    from server_modules import connectors_actions
+    from server_modules.schemas import ConnectorCreate
+
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_code = str(oauth_code or "").strip()
+    normalized_redirect_uri = str(redirect_uri or "").strip()
+
+    if not normalized_provider or not normalized_code or not normalized_redirect_uri:
+        raise HTTPException(status_code=400, detail="provider, oauth_code, and redirect_uri are required.")
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required.")
+
+    # Step 1: Exchange OAuth code for tokens (reuse existing provider-specific logic)
+    provider_config = _provider_config(normalized_provider)
+
+    try:
+        if normalized_provider == "google_workspace":
+            credentials = _exchange_google(normalized_code, normalized_redirect_uri)
+        elif normalized_provider == "github":
+            credentials = _exchange_github(normalized_code, normalized_redirect_uri)
+        elif normalized_provider == "microsoft_365":
+            credentials = _exchange_microsoft(normalized_code, normalized_redirect_uri)
+        elif normalized_provider == "slack":
+            credentials = _exchange_slack(normalized_code, normalized_redirect_uri)
+        elif normalized_provider == "notion":
+            credentials = _exchange_notion(normalized_code, normalized_redirect_uri)
+        elif normalized_provider == "linear":
+            credentials = _exchange_linear(normalized_code, normalized_redirect_uri)
+        elif provider_config.token_parser == "standard":
+            credentials = _exchange_standard_oauth(normalized_provider, normalized_code, normalized_redirect_uri)
+        else:
+            raise HTTPException(status_code=409, detail=f"{_connector_label(normalized_provider)} OAuth token exchange is not supported for MCP bridge.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"OAuth token exchange failed: {exc}") from exc
+
+    # Step 2: Store credential in vault
+    vault_connector = "discord_bot" if normalized_provider == "discord" else normalized_provider
+    try:
+        connector_result = await connectors_actions.create_connector_vault(
+            ConnectorCreate(
+                label=f"{_connector_label(normalized_provider)} (MCP)",
+                connector=vault_connector,
+                workspace_id=workspace_id,
+                credentials=credentials,
+                metadata={
+                    "source": "oauth_mcp_bridge",
+                    "oauth_provider": normalized_provider,
+                    "surface": "sage",
+                },
+            )
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to store credential in vault: {exc}") from exc
+
+    credential_id = str(connector_result.get("id") or "").strip()
+    if not credential_id:
+        raise HTTPException(status_code=500, detail="Credential was stored but no credential_id was returned.")
+
+    # Step 3: Look up MCP server entries for this provider
+    server_entries = APP_MCP_SERVER_MAP.get(normalized_provider)
+    if not server_entries:
+        _log.warning(
+            "No MCP server configured for provider %s — credential stored but agent tools not available.",
+            normalized_provider,
+        )
+        return {
+            "ok": True,
+            "provider": normalized_provider,
+            "workspace_id": workspace_id,
+            "credential_id": credential_id,
+            "mcp_servers_registered": 0,
+            "servers": [],
+            "warning": f"No MCP server configured for provider {normalized_provider} — credential stored but agent tools not available.",
+        }
+
+    # Step 4: Register each MCP server with credential injection
+    from server_modules import mcp_registry_service
+
+    registered_servers: List[Dict[str, Any]] = []
+    all_tools: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    for entry in server_entries:
+        server_id = str(entry.get("server_id") or "").strip()
+        server_label = str(entry.get("label") or server_id).strip()
+        server_endpoint = entry.get("endpoint")
+
+        if not server_id:
+            warnings.append(f"Skipping MCP server entry with empty server_id for {normalized_provider}")
+            continue
+
+        if server_endpoint is None:
+            _log.warning(
+                "No MCP server URL configured for %s/%s — credential stored but agent tools not available.",
+                normalized_provider, server_id,
+            )
+            registered_servers.append({
+                "server_id": server_id,
+                "mcp_server_registered": False,
+                "tools": [],
+                "warning": f"No MCP server URL configured for {normalized_provider}/{server_id}.",
+            })
+            continue
+
+        try:
+            server = await mcp_registry_service.upsert_workspace_mcp_server_async(
+                workspace_id=workspace_id,
+                server_id=server_id,
+                label=server_label,
+                transport="streamable_http",
+                endpoint=str(server_endpoint),
+                enabled=True,
+                credential_id=credential_id,
+                discover_tools=True,
+            )
+            tools = server.get("tools") if isinstance(server.get("tools"), list) else []
+            all_tools.extend(tools)
+            registered_servers.append({
+                "server_id": server.get("id"),
+                "label": server_label,
+                "endpoint": str(server_endpoint),
+                "mcp_server_registered": True,
+                "tool_count": len(tools),
+                "tools": tools,
+            })
+        except Exception as exc:
+            _log.warning("MCP server registration failed for %s/%s: %s", normalized_provider, server_id, exc)
+            registered_servers.append({
+                "server_id": server_id,
+                "mcp_server_registered": False,
+                "tools": [],
+                "error": str(exc),
+            })
+
+    return {
+        "ok": True,
+        "provider": normalized_provider,
+        "workspace_id": workspace_id,
+        "credential_id": credential_id,
+        "mcp_servers_registered": sum(1 for s in registered_servers if s.get("mcp_server_registered")),
+        "servers": registered_servers,
+        "tools": all_tools,
+        "warning": "; ".join(warnings) if warnings else None,
+    }
+
+
+def refresh_oauth_token_if_needed(credential_id: str) -> Dict[str, Any]:
+    """Check and refresh an OAuth credential if it is expired or about to expire.
+
+    Reads the credential from vault by id, checks if ``access_token_expires_at``
+    is within 5 minutes of the current time, and if a ``refresh_token`` is
+    available, calls the provider's token refresh endpoint to obtain a new
+    access token.  Updates the stored credential with the new values.
+
+    If the credential has no ``expires_at`` / ``access_token_expires_at`` or no
+    ``refresh_token``, it is returned as-is.
+
+    Returns the (possibly refreshed) credential dict.
+    """
+    import json as _json
+    import time as _time
+    from server_modules.vault_store import _openssl_decrypt, _openssl_encrypt, load_vault, save_vault
+    from server_modules.vault_helpers import resolve_vault_credential
+
+    normalized_id = str(credential_id or "").strip()
+    if not normalized_id:
+        return {}
+
+    # Step 1: Read credential from vault
+    try:
+        credential = resolve_vault_credential(load_vault, _openssl_decrypt, normalized_id)
+    except Exception:
+        _log.warning("refresh_oauth_token_if_needed: cannot resolve credential %s", normalized_id)
+        return {}
+
+    if not isinstance(credential, dict) or not credential:
+        return {}
+
+    # Step 2: Check expiration
+    expires_at = credential.get("access_token_expires_at") or credential.get("expires_at") or 0
+    expires_at = int(expires_at or 0)
+    if expires_at <= 0:
+        return credential
+
+    now = int(_time.time())
+    five_minutes = 300
+    if expires_at > now + five_minutes:
+        return credential
+
+    refresh_token = str(credential.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return credential
+
+    # Step 3: Determine the provider from credential metadata
+    provider = str(credential.get("provider") or credential.get("oauth_provider") or "").strip().lower()
+    if not provider:
+        _log.warning("refresh_oauth_token_if_needed: credential %s has no provider info", normalized_id)
+        return credential
+
+    config = OAUTH_PROVIDER_CONFIGS.get(provider)
+    if config is None:
+        _log.warning("refresh_oauth_token_if_needed: no OAuth config for provider %s", provider)
+        return credential
+
+    # Step 4: Call the provider's token refresh endpoint
+    client_id, client_secret = "", ""
+    try:
+        client_id, client_secret = ensure_oauth_configured(provider)
+    except Exception:
+        _log.warning("refresh_oauth_token_if_needed: provider %s OAuth not configured", provider)
+        return credential
+
+    try:
+        token_url = _provider_url(provider, config.token_url)
+        body: Dict[str, Any] = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        headers: Dict[str, str] = {}
+        if config.token_auth == "basic":
+            headers["Authorization"] = _oauth_basic_header(client_id, client_secret)
+            body.pop("client_id", None)
+            body.pop("client_secret", None)
+
+        if config.token_request_format == "json":
+            token_response = _post_json(token_url, body, headers=headers)
+        else:
+            token_response = _post_form_json(token_url, body, headers=headers)
+
+        new_access_token = str(token_response.get("access_token") or "").strip()
+        if not new_access_token:
+            _log.warning("refresh_oauth_token_if_needed: no access_token in refresh response for %s", provider)
+            return credential
+
+        credential["access_token"] = new_access_token
+        new_expires_in = int(token_response.get("expires_in") or 0)
+        if new_expires_in > 0:
+            credential["access_token_expires_at"] = now + new_expires_in
+        new_refresh_token = str(token_response.get("refresh_token") or "").strip()
+        if new_refresh_token:
+            credential["refresh_token"] = new_refresh_token
+
+        # Step 5: Persist updated credential back to vault
+        vault = load_vault()
+        credentials_list = vault.get("credentials", [])
+        for entry in credentials_list:
+            if isinstance(entry, dict) and str(entry.get("id") or "").strip() == normalized_id:
+                plain = _json.dumps(credential, separators=(",", ":"))
+                entry["encrypted_secret"] = _openssl_encrypt(plain)
+                entry["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                break
+        save_vault(vault)
+        _log.info("refresh_oauth_token_if_needed: refreshed token for credential %s (provider %s)", normalized_id, provider)
+    except Exception as exc:
+        _log.warning("refresh_oauth_token_if_needed: refresh failed for credential %s: %s", normalized_id, exc)
+
+    return credential
 
 
 async def complete_oauth_callback(

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from server_modules.auth import enforce_workspace_access
 from server_modules import client_identity_service, provider_catalog_service, request_window_quota_adapter
-from server_modules import channel_lane_contract_service
+from server_modules import channel_lane_contract_service, connection_oauth_service
 from server_modules.runtime_common import require_admin_api_key, require_api_key
 from server_modules.runtime_models import (
     ConnectorPatchRequest,
@@ -488,6 +488,36 @@ async def import_vault_credentials(
     return await core.import_vault_credentials(body)
 
 
+async def complete_app_oauth_for_mcp(
+    request: Request,
+    provider: str,
+    current_user=Depends(require_api_key),
+):
+    """Bridge: complete OAuth for an app and register its MCP server with credential injection."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    code = str(body.get("code") or "").strip()
+    redirect_uri = str(body.get("redirect_uri") or "").strip()
+    workspace_id = str(body.get("workspace_id") or "").strip()
+    if not code or not redirect_uri or not workspace_id:
+        raise HTTPException(status_code=400, detail="code, redirect_uri, and workspace_id are required.")
+    workspace_id = enforce_workspace_access(
+        current_user,
+        workspace_id,
+        minimum_role="owner",
+        capability_id="connectors.manage",
+    )
+    return await connection_oauth_service.connect_app_via_oauth_to_mcp(
+        workspace_id=workspace_id,
+        provider=provider,
+        oauth_code=code,
+        redirect_uri=redirect_uri,
+    )
+
+
+router.add_api_route("/apps/{provider}/oauth/complete", complete_app_oauth_for_mcp, methods=['POST'])
 router.add_api_route("/providers/profiles", provider_profiles, methods=['GET', 'POST'])
 router.add_api_route("/providers/profiles/{profile_id}/enable", core.enable_provider_profile, methods=['POST'], dependencies=admin_deps)
 router.add_api_route("/providers/profiles/{profile_id}/disable", core.disable_provider_profile, methods=['POST'], dependencies=admin_deps)

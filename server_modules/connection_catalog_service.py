@@ -14,7 +14,7 @@ from server_modules import (
     runtime_common,
     sage_agent_computer_selection_service,
 )
-from server_modules.runtime_config import CONNECTOR_CATALOG
+from server_modules.runtime_config import CONNECTOR_CATALOG, CHANNEL_REGISTRY
 
 
 LANE_SAGE_PERSONAL_CHANNEL = "sage_personal_channel"
@@ -103,7 +103,7 @@ def _item(
     normalized_account_provider = account_provider or normalized_connector_id
     normalized_runtime_provider = runtime_provider or provider or connection_id
     normalized_vault_provider = vault_provider or normalized_account_provider
-    auth_catalog = CONNECTOR_CATALOG.get(normalized_vault_provider) or CONNECTOR_CATALOG.get(normalized_connector_id) or {}
+    auth_catalog = CONNECTOR_CATALOG.get(normalized_vault_provider) or CONNECTOR_CATALOG.get(normalized_connector_id) or CHANNEL_REGISTRY.get(normalized_vault_provider) or CHANNEL_REGISTRY.get(normalized_connector_id) or {}
     auth_required_fields = list(auth_catalog.get("auth") or [])
     launch_blockers = _static_launch_blockers(
         launch_status=normalized_status,

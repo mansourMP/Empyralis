@@ -555,8 +555,11 @@ _credential_identity = _credential_identity_impl
 _sanitize_bearer_token = _sanitize_bearer_token_impl
 _openai_bearer_from_credentials = _openai_bearer_from_credentials_impl
 
-list_vault_credentials = lambda workspace_id=None: _list_vault_credentials_impl(load_vault, CONNECTOR_CATALOG, workspace_id)
-list_vault_connectors = lambda workspace_id=None: _list_vault_connectors_impl(load_vault, CONNECTOR_CATALOG, workspace_id)
+# Combined catalog for vault classification: entries in CONNECTOR_CATALOG or CHANNEL_REGISTRY
+# are treated as "connectors"; everything else is a "credential".
+_VAULT_CONNECTOR_CATALOG = {**CONNECTOR_CATALOG, **CHANNEL_REGISTRY}
+list_vault_credentials = lambda workspace_id=None: _list_vault_credentials_impl(load_vault, _VAULT_CONNECTOR_CATALOG, workspace_id)
+list_vault_connectors = lambda workspace_id=None: _list_vault_connectors_impl(load_vault, _VAULT_CONNECTOR_CATALOG, workspace_id)
 
 
 def resolve_vault_credential(credential_id, workspace_id=None, **scope):

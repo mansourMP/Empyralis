@@ -819,30 +819,7 @@ CONNECTOR_CATALOG = {
     "smtp": {
         "label": "SMTP Email",
         "auth": ["host", "port", "username", "password", "use_tls"],
-    },
-    "telegram_bot": {
-        "label": "Telegram Bot",
-        "auth": ["bot_token", "chat_id"],
-    },
-    "wechat_work": {
-        "label": "WeChat Work",
-        "auth": ["webhook_url"],
-    },
-    "whatsapp_twilio": {
-        "label": "WhatsApp (Twilio)",
-        "auth": ["account_sid", "auth_token", "from_number", "to_number"],
-    },
-    "apple_messages_business": {
-        "label": "Apple Messages for Business",
-        "auth": ["msp_provider", "business_account_id", "api_key", "webhook_secret"],
-    },
-    "discord_bot": {
-        "label": "Discord (Bot API)",
-        "auth": ["bot_token", "channel_id", "guild_id", "application_id", "public_key", "application_public_key"],
-    },
-    "slack": {
-        "label": "Slack",
-        "auth": ["bot_token", "user_token", "team_id", "team_name"],
+        "surface_type": "app",
     },
     "github": {
         "label": "GitHub",
@@ -984,9 +961,49 @@ CONNECTOR_CATALOG = {
         "label": "Instagram Business",
         "auth": ["access_token", "instagram_account_id", "page_id"],
     },
+}
+
+# Annotate all connector catalog entries with surface_type "app"
+for _entry in CONNECTOR_CATALOG.values():
+    if "surface_type" not in _entry:
+        _entry["surface_type"] = "app"
+
+
+CHANNEL_REGISTRY = {
+    "telegram_bot": {
+        "label": "Telegram Bot",
+        "auth": ["bot_token", "chat_id"],
+        "surface_type": "channel",
+    },
+    "wechat_work": {
+        "label": "WeChat Work",
+        "auth": ["webhook_url"],
+        "surface_type": "channel",
+    },
+    "whatsapp_twilio": {
+        "label": "WhatsApp (Twilio)",
+        "auth": ["account_sid", "auth_token", "from_number", "to_number"],
+        "surface_type": "channel",
+    },
+    "apple_messages_business": {
+        "label": "Apple Messages for Business",
+        "auth": ["msp_provider", "business_account_id", "api_key", "webhook_secret"],
+        "surface_type": "channel",
+    },
+    "discord_bot": {
+        "label": "Discord (Bot API)",
+        "auth": ["bot_token", "channel_id", "guild_id", "application_id", "public_key", "application_public_key"],
+        "surface_type": "channel",
+    },
+    "slack": {
+        "label": "Slack",
+        "auth": ["bot_token", "user_token", "team_id", "team_name"],
+        "surface_type": "channel",
+    },
     "irc": {
         "label": "IRC (Server + Nick)",
         "auth": ["server", "port", "nick", "channel", "password", "use_tls"],
+        "surface_type": "channel",
     },
 }
 

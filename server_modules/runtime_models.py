@@ -9,6 +9,7 @@ _NORMALIZE_MEMORY_BUCKET: Callable[[Any], Any]
 _NORMALIZE_ACTION_ID: Callable[[Any], str]
 _PROVIDER_CATALOG: Dict[str, Any] = {}
 _CONNECTOR_CATALOG: Dict[str, Any] = {}
+_CHANNEL_CATALOG: Dict[str, Any] = {}
 
 
 def _noop_normalize_memory_bucket(value: Any, required: bool = True) -> Any:
@@ -32,17 +33,20 @@ def configure_runtime_model_context(
     normalize_action_id: Callable[[Any], str],
     provider_catalog: Dict[str, Any],
     connector_catalog: Dict[str, Any],
+    channel_catalog: Optional[Dict[str, Any]] = None,
 ) -> None:
     global _MEMORY_MAX_TEXT_CHARS
     global _NORMALIZE_MEMORY_BUCKET
     global _NORMALIZE_ACTION_ID
     global _PROVIDER_CATALOG
     global _CONNECTOR_CATALOG
+    global _CHANNEL_CATALOG
     _MEMORY_MAX_TEXT_CHARS = int(memory_max_text_chars)
     _NORMALIZE_MEMORY_BUCKET = normalize_memory_bucket
     _NORMALIZE_ACTION_ID = normalize_action_id
     _PROVIDER_CATALOG = provider_catalog
     _CONNECTOR_CATALOG = connector_catalog
+    _CHANNEL_CATALOG = channel_catalog or {}
 
 
 class RunStartRequest(BaseModel):
@@ -504,7 +508,7 @@ class ConnectorUpsertRequest(BaseModel):
 
     def validate_fields(self) -> None:
         connector = (self.connector or "").strip().lower()
-        if connector not in _CONNECTOR_CATALOG:
+        if connector not in _CONNECTOR_CATALOG and connector not in _CHANNEL_CATALOG:
             raise HTTPException(status_code=400, detail=f"Unsupported connector '{self.connector}'")
         if not self.label or len(self.label.strip()) < 2:
             raise HTTPException(status_code=400, detail="Connector label is required.")

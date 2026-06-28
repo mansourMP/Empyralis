@@ -15,6 +15,7 @@ configure_runtime_model_context(
     normalize_action_id=normalize_action_id,
     provider_catalog=PROVIDER_CATALOG,
     connector_catalog=CONNECTOR_CATALOG,
+    channel_catalog=CHANNEL_REGISTRY,
 )
 
 RUN_TOOL_LOOP_REPEAT_LIMIT = 3

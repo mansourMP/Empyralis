@@ -124,17 +124,15 @@ _CONNECTOR_CLASS_DEFAULTS: Dict[str, Dict[str, Any]] = {
     },
 }
 _CONNECTOR_CONTRACT_OVERRIDES: Dict[str, Dict[str, Any]] = {
+    # DEPRECATED: google_workspace custom tools replaced by MCP pipeline (google-gmail, google-calendar, google-drive servers).
+    # capability_patterns and actions cleared — agent now uses MCP tools instead. Remove entry after 30-day stability period.
     "google_workspace": {
         "connector_class": CONNECTOR_CLASS_API,
         "surface_role": CONNECTOR_SURFACE_DEEP_APP,
         "preferred_execution": CONNECTOR_CLASS_API,
-        "capability_patterns": ["browse_drive", "create_document", "create_spreadsheet"],
+        "capability_patterns": [],
         "allowed_secret_fields": ["access_token"],
-        "actions": {
-            "browse_drive": {"action_class": "read", "approval_required": False},
-            "create_document": {"action_class": "write", "approval_required": True},
-            "create_spreadsheet": {"action_class": "write", "approval_required": True},
-        },
+        "actions": {},
     },
     "microsoft_365": {
         "connector_class": CONNECTOR_CLASS_API,
@@ -146,26 +144,35 @@ _CONNECTOR_CONTRACT_OVERRIDES: Dict[str, Dict[str, Any]] = {
             "browse_drive": {"action_class": "read", "approval_required": False},
         },
     },
+    # DEPRECATED: github custom tools replaced by MCP pipeline (api.githubcopilot.com/mcp/).
+    # Requires GitHub Copilot or Copilot Enterprise seat. Remove entry after 30-day stability period.
     "github": {
         "connector_class": CONNECTOR_CLASS_API,
         "surface_role": CONNECTOR_SURFACE_DEEP_APP,
         "preferred_execution": CONNECTOR_CLASS_API,
-        "capability_patterns": ["read_repo", "create_issue", "create_pr", "dispatch_webhook"],
+        "capability_patterns": [],
         "allowed_secret_fields": ["personal_access_token", "app_id", "installation_id", "private_key_pem"],
+        "actions": {},
     },
+    # DEPRECATED: notion custom tools replaced by MCP pipeline (mcp.notion.com/mcp).
+    # Remove entry after 30-day stability period.
     "notion": {
         "connector_class": CONNECTOR_CLASS_API,
         "surface_role": CONNECTOR_SURFACE_DEEP_APP,
         "preferred_execution": CONNECTOR_CLASS_API,
-        "capability_patterns": ["read_page", "search_workspace", "create_page", "update_page"],
+        "capability_patterns": [],
         "allowed_secret_fields": ["integration_token", "access_token"],
+        "actions": {},
     },
+    # DEPRECATED: linear custom tools replaced by MCP pipeline (mcp.linear.app/mcp).
+    # Remove entry after 30-day stability period.
     "linear": {
         "connector_class": CONNECTOR_CLASS_API,
         "surface_role": CONNECTOR_SURFACE_DEEP_APP,
         "preferred_execution": CONNECTOR_CLASS_API,
-        "capability_patterns": ["read_issue", "search_issue", "create_issue", "update_issue"],
+        "capability_patterns": [],
         "allowed_secret_fields": ["api_key", "access_token"],
+        "actions": {},
     },
     "s3": {
         "connector_class": CONNECTOR_CLASS_API,
@@ -174,12 +181,15 @@ _CONNECTOR_CONTRACT_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "capability_patterns": ["list_bucket", "read_object", "upload_object", "delete_object"],
         "allowed_secret_fields": ["aws_access_key_id", "aws_secret_access_key", "region"],
     },
+    # DEPRECATED: dropbox custom tools replaced by MCP pipeline (mcp.dropbox.com/mcp).
+    # Remove entry after 30-day stability period.
     "dropbox": {
         "connector_class": CONNECTOR_CLASS_API,
         "surface_role": CONNECTOR_SURFACE_DEEP_APP,
         "preferred_execution": CONNECTOR_CLASS_API,
-        "capability_patterns": ["list_folder", "read_file", "upload_file", "delete_file"],
+        "capability_patterns": [],
         "allowed_secret_fields": ["access_token"],
+        "actions": {},
     },
     "smtp": {
         "connector_class": CONNECTOR_CLASS_API,
@@ -290,7 +300,7 @@ def connector_contract(connector_id: str) -> Dict[str, Any]:
     token = _normalize_connector_token(connector_id)
     if not token:
         raise HTTPException(status_code=400, detail="connector_id is required.")
-    catalog_entry = CONNECTOR_CATALOG.get(token, {})
+    catalog_entry = CONNECTOR_CATALOG.get(token) or CHANNEL_REGISTRY.get(token) or {}
     override = dict(_CONNECTOR_CONTRACT_OVERRIDES.get(token, {}))
     connector_class = _normalize_connector_class(override.get("connector_class") or _default_connector_class_for_id(token))
     class_defaults = _CONNECTOR_CLASS_DEFAULTS[connector_class]
@@ -506,12 +516,17 @@ async def browse_microsoft_connector_drive(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+# DEPRECATED: replaced by MCP pipeline. Remove after 30-day stability period.
 async def browse_google_connector_drive(
     connector_id: str,
     workspace_id: Optional[str] = None,
     path: Optional[str] = None,
     execution_context: Optional[Dict[str, Any]] = None,
 ):
+    import logging
+    logging.getLogger(__name__).warning(
+        "browse_google_connector_drive is DEPRECATED — use MCP pipeline (google-drive MCP server) instead."
+    )
     try:
         _, secret = _resolve_connector_secret_for_execution(
             credential_id=connector_id,
@@ -542,12 +557,17 @@ async def browse_google_connector_drive(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+# DEPRECATED: replaced by MCP pipeline. Remove after 30-day stability period.
 async def create_google_connector_document(
     connector_id: str,
     body: Optional[ConnectorDocumentCreateRequest] = None,
     workspace_id: Optional[str] = None,
     execution_context: Optional[Dict[str, Any]] = None,
 ):
+    import logging
+    logging.getLogger(__name__).warning(
+        "create_google_connector_document is DEPRECATED — use MCP pipeline (google-drive MCP server) instead."
+    )
     try:
         _, secret = _resolve_connector_secret_for_execution(
             credential_id=connector_id,
@@ -582,12 +602,17 @@ async def create_google_connector_document(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+# DEPRECATED: replaced by MCP pipeline. Remove after 30-day stability period.
 async def create_google_connector_spreadsheet(
     connector_id: str,
     body: Optional[ConnectorSpreadsheetCreateRequest] = None,
     workspace_id: Optional[str] = None,
     execution_context: Optional[Dict[str, Any]] = None,
 ):
+    import logging
+    logging.getLogger(__name__).warning(
+        "create_google_connector_spreadsheet is DEPRECATED — use MCP pipeline (google-drive MCP server) instead."
+    )
     try:
         _, secret = _resolve_connector_secret_for_execution(
             credential_id=connector_id,
@@ -1574,6 +1599,7 @@ async def create_connector_vault(body: ConnectorCreate):
     test: Dict[str, Any] = {"ok": True, "status": "healthy", "message": "OAuth token stored."}
 
     try:
+        # DEPRECATED: google_workspace validation replaced by MCP pipeline. Remove after 30-day stability period.
         if connector == "google_workspace":
             test = validate_google_workspace_connector(credentials)
         elif connector == "microsoft_365":

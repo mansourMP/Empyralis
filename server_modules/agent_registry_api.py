@@ -206,6 +206,7 @@ class McpServerUpsertRequest(BaseModel):
     tools: list[Dict[str, Any]] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     discover_tools: bool = False
+    credential_id: Optional[str] = None
 
 
 class McpServerRefreshRequest(BaseModel):
@@ -942,6 +943,7 @@ def register_agent_registry_routes(app) -> None:
                 tools=_strip_mcp_tool_approval_flags(body.tools),
                 metadata=_coerce_dict(body.metadata),
                 discover_tools=bool(body.discover_tools),
+                credential_id=str(body.credential_id or "").strip() or None,
             )
         except Exception as error:
             _raise_mcp_registry_error(error)
@@ -1017,6 +1019,89 @@ def register_agent_registry_routes(app) -> None:
             record,
         )
         return {"advanced_only": True, **enriched}
+
+    @app.post("/agent-registry/mcp/servers/{server_id}/tools/{tool_name}/approve", dependencies=[Depends(member_dependency)])
+    async def approve_mcp_server_tool_by_path(
+        server_id: str,
+        tool_name: str,
+        workspace_id: Optional[str] = None,
+        current_user=Depends(member_dependency),
+    ):
+        _refresh_server_exports()
+        resolved_workspace_id = enforce_workspace_access(
+            current_user,
+            _workspace_id_from_query_or_body(query_workspace_id=workspace_id),
+            minimum_role="owner",
+        )
+        try:
+            record = mcp_registry_service.approve_mcp_tool(
+                workspace_id=resolved_workspace_id,
+                server_id=server_id,
+                tool_name=tool_name,
+            )
+        except Exception as error:
+            _raise_mcp_registry_error(error)
+        enriched = next(
+            (
+                item
+                for item in mcp_registry_service.list_workspace_mcp_servers(resolved_workspace_id)
+                if str(item.get("id") or "").strip() == str(record.get("id") or server_id).strip().lower()
+            ),
+            record,
+        )
+        return {"advanced_only": True, **enriched}
+
+    @app.post("/agent-registry/mcp/servers/{server_id}/tools/{tool_name}/deny", dependencies=[Depends(member_dependency)])
+    async def deny_mcp_server_tool(
+        server_id: str,
+        tool_name: str,
+        workspace_id: Optional[str] = None,
+        current_user=Depends(member_dependency),
+    ):
+        _refresh_server_exports()
+        resolved_workspace_id = enforce_workspace_access(
+            current_user,
+            _workspace_id_from_query_or_body(query_workspace_id=workspace_id),
+            minimum_role="owner",
+        )
+        try:
+            record = mcp_registry_service.deny_mcp_tool(
+                workspace_id=resolved_workspace_id,
+                server_id=server_id,
+                tool_name=tool_name,
+            )
+        except Exception as error:
+            _raise_mcp_registry_error(error)
+        enriched = next(
+            (
+                item
+                for item in mcp_registry_service.list_workspace_mcp_servers(resolved_workspace_id)
+                if str(item.get("id") or "").strip() == str(record.get("id") or server_id).strip().lower()
+            ),
+            record,
+        )
+        return {"advanced_only": True, **enriched}
+
+    @app.get("/agent-registry/mcp/servers/{server_id}/tools", dependencies=[Depends(member_dependency)])
+    async def list_mcp_server_tools_route(
+        server_id: str,
+        workspace_id: Optional[str] = None,
+        current_user=Depends(member_dependency),
+    ):
+        _refresh_server_exports()
+        resolved_workspace_id = enforce_workspace_access(
+            current_user,
+            _workspace_id_from_query_or_body(query_workspace_id=workspace_id),
+            minimum_role="viewer",
+        )
+        try:
+            tools = mcp_registry_service.list_mcp_server_tools(
+                workspace_id=resolved_workspace_id,
+                server_id=server_id,
+            )
+        except Exception as error:
+            _raise_mcp_registry_error(error)
+        return {"server_id": server_id, "tools": tools}
 
     @app.delete("/agent-registry/mcp/servers/{server_id}", dependencies=[Depends(member_dependency)])
     async def delete_mcp_server(
