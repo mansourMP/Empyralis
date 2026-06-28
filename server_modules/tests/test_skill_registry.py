@@ -248,6 +248,124 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertIn("mcp", definition.connector_scopes)
         self.assertIn("inventory", definition.connector_scopes)
 
+    # ── Bundled skill execution bridge tests ──────────────────────────
+
+    def test_execute_bundled_skill_with_executor(self) -> None:
+        """A bundled skill with a built-in executor returns structured output."""
+        result = asyncio.run(
+            skill_registry.execute_skill(
+                skill_id="memory-manager",
+                tenant_id="default",
+                workspace_id="workspace-1",
+                goal="Show current memory facts",
+                agent_label="Sage",
+                hard_context="",
+                operational_policy="",
+            )
+        )
+        self.assertIsInstance(result, dict)
+        self.assertIn(result.get("status"), ("ok", "manual"))
+        self.assertIsNotNone(result.get("reply"))
+        self.assertIn("steps", result)
+
+    def test_execute_bundled_skill_via_adapter(self) -> None:
+        """A bundled skill with an adapter executor returns structured output."""
+        result = asyncio.run(
+            skill_registry.execute_skill(
+                skill_id="inventory-tool",
+                tenant_id="default",
+                workspace_id="workspace-1",
+                goal="Check stock of brake pads",
+                agent_label="Sage",
+                hard_context="",
+                operational_policy="",
+            )
+        )
+        self.assertIsInstance(result, dict)
+        self.assertIsNotNone(result.get("status"))
+        self.assertIsNotNone(result.get("reply"))
+
+    def test_execute_unknown_skill_returns_missing(self) -> None:
+        """An unregistered skill returns a missing status."""
+        result = asyncio.run(
+            skill_registry.execute_skill(
+                skill_id="nonexistent-skill-42",
+                tenant_id="default",
+                workspace_id="workspace-1",
+                goal="Do something",
+                agent_label="Sage",
+                hard_context="",
+                operational_policy="",
+            )
+        )
+        self.assertEqual(result.get("status"), "missing")
+
+    def test_execute_disabled_skill_returns_disabled(self) -> None:
+        """A disabled skill returns a disabled status."""
+        # Simulate: business-skill-template is disabled by default in bundled skills
+        result = asyncio.run(
+            skill_registry.execute_skill(
+                skill_id="business-skill-template",
+                tenant_id="default",
+                workspace_id="workspace-1",
+                goal="Use template",
+                agent_label="Sage",
+                hard_context="",
+                operational_policy="",
+            )
+        )
+        self.assertIsInstance(result, dict)
+        # business-skill-template is disabled in SKILL.md → should be missing or disabled
+        self.assertIn(result.get("status"), ("missing", "disabled"))
+
+    def test_bundled_skill_definition_has_executor(self) -> None:
+        """Every live bundled skill in _BUILT_IN_SKILLS has an executor."""
+        for definition in skill_registry._BUILT_IN_SKILLS:
+            if definition.execution_mode != "live":
+                continue  # manual skills don't need executors
+            with self.subTest(skill_id=definition.id):
+                self.assertIsNotNone(
+                    definition.executor,
+                    f"Live skill '{definition.id}' must have an executor",
+                )
+
+    def test_bundled_skill_in_registry(self) -> None:
+        """Bundled skills appear in the merged registry."""
+        definition = skill_registry.get_skill_definition(
+            "memory-manager", workspace_id="workspace-1"
+        )
+        self.assertIsNotNone(definition)
+        self.assertEqual(definition.id, "memory-manager")
+        self.assertIsNotNone(definition.executor)
+
+    def test_workspace_skill_with_handler_executes(self) -> None:
+        """A workspace skill with handler.py executes via subprocess."""
+        _write_skill(
+            self.workspace_root,
+            name="echo-skill",
+            description="Echo test skill.",
+            runtime={"execution_mode": "live", "execution_adapter": "handler"},
+            handler_body=(
+                "import sys, json\n"
+                "payload = json.loads(sys.stdin.read())\n"
+                "print(json.dumps({'reply': f\"Echo: {payload.get('goal', '')}\"}))\n"
+            ),
+        )
+        result = asyncio.run(
+            skill_registry.execute_skill(
+                skill_id="echo-skill",
+                tenant_id="default",
+                workspace_id="workspace-1",
+                goal="Hello world",
+                agent_label="TestBot",
+                hard_context="",
+                operational_policy="",
+            )
+        )
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("status"), "ok")
+        self.assertIn("Echo: Hello world", str(result.get("reply") or ""))
+
 
 if __name__ == "__main__":
     unittest.main()

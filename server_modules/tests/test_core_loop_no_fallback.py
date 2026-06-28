@@ -400,19 +400,39 @@ class HardStopMessageTests(unittest.TestCase):
         self.assertIn("Setup", SAGE_AI_NEEDS_ATTENTION_MESSAGE)
 
     def test_sage_command_dispatcher_has_exhaustion_messages(self):
-        """The command dispatcher must export generic AI-stop messages."""
+        """The command dispatcher must export error classification messages."""
         from server_modules.sage_command_dispatcher import (
             SAGE_AI_LIMIT_REPLY,
             SAGE_AI_NEEDS_ATTENTION_REPLY,
+            SAGE_RATE_LIMITED_REPLY,
+            SAGE_PROVIDER_UNREACHABLE_REPLY,
+            SAGE_ERROR_REPLY,
         )
 
-        self.assertIn("reached your ai limit", SAGE_AI_LIMIT_REPLY.lower())
-        self.assertIn("AI", SAGE_AI_LIMIT_REPLY)
-        self.assertIn("Setup", SAGE_AI_LIMIT_REPLY)
+        # Bucket 1 — Credits exhausted
+        self.assertIn("credit exhausted", SAGE_AI_LIMIT_REPLY.lower())
+        self.assertIn("heads up", SAGE_AI_LIMIT_REPLY.lower())
+        self.assertIn("api key", SAGE_AI_LIMIT_REPLY.lower())
 
-        self.assertIn("needs attention", SAGE_AI_NEEDS_ATTENTION_REPLY.lower())
-        self.assertIn("AI", SAGE_AI_NEEDS_ATTENTION_REPLY)
-        self.assertIn("Setup", SAGE_AI_NEEDS_ATTENTION_REPLY)
+        # Bucket 2 — Rate limited
+        self.assertIn("heads up", SAGE_RATE_LIMITED_REPLY.lower())
+        self.assertIn("rate limited", SAGE_RATE_LIMITED_REPLY.lower())
+        self.assertIn("try again", SAGE_RATE_LIMITED_REPLY.lower())
+
+        # Bucket 3 — Auth / key failed
+        self.assertIn("heads up", SAGE_AI_NEEDS_ATTENTION_REPLY.lower())
+        self.assertIn("authentication", SAGE_AI_NEEDS_ATTENTION_REPLY.lower())
+        self.assertIn("api key", SAGE_AI_NEEDS_ATTENTION_REPLY.lower())
+
+        # Bucket 4 — Provider unreachable
+        self.assertIn("heads up", SAGE_PROVIDER_UNREACHABLE_REPLY.lower())
+        self.assertIn("unreachable", SAGE_PROVIDER_UNREACHABLE_REPLY.lower())
+        self.assertIn("try again", SAGE_PROVIDER_UNREACHABLE_REPLY.lower())
+
+        # Bucket 5 — Catch-all
+        self.assertIn("heads up", SAGE_ERROR_REPLY.lower())
+        self.assertIn("something went wrong", SAGE_ERROR_REPLY.lower())
+        self.assertIn("try again", SAGE_ERROR_REPLY.lower())
 
     def test_entitlement_exhaustion_message_is_friendly(self):
         """The entitlement service must return a friendly message when
@@ -435,6 +455,201 @@ class HardStopMessageTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("reached your ai limit", result["message"].lower())
         self.assertIn("ai & setup", result["message"].lower())
+
+
+class ClassifyErrorTests(unittest.TestCase):
+    """Verify classify_error() maps error strings to the correct buckets."""
+
+    @classmethod
+    def setUpClass(cls):
+        from server_modules.sage_command_dispatcher import classify_error
+        cls._classify = staticmethod(classify_error)
+
+    def _classify(self, error_text):
+        """Call the classify_error function without instance binding."""
+        # Use the underlying function via the descriptor protocol
+        return type(self)._classify.__func__(error_text)
+
+    # ── Bucket 1 — Credits exhausted ──
+
+    def test_credits_exhausted_reached_limit(self):
+        msg = self._classify("You've reached your AI limit. Open AI & Setup →")
+        self.assertIn("credit exhausted", msg.lower())
+
+    def test_credits_exhausted_cap_reached(self):
+        msg = self._classify("cap_reached: monthly limit")
+        self.assertIn("credit exhausted", msg.lower())
+
+    # ── Bucket 2 — Rate limited ──
+
+    def test_rate_limited_provider_code(self):
+        msg = self._classify("provider_rate_limited: http 429")
+        self.assertIn("rate limited", msg.lower())
+        self.assertIn("try again in a moment", msg.lower())
+
+    def test_rate_limited_429(self):
+        msg = self._classify("HTTP 429 Too Many Requests")
+        self.assertIn("rate limited", msg.lower())
+
+    def test_rate_limited_too_many_requests(self):
+        msg = self._classify("too many requests error")
+        self.assertIn("rate limited", msg.lower())
+
+    # ── Bucket 3 — Auth / key failed ──
+
+    def test_auth_failed_provider_code(self):
+        msg = self._classify("provider_generation_failed: http 401")
+        self.assertIn("authentication", msg.lower())
+        self.assertIn("api key", msg.lower())
+
+    def test_auth_failed_401(self):
+        msg = self._classify("HTTP error 401 Unauthorized")
+        self.assertIn("authentication", msg.lower())
+
+    def test_auth_failed_403(self):
+        msg = self._classify("403 Forbidden - check your API key")
+        self.assertIn("authentication", msg.lower())
+
+    def test_auth_failed_invalid_key(self):
+        msg = self._classify("invalid key: authentication failed")
+        self.assertIn("authentication", msg.lower())
+
+    def test_auth_failed_unauthorized(self):
+        msg = self._classify("unauthorized access to model")
+        self.assertIn("authentication", msg.lower())
+
+    # ── Bucket 4 — Provider unreachable ──
+
+    def test_provider_unreachable_code(self):
+        msg = self._classify("provider_transport_unavailable: connection refused")
+        self.assertIn("unreachable", msg.lower())
+        self.assertIn("try again shortly", msg.lower())
+
+    def test_provider_unreachable_timeout(self):
+        msg = self._classify("connection timeout after 30s")
+        self.assertIn("unreachable", msg.lower())
+
+    def test_provider_unreachable_connection(self):
+        msg = self._classify("connection error: unreachable host")
+        self.assertIn("unreachable", msg.lower())
+
+    # ── Bucket 5 — Catch-all ──
+
+    def test_catch_all_unknown_error(self):
+        msg = self._classify("something exploded unexpectedly")
+        self.assertIn("something went wrong", msg.lower())
+        self.assertIn("try again", msg.lower())
+
+    def test_catch_all_none_input(self):
+        msg = self._classify(None)
+        self.assertIn("something went wrong", msg.lower())
+
+    def test_catch_all_empty_string(self):
+        msg = self._classify("")
+        self.assertIn("something went wrong", msg.lower())
+
+    # ── Order: credits exhausted before rate limited ──
+
+    def test_credit_limit_checked_before_rate_limit(self):
+        """When error mentions both limit and 429, credit takes priority."""
+        msg = self._classify("reached your ai limit: HTTP 429")
+        self.assertIn("credit exhausted", msg.lower())
+
+    # ── Order: rate limited before auth ──
+
+    def test_rate_limit_checked_before_auth(self):
+        """When error mentions both 429 and 401, rate limit takes priority."""
+        msg = self._classify("HTTP 429 rate limit; also 401 auth issue")
+        self.assertIn("rate limited", msg.lower())
+
+
+class ErrorNotificationTests(unittest.TestCase):
+    """Verify classify_error_notification() produces full notifications."""
+
+    def test_rate_limited_notification_has_warning_tone(self):
+        from server_modules.error_notification import classify_error_notification
+        n = classify_error_notification("HTTP 429 rate limit", raw_error="TooManyRequests")
+        self.assertEqual(n.tone, "warning")
+        self.assertEqual(n.title, "Rate Limited")
+        self.assertIn("rate limited", n.body.lower())
+        self.assertEqual(n.raw_detail, "TooManyRequests")
+        self.assertTrue(len(n.actions) > 0)
+        self.assertEqual(n.actions[0].label, "Try Again")
+        self.assertEqual(n.actions[0].type, "command")
+        self.assertEqual(n.actions[0].value, "/retry")
+        self.assertEqual(n.actions[0].style, "primary")
+        self.assertTrue(n.dismissible)
+
+    def test_auth_failed_notification_has_danger_tone(self):
+        from server_modules.error_notification import classify_error_notification
+        n = classify_error_notification("HTTP 401 Unauthorized", raw_error="Invalid API key")
+        self.assertEqual(n.tone, "danger")
+        self.assertEqual(n.title, "Auth Failed")
+        self.assertIn("authentication", n.body.lower())
+        self.assertEqual(n.actions[0].label, "Try Again")
+        self.assertEqual(n.actions[0].type, "command")
+        self.assertEqual(n.actions[0].value, "/retry")
+
+    def test_credit_exhausted_notification_has_try_again_action(self):
+        from server_modules.error_notification import classify_error_notification
+        n = classify_error_notification("reached your AI limit")
+        self.assertEqual(n.tone, "danger")
+        self.assertEqual(n.title, "Credit Exhausted")
+        self.assertIn("credit exhausted", n.body.lower())
+        self.assertEqual(n.actions[0].label, "Try Again")
+
+    def test_catch_all_notification_has_try_again_action(self):
+        from server_modules.error_notification import classify_error_notification
+        n = classify_error_notification(None, raw_error="Connection reset")
+        self.assertEqual(n.tone, "danger")
+        self.assertEqual(n.title, "Something Went Wrong")
+        self.assertEqual(n.raw_detail, "Connection reset")
+        self.assertEqual(n.actions[0].label, "Try Again")
+
+    def test_as_dict_serializable(self):
+        from server_modules.error_notification import classify_error_notification
+        import json
+        n = classify_error_notification("timeout unreachable", raw_error="ETIMEDOUT")
+        d = n.as_dict()
+        self.assertEqual(d["tone"], "warning")
+        self.assertEqual(d["title"], "Service Unreachable")
+        self.assertEqual(len(d["actions"]), 1)
+        self.assertEqual(d["actions"][0]["label"], "Try Again")
+        json.dumps(d)  # does not raise
+
+    def test_render_text_includes_title_body_and_actions(self):
+        from server_modules.error_notification import (
+            classify_error_notification, render_error_notification_text,
+        )
+        n = classify_error_notification("HTTP 429 rate limit", raw_error="try later")
+        text = render_error_notification_text(n)
+        self.assertIn("Rate Limited", text)
+        self.assertIn("rate limited", text.lower())
+        self.assertIn("try later", text)
+        self.assertIn("/retry", text)
+
+    def test_provider_unreachable_notification(self):
+        from server_modules.error_notification import classify_error_notification
+        n = classify_error_notification("provider_transport_unavailable")
+        self.assertEqual(n.tone, "warning")
+        self.assertEqual(n.title, "Service Unreachable")
+        self.assertIn("unreachable", n.body.lower())
+
+    def test_all_buckets_have_try_again_action(self):
+        """Every error bucket has exactly one Try Again /retry action."""
+        from server_modules.error_notification import classify_error_notification
+        for error in (
+            "reached your ai limit",
+            "HTTP 429 rate limit",
+            "401 unauthorized api key",
+            "provider_transport_unavailable",
+            "something weird happened",
+            None,
+        ):
+            n = classify_error_notification(error)
+            self.assertEqual(len(n.actions), 1)
+            self.assertEqual(n.actions[0].label, "Try Again")
+            self.assertEqual(n.actions[0].value, "/retry")
 
 
 class NoFallbackDefaultTests(unittest.TestCase):

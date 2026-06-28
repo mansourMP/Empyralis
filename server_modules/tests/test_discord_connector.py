@@ -185,6 +185,60 @@ class DiscordConnectorTests(unittest.TestCase):
         self.assertEqual(result[0]["name"], "Acme Guild")
         self.assertIn("/users/@me/guilds?limit=20", calls[0][0])
 
+    # ── Deduplication guard tests ──────────────────────────────────────
+
+    def test_dedup_first_call_not_duplicate(self):
+        """First call for a message_id should return False (not a duplicate)."""
+        discord_connector._clear_discord_dedup_cache()
+        result = discord_connector._is_duplicate_discord_message("msg-001", "discord_personal")
+        self.assertFalse(result, "First call should not be a duplicate")
+
+    def test_dedup_second_call_is_duplicate(self):
+        """Second call for the same (message_id, channel_origin) should return True."""
+        discord_connector._clear_discord_dedup_cache()
+        self.assertFalse(discord_connector._is_duplicate_discord_message("msg-002", "discord_personal"))
+        self.assertTrue(discord_connector._is_duplicate_discord_message("msg-002", "discord_personal"))
+
+    def test_dedup_different_channel_origin_not_duplicate(self):
+        """Same message_id on different channel_origins are not duplicates."""
+        discord_connector._clear_discord_dedup_cache()
+        self.assertFalse(discord_connector._is_duplicate_discord_message("msg-003", "discord_personal"))
+        self.assertFalse(discord_connector._is_duplicate_discord_message("msg-003", "discord_guild"))
+
+    def test_dedup_empty_message_id_not_duplicate(self):
+        """Empty or None message_id always returns False."""
+        discord_connector._clear_discord_dedup_cache()
+        self.assertFalse(discord_connector._is_duplicate_discord_message("", "discord_personal"))
+        self.assertFalse(discord_connector._is_duplicate_discord_message("", "discord_personal"))
+
+    def test_dedup_expired_entry_reprocessed(self):
+        """An entry whose TTL has expired should be reprocessed."""
+        discord_connector._clear_discord_dedup_cache()
+        self.assertFalse(discord_connector._is_duplicate_discord_message("msg-004", "discord_personal"))
+        # Artificially age the entry beyond TTL
+        import time as _t
+        key = "msg-004:discord_personal"
+        discord_connector._DEDUP_CACHE[key] = _t.time() - discord_connector._DEDUP_TTL_SECONDS - 10
+        self.assertFalse(discord_connector._is_duplicate_discord_message("msg-004", "discord_personal"))
+
+    def test_dedup_max_size_eviction(self):
+        """When the cache exceeds max size, stale entries are evicted."""
+        discord_connector._clear_discord_dedup_cache()
+        import time as _t
+        # Fill the cache with stale entries + one fresh one
+        discord_connector._DEDUP_MAX_SIZE = 5  # temporarily lower for test
+        for i in range(10):
+            key = f"stale-{i}:discord_personal"
+            discord_connector._DEDUP_CACHE[key] = _t.time() - discord_connector._DEDUP_TTL_SECONDS - 60
+        # A new unique message should trigger eviction
+        result = discord_connector._is_duplicate_discord_message("fresh-msg", "discord_personal")
+        self.assertFalse(result)
+        # The cache shouldn't have grown; stale entries should be gone
+        self.assertLessEqual(len(discord_connector._DEDUP_CACHE), 12)
+        # Reset for other tests
+        discord_connector._clear_discord_dedup_cache()
+        discord_connector._DEDUP_MAX_SIZE = 2000
+
 
 if __name__ == "__main__":
     unittest.main()

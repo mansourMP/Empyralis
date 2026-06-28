@@ -301,9 +301,21 @@ async def execute_direct_chat_turn_request(
     print(f"[TRACE_UNIFIED_ENTRY] ws={workspace_id} channel={turn_request.channel} routing through handle_sage_chat (unified entry)", flush=True, file=_sys_turn.stderr)
 
     def producer():
-        """Producer that routes through the unified Sage entry, wrapping result as SSE events."""
+        """Producer that routes through the unified Sage entry, forwarding
+        generation events as they arrive via a thread-safe sink so the reply
+        streams in real time instead of landing in one dump.
+
+        The sink is a contextvar — it is inherited by the thread-pool thread
+        that executes the generation loop.  When the sink is NOT set
+        (Telegram / API / background paths) nothing changes.
+        """
         import asyncio as _asyncio
+        import queue as _queue
         import threading as _threading
+
+        from server_modules.direct_chat_generation_service import (
+            _GENERATION_EVENT_SINK,
+        )
 
         # Resolve actor info from turn_request
         actor = getattr(turn_request, 'actor', None)
@@ -314,7 +326,16 @@ async def execute_direct_chat_turn_request(
             sender_id = ''
             sender_name = ''
 
-        # Call handle_sage_chat in a thread (it's async, but producer must be sync)
+        # Thread-safe queue so the generation thread (Thread 3 in the pool)
+        # can push events and the SSE thread (this one) can pop them.
+        event_queue: _queue.Queue = _queue.Queue()
+
+        def _sink(event: dict):
+            event_queue.put(event)
+
+        # Set BEFORE spawning the thread so the child thread inherits it.
+        _GENERATION_EVENT_SINK.set(_sink)
+
         result_container: dict = {}
         error_container: dict = {}
 
@@ -334,14 +355,36 @@ async def execute_direct_chat_turn_request(
                     channel_sender_name=sender_name,
                     attachments=list(turn_request.attachments) if getattr(turn_request, 'attachments', None) else None,
                     thread_id=thread_id,
+                    request_id=client_request_id,
                 ))
                 _loop.close()
                 result_container['value'] = sage_result
             except BaseException as _err:
                 error_container['error'] = _err
+            finally:
+                # Ensure the consumer always wakes up — even if
+                # execute_sage_turn raises before pushing a single event.
+                event_queue.put(_SENTINEL)
 
+        _SENTINEL = object()
         _thread = _threading.Thread(target=_run_sage, daemon=True)
         _thread.start()
+
+        # Drain the queue as events arrive, yielding each one to the SSE
+        # transport.  The thread is still running; we keep yielding until
+        # the sentinel arrives.
+        while True:
+            try:
+                event = event_queue.get(timeout=0.15)
+            except _queue.Empty:
+                if not _thread.is_alive():
+                    break
+                continue
+            if event is _SENTINEL:
+                break
+            if isinstance(event, dict):
+                yield event
+
         _thread.join()
 
         if 'error' in error_container:
@@ -357,29 +400,19 @@ async def execute_direct_chat_turn_request(
                 'model': getattr(sage_result, 'model', None),
             }
 
-        # Convert sage result to SSE-compatible event stream (single final event)
+        # Convert sage result to a single final SSE event.
         reply_text = str((sage_result or {}).get('message') or '').strip()
         error_text = str((sage_result or {}).get('error') or '').strip()
 
-        # Yield a "step" event to indicate processing
-        yield {
-            "type": "step",
-            "label": "Agent is thinking",
-            "detail": "",
-            "status": "active",
-            "kind": "thinking",
-            "id": "unified-sage-turn",
-        }
+        # Never surface the internal [SILENT] sentinel as user-visible text.
+        if reply_text == '[SILENT]' or reply_text.startswith('[SILENT]'):
+            reply_text = ''
 
+        # If the generator already streamed a full reply via chunks, the
+        # frontend used the streamed text as visual feedback but will
+        # replace it with this final payload.  That is correct — the final
+        # payload is the canonical answer, the stream was live progress.
         if error_text and not reply_text:
-            yield {
-                "type": "step",
-                "label": "Agent encountered an error",
-                "detail": error_text[:120],
-                "status": "done",
-                "kind": "error",
-                "id": "unified-sage-turn",
-            }
             yield {
                 "type": "final",
                 "payload": {
@@ -390,14 +423,6 @@ async def execute_direct_chat_turn_request(
                 },
             }
         else:
-            yield {
-                "type": "step",
-                "label": "Agent replied",
-                "detail": reply_text[:120] if reply_text else "Done",
-                "status": "done",
-                "kind": "thinking",
-                "id": "unified-sage-turn",
-            }
             yield {
                 "type": "final",
                 "payload": {

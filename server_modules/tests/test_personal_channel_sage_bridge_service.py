@@ -11,7 +11,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         with (
             patch(
                 "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(side_effect=RuntimeError("force-fallback")),
+                new=AsyncMock(return_value={"message": ""}),
             ),
             patch(
                 "server_modules.direct_chat_runtime_exports.collect_direct_operator_reply",
@@ -59,7 +59,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         with (
             patch(
                 "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(side_effect=RuntimeError("force-fallback")),
+                new=AsyncMock(return_value={"message": ""}),
             ),
             patch(
                 "server_modules.direct_chat_runtime_exports.collect_direct_operator_reply",
@@ -97,7 +97,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         with (
             patch(
                 "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(side_effect=RuntimeError("force-fallback")),
+                new=AsyncMock(return_value={"message": ""}),
             ),
             patch.object(
                 direct_chat_runtime_exports,
@@ -163,6 +163,166 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         self.assertEqual(result["source"], "sage_turn_adapter")
         self.assertEqual(result["trace_id"], "trace-smoke-1")
         self.assertEqual(result["text"], "unified sage reply")
+
+    def test_whatsapp_async_exception_returns_classified_error(self) -> None:
+        """On exception, build_whatsapp_personal_reply_async returns
+        classified error text, not None."""
+        async def run_case():
+            with patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                new=AsyncMock(side_effect=RuntimeError("HTTP 429 rate limit")),
+            ):
+                return await personal_channel_sage_bridge_service.build_whatsapp_personal_reply_async(
+                    workspace_id="workspace-1",
+                    gateway_id="gateway-1",
+                    remote_jid="15551234567",
+                    text="hey Sage",
+                    push_name="Mansur",
+                )
+
+        result = asyncio.run(run_case())
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result["text"])
+        self.assertIn("rate limited", str(result["text"]).lower())
+        self.assertEqual(result["source"], "error_classifier")
+
+    def test_discord_async_exception_returns_classified_error(self) -> None:
+        """On exception, build_discord_personal_reply_async returns
+        classified error text, not None."""
+        async def run_case():
+            with patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                new=AsyncMock(side_effect=RuntimeError("provider HTTP 401 unauthorized")),
+            ):
+                return await personal_channel_sage_bridge_service.build_discord_personal_reply_async(
+                    workspace_id="workspace-1",
+                    gateway_id="gateway-1",
+                    remote_jid="discord-user-1",
+                    text="hey Sage",
+                )
+
+        result = asyncio.run(run_case())
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result["text"])
+        self.assertIn("authentication", str(result["text"]).lower())
+        self.assertEqual(result["source"], "error_classifier")
+
+    def test_personal_channel_async_exception_returns_classified_error(self) -> None:
+        """On exception, build_personal_channel_reply_async returns
+        classified error text for Gateway delivery."""
+        async def run_case():
+            with patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                new=AsyncMock(side_effect=ConnectionError("timeout unreachable")),
+            ):
+                return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+                    surface_channel="wechat_personal",
+                    workspace_id="workspace-1",
+                    gateway_id="gateway-1",
+                    remote_jid="wechat-user-1",
+                    text="hey Sage",
+                    fallback_label="WeChat",
+                )
+
+        result = asyncio.run(run_case())
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result["text"])
+        self.assertIn("unreachable", str(result["text"]).lower())
+        self.assertEqual(result["source"], "error_classifier")
+
+
+class PersonalChannelRouteErrorSurfacingTests(unittest.TestCase):
+    """Verify route handlers return 200 with error_text, not 500."""
+
+    def test_signal_route_exception_returns_200_with_error_text(self) -> None:
+        """On exception, signal route returns 200 with error_surfaced=True."""
+        import json
+        from unittest.mock import MagicMock, AsyncMock
+        from server_modules.routes_signal import signal_inbound
+
+        async def run_case():
+            mock_request = MagicMock()
+            mock_request.json = AsyncMock(return_value={
+                "text": "hello",
+                "sender_id": "test-sender",
+                "workspace_id": "test-workspace",
+            })
+
+            with patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(side_effect=RuntimeError("HTTP 429 rate limit")),
+            ):
+                # signal_inbound requires Depends(require_api_key),
+                # but we can pass current_user=None since it's not validated
+                # by FastAPI when called directly
+                return await signal_inbound(
+                    request=mock_request,
+                    current_user=None,
+                )
+
+        result = asyncio.run(run_case())
+        self.assertTrue(result["ok"])
+        self.assertFalse(result.get("sage_replied"))
+        self.assertTrue(result.get("error_surfaced"))
+        self.assertIn("rate limited", result["error_text"].lower())
+
+    def test_wechat_route_exception_returns_200_with_error_text(self) -> None:
+        """On exception, wechat route returns 200 with error_surfaced=True."""
+        import json
+        from unittest.mock import MagicMock, AsyncMock
+        from server_modules.routes_wechat import wechat_inbound
+
+        async def run_case():
+            mock_request = MagicMock()
+            mock_request.json = AsyncMock(return_value={
+                "text": "hello",
+                "sender_id": "test-sender",
+                "workspace_id": "test-workspace",
+            })
+
+            with patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(side_effect=RuntimeError("provider HTTP 401 unauthorized")),
+            ):
+                return await wechat_inbound(
+                    request=mock_request,
+                    current_user=None,
+                )
+
+        result = asyncio.run(run_case())
+        self.assertTrue(result["ok"])
+        self.assertFalse(result.get("sage_replied"))
+        self.assertTrue(result.get("error_surfaced"))
+        self.assertIn("authentication", result["error_text"].lower())
+
+    def test_imessage_route_exception_returns_200_with_error_text(self) -> None:
+        """On exception, imessage route returns 200 with error_surfaced=True."""
+        import json
+        from unittest.mock import MagicMock, AsyncMock
+        from server_modules.routes_imessage import imessage_inbound
+
+        async def run_case():
+            mock_request = MagicMock()
+            mock_request.json = AsyncMock(return_value={
+                "text": "hello",
+                "sender_id": "test-sender",
+                "workspace_id": "test-workspace",
+            })
+
+            with patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(side_effect=ConnectionError("unreachable")),
+            ):
+                return await imessage_inbound(
+                    request=mock_request,
+                    current_user=None,
+                )
+
+        result = asyncio.run(run_case())
+        self.assertTrue(result["ok"])
+        self.assertFalse(result.get("sage_replied"))
+        self.assertTrue(result.get("error_surfaced"))
+        self.assertIn("unreachable", result["error_text"].lower())
 
 
 if __name__ == "__main__":

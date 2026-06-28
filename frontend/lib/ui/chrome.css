@@ -3236,6 +3236,26 @@ body[data-emp-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
   font-weight: var(--app-weight-medium);
 }
 
+/* Hardware status dot — green/amber/red depending on gateway connectivity */
+.sage-canvas-hardware__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sage-canvas-hardware__dot--online {
+  background: #22c55e;
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, #22c55e 28%, transparent);
+}
+.sage-canvas-hardware__dot--warning {
+  background: #f59e0b;
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, #f59e0b 28%, transparent);
+}
+.sage-canvas-hardware__dot--offline {
+  background: #ef4444;
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, #ef4444 28%, transparent);
+}
+
 .sage-canvas-model__trigger strong,
 .sage-canvas-hardware__trigger strong {
   min-width: 0;

@@ -6,9 +6,33 @@ from typing import Any, Dict, Optional
 import logging as _logging
 _logger = _logging.getLogger(__name__)
 
-from server_modules.sage_command_dispatcher import SAGE_ERROR_REPLY  # noqa: E402
+from server_modules.sage_command_dispatcher import (  # noqa: E402
+    SAGE_ERROR_REPLY,
+    classify_error,
+)
+from server_modules.error_notification import classify_error_notification  # noqa: E402
 
 from server_modules import channel_lane_contract_service
+
+
+def _build_error_reply_dict(
+    exc: Exception,
+    workspace_id: str,
+    *,
+    extra: dict | None = None,
+) -> dict:
+    """Build a classified error return dict with notification payload."""
+    _exc_str = str(exc)
+    result: dict = {
+        "text": classify_error(_exc_str, raw_error=_exc_str),
+        "source": "error_classifier",
+        "notification": classify_error_notification(
+            _exc_str, raw_error=_exc_str,
+        ).as_dict(),
+    }
+    if extra:
+        result.update(extra)
+    return result
 
 
 _NO_TOOL_RUNTIME_CALLBACKS = (
@@ -140,8 +164,12 @@ def _build_personal_reply(
                 "source": "direct_chat_runtime_exports",
                 "raw": dict(result or {}),
             }
-    except Exception:
-        pass
+    except Exception as _exc:
+        _logger.warning(
+            "_build_personal_reply failed for channel=%s workspace=%s: %s",
+            surface_channel, workspace_id, _exc,
+        )
+        return _build_error_reply_dict(_exc, workspace_id)
     return None
 
 
@@ -198,6 +226,7 @@ async def _build_unified_sage_personal_reply_async(
             "_build_unified_sage_personal_reply_async failed for workspace=%s channel=%s: %s",
             workspace_id, surface_channel, _exc
         )
+        return _build_error_reply_dict(_exc, workspace_id)
 
     return None
 
@@ -285,7 +314,20 @@ async def build_whatsapp_personal_reply_async(
             "WhatsApp turn failed for workspace=%s: %s",
             workspace_id, _exc
         )
-        return None
+        # Try cloud-session dispatch if available (same pattern as Telegram),
+        # otherwise return classified error for Gateway delivery.
+        _session_id = str(gateway_id or "").replace("cloud:", "", 1).strip()
+        if _session_id and remote_jid:
+            try:
+                from server_modules.personal_channels_service import dispatch_cloud_channel_outbound as _cs_dispatch
+                await _cs_dispatch(
+                    session_id=_session_id,
+                    text=classify_error(str(_exc), raw_error=str(_exc)),
+                    remote_jid=remote_jid,
+                )
+            except Exception:
+                pass
+        return _build_error_reply_dict(_exc, workspace_id)
     return _build_personal_reply(
         surface_channel="whatsapp_personal",
         workspace_id=workspace_id,
@@ -355,27 +397,24 @@ async def build_discord_personal_reply_async(
     linked_user_name is accepted for future identity-context injection but
     not yet threaded into _build_unified_sage_personal_reply_async.
     """
-    unified = await _build_unified_sage_personal_reply_async(
-        surface_channel="discord_personal",
-        workspace_id=workspace_id,
-        gateway_id=gateway_id,
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        fallback_label="Discord",
-        source_event_id=source_event_id,
-    )
-    return unified
-    return _build_personal_reply(
-        surface_channel="telegram_personal",
-        workspace_id=workspace_id,
-        gateway_id=gateway_id,
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        fallback_label="Telegram",
-        source_event_id=source_event_id,
-    )
+    try:
+        unified = await _build_unified_sage_personal_reply_async(
+            surface_channel="discord_personal",
+            workspace_id=workspace_id,
+            gateway_id=gateway_id,
+            remote_jid=remote_jid,
+            text=text,
+            push_name=push_name,
+            fallback_label="Discord",
+            source_event_id=source_event_id,
+        )
+        return unified
+    except Exception as _exc:
+        _logger.warning(
+            "Discord DM turn failed for workspace=%s: %s",
+            workspace_id, _exc
+        )
+        return _build_error_reply_dict(_exc, workspace_id)
 
 
 async def build_personal_channel_reply_async(
@@ -389,27 +428,24 @@ async def build_personal_channel_reply_async(
     fallback_label: str = "channel",
     source_event_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    unified = await _build_unified_sage_personal_reply_async(
-        surface_channel=surface_channel,
-        workspace_id=workspace_id,
-        gateway_id=gateway_id,
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        fallback_label=fallback_label,
-        source_event_id=source_event_id,
-    )
-    return unified
-    return _build_personal_reply(
-        surface_channel=surface_channel,
-        workspace_id=workspace_id,
-        gateway_id=gateway_id,
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        fallback_label=fallback_label,
-        source_event_id=source_event_id,
-    )
+    try:
+        unified = await _build_unified_sage_personal_reply_async(
+            surface_channel=surface_channel,
+            workspace_id=workspace_id,
+            gateway_id=gateway_id,
+            remote_jid=remote_jid,
+            text=text,
+            push_name=push_name,
+            fallback_label=fallback_label,
+            source_event_id=source_event_id,
+        )
+        return unified
+    except Exception as _exc:
+        _logger.warning(
+            "Personal channel turn failed for channel=%s workspace=%s: %s",
+            surface_channel, workspace_id, _exc
+        )
+        return _build_error_reply_dict(_exc, workspace_id)
 
 
 def build_whatsapp_personal_reply(
@@ -431,7 +467,8 @@ def build_whatsapp_personal_reply(
         fallback_label="WhatsApp",
         source_event_id=source_event_id,
     )
-    return unified
+    if unified is not None:
+        return unified
     return _build_personal_reply(
         surface_channel="whatsapp_personal",
         workspace_id=workspace_id,
@@ -463,7 +500,8 @@ def build_telegram_personal_reply(
         fallback_label="Telegram",
         source_event_id=source_event_id,
     )
-    return unified
+    if unified is not None:
+        return unified
     return _build_personal_reply(
         surface_channel="telegram_personal",
         workspace_id=workspace_id,

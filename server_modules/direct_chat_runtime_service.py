@@ -735,26 +735,27 @@ def build_direct_operator_reply(
     slash_remainder = prepared.slash_remainder
     resolved_chat_max_iterations = prepared.resolved_chat_max_iterations
 
-    slash_payload = direct_chat_response_service.slash_command_payload(
-        slash_command_name=slash_command_name,
-        slash_remainder=slash_remainder,
-        workspace_id=normalized_workspace_id,
-        requested_provider=normalized_requested_provider,
-        requested_model=normalized_requested_model,
-        reasoning_effort=normalized_reasoning_effort,
-        availability_payload=availability_payload,
-        connected_systems=connected_systems,
-        tool_capabilities=tool_capabilities,
-        proactive_suggestions=proactive_suggestions,
-        base_context_used=base_context_used,
-        services=services.direct_chat_response_services,
-    )
-    print(f"[DR_DBG] ws={normalized_workspace_id} thread={normalized_thread_id} msg_len={len(normalized_message)} provider={normalized_requested_provider} model={normalized_requested_model} availability.ai_ready={availability_payload.get('ai_ready')} credential_plane={availability_payload.get('credential_plane')} host_tier={availability_payload.get('ai_tier')} tools={len(tools)} max_iter={resolved_chat_max_iterations}", flush=True)
+    # Dispatch /commands through the single registry (same one channels use).
+    if slash_command_name:
+        from server_modules.command_registry import dispatch_sync as _cmd_dispatch
 
-    if slash_payload is not None:
-        print(f"[DR_EXIT] ws={normalized_workspace_id} EXIT=slash_command", flush=True)
-        yield {"type": "final", "payload": slash_payload}
-        return
+        slash_payload = _cmd_dispatch(
+            text=f"/{slash_command_name} {slash_remainder}".strip(),
+            workspace_id=normalized_workspace_id,
+            surface="web",
+            services=services.direct_chat_response_services,
+            availability_payload=availability_payload,
+            connected_systems=connected_systems,
+            tool_capabilities=tool_capabilities,
+        )
+        if slash_payload is not None:
+            slash_payload.setdefault("actions", [])
+            slash_payload.setdefault("mode", "answer")
+            slash_payload.setdefault("suggestions", proactive_suggestions)
+            print(f"[DR_EXIT] ws={normalized_workspace_id} EXIT=registry_command cmd={slash_command_name}", flush=True)
+            yield {"type": "final", "payload": slash_payload}
+            return
+    print(f"[DR_DBG] ws={normalized_workspace_id} thread={normalized_thread_id} msg_len={len(normalized_message)} provider={normalized_requested_provider} model={normalized_requested_model} availability.ai_ready={availability_payload.get('ai_ready')} credential_plane={availability_payload.get('credential_plane')} host_tier={availability_payload.get('ai_tier')} tools={len(tools)} max_iter={resolved_chat_max_iterations}", flush=True)
 
     if not normalized_message:
         print(f"[DR_EXIT] ws={normalized_workspace_id} EXIT=empty_message", flush=True)
@@ -1058,7 +1059,7 @@ def build_direct_operator_reply(
     history_mode = "compacted_messages" if compaction.get("compacted") else ("raw_messages" if compacted_prior_messages else "none")
     prior_messages_used = bool(compacted_prior_messages)
     print(f"[DR_ENTER_DG] ws={normalized_workspace_id} provider={provider} model={selected_model} — calling stream_provider_backed_direct_chat", flush=True)
-    yield from direct_chat_generation_service.stream_provider_backed_direct_chat(
+    _direct_gen = direct_chat_generation_service.stream_provider_backed_direct_chat(
         services=services.direct_chat_generation_services,
         context=context,
         metadata=metadata,
@@ -1086,6 +1087,7 @@ def build_direct_operator_reply(
         direct_tool_result_summary_system_message="Use the tool results to answer the user's request.",
         assistant_plan_tools=tools,
     )
+    yield from direct_chat_generation_service.wrap_generation_with_sink(_direct_gen)
 
 
 def collect_direct_operator_reply(

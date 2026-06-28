@@ -18,7 +18,6 @@ _logger = logging.getLogger(__name__)
 SUPPORTED_COMMANDS = ["/compact", "/new", "/main", "/approve", "/deny", "/help", "/memory"]
 
 # ── Standardized error / status messages ──
-SAGE_ERROR_REPLY = "⚠️ I ran into an issue. Please try again."
 SAGE_OVERFLOW_REPLY = "📦 My context was too full — I've compacted it. Please resend your message."
 SAGE_UNAVAILABLE_REPLY = "😴 I'm temporarily unavailable. Please try again in a moment."
 SAGE_NO_PENDING_APPROVALS = "No pending approvals."
@@ -28,6 +27,7 @@ SAGE_COMPACTED = "✅ Context compacted."
 SAGE_COMPACT_NOT_NEEDED = "Nothing to compact — context is still small."
 SAGE_NEW_SESSION = "🆕 New session started. Type /main to return to your main thread."
 SAGE_MAIN_RETURN = "🏠 Back to your main thread."
+SAGE_NO_MEMORIES = "📭 No memories saved yet."
 
 # ── AI limit / attention messages (ONE source of truth for all channels) ──
 # These are the ONLY user-facing AI-stop messages.  They are generic,
@@ -35,18 +35,41 @@ SAGE_MAIN_RETURN = "🏠 Back to your main thread."
 # user sees what happened and chooses what to do.
 _SAGE_AI_SETUP_LABEL = "AI \\& Setup"
 
+# ── Error classification constants ────────────────────────────────────────
+# classify_error() below maps raw error strings to ONE of these five
+# buckets.  Every channel (Telegram, Discord, WhatsApp, route handlers)
+# uses this SINGLE function to build user-facing error text.
+
+# Bucket 1 — Credits exhausted
 SAGE_AI_LIMIT_REPLY = (
-    f"⚠️ You've reached your AI limit. Open {_SAGE_AI_SETUP_LABEL} →"
+    "⚠️ Heads up — credit exhausted. "
+    "Add your own API key or top up to continue."
 )
 
-SAGE_AI_NEEDS_ATTENTION_REPLY = (
-    f"⚠️ Your AI needs attention. Open {_SAGE_AI_SETUP_LABEL} →"
+# Bucket 2 — Rate limited
+SAGE_RATE_LIMITED_REPLY = (
+    "⚠️ Heads up — service is being rate limited. "
+    "Try again in a moment."
 )
+
+# Bucket 3 — Auth / key failed
+SAGE_AI_NEEDS_ATTENTION_REPLY = (
+    "⚠️ Heads up — AI service authentication failed. "
+    "Check your API key."
+)
+
+# Bucket 4 — Provider unreachable
+SAGE_PROVIDER_UNREACHABLE_REPLY = (
+    "⚠️ Heads up — AI service is unreachable right now. "
+    "Try again shortly."
+)
+
+# Bucket 5 — Catch-all
+SAGE_ERROR_REPLY = "⚠️ Heads up — something went wrong. Try again."
 
 # Web-chat plain-text variants (no Telegram markdown escaping)
 SAGE_AI_LIMIT_MESSAGE = "You've reached your AI limit. Open AI & Setup →"
 SAGE_AI_NEEDS_ATTENTION_MESSAGE = "Your AI needs attention. Open AI & Setup →"
-SAGE_NO_MEMORIES = "📭 No memories saved yet."
 
 SAGE_HELP_TEXT = (
     "Available commands:\n"
@@ -58,6 +81,62 @@ SAGE_HELP_TEXT = (
     "/memory — show what I remember about you\n"
     "/help — show this message"
 )
+
+
+# ── Error classification ──────────────────────────────────────────────────
+
+def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
+    """Map an error string to the appropriate user-facing reply constant.
+
+    SINGLE source of truth for error classification — all channels use
+    this ONE function.  Returns one of the five SAGE_*_REPLY constants.
+
+    When *raw_error* is non-empty, it is appended as a second line::
+
+        ↳ {raw_error}
+
+    Five specific buckets, checked in order:
+
+    1. Credits exhausted  → SAGE_AI_LIMIT_REPLY
+    2. Rate limited       → SAGE_RATE_LIMITED_REPLY
+    3. Auth / key failed  → SAGE_AI_NEEDS_ATTENTION_REPLY
+    4. Provider unreachable → SAGE_PROVIDER_UNREACHABLE_REPLY
+    5. Catch-all          → SAGE_ERROR_REPLY
+    """
+    if not error_text:
+        base = SAGE_ERROR_REPLY
+    else:
+        msg = str(error_text).lower().strip()
+
+        # 1) Credits exhausted
+        if any(kw in msg for kw in (
+            "reached your ai limit", "ai limit", "cap_reached",
+        )):
+            base = SAGE_AI_LIMIT_REPLY
+        # 2) Rate limited
+        elif any(kw in msg for kw in (
+            "provider_rate_limited", "429", "rate limit", "too many requests",
+        )):
+            base = SAGE_RATE_LIMITED_REPLY
+        # 3) Auth / key failed
+        elif any(kw in msg for kw in (
+            "provider_generation_failed", "401", "403", "auth", "api key",
+            "invalid key", "unauthorized",
+        )):
+            base = SAGE_AI_NEEDS_ATTENTION_REPLY
+        # 4) Provider unreachable
+        elif any(kw in msg for kw in (
+            "provider_transport_unavailable", "transport", "connection",
+            "timeout", "unreachable",
+        )):
+            base = SAGE_PROVIDER_UNREACHABLE_REPLY
+        # 5) Catch-all
+        else:
+            base = SAGE_ERROR_REPLY
+
+    if raw_error:
+        return base + "\n↳ " + str(raw_error)
+    return base
 
 
 # ── Active thread resolution ──
@@ -189,42 +268,23 @@ async def dispatch_command(
 ) -> str | None:
     """Dispatch a /command and return the reply string.
 
-    Returns None if the text is not a recognized command (caller should
-    pass it through to handle_sage_chat() as a normal message).
-
-    Returns a reply string if the command was handled. Caller is responsible
-    for delivering the reply back to the user on the appropriate channel.
+    Delegates to the single :mod:`command_registry`.  Returns ``None`` when
+    *command* is not a recognised slash command (caller should pass it through
+    to handle_sage_chat() as a normal message).
     """
-    text = str(command or "").strip()
-    if not text.startswith("/"):
+    from server_modules.command_registry import dispatch as _dispatch
+
+    result = await _dispatch(
+        text=str(command or ""),
+        workspace_id=workspace_id,
+        surface="channel",
+        thread_id=thread_id,
+        channel_origin=channel_origin,
+        sender_id=sender_id,
+    )
+    if result is None:
         return None
-
-    cmd = text.split()[0].strip().lower()
-    args = text[len(cmd):].strip()
-
-    if cmd == "/compact":
-        return await _handle_compact(workspace_id, thread_id)
-
-    if cmd == "/new":
-        return await _handle_new(workspace_id, channel_origin)
-
-    if cmd == "/main":
-        return await _handle_main(workspace_id, channel_origin)
-
-    if cmd == "/approve":
-        return await _handle_approve(workspace_id, approved=True)
-
-    if cmd == "/deny":
-        return await _handle_approve(workspace_id, approved=False)
-
-    if cmd == "/help":
-        return SAGE_HELP_TEXT
-
-    if cmd == "/memory":
-        return await _handle_memory(workspace_id)
-
-    # Not a recognized command — let handle_sage_chat() process it
-    return None
+    return str(result.get("reply") or "") or None
 
 
 # ── Internal handlers ──

@@ -259,6 +259,9 @@ from server_modules.routes_workspaces import router as workspaces_router
 from server_modules.routes_workflows import router as workflows_router
 from server_modules.routes_doctor import router as doctor_router
 from server_modules.routes_sage_telegram_hosted import router as sage_telegram_hosted_router
+from server_modules.routes_signal import router as signal_router
+from server_modules.routes_wechat import router as wechat_router
+from server_modules.routes_imessage import router as imessage_router
 from server_modules.connectors.discord_bot_runtime_service import DiscordBotRuntimeService
 
 
@@ -402,6 +405,9 @@ app.include_router(studio_router, prefix="/api")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(doctor_router)
 app.include_router(sage_telegram_hosted_router, prefix="/api")
+app.include_router(signal_router, prefix="/api")
+app.include_router(wechat_router, prefix="/api")
+app.include_router(imessage_router, prefix="/api")
 
 
 def _runtime_cli_args() -> argparse.Namespace:

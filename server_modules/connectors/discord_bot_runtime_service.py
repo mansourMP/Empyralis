@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
@@ -240,15 +241,34 @@ class DiscordBotRuntimeService:
             started += 1
             self._statuses.append(DiscordBotRuntimeStatus(connector_id, workspace_id, "online"))
 
-            # Register slash commands with Discord (fire-and-forget)
-            try:
-                import asyncio as _asyncio_disc
-                _token = str((credentials or {}).get("bot_token") or "").strip()
-                _asyncio_disc.ensure_future(
-                    _register_discord_slash_commands(bot_token=_token)
+            # Register slash commands with Discord — must happen AFTER the
+            # client is connected so we can read the bot's application ID
+            # (the client's user.id) instead of the invalid "@me" placeholder.
+            _token = str((credentials or {}).get("bot_token") or "").strip()
+            _app_id = ""
+            _deadline = time.time() + 30  # 30 s for client to finish login
+            while time.time() < _deadline:
+                _client_user = getattr(listener, "_client", None)
+                if _client_user is not None:
+                    _user_obj = getattr(_client_user, "user", None)
+                    if _user_obj is not None:
+                        _app_id = str(getattr(_user_obj, "id", "") or "").strip()
+                        if _app_id:
+                            break
+                time.sleep(0.5)
+            if _app_id:
+                try:
+                    import asyncio as _asyncio_disc
+                    _asyncio_disc.ensure_future(
+                        _register_discord_slash_commands(bot_token=_token, application_id=_app_id)
+                    )
+                except Exception:
+                    pass
+            else:
+                import logging as _dc_log
+                _dc_log.getLogger(__name__).warning(
+                    "Discord slash commands NOT registered: client did not become ready within 30 s"
                 )
-            except Exception:
-                pass
 
         return {"ok": True, "started": started, "statuses": self.statuses()}
 
@@ -314,110 +334,13 @@ class DiscordBotRuntimeService:
                 connector_entry=connector_entry,
             )
 
-        # ── Personal DM routing through unified Sage ingress (Path A) ──
-        # Mirrors the Telegram-hosted pattern:
-        #   parse → dispatch_command() → execute_sage_turn() → filter_outbound_reply() → send_dm()
-        # This guarantees identical safety rules, context loading, response envelope,
-        # persistence, and audit as every other Main Agent channel.
-        message_type = str(parsed.get("message_type") or "").strip().lower()
-        if message_type == "direct_message":
-            try:
-                from server_modules.connectors.discord_connector import send_message as _send_msg
-
-                _discord_user_id = str(parsed.get("user_id") or "").strip()
-                _discord_channel_id = str(parsed.get("channel_id") or "").strip()
-                _push_name = str(parsed.get("username") or "").strip()
-                _text = str(parsed.get("text") or "").strip()
-
-                if not _discord_user_id or not _text:
-                    return {"ok": True, "handled": True, "triggered": False, "reason": "empty_dm"}
-
-                # ── /pair <code> — link Discord user to workspace ──
-                _pair_match = re.match(r"^/pair\s+(\S+)", _text)
-                if _pair_match:
-                    _code = _pair_match.group(1).strip()
-                    from server_modules.sage_telegram_hosted_service import consume_pairing_code
-                    from server_modules.discord_pairing_service import (
-                        pair_discord_workspace,
-                    )
-                    _pair_wid = consume_pairing_code(_code)
-                    if _pair_wid:
-                        pair_discord_workspace(_discord_user_id, _pair_wid)
-                        _send_msg(
-                            credentials=dict(credentials),
-                            channel_id=_discord_channel_id,
-                            content="✅ Connected to Empyralis! Your workspace is now linked. Try sending a message.",
-                        )
-                    else:
-                        _send_msg(
-                            credentials=dict(credentials),
-                            channel_id=_discord_channel_id,
-                            content="Invalid or expired pairing code. Generate a new one at empyralis.ai → Connections → Discord.",
-                        )
-                    return {"ok": True, "handled": True, "triggered": True, "reason": "pair_command"}
-
-                # ── Workspace lookup ──
-                from server_modules.discord_pairing_service import (
-                    get_workspace_for_discord_user,
-                )
-                _workspace_id = get_workspace_for_discord_user(_discord_user_id)
-                if not _workspace_id:
-                    _send_msg(
-                        credentials=dict(credentials),
-                        channel_id=_discord_channel_id,
-                        content="Send `/pair CODE` to connect your workspace. Get a code at empyralis.ai → Connections → Discord.",
-                    )
-                    return {"ok": True, "handled": True, "triggered": True, "reason": "unpaired_discord_user"}
-
-                # ── Shared command dispatcher ──
-                from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
-                _cmd_reply = await _dispatch_cmd(
-                    command=_text,
-                    workspace_id=_workspace_id,
-                    thread_id="sage-main",
-                    channel_origin="discord_personal",
-                    sender_id=_discord_user_id or None,
-                )
-                if _cmd_reply is not None:
-                    _send_msg(
-                        credentials=dict(credentials),
-                        channel_id=_discord_channel_id,
-                        content=_cmd_reply,
-                    )
-                    return {"ok": True, "handled": True, "triggered": True, "reason": "command_dispatched"}
-
-                # ── Route through unified Sage ingress ──
-                from server_modules.sage_turn_adapter import execute_sage_turn
-
-                result = await execute_sage_turn(
-                    workspace_id=_workspace_id,
-                    message=_text,
-                    channel_origin="discord_personal",
-                    channel_sender_id=_discord_user_id,
-                    channel_sender_name=_push_name or None,
-                    thread_id="sage-main",
-                )
-
-                _sage_reply = str(result.message or "").strip()
-                if _sage_reply:
-                    from server_modules.channel_adapter import filter_outbound_reply
-                    _filtered = filter_outbound_reply(_sage_reply)
-                    if _filtered:
-                        _send_msg(
-                            credentials=dict(credentials),
-                            channel_id=_discord_channel_id,
-                            content=_filtered,
-                        )
-                        return {"ok": True, "handled": True, "triggered": True, "reason": "sage_ingress_dm_replied"}
-                return {"ok": True, "handled": True, "triggered": True, "reason": "sage_ingress_dm_no_reply"}
-            except Exception as _dm_exc:
-                import logging as _logging2
-                import traceback as _tb
-                _logging2.getLogger(__name__).warning(
-                    "Discord Sage ingress DM failed: %s\nTRACEBACK:\n%s",
-                    _dm_exc, _tb.format_exc(),
-                )
-                return {"ok": True, "handled": True, "triggered": False, "reason": f"sage_ingress_dm_error: {_dm_exc}"}
+        # ── DM events do NOT reach this handler ──
+        # DiscordGatewayListener.on_message (discord_connector.py:1056-1058)
+        # intercepts DMs and routes them through _handle_dm_via_gateway()
+        # (Path C) BEFORE calling self._on_event.  Consequently,
+        # message_type="direct_message" is unreachable here.
+        # The canonical DM path is _handle_dm_via_gateway() in
+        # discord_connector.py.  Guild messages continue below.
 
         goal = build_run_goal_from_event(parsed)
         if not goal:
@@ -483,34 +406,68 @@ __all__ = ["DiscordBotRuntimeService", "DiscordBotRuntimeStatus"]
 # ── Discord slash command registration ──
 
 DISCORD_SLASH_COMMANDS = [
-    {"name": "compact", "description": "Summarize and clear conversation context"},
-    {"name": "memory", "description": "Show what Sage remembers about you"},
-    {"name": "help", "description": "Show available commands"},
-    {"name": "new", "description": "Start a new task session"},
-    {"name": "approve", "description": "Approve pending action"},
-    {"name": "deny", "description": "Deny pending action"},
+    # Sessions & runs
+    {"name": "new",      "type": 1, "description": "Start a new task session"},
+    {"name": "compact",  "type": 1, "description": "Summarize and clear old context"},
+    {"name": "stop",     "type": 1, "description": "Abort the current run"},
+    # Model
+    {"name": "model",    "type": 1, "description": "Show available models or set the active one"},
+    # Discovery
+    {"name": "help",     "type": 1, "description": "Show available commands"},
+    {"name": "commands", "type": 1, "description": "Show full command catalog"},
+    {"name": "tools",    "type": 1, "description": "Show what the agent can use right now"},
+    {"name": "status",   "type": 1, "description": "Report AI readiness and providers"},
+    {"name": "whoami",   "type": 1, "description": "Show your sender ID"},
+    {"name": "usage",    "type": 1, "description": "Show token and cost summary"},
+    # Memory
+    {"name": "memory",   "type": 1, "description": "Show what I remember about you"},
+    # Tasks & agents
+    {"name": "tasks",    "type": 1, "description": "List background tasks"},
+    {"name": "agents",   "type": 1, "description": "List sub-agents for this session"},
+    {"name": "skills",   "type": 1, "description": "List or run available skills"},
+    # Admin
+    {"name": "config",   "type": 1, "description": "Read or write configuration"},
+    {"name": "mcp",      "type": 1, "description": "Manage MCP server configuration"},
+    {"name": "plugins",  "type": 1, "description": "Manage plugins"},
+    {"name": "debug",    "type": 1, "description": "Runtime-only config overrides"},
+    # Channel
+    {"name": "tts",      "type": 1, "description": "Text-to-speech control"},
+    {"name": "bash",     "type": 1, "description": "Execute a host shell command"},
 ]
 
 
-async def _register_discord_slash_commands(bot_token: str) -> None:
-    """Register slash commands with Discord via REST API."""
+async def _register_discord_slash_commands(bot_token: str, application_id: str) -> None:
+    """Register slash commands with Discord via REST API.
+
+    Must be called AFTER the Discord gateway client has connected and
+    ``application_id`` (the bot's user ID) is known.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
     if not bot_token:
+        _log.warning("Discord slash commands NOT registered: no bot_token")
+        return
+    if not application_id:
+        _log.error("Discord slash commands NOT registered: no application_id")
         return
     try:
         import httpx
         async with httpx.AsyncClient() as client:
-            # Register globally (no guild_id = global commands)
             resp = await client.put(
-                f"https://discord.com/api/v10/applications/@me/commands",
+                f"https://discord.com/api/v10/applications/{application_id}/commands",
                 headers={"Authorization": f"Bot {bot_token}"},
                 json=DISCORD_SLASH_COMMANDS,
             )
             if resp.status_code == 200:
-                import logging
-                _log = logging.getLogger(__name__)
                 _log.info("Discord slash commands registered: %d commands", len(DISCORD_SLASH_COMMANDS))
-    except Exception:
-        pass
+            else:
+                _log.error(
+                    "Discord slash command registration failed: HTTP %s — %s",
+                    resp.status_code,
+                    (resp.text or "")[:500],
+                )
+    except Exception as exc:
+        _log.exception("Discord slash command registration error: %s", exc)
 
 
 async def _handle_discord_interaction(

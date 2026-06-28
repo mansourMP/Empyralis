@@ -332,8 +332,8 @@ class AutopilotRegistryFacadeService:
                 thread_alive=self.telegram_thread_alive,
                 enabled=self.telegram_enabled_getter(),
                 default_profile=self.telegram_default_profile_getter(),
-                list_connector_entries=lambda: self.telegram_service_registry().telegram_autopilot_state_service().list_connector_entries(
-                    self.telegram_default_workspace_id_getter()
+                list_connector_entries=lambda requested_workspace_id=None: self.telegram_service_registry().telegram_autopilot_state_service().list_connector_entries(
+                    requested_workspace_id or self.telegram_default_workspace_id_getter()
                 ),
                 resolve_profile=lambda entry: support_registry.profile_service().resolve_telegram_profile(entry),
                 resolve_allow_from=lambda entry: runtime_registry.connector_support_service().resolve_allow_from(

@@ -21,7 +21,9 @@ The dispatcher owns: EVERYTHING after that.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Optional
 
 from server_modules.channel_transport import ChannelTransport
@@ -33,6 +35,44 @@ _GUARANTEED_FALLBACK = (
     "I processed your message but couldn't produce a response. "
     "Could you try again?"
 )
+
+# ── Per-channel turn serialization ──────────────────────────────────────
+# Channel paths (Telegram, Discord, Slack, etc.) bypass the web session
+# manager's actor queue.  Two concurrent messages for the same
+# (workspace_id, thread_id) would race — interleaved LLM calls, tool
+# execution, and state mutations.  This lightweight per-key asyncio lock
+# serialises turns so only ONE executes per (workspace, thread) at a time.
+#
+# Keys are cleaned up when the dict exceeds 500 entries (stale locks
+# unused for ≥10 minutes are dropped).
+
+_CHANNEL_TURN_LOCKS: dict[str, asyncio.Lock] = {}
+_CHANNEL_TURN_LOCKS_LAST_SEEN: dict[str, float] = {}
+_CHANNEL_TURN_LOCK_MAX_KEYS = 500
+_CHANNEL_TURN_LOCK_STALE_SECONDS = 600  # 10 minutes
+
+
+async def _with_channel_turn_lock(
+    workspace_id: str,
+    thread_id: str,
+) -> asyncio.Lock:
+    """Return the per-thread lock, creating it on first use."""
+    lock_key = f"{workspace_id}:{thread_id}"
+    if lock_key not in _CHANNEL_TURN_LOCKS:
+        # Cheap cleanup sweep when the dict grows too large
+        if len(_CHANNEL_TURN_LOCKS) >= _CHANNEL_TURN_LOCK_MAX_KEYS:
+            now = time.time()
+            stale = [
+                k
+                for k, ts in _CHANNEL_TURN_LOCKS_LAST_SEEN.items()
+                if now - ts > _CHANNEL_TURN_LOCK_STALE_SECONDS
+            ]
+            for k in stale:
+                _CHANNEL_TURN_LOCKS.pop(k, None)
+                _CHANNEL_TURN_LOCKS_LAST_SEEN.pop(k, None)
+        _CHANNEL_TURN_LOCKS[lock_key] = asyncio.Lock()
+    _CHANNEL_TURN_LOCKS_LAST_SEEN[lock_key] = time.time()
+    return _CHANNEL_TURN_LOCKS[lock_key]
 
 
 def split_long_message(text: str, max_len: int) -> list[str]:
@@ -79,40 +119,15 @@ def split_long_message(text: str, max_len: int) -> list[str]:
     return chunks
 
 
-def classify_error(error_text: str | None) -> str:
+def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
     """Map an error string to the appropriate user-facing reply constant.
 
-    SINGLE source of truth for error classification — all channels use
-    this ONE function.  Returns one of the shared SAGE_*_REPLY constants
-    (WITHOUT the AI & Setup suffix — callers append that as needed).
+    Delegates to the single source of truth in :mod:`sage_command_dispatcher`.
+    This re-export exists so existing callers in this module don't need to
+    change; new callers should import directly from sage_command_dispatcher.
     """
-    from server_modules.sage_command_dispatcher import (
-        SAGE_ERROR_REPLY,
-        SAGE_AI_LIMIT_REPLY,
-        SAGE_AI_NEEDS_ATTENTION_REPLY,
-    )
-
-    if not error_text:
-        return SAGE_ERROR_REPLY
-
-    msg = str(error_text).lower().strip()
-
-    # ── AI limit / cap exhausted ──
-    if any(kw in msg for kw in (
-        "reached your ai limit", "ai limit", "cap_reached",
-        "limit", "cap",
-    )):
-        return SAGE_AI_LIMIT_REPLY
-
-    # ── Provider needs attention / not available ──
-    if any(kw in msg for kw in (
-        "needs attention", "not available", "no cloud provider",
-        "not configured", "attention",
-    )):
-        return SAGE_AI_NEEDS_ATTENTION_REPLY
-
-    # ── Generic / unknown error ──
-    return SAGE_ERROR_REPLY
+    from server_modules.sage_command_dispatcher import classify_error as _ce
+    return _ce(error_text, raw_error=raw_error)
 
 
 def _build_setup_hint(workspace_id: str) -> str:
@@ -203,24 +218,58 @@ async def dispatch_sage_reply(
                     channel_origin, exc,
                 )
 
+    # ── Process directives & inline shortcuts ──────────────────────────
+    # Strip /model, /thinking, /help etc. from the text before the LLM
+    # sees it.  Directive-only messages are handled without calling the LLM.
+    from server_modules.command_registry import process_message as _proc_msg
+
+    _proc = await _proc_msg(
+        text=message,
+        workspace_id=workspace_id,
+        surface="channel",
+        channel_origin=channel_origin,
+        sender_id=sender_id,
+        sender_name=sender_name,
+        thread_id=thread_id,
+    )
+
+    # Send directive/shortcut replies immediately (no typing indicator —
+    # these are fast, sub-millisecond handler calls).
+    for _reply_text in _proc.replies:
+        await _send(_reply_text)
+
+    if _proc.is_command_only:
+        # All-directive message — nothing to send to the LLM.
+        if not sent_any:
+            await _send("OK.")
+        return sent_any
+
+    # Use cleaned text for the LLM turn.
+    _cleaned_message = _proc.text if _proc.text.strip() else message
+
     # ── Start typing ──
     if transport.supports_typing_indicator:
         await transport.start_typing()
 
     result = None
-    try:
-        result = await execute_sage_turn(
-            workspace_id=workspace_id,
-            message=message if message else "[Media]",
-            attachments=attachments if attachments else None,
-            channel_origin=channel_origin,
-            channel_sender_id=sender_id,
-            channel_sender_name=sender_name,
-            thread_id=thread_id,
-        )
-    finally:
-        if transport.supports_typing_indicator:
-            await transport.stop_typing()
+    # Serialize per (workspace, thread) so only ONE turn executes at a time
+    # for a given thread across ALL channels.  Web path has its own
+    # serialization via SessionActorQueue; this covers everything else.
+    lock = await _with_channel_turn_lock(workspace_id, thread_id)
+    async with lock:
+        try:
+            result = await execute_sage_turn(
+                workspace_id=workspace_id,
+                message=_cleaned_message if _cleaned_message else "[Media]",
+                attachments=attachments if attachments else None,
+                channel_origin=channel_origin,
+                channel_sender_id=sender_id,
+                channel_sender_name=sender_name,
+                thread_id=thread_id,
+            )
+        finally:
+            if transport.supports_typing_indicator:
+                await transport.stop_typing()
 
     # ── Build reply from result ──
     reply = str(result.message or "").strip() if result else ""
@@ -231,7 +280,7 @@ async def dispatch_sage_reply(
         await _send(reply, reply_to_id=reply_to_id)
     elif result and result.error:
         # Error captured in result (not raised)
-        classified = classify_error(str(result.error))
+        classified = classify_error(str(result.error), raw_error=str(result.error))
         await _send(classified + setup_hint, reply_to_id=reply_to_id)
     else:
         # GUARANTEED RESPONSE: reply empty with no error
@@ -288,7 +337,7 @@ async def dispatch_sage_reply_safe(
         )
 
         # ── Last-resort: classify + send via transport directly ──
-        classified = classify_error(str(exc))
+        classified = classify_error(str(exc), raw_error=str(exc))
         text = classified + setup_hint
 
         sent = False

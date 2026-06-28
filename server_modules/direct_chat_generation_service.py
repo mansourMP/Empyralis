@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import contextvars
 import re
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional
@@ -29,6 +30,36 @@ from server_modules.plugin_system import (
     HOOK_TOOL_RESULT,
     get_global_hook_registry,
 )
+
+
+# ── Live event sink ──────────────────────────────────────────────────────────
+# Web chat sets this contextvar before the generation loop runs so streaming
+# chunks, thinking steps, and tool traces are forwarded to the SSE transport
+# in real time.  When the contextvar is None (Telegram / API / background
+# paths) nothing changes — events are only yielded through the normal generator.
+_GENERATION_EVENT_SINK: contextvars.ContextVar[
+    Optional[Callable[[Dict[str, Any]], None]]
+] = contextvars.ContextVar("generation_event_sink", default=None)
+
+
+def wrap_generation_with_sink(
+    gen: Iterator[Dict[str, Any]],
+) -> Iterator[Dict[str, Any]]:
+    """Wrap a generation-stream iterator with live event forwarding.
+
+    Every event yielded by *gen* is also pushed through the current
+    :data:`_GENERATION_EVENT_SINK` (if one is set).  The sink MUST be
+    thread-safe — it runs inside the thread-pool thread that executes the
+    generation loop.
+    """
+    for event in gen:
+        sink = _GENERATION_EVENT_SINK.get(None)
+        if sink is not None and isinstance(event, dict):
+            try:
+                sink(event)
+            except Exception:
+                pass
+        yield event
 
 
 def _local_gateway_activity_payload(
@@ -231,6 +262,25 @@ def _stable_visible_stream_prefix(value: Any) -> str:
     return text
 
 
+def _collapse_exact_duplicate_reply(text: Any) -> str:
+    """Defensive guard against a streaming/retry artifact that emits the reply
+    verbatim twice back-to-back ("XX" or "X\\nX"). Only collapses when the entire
+    message is two identical halves (optionally separated by one whitespace char),
+    so it never alters a normal reply. Requires >=16 chars to avoid touching short
+    legitimately-repeated phrases.
+    """
+    s = str(text or "").strip()
+    if len(s) < 16:
+        return str(text or "")
+    if len(s) % 2 == 0 and s[: len(s) // 2] == s[len(s) // 2 :]:
+        return s[: len(s) // 2].strip()
+    if len(s) % 2 == 1:
+        half = (len(s) - 1) // 2
+        if s[:half] == s[half + 1 :] and s[half : half + 1].isspace():
+            return s[:half].strip()
+    return str(text or "")
+
+
 def _has_shell_exec_tool(tools: List[Dict[str, Any]]) -> bool:
     tool_names = {str(item.get("name") or "").strip() for item in tools if isinstance(item, dict)}
     return "shell__exec" in tool_names
@@ -386,8 +436,9 @@ def _public_generation_error_code(llm_error: str) -> str:
 
 
 def _public_generation_error_reply(services: DirectChatGenerationServices, llm_error: str) -> str:
-    _ = (services, llm_error)
-    return ""
+    from server_modules.sage_command_dispatcher import classify_error
+    _ = services
+    return classify_error(str(llm_error or ""), raw_error=str(llm_error or ""))
 
 
 def _turn_metadata_from_session(session_ctx: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -848,6 +899,7 @@ def stream_provider_backed_direct_chat(
                 continue
             if event_type == "result":
                 final_reply = str(event.get("reply") or "").strip() or iteration_raw_reply or iteration_reply
+                final_reply = _collapse_exact_duplicate_reply(final_reply)
                 usage_masked = event.get("usage_masked") if isinstance(event.get("usage_masked"), dict) else {}
                 attempted_providers = str(event.get("attempted_providers") or "").strip()
                 llm_error = str(event.get("error") or "").strip()
@@ -1189,6 +1241,15 @@ def stream_provider_backed_direct_chat(
                                 provider=effective_iteration_provider or actual_provider or context.get("provider"),
                                 credentials=direct_chat_credentials,
                             )
+                            try:
+                                print(
+                                    f"[TOOL_OUTPUT_DEBUG] tool={tool_name!r} connector={connector_id!r} "
+                                    f"action={action_id!r} raw_len={len(str(tool_result or ''))} "
+                                    f"ctx_preview={str(tool_result_for_context or '')[:500]!r}",
+                                    flush=True,
+                                )
+                            except Exception:
+                                pass
                             completed_trace_metadata = direct_tool_execution_service.build_direct_tool_trace_metadata(
                                 connector_id,
                                 action_id,
@@ -1322,10 +1383,42 @@ def stream_provider_backed_direct_chat(
                                 "Otherwise provide the final answer to the user."
                             )
                         else:
-                            current_prompt = (
-                                "Based on the tool results above, provide a clear and helpful answer to the user. "
-                                "If you need more information, use another tool now. Otherwise respond directly."
+                            # Detect whether any tool in THIS iteration reported a failure so we can
+                            # forbid the model from fabricating an answer on top of a failed tool.
+                            _recent_tool_contents = []
+                            for _m in reversed(conversation_messages):
+                                if isinstance(_m, dict) and str(_m.get("role") or "") == "tool":
+                                    _recent_tool_contents.append(str(_m.get("content") or "").lower())
+                                else:
+                                    break
+                            _tool_failure_detected = any(
+                                (
+                                    '"status": "failed"' in _c
+                                    or '"status": "error"' in _c
+                                    or '"runtime_state": "failed"' in _c
+                                    or 'timed out' in _c
+                                    or 'timeout' in _c
+                                    or '"error"' in _c
+                                )
+                                for _c in _recent_tool_contents
                             )
+                            if _tool_failure_detected:
+                                current_prompt = (
+                                    "One or more tools FAILED — see the tool results above (an error, a "
+                                    "timeout, or \"status\": \"failed\"). Tell the user plainly that the action "
+                                    "did not succeed and state what failed. You MUST NOT invent, guess, "
+                                    "estimate, or fabricate ANY data — no hardware specs, OS versions, serial "
+                                    "numbers, file contents, command output, or numbers of any kind. Report "
+                                    "ONLY what the tools actually returned. If a tool could not reach the "
+                                    "device or machine, say exactly that and stop."
+                                )
+                            else:
+                                current_prompt = (
+                                    "Based on the tool results above, provide a clear and helpful answer to the user. "
+                                    "Use ONLY facts that are present in the tool results — never invent, guess, or "
+                                    "fabricate any data. If you need more information, use another tool now. "
+                                    "Otherwise respond directly."
+                                )
                         # Feed tool results back to the model in the next iteration
                         # so it can reason about them and call more tools if needed.
                         continue

@@ -2154,8 +2154,41 @@ async def dispatch_cloud_channel_outbound(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Studio connector channel routing (safe honest stub)
+# Studio connector channel routing
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Channel keys that route through the main Sage agent pipeline.
+_SAGE_CHANNEL_ORIGIN_MAP: dict[str, str] = {
+    "slack": "slack_guild",
+    "discord": "discord_guild",
+    "github": "github",
+}
+
+
+def _coerce_customer_message_text(customer_message: Any) -> str:
+    """Extract a plain-text message from *customer_message*.
+
+    Callers in connectors_actions.py pass a bare string (the goal).
+    Callers in agent_registry_api.py may pass a dict from a JSON body.
+    """
+    if customer_message is None:
+        return ""
+    if isinstance(customer_message, str):
+        return customer_message.strip()
+    if isinstance(customer_message, dict):
+        # Try common text fields in priority order.
+        for key in ("text", "goal", "message", "body", "content"):
+            val = customer_message.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        # Fallback: JSON-serialise the dict so the agent can see it.
+        import json as _json
+        try:
+            return _json.dumps(customer_message, ensure_ascii=False, default=str)
+        except Exception:
+            return str(customer_message)
+    return str(customer_message).strip()
+
 
 async def route_inbound_channel_message(
     *,
@@ -2176,15 +2209,73 @@ async def route_inbound_channel_message(
 ) -> Dict[str, Any]:
     """Route an inbound studio-connector message to the agent pipeline.
 
-    HONEST STUB — this function exists to prevent runtime AttributeError
-    crashes at the 7 call sites that reference it.  Studio connector channels
-    (Slack guild, Discord guild, WhatsApp Business, Telegram connector, GitHub)
-    are NOT yet implemented end-to-end.
-
-    Once a channel's specialist routing pipeline is built, replace this stub
-    with the real implementation that fans out to the agent registry, deployed
-    agent run dispatch, or other channel-specific handlers.
+    Wired channels (Slack Guild, Discord Guild, GitHub) route through
+    :func:`execute_sage_turn` — the same unified pipeline used by every
+    other channel.  Remaining channels return ``channel_unavailable``
+    until their specialist routing is built.
     """
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_channel_key = str(channel_key or "").strip().lower()
+
+    # ── Sage-routed channels ───────────────────────────────────────────
+    channel_origin = _SAGE_CHANNEL_ORIGIN_MAP.get(resolved_channel_key)
+    if channel_origin is not None:
+        message_text = _coerce_customer_message_text(customer_message)
+        if not message_text:
+            logger.warning(
+                "route_inbound_channel_message: channel=%s empty message from actor=%s",
+                resolved_channel_key,
+                actor_id or "unknown",
+            )
+            return {
+                "ok": False,
+                "status": "empty_message",
+                "error": "No message text could be extracted from the inbound payload.",
+                "run_id": None,
+                "reply": None,
+            }
+
+        run_id = trace_id or f"chan-{uuid4().hex[:12]}"
+
+        try:
+            from server_modules.sage_turn_adapter import execute_sage_turn
+
+            sage_result = await execute_sage_turn(
+                workspace_id=resolved_workspace_id,
+                tenant_id=tenant_id or "",
+                message=message_text,
+                surface="chat",
+                channel_origin=channel_origin,
+                channel_sender_id=str(actor_id or ""),
+                channel_sender_name=str(actor_display_name or ""),
+                request_id=message_id or run_id,
+            )
+
+            reply_text = str(sage_result.message or "")
+            return {
+                "ok": True,
+                "status": "completed",
+                "run_id": run_id,
+                "reply": reply_text,
+                "trace_id": str(sage_result.trace_id or ""),
+                "provider": str(sage_result.provider or ""),
+                "model": sage_result.model,
+            }
+        except Exception as exc:
+            logger.warning(
+                "route_inbound_channel_message: channel=%s execute_sage_turn failed: %s",
+                resolved_channel_key,
+                exc,
+            )
+            return {
+                "ok": False,
+                "status": "execution_error",
+                "error": f"Sage turn failed: {exc}",
+                "run_id": run_id,
+                "reply": None,
+            }
+
+    # ── Unimplemented channels ─────────────────────────────────────────
     logger.warning(
         "agent_channel_router.route_inbound_channel_message: channel=%s is not "
         "available — studio connector routing is not yet implemented. "

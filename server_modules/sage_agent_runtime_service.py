@@ -1701,9 +1701,8 @@ async def _run_sage_action_loop_v3(
         model=model,
     )
     def _collect_stream_events() -> List[Dict[str, Any]]:
-        return list(
-            direct_chat_generation_service.stream_provider_backed_direct_chat(
-                services=generation_services,
+        _gen = direct_chat_generation_service.stream_provider_backed_direct_chat(
+            services=generation_services,
                 context={
                     "workspace_id": workspace_id,
                     "provider": provider,
@@ -1751,7 +1750,7 @@ async def _run_sage_action_loop_v3(
                 direct_tool_result_summary_system_message="Use the Sage tool results to answer the user's request. Do not paste raw tool output.",
                 assistant_plan_tools=tools,
             )
-        )
+        return list(direct_chat_generation_service.wrap_generation_with_sink(_gen))
 
     stream_events = await asyncio.to_thread(_collect_stream_events)
     collected = _collect_sage_operator_loop_v3_events(stream_events)
@@ -2331,6 +2330,7 @@ async def handle_sage_chat(
     sender_name: str | None = None,
     sender_id: str | None = None,
     thread_id: str = "sage-main",
+    request_id: str = "",
 ) -> dict:
     normalized_workspace_id = _coerce_text(workspace_id)
     normalized_message = _coerce_text(message)
@@ -2738,7 +2738,7 @@ async def handle_sage_chat(
                 session_id=None,
                 actor=actor,
                 content=normalized_message,
-                metadata={"channel": channel_origin or "sage"},
+                metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
             )
             if reply and not (str(reply).strip() == _SILENT_REPLY_MARKER or str(reply).strip().startswith(_SILENT_REPLY_MARKER)):
                 await thread_service.record_assistant_turn(
@@ -2750,7 +2750,7 @@ async def handle_sage_chat(
                     reply=reply,
                     status="completed",
                     run_id=trace_id,
-                    metadata={"channel": channel_origin or "sage"},
+                    metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
                 )
         except Exception:
             pass  # never break a reply just because persistence failed
@@ -2816,7 +2816,7 @@ async def handle_sage_chat(
                 session_id=None,
                 actor=actor3,
                 content=normalized_message,
-                metadata={"channel": channel_origin or "sage"},
+                metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
             )
             if reply and not (str(reply).strip() == _SILENT_REPLY_MARKER or str(reply).strip().startswith(_SILENT_REPLY_MARKER)):
                 await thread_service.record_assistant_turn(
@@ -2828,7 +2828,7 @@ async def handle_sage_chat(
                     reply=reply,
                     status="completed",
                     run_id=trace_id,
-                    metadata={"channel": channel_origin or "sage"},
+                    metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
                 )
         except Exception:
             pass  # never break a reply just because persistence failed
@@ -3153,7 +3153,7 @@ async def handle_sage_chat(
             session_id=None,
             actor=actor3,
             content=normalized_message,
-            metadata={"channel": channel_origin or "sage"},
+            metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
         )
         if reply and not (str(reply).strip() == _SILENT_REPLY_MARKER or str(reply).strip().startswith(_SILENT_REPLY_MARKER)):
             await thread_service.record_assistant_turn(
@@ -3165,7 +3165,7 @@ async def handle_sage_chat(
                 reply=reply,
                 status="completed",
                 run_id=trace_id,
-                metadata={"channel": channel_origin or "sage"},
+                metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
             )
     except Exception as _exc:
         import logging as _logging

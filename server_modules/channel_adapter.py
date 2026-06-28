@@ -22,6 +22,9 @@ class ChannelOrigin(str, Enum):
     WECHAT_PERSONAL = "wechat_personal"
     SIGNAL_PERSONAL = "signal_personal"
     SLACK = "slack"
+    SLACK_GUILD = "slack_guild"
+    DISCORD_GUILD = "discord_guild"
+    GITHUB = "github"
     ACP = "acp"
     UNKNOWN = "unknown"
 

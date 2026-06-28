@@ -106,54 +106,7 @@ def oauth_authorize_url(
     return f"https://slack.com/oauth/v2/authorize?{urlparse.urlencode(query)}"
 
 
-def _http_json_request(
-    url: str,
-    *,
-    headers: Optional[Dict[str, str]] = None,
-    payload: Optional[Any] = None,
-    method: Optional[str] = None,
-    timeout: int = 30,
-) -> Dict[str, Any]:
-    request_headers = dict(headers or {})
-    body: Optional[bytes] = None
-    verb = (method or ("POST" if payload is not None else "GET")).upper()
-    if payload is not None:
-        if isinstance(payload, (bytes, bytearray)):
-            body = bytes(payload)
-        elif request_headers.get("Content-Type") == "application/x-www-form-urlencoded":
-            if isinstance(payload, str):
-                body = payload.encode("utf-8")
-            else:
-                body = urlparse.urlencode(payload, doseq=True).encode("utf-8")
-        else:
-            body = json.dumps(payload).encode("utf-8")
-            request_headers.setdefault("Content-Type", "application/json")
-    req = urlrequest.Request(url, data=body, headers=request_headers, method=verb)
-    try:
-        with urlrequest.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
-            try:
-                parsed = json.loads(raw) if raw else None
-            except Exception:
-                parsed = None
-            return {
-                "status": getattr(resp, "status", 200),
-                "json": parsed,
-                "text": raw,
-                "headers": dict(getattr(resp, "headers", {}) or {}),
-            }
-    except urlerror.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(raw) if raw else None
-        except Exception:
-            parsed = None
-        return {
-            "status": int(getattr(exc, "code", 500) or 500),
-            "json": parsed,
-            "text": raw,
-            "headers": dict(getattr(exc, "headers", {}) or {}),
-        }
+from server_modules.channel_sdk import _http_json_request
 
 
 def _ensure_ok_response(response: Dict[str, Any], *, fallback_error: str) -> Dict[str, Any]:

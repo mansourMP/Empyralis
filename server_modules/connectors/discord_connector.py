@@ -33,6 +33,46 @@ DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_ALLOWED_WRITE_APPROVAL_ACTIONS = {"send_message", "send_dm", "delete_message"}
 _MENTION_RE = re.compile(r"<@!?(\d+)>")
 
+# ── Deduplication guard ─────────────────────────────────────────────────────
+# Prevents the same Discord message from being processed more than once across
+# the Gateway WebSocket (Path C/A) and HTTP Interactions endpoint (Path B).
+# Keys are "message_id:channel_origin" strings.  Entries older than 300 s are
+# evicted on access (lazy TTL).
+_DEDUP_CACHE: dict[str, float] = {}
+_DEDUP_MAX_SIZE = 2000
+_DEDUP_TTL_SECONDS = 300  # Discord retry window is ~5 s; 300 s is generous
+
+
+def _is_duplicate_discord_message(message_id: str, channel_origin: str) -> bool:
+    """Return True if this (message_id, channel_origin) was seen recently."""
+    import time as _time
+
+    if not message_id or not channel_origin:
+        return False
+    key = f"{message_id}:{channel_origin}"
+    now = _time.time()
+
+    # Lazy eviction — clean stale entries when the cache grows
+    if len(_DEDUP_CACHE) > _DEDUP_MAX_SIZE:
+        stale = [k for k, ts in _DEDUP_CACHE.items() if now - ts > _DEDUP_TTL_SECONDS]
+        for k in stale:
+            _DEDUP_CACHE.pop(k, None)
+
+    if key in _DEDUP_CACHE:
+        age = now - _DEDUP_CACHE[key]
+        if age < _DEDUP_TTL_SECONDS:
+            return True
+        # TTL expired — allow reprocessing
+        _DEDUP_CACHE.pop(key, None)
+
+    _DEDUP_CACHE[key] = now
+    return False
+
+
+def _clear_discord_dedup_cache() -> None:
+    """Test helper — clears the dedup cache."""
+    _DEDUP_CACHE.clear()
+
 
 def _env_first(*names: str) -> str:
     for name in names:
@@ -42,55 +82,7 @@ def _env_first(*names: str) -> str:
     return ""
 
 
-def _http_json_request(
-    url: str,
-    *,
-    headers: Optional[Dict[str, str]] = None,
-    payload: Optional[Any] = None,
-    method: Optional[str] = None,
-    timeout: int = 30,
-) -> Dict[str, Any]:
-    request_headers = dict(headers or {})
-    body: Optional[bytes] = None
-    verb = (method or ("POST" if payload is not None else "GET")).upper()
-    if payload is not None:
-        if isinstance(payload, (bytes, bytearray)):
-            body = bytes(payload)
-        elif request_headers.get("Content-Type") == "application/x-www-form-urlencoded":
-            body = urlparse.urlencode(payload, doseq=True).encode("utf-8")
-        else:
-            body = json.dumps(payload).encode("utf-8")
-            request_headers.setdefault("Content-Type", "application/json")
-    req = urlrequest.Request(url, data=body, headers=request_headers, method=verb)
-    try:
-        with urlrequest.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            text = raw.decode("utf-8", errors="replace")
-            try:
-                parsed = json.loads(text) if text else None
-            except Exception:
-                parsed = None
-            return {
-                "status": getattr(resp, "status", 200),
-                "json": parsed,
-                "text": text,
-                "content": raw,
-                "headers": dict(getattr(resp, "headers", {}) or {}),
-            }
-    except urlerror.HTTPError as exc:
-        raw = exc.read()
-        text = raw.decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(text) if text else None
-        except Exception:
-            parsed = None
-        return {
-            "status": int(getattr(exc, "code", 500) or 500),
-            "json": parsed,
-            "text": text,
-            "content": raw,
-            "headers": dict(getattr(exc, "headers", {}) or {}),
-        }
+from server_modules.channel_sdk import _http_json_request
 
 
 def _multipart_request(
@@ -953,10 +945,21 @@ def dispatch_inbound_event(
 
 
 async def _handle_dm_via_gateway(message: Any) -> None:
-    """Process a direct-message through Sage and reply via the gateway WebSocket.
+    """CANONICAL Discord DM handler (Path C).
 
-    Uses ``message.channel.send()`` (the native discord.py method) instead of
-    the REST API, which means no ``_discord_api_call`` / bot-token HTTP calls.
+    Processes a direct message through Sage and replies via the Gateway
+    WebSocket.  Uses ``message.channel.send()`` (the native discord.py method)
+    instead of the REST API.
+
+    This is the *single source of truth* for Discord DM text messages.
+    All DMs arrive through the Gateway WebSocket and are intercepted by
+    ``DiscordGatewayListener.on_message`` BEFORE the ``_on_event`` callback
+    fires — so the DM handler in ``DiscordBotRuntimeService.handle_parsed_event``
+    (Path A) is never reached for DMs.
+
+    Slash commands / interactions in DMs are handled separately by the
+    HTTP Interactions endpoint in ``connectors_actions.discord_webhook``
+    (Path B).
     """
     import logging as _hdlr_log
 
@@ -1006,6 +1009,13 @@ async def _handle_dm_via_gateway(message: Any) -> None:
             return
 
         # ── Command dispatch ──
+        _msg_id = str(getattr(message, "id", "") or "").strip()
+        if _msg_id and _is_duplicate_discord_message(_msg_id, "discord_personal"):
+            _hdlr_log.getLogger("discord_bot").info(
+                "DM dedup: skipping duplicate message_id=%s", _msg_id
+            )
+            return
+
         from server_modules.sage_command_dispatcher import dispatch_command as _dc
         _cmd_reply = await _dc(
             command=_text,

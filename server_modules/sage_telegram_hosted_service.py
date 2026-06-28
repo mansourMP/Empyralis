@@ -187,6 +187,43 @@ def pairing_code_for_workspace(workspace_id: str) -> Optional[str]:
 
 # --- Telegram Bot API ---
 
+async def _register_telegram_native_commands() -> None:
+    """Register slash commands with Telegram via setMyCommands.
+
+    Called once at startup after the bot token is confirmed available.
+    Syncs the command registry to Telegram's native command menu so users
+    see autocomplete suggestions when typing / in a bot chat.
+    """
+    token = _bot_token()
+    if not token:
+        return
+    try:
+        from server_modules.command_registry import list_for_scope
+        commands = [
+            {"command": cmd.name, "description": cmd.description[:100]}
+            for cmd in list_for_scope("both")
+            if not cmd.aliases  # only primary names
+        ]
+        if not commands:
+            return
+        import httpx
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            resp = await client.post(
+                f"{TELEGRAM_API_BASE}/bot{token}/setMyCommands",
+                json={"commands": commands},
+            )
+            data = resp.json()
+            if data.get("ok"):
+                LOGGER.info("Telegram native commands registered: %d commands", len(commands))
+            else:
+                LOGGER.warning(
+                    "Telegram setMyCommands failed: %s",
+                    data.get("description", "unknown"),
+                )
+    except Exception:
+        LOGGER.exception("Telegram native command registration failed")
+
+
 async def _telegram_api(method: str, body: dict) -> dict:
     token = _bot_token()
     if not token:
@@ -1267,3 +1304,9 @@ def start_background_polling() -> None:
         asyncio.set_event_loop(loop)
     _polling_task = loop.create_task(_background_polling_loop())
     LOGGER.info("Sage Telegram hosted: background polling started")
+
+    # Register native slash commands with Telegram (fire-and-forget).
+    try:
+        loop.create_task(_register_telegram_native_commands())
+    except Exception:
+        pass

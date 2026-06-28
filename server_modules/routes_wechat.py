@@ -46,13 +46,28 @@ async def wechat_inbound(
 
     # ── Normal message: route through unified Sage ingress ──
     from server_modules.sage_turn_adapter import execute_sage_turn
+    from server_modules.sage_command_dispatcher import classify_error
+    from server_modules.error_notification import classify_error_notification
 
-    result = await execute_sage_turn(
-        workspace_id=workspace_id,
-        message=text,
-        channel_origin="wechat_personal",
-        channel_sender_id=sender_id,
-        channel_sender_name=str(body.get("sender_name") or "").strip(),
-    )
-
-    return {"ok": True, "sage_replied": bool(result.message)}
+    try:
+        result = await execute_sage_turn(
+            workspace_id=workspace_id,
+            message=text,
+            channel_origin="wechat_personal",
+            channel_sender_id=sender_id,
+            channel_sender_name=str(body.get("sender_name") or "").strip(),
+        )
+        return {"ok": True, "sage_replied": bool(result.message)}
+    except Exception as _exc:
+        import logging
+        _logger = logging.getLogger(__name__)
+        _logger.warning("execute_sage_turn failed for wechat: %s", _exc)
+        return {
+            "ok": True,
+            "sage_replied": False,
+            "error_surfaced": True,
+            "error_text": classify_error(str(_exc), raw_error=str(_exc)),
+            "notification": classify_error_notification(
+                str(_exc), raw_error=str(_exc),
+            ).as_dict(),
+        }

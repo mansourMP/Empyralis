@@ -78,7 +78,7 @@ class ConnectorRuntime:
         self.run_timeout_seconds = int(run_timeout_seconds or 0)
         self.max_reply_chars = int(max_reply_chars or 0)
         self.thread_alive = thread_alive
-        self.list_connector_entries = list_connector_entries
+        self._list_connector_entries = list_connector_entries
         self.get_updates_process_lock = get_updates_process_lock
         self.notify_pending_approvals = notify_pending_approvals
         self.telegram_api_request = telegram_api_request
@@ -593,7 +593,7 @@ class ConnectorRuntime:
     def run_iteration(self) -> float:
         sleep_seconds = self.poll_seconds
         try:
-            entries = self.list_connector_entries()
+            entries = self._list_connector_entries()
             had_connector_error = False
             self.set_connectors_seen(len(entries))
             self.mark_poll(False)

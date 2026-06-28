@@ -2947,7 +2947,14 @@ export function WorkstationChatPane() {
                 );
                 streamBufferRef.current = "";
               } else {
-                setStreamingAssistantText(visibleFinalReply);
+                // Only use the final payload if nothing was streamed yet.
+                // Otherwise keep the streamed text — it IS the complete reply.
+                setStreamingAssistantText((current) => {
+                  if (current && !isProviderRuntimeGateMessage(current)) {
+                    return current;
+                  }
+                  return visibleFinalReply;
+                });
               }
               setStatusMessage(null);
               setSendFailureNotice(null);
@@ -2960,6 +2967,17 @@ export function WorkstationChatPane() {
             const finalTraceId = readString(metadata.trace_id);
             if (finalTraceId) {
               observedTraceId = finalTraceId;
+              // Persist live timeline events so the thinking trace
+              // survives a page refresh and is visible on past turns.
+              setLiveTimelineEvents((current) => {
+                if (current.length > 0) {
+                  setLegacyTraceEventsByTraceId((prev) => ({
+                    ...prev,
+                    [finalTraceId]: current,
+                  }));
+                }
+                return current;
+              });
             }
           }
         },
@@ -3442,25 +3460,22 @@ export function WorkstationChatPane() {
     </div>
   );
 
+  const hardwareDotTone = localCompanionConnected ? 'online' : localCompanionOnline ? 'warning' : 'offline';
   const sageCanvasControls = (
-    <div className="sage-canvas-controls" aria-label="Sage chat controls">
+    <div className="sage-canvas-controls" aria-label="Hardware status">
       <div className="sage-canvas-hardware" ref={hardwareCanvasPickerRef}>
         <button
           type="button"
           className="sage-canvas-hardware__trigger"
-          aria-label={`Choose Agent Computer. Current: ${agentComputerHeaderLabel}`}
+          aria-label={`Agent Computer: ${agentComputerHeaderLabel}`}
           aria-expanded={hardwareCanvasPickerOpen}
-          disabled={isSending || isPersistingModelSelection}
+          disabled={isSending}
           onClick={() => {
-            setModelCanvasPickerOpen(false);
-            setModelPickerSubpanel(null);
-            setHardwareCanvasPickerOpen((current) => {
-              const nextOpen = !current;
-                return nextOpen;
-            });
+            setHardwareCanvasPickerOpen((current) => !current);
           }}
         >
-          {`Agent Computer: ${agentComputerHeaderLabel}`}
+          <span className={`sage-canvas-hardware__dot sage-canvas-hardware__dot--${hardwareDotTone}`} aria-hidden="true" />
+          <span>{agentComputerDeviceLabel || agentComputerHeaderLabel}</span>
         </button>
         {hardwareCanvasPickerOpen ? (
           <div

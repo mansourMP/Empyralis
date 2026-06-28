@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
+
   Brain,
   Camera,
   Check,
@@ -20,6 +21,7 @@ import {
 
 import type { CodexTranscriptCell } from './cells';
 import { stripInternalToolMarkup } from '../workstation-chat-pane-model';
+import { useAnimatedText } from '@/lib/ui/use-animated-text';
 import { useWorkspaceServices } from '@/lib/workspace/workspace-services';
 
 export type CodexApprovalAction = 'allow_once' | 'allow_session' | 'deny';
@@ -944,9 +946,12 @@ export function AssistantCell({ cell }: { cell: Extract<CodexTranscriptCell, { k
   const timestamp = formatTimestamp(cell.createdAt);
   const effectiveLabel = providerLabel(cell);
   const taskRouteLabel = routeLabel(cell);
-  const text = stripInternalToolMarkup(cell.content);
+  const rawText = stripInternalToolMarkup(cell.content);
+  // Word-by-word reveal while streaming — smooth typewriter feel
+  const animatedText = useAnimatedText(cell.isStreaming ? rawText : '', ' ', 22);
+  const text = cell.isStreaming ? animatedText : rawText;
   const [copied, setCopied] = useState(false);
-  if ((!text && !cell.isStreaming) || isLeakedMachineResultJson(text)) {
+  if ((!rawText && !cell.isStreaming) || isLeakedMachineResultJson(rawText)) {
     return null;
   }
   const handleCopy = () => {

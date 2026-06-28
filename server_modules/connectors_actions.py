@@ -1323,9 +1323,33 @@ async def discord_webhook(request: Request):
             goal = discord_build_run_goal_from_event(parsed)
             if not goal:
                 continue
+
+            # ── Deduplication guard ──────────────────────────────────────
+            # Uses interaction_id (for Interactions) or message_id (for
+            # MESSAGE_CREATE events forwarded through this endpoint).
+            # Discord retries Interactions with the same ID on timeout,
+            # so this prevents double-processing.
+            _dedup_msg_id = str(parsed.get("interaction_id") or parsed.get("message_id") or "").strip()
+            _dedup_origin = "discord_personal" if str(parsed.get("message_type") or "").strip().lower() == "direct_message" else "discord_guild"
+            if _dedup_msg_id:
+                from server_modules.connectors.discord_connector import _is_duplicate_discord_message
+                if _is_duplicate_discord_message(_dedup_msg_id, _dedup_origin):
+                    import logging as _dd_log
+                    _dd_log.getLogger(__name__).info(
+                        "Discord webhook dedup: skipping duplicate id=%s origin=%s",
+                        _dedup_msg_id, _dedup_origin,
+                    )
+                    continue
+
             # ── DM routing through unified Sage ingress ──
-            # Mirrors discord_bot_runtime_service.py pattern:
-            #   parse → dispatch_command → execute_sage_turn → filter_outbound_reply → send_dm
+            # NOTE: This block handles MESSAGE_CREATE events with
+            # message_type="direct_message".  It is *not* reachable via the
+            # standard Discord Interactions endpoint (which only sends type
+            # 2/3/5 payloads).  It is kept as a forward-compatible path in
+            # case a Gateway-event-forwarding proxy or future Discord feature
+            # delivers regular message events to this webhook.
+            # The canonical DM path is _handle_dm_via_gateway() in
+            # discord_connector.py (Path C).
             _message_type = str(parsed.get("message_type") or "").strip().lower()
             if _message_type == "direct_message":
                 try:

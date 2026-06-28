@@ -52,6 +52,7 @@ async def execute_sage_turn(
     channel_sender_name: str = "",
     attachments: Optional[List[dict]] = None,
     thread_id: str = "",
+    request_id: str = "",
     # ── Option 2: Pre-built task (data-structure handoff for Option B) ──
     task: Optional[NormalizedSageTurn] = None,
 ) -> SageTurnResult:
@@ -155,29 +156,53 @@ async def execute_sage_turn(
             channel_sender_name=resolved_sender_name,
         )
 
-    from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH, set_persisted_model_preference
+    from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
 
-    # ── /model command: persist to workspace metadata (survives restart, applies to all channels) ──
+    # ── Directive & shortcut processing ─────────────────────────────────
+    # Strip /model, /thinking, /help etc. before the LLM sees the message.
+    # Directive-only messages return early — no LLM call.
     _msg = str(resolved_message or "").strip()
-    if _msg.startswith("/model"):
-        _model_arg = _msg[len("/model"):].strip()
-        if not _model_arg:
-            result = {"message": "Usage: /model <name>\nExample: /model deepseek-chat", "surface": resolved_surface}
-        else:
-            _persisted = await set_persisted_model_preference(resolved_workspace_id, _model_arg)
-            if _persisted:
-                result = {"message": f"Model set to {_model_arg} for this workspace.\n(This setting persists across server restarts and applies to all channels.)", "surface": resolved_surface}
-            else:
-                result = {"message": f"Model preference noted: {_model_arg}\n(Note: Could not persist — workspace metadata may be read-only.)", "surface": resolved_surface}
-        return SageTurnResult(
-            message=result.get("message", ""),
-            ai_setup_url=f"/w/{resolved_workspace_id}{_SAGE_AI_SETUP_PATH}" if resolved_workspace_id else _SAGE_AI_SETUP_PATH,
+    _cleaned_msg = _msg
+    if _msg.startswith("/"):
+        from server_modules.command_registry import process_message as _proc_msg
+        from server_modules.command_registry import dispatch as _cmd_dispatch
+
+        _proc = await _proc_msg(
+            text=_msg,
+            workspace_id=resolved_workspace_id,
+            surface="channel" if resolved_channel_origin else "web",
+            channel_origin=resolved_channel_origin,
+            sender_id=resolved_sender_id,
         )
+        if _proc.is_command_only and not _proc.text.strip():
+            # Pure command/directive message — skip LLM entirely
+            _reply = "\n".join(_proc.replies) if _proc.replies else "OK."
+            return SageTurnResult(
+                message=_reply,
+                ai_setup_url=f"/w/{resolved_workspace_id}{_SAGE_AI_SETUP_PATH}" if resolved_workspace_id else _SAGE_AI_SETUP_PATH,
+            )
+
+        # Fallback: standalone commands like /new or /compact that aren't
+        # directives still start with / after directive stripping.
+        _remaining = _proc.text.strip()
+        if _remaining.startswith("/"):
+            _cmd_result = await _cmd_dispatch(
+                text=_remaining,
+                workspace_id=resolved_workspace_id,
+                surface="channel" if resolved_channel_origin else "web",
+            )
+            if _cmd_result is not None:
+                return SageTurnResult(
+                    message=str(_cmd_result.get("reply") or ""),
+                    ai_setup_url=f"/w/{resolved_workspace_id}{_SAGE_AI_SETUP_PATH}" if resolved_workspace_id else _SAGE_AI_SETUP_PATH,
+                )
+
+        _cleaned_msg = _remaining if _remaining else _msg
 
     result = await handle_sage_chat(
         workspace_id=turn.workspace_id,
         tenant_id=turn.tenant_id,
-        message=turn.message,
+        message=_cleaned_msg,
         surface=turn.surface,
         mode=turn.mode,
         current_user=turn.current_user,
@@ -186,6 +211,7 @@ async def execute_sage_turn(
         sender_name=turn.channel_sender_name or None,
         sender_id=turn.channel_sender_id or None,
         thread_id=resolved_thread_id,
+        request_id=request_id,
     )
 
     # Build canonical AI & Setup link — backend is the single source of truth

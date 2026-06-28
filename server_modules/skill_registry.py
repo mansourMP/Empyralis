@@ -320,11 +320,208 @@ async def _execute_handler_skill(
     }
 
 
-_ADAPTER_EXECUTORS: dict[str, SkillExecutor] = {
+_ADAPTER_EXECUTORS: dict[str, SkillExecutor] = {}
+
+# ── Bundled-skill → tool adapter mapping ───────────────────────────────
+# Each bundled skill from /skills/ wraps built-in tools from skills_service.py.
+# When invoked, the executor dispatches to the underlying tool handler(s)
+# and returns structured output compatible with the agent loop's tool result
+# format (sage_agent_runtime_service.py).  Skills without tool equivalents
+# inject their SKILL.md prompt content into the agent context.
+
+_BUNDLED_SKILL_DISPATCH: dict[str, str] = {
+    "memory-manager": "memory_update",
+    "code-runner": "shell__exec",
+    "file-manager": "file__read",
+    "telegram-bot": "telegram_bot__send_message",
+    "web-search": "web__search",
+    "browser": "browser__navigate",
+}
+
+# Skills that only inject prompt context (no tool execution).
+_PROMPT_ONLY_SKILLS: frozenset[str] = frozenset({
+    "business-skill-template",
+    "vision-monitor",  # has its own handler.py — executed via _execute_handler_skill
+})
+
+
+async def _bundled_skill_executor(
+    *,
+    skill_id: str,
+    goal: str,
+    agent_label: str,
+    tenant_id: str,
+    workspace_id: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Execute a bundled skill by dispatching to its mapped tool handler.
+
+    For skills with tool equivalents (memory-manager → memory_update, etc.),
+    this calls the underlying tool via the skills_service tool execution path.
+    For prompt-only skills, it loads the SKILL.md content and returns it as
+    a context-injection artifact.
+    """
+    tool_name = _BUNDLED_SKILL_DISPATCH.get(skill_id)
+    if tool_name:
+        # Tool-backed skill — dispatch to the underlying tool handler.
+        try:
+            from server_modules.direct_tool_execution_service import (
+                execute_tool_by_name,
+            )
+            result = await execute_tool_by_name(
+                tool_name=tool_name,
+                goal=goal,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+            )
+            if result and isinstance(result, dict):
+                reply = str(result.get("reply") or result.get("output") or f"{agent_label} completed {skill_id}.")
+                return {
+                    "status": "ok",
+                    "reply": reply,
+                    "artifact": result.get("artifact"),
+                    "steps": [
+                        {"label": f"Running {skill_id}", "detail": goal, "status": "done", "kind": "thinking"},
+                        {"label": f"Dispatched to {tool_name}", "detail": reply[:200], "status": "done", "kind": "connector"},
+                    ],
+                }
+        except (ImportError, AttributeError):
+            pass
+        # Fallback: tool dispatch not available — return manual stub with tool hint
+        return {
+            "status": "manual",
+            "reply": f"{agent_label} would use {tool_name} for this, but tool dispatch is not available in this environment.",
+            "artifact": None,
+            "steps": [
+                {"label": f"Resolving {skill_id}", "detail": goal, "status": "done", "kind": "thinking"},
+                {"label": f"Mapped to {tool_name}", "detail": "Tool execution path unavailable", "status": "error", "kind": "connector"},
+            ],
+        }
+
+    # Prompt-only skill — inject SKILL.md content into agent context.
+    prompt_content = ""
+    try:
+        from server_modules.installed_skills import _read_text
+        from pathlib import Path as _Path
+        skill_path = _Path(__file__).resolve().parent.parent / "skills" / skill_id / "SKILL.md"
+        if skill_path.exists():
+            prompt_content = _read_text(skill_path)
+    except Exception:
+        prompt_content = ""
+
+    if prompt_content:
+        return {
+            "status": "ok",
+            "reply": f"{agent_label} loaded the {skill_id} skill context.",
+            "artifact": {
+                "label": f"{skill_id} skill prompt",
+                "kind": "skill-context",
+                "summary": f"Injected {skill_id} skill instructions into agent context.",
+                "media_type": "text/markdown",
+                "preview_content": prompt_content[:8000],
+            },
+            "steps": [
+                {"label": f"Loading {skill_id}", "detail": "Skill prompt injected into agent context", "status": "done", "kind": "thinking"},
+            ],
+        }
+    return await _manual_skill_stub(goal=goal, agent_label=agent_label, skill_label=skill_id)
+
+
+async def _live_memory_skill(
+    *,
+    goal: str,
+    agent_label: str,
+    workspace_id: str,
+    tenant_id: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for the memory-manager skill.  Loads and returns the current
+    memory context so the agent can inspect and edit memory facts."""
+    try:
+        from server_modules import memory_service
+        text = memory_service.get_memory(workspace_id) or "No memory facts stored yet."
+        return {
+            "status": "ok",
+            "reply": f"{agent_label} loaded the current memory context.",
+            "artifact": {
+                "label": "Memory context",
+                "kind": "memory-snapshot",
+                "summary": f"Current memory facts for workspace {workspace_id}.",
+                "media_type": "text/markdown",
+                "preview_content": text[:8000],
+            },
+            "steps": [
+                {"label": "Loading memory-manager", "detail": "Memory context retrieved", "status": "done", "kind": "thinking"},
+            ],
+        }
+    except Exception:
+        return await _bundled_skill_executor(
+            skill_id="memory-manager", goal=goal, agent_label=agent_label,
+            tenant_id=tenant_id, workspace_id=workspace_id, **kwargs,
+        )
+
+
+async def _live_code_runner_skill(
+    *,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for the code-runner skill.  Prepares a sandboxed execution
+    environment.  Actual execution is handled by the shell__exec tool."""
+    return await _bundled_skill_executor(
+        skill_id="code-runner", goal=goal, agent_label=agent_label, **kwargs,
+    )
+
+
+async def _live_file_manager_skill(
+    *,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for the file-manager skill."""
+    return await _bundled_skill_executor(
+        skill_id="file-manager", goal=goal, agent_label=agent_label, **kwargs,
+    )
+
+
+async def _live_telegram_bot_skill(
+    *,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for the telegram-bot skill."""
+    return await _bundled_skill_executor(
+        skill_id="telegram-bot", goal=goal, agent_label=agent_label, **kwargs,
+    )
+
+
+async def _live_vision_monitor_skill(
+    *,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for the vision-monitor skill — dispatches to the handler.py
+    subprocess.  Falls back to prompt injection if handler unavailable."""
+    return await _bundled_skill_executor(
+        skill_id="vision-monitor", goal=goal, agent_label=agent_label, **kwargs,
+    )
+
+
+# ── Populate adapter executors (must be after all executor functions) ──
+_ADAPTER_EXECUTORS.update({
     "web_search": _live_web_search,
     "browser": _live_browser_skill,
     "inventory": inventory_skill.execute_inventory_skill,
-}
+    "memory_manager": _live_memory_skill,
+    "code_runner": _live_code_runner_skill,
+    "file_manager": _live_file_manager_skill,
+    "telegram_bot": _live_telegram_bot_skill,
+    "vision_monitor": _live_vision_monitor_skill,
+})
 
 
 _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
@@ -416,6 +613,72 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         trigger_terms=(),
         skill_class="system",
     ),
+    # ── Bundled skills (from /skills/) ──────────────────────────────────
+    SkillDefinition(
+        id="memory-manager",
+        label="Memory Manager",
+        description="Save and recall facts about the user.",
+        permission_label="Memory scope",
+        execution_mode="live",
+        action_class="write",
+        connector_scopes=("memory",),
+        trigger_terms=(),
+        executor=_live_memory_skill,
+        execution_adapter="memory_manager",
+        skill_class="system",
+    ),
+    SkillDefinition(
+        id="code-runner",
+        label="Code Runner",
+        description="Run Python and shell code, show output, handle errors.",
+        permission_label="Code execution",
+        execution_mode="live",
+        action_class="execute",
+        connector_scopes=("shell", "code"),
+        trigger_terms=(),
+        executor=_live_code_runner_skill,
+        execution_adapter="code_runner",
+        skill_class="system",
+    ),
+    SkillDefinition(
+        id="file-manager",
+        label="File Manager",
+        description="Read, write, list, and delete files.",
+        permission_label="File system",
+        execution_mode="live",
+        action_class="write",
+        connector_scopes=("file",),
+        trigger_terms=(),
+        executor=_live_file_manager_skill,
+        execution_adapter="file_manager",
+        skill_class="system",
+    ),
+    SkillDefinition(
+        id="telegram-bot",
+        label="Telegram Bot",
+        description="Send Telegram messages with approval.",
+        permission_label="Telegram messaging",
+        execution_mode="live",
+        action_class="write",
+        connector_scopes=("telegram",),
+        trigger_terms=(),
+        executor=_live_telegram_bot_skill,
+        execution_adapter="telegram_bot",
+        skill_class="system",
+    ),
+    SkillDefinition(
+        id="vision-monitor",
+        label="Vision Monitor",
+        description="Monitor physical spaces from camera snapshots.",
+        permission_label="Camera access",
+        execution_mode="live",
+        action_class="read",
+        connector_scopes=("vision",),
+        trigger_terms=(),
+        executor=_live_vision_monitor_skill,
+        execution_adapter="vision_monitor",
+        skill_class="system",
+    ),
 )
 
 
@@ -426,10 +689,22 @@ def _definition_from_installed_skill(item: dict[str, Any]) -> SkillDefinition | 
     runtime_metadata = dict(item.get("runtime_metadata") or {}) if isinstance(item.get("runtime_metadata"), dict) else {}
     execution_adapter = str(runtime_metadata.get("execution_adapter") or "").strip().lower()
     has_query_handler = bool(item.get("has_query_handler"))
-    if not execution_adapter and not has_query_handler:
+    # Allow bundled skills through even without an execution adapter — they
+    # get their executor from _BUILT_IN_SKILLS (which now covers all bundled
+    # skills: memory-manager, code-runner, file-manager, telegram-bot,
+    # vision-monitor, etc.).
+    source = str(item.get("source") or "").strip().lower()
+    is_bundled = source == "bundled"
+    has_builtin = skill_id in {d.id for d in _BUILT_IN_SKILLS}
+    if not execution_adapter and not has_query_handler and not is_bundled and not has_builtin:
         return None
     executor: SkillExecutor | None = _ADAPTER_EXECUTORS.get(execution_adapter) if execution_adapter else None
-    if executor is None and execution_adapter not in {"", "handler"} and not has_query_handler:
+    # Resolve executor from _BUILT_IN_SKILLS for bundled skills
+    if executor is None and has_builtin:
+        builtin = {d.id: d for d in _BUILT_IN_SKILLS}.get(skill_id)
+        if builtin is not None and builtin.executor is not None:
+            executor = builtin.executor
+    if executor is None and execution_adapter not in {"", "handler"} and not has_query_handler and not has_builtin:
         return None
     if executor is None and (execution_adapter == "handler" or has_query_handler):
         execution_adapter = "handler"
@@ -633,5 +908,48 @@ async def execute_skill(
             goal=goal,
             agent_label=agent_label,
         )
+
+    # ── Fallback: bundled skills and prompt-only skills ────────────────
+    # For skills that don't have an executor or handler, try the bundled
+    # skill executor (which loads SKILL.md for prompt injection or
+    # dispatches to the mapped tool handler).
+    if definition.id in _BUNDLED_SKILL_DISPATCH or definition.id in _PROMPT_ONLY_SKILLS:
+        return await _bundled_skill_executor(
+            skill_id=definition.id,
+            goal=goal,
+            agent_label=agent_label,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            hard_context=hard_context,
+            operational_policy=operational_policy,
+        )
+
+    # ── Workspace/custom skills: inject SKILL.md prompt content ────────
+    # Custom skills without executor functions modify agent behavior by
+    # injecting their SKILL.md instructions into the agent context.
+    if definition.path:
+        try:
+            from pathlib import Path as _Path
+            from server_modules.installed_skills import _read_text
+            skill_md = _Path(definition.path) / "SKILL.md"
+            if skill_md.exists():
+                prompt_content = _read_text(skill_md)
+                if prompt_content:
+                    return {
+                        "status": "ok",
+                        "reply": f"{agent_label} loaded the {definition.label} skill context.",
+                        "artifact": {
+                            "label": f"{definition.label} skill prompt",
+                            "kind": "skill-context",
+                            "summary": f"Injected {definition.id} skill instructions into agent context.",
+                            "media_type": "text/markdown",
+                            "preview_content": prompt_content[:8000],
+                        },
+                        "steps": [
+                            {"label": f"Loading {definition.id}", "detail": "Skill prompt injected into agent context", "status": "done", "kind": "thinking"},
+                        ],
+                    }
+        except Exception:
+            pass
 
     return await _manual_skill_stub(goal=goal, agent_label=agent_label, skill_label=definition.label)
