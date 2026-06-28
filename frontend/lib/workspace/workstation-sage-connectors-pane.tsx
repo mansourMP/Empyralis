@@ -3379,17 +3379,17 @@ export function WorkstationSageConnectorsPane({
       return 'Requires Agent Computer';
     }
     if (displayState === 'requires_setup') {
-      return 'Requires setup';
+      return 'Set up';
     }
     if (displayState === 'unavailable') {
       return 'Unavailable';
     }
     const launchStatus = readString(item?.launch_status).toLowerCase();
     if (launchStatus === 'partial') {
-      return 'Requires setup';
+      return 'Set up';
     }
     if (launchStatus === 'planned') {
-      return 'Requires setup';
+      return 'Set up';
     }
     return fallback;
   }
