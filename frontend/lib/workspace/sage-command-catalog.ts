@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
-import type { WorkspaceRouteId } from '../../../shared/nav-manifest';
+import type { WorkspaceRouteId } from '../../shared/nav-manifest';
 
 export type SageCommandActionKind =
   | 'open_status'

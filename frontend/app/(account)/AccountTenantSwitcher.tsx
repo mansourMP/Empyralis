@@ -24,7 +24,7 @@ import {
   getWorkspaceNavRouteDefinition,
   resolveWorkspaceRouteIdFromSegment,
   type WorkspaceRouteId,
-} from '../../../shared/nav-manifest';
+} from '../../shared/nav-manifest';
 import { useAppTheme } from '@/lib/ui/app-theme';
 import { APP_THEME_ATTRIBUTE } from '@/lib/ui/tokens';
 

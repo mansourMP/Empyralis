@@ -49,7 +49,7 @@ import {
   getWorkspaceNavRouteDefinition,
   type WorkspaceNavDestinationId,
   type WorkspaceRouteId,
-} from '../../../shared/nav-manifest';
+} from '../../shared/nav-manifest';
 
 const CONTEXT_ROUTE_IDS_BY_DESTINATION: Record<WorkspaceNavDestinationId, readonly WorkspaceRouteId[]> = {
   sage: ['chat', 'studio', 'activity', 'integrations', 'memory', 'tasks', 'artifacts'],

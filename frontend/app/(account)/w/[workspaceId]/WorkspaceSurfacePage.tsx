@@ -24,7 +24,7 @@ import { resolveRouteIdFromHref, type WorkspaceRouteId } from '@/lib/workspace/w
 import {
   getWorkspaceNavRouteDefinition,
   type WorkspaceNavDestinationId,
-} from '../../../../../shared/nav-manifest';
+} from '../../../../shared/nav-manifest';
 
 type SurfaceRenderer = (workspaceId: string) => ReactNode;
 
