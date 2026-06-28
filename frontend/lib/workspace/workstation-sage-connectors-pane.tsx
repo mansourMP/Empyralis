@@ -3493,7 +3493,7 @@ export function WorkstationSageConnectorsPane({
       detail: locked ? readString(statusItem?.description, record.definition.summary) : describeConnectorCard(record, connected),
       statusLabel: opensAdvancedSetup
         ? 'Advanced setup'
-        : locked ? connectionLockedLabel(statusItem, 'Requires setup') : connected ? 'Connected' : consumerSetupStatusLabel(setupState) ?? 'Not connected',
+        : locked ? connectionLockedLabel(statusItem, 'Set up') : connected ? 'Connected' : consumerSetupStatusLabel(setupState) ?? 'Not connected',
       statusTone: locked ? 'neutral' : connected ? 'connected' : 'neutral',
       summary: record.definition.summary,
       nextStep: locked ? null : connected ? null : record.definition.setupHint,
@@ -3528,7 +3528,7 @@ export function WorkstationSageConnectorsPane({
       label: record.label,
       image: record.image,
       detail: locked && !bridgePersonalChannel ? readString(statusItem?.description, 'Requires Agent Computer bridge.') : record.detail,
-      statusLabel: locked && !bridgePersonalChannel ? connectionLockedLabel(statusItem, 'Requires setup') : record.statusLabel,
+      statusLabel: locked && !bridgePersonalChannel ? connectionLockedLabel(statusItem, 'Set up') : record.statusLabel,
       statusTone: locked && !bridgePersonalChannel ? 'neutral' : record.statusTone,
       summary: record.summary,
       nextStep: bridgeLocked ? null : record.nextStep,
