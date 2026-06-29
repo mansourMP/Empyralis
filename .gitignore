@@ -97,3 +97,4 @@ config/secret_key
 dump.rdb
 *.rdb
 *.dmg
+graphify-out/

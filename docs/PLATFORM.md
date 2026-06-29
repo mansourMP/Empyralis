@@ -4,7 +4,7 @@ Managed, reliable, safe agent platform. Cloud-first, hardware as upgrade.
 Consumers get their own agent in their channels.
 
 **Stack:** Python (FastAPI) + TypeScript (Next.js 16) + Rust (policy kernel + supervisor)
-**Updated:** 2026-06-29
+**Updated:** 2026-06-30
 **See also:** `OpenClaw.md` (competitor forensic audit)
 
 ---
@@ -638,3 +638,163 @@ OAuth App → credential vault → MCP server registration → tool discovery �
 3. **Fix violations** — 75 known issues, starting with "I"/"my" strings and channel leakage
 4. **Commit C+D hardening** — done but uncommitted
 5. **Simplify** — merge 3 execution paths into one, one command registry
+
+---
+
+## 7. Architecture Decisions — Why We Built It This Way
+
+This section exists so any agent reading this file knows WHY decisions were made
+and does NOT reverse them without explicit instruction. Each entry is opinionated
+and final unless Mansur says otherwise.
+
+### Decision: Channels are pure transport (pigeon theory)
+
+**Chosen:** Every channel (Telegram, Discord, WhatsApp, etc.) is a stateless
+transport shell that normalizes inbound messages into `AgentTurnRequest` and
+delivers outbound `AgentTurnResponse` back to the user. Channels never hold
+routing logic, policy, or session state.
+
+**Rejected:** Channels as control-plane participants — parsing commands,
+enforcing quotas, managing sessions, or selecting agent targets.
+
+**Why:** If channels carry logic, every new channel requires reimplementing the
+same rules and every policy change requires touching every channel. The pigeon
+model means the control plane is the single brain — channels are dumb pipes.
+Adding a channel becomes a thin translation layer (inbound normalization +
+outbound delivery), not a feature reimplementation. This also means the
+platform can answer from any channel without the user knowing or caring which
+one delivered the message.
+
+### Decision: WSS reverse tunnel, not SSH, for hardware connection
+
+**Chosen:** The Empyralis Gateway on user hardware opens an outbound
+WebSocket Secure (WSS) connection to the cloud control plane and holds it open.
+Commands flow down that tunnel; results flow up.
+
+**Rejected:** SSH tunnels, direct TCP connections, or polling-based approaches.
+
+**Why:** Outbound WSS survives NAT, consumer firewalls, and dynamic IPs without
+port forwarding or static addressing — the user installs the Gateway and it
+just connects. SSH requires key management, known hosts, and opens an
+interactive shell surface that must be locked down. WSS is a single-purpose,
+authenticated pipe that carries only our protocol. The connection is initiated
+from inside the network, so no inbound holes are punched.
+
+### Decision: MCP over custom connectors
+
+**Chosen:** Model Context Protocol (MCP) is the primary integration surface for
+external tools and data sources. The platform ships 38 MCP-bridge connectors.
+
+**Rejected:** A proprietary connector SDK for every third-party service, or a
+plugin marketplace where third parties build and host connectors.
+
+**Why:** MCP is an open standard with growing ecosystem support — adopting it
+means every MCP-compatible tool works with Empyralis without us writing a line
+of integration code. The 5 custom connectors that remain (Telegram, Discord,
+WhatsApp, Slack, VPS) are channels — not tools — and channels are transport, not
+capability. A channel must speak the platform's internal protocol, which MCP
+doesn't cover. Everything else bridges through MCP so the surface area we
+maintain stays small.
+
+### Decision: No approval/deny flow
+
+**Chosen:** The agent is fully autonomous. When a user gives an instruction,
+the agent acts on it immediately. There is no "Agent wants to X — approve?"
+interrupt.
+
+**Rejected:** A human-in-the-loop approval gate for sensitive actions
+(spending money, sending messages, modifying production data).
+
+**Why:** Approval flows break the core promise — an agent that needs permission
+isn't an agent, it's a suggestion box. The governance model is internalized: the
+agent is instructed through its system prompt and policy context to understand
+risk, and the safety layer (Rust Supervisor) enforces hard boundaries at the
+execution level. If an action is safe, it runs. If it violates a hard boundary,
+it's blocked — no "ask the human" middle ground. This keeps latency low and the
+experience decisive.
+
+### Decision: No "I"/"my" in platform messages
+
+**Chosen:** Every string the platform generates — error messages, status
+notifications, quota warnings — uses impersonal, system-voiced language.
+`PlatformEvent.channel_text` must never contain "I", "I'm", "my", "you've", or
+"your".
+
+**Rejected:** Friendly, first-person platform messages ("I hit an error", "Your
+limit was reached") that make the infrastructure sound like the agent.
+
+**Why:** The platform is infrastructure, not a person. When the agent says "I",
+it speaks for itself. When the platform says "I", it impersonates the agent and
+the user cannot tell who they're talking to. The channel layer is a pigeon — it
+delivers messages, it doesn't author them. If the system has nothing to say, it
+sends nothing. All platform-generated text goes through `PlatformEvent` so
+there's one place to enforce this rule.
+
+### Decision: Dead routes preserved, not deleted
+
+**Chosen:** Route files for Signal, iMessage, WeChat, and Slack are kept in
+`server_modules/` but unmounted from `server.py` — they are not reachable at
+runtime.
+
+**Rejected:** Deleting dead route files to keep the codebase lean.
+
+**Why:** These channels are not abandoned — they're not yet built, or the
+bridge layer (BlueBubbles, signal-cli) isn't production-ready. Deleting the
+route files would lose the channel-specific message normalization and delivery
+logic that was already written. When the bridge becomes viable, remounting a
+route is a one-line change in `server.py`. Rewriting the route from scratch is
+days of work. Dead code you might ship next quarter is scaffolding; dead code
+you'll never ship is garbage. These are scaffolding.
+
+### Decision: Rust Supervisor separate from Node.js Gateway
+
+**Chosen:** The policy kernel and execution supervisor run in a Rust binary
+(`empyralis-supervisor`). The Gateway that connects user hardware runs in a
+Node.js process (`empyralis-gateway`). They are separate binaries, separate
+runtimes, separate repos.
+
+**Rejected:** Bundling supervisor logic into the Gateway (one process on
+hardware), or writing the Gateway in Rust to unify the stack.
+
+**Why:** The Supervisor enforces hard safety boundaries — filesystem scope,
+network egress, process sandboxing. If it shares a runtime with channel logic
+(Node.js event loop, npm dependency tree, JS type system), a bug in channel
+code can escape into policy enforcement. Rust provides memory safety and zero-
+cost abstractions for the tight kernel loop. Node.js provides fast iteration and
+a massive ecosystem for the Gateway's integration surface (USB, Bluetooth,
+OS-level APIs). Separate runtimes mean a Gateway crash doesn't take down the
+safety layer, and a safety violation can't be papered over by Gateway code.
+
+### Decision: No fallback to cheaper models
+
+**Chosen:** When AI credits run out, the platform hard-stops. It does not
+downgrade to a cheaper or smaller model to keep serving requests.
+
+**Rejected:** Graceful degradation — "You're out of DeepSeek credits, so I've
+switched you to Llama-3-8B for the rest of the month."
+
+**Why:** Degradation breaks trust in two directions. The user experiences
+suddenly worse answers with no explanation they asked for — the agent just gets
+dumber mid-conversation. And the platform operator loses the signal that
+capacity is insufficient — silent fallback masks the problem. A hard stop is
+honest: the user knows exactly what happened and can add credits or wait.
+There is one road (AI) and when it's closed, it's closed. No secret dirt path.
+
+### Decision: No consumer-facing approval UX
+
+**Chosen:** Governance rules are internalized by the agent through its system
+prompt and policy context. The user never sees an approval screen, confirmation
+dialog, or "Agent is waiting for permission" state.
+
+**Rejected:** A visible governance layer — approval cards in the chat, a
+dashboard queue of pending actions, email confirmations for high-risk
+operations.
+
+**Why:** Internalized governance is invisible governance. The agent knows the
+rules (no spending over $X, no modifying production, no sending without
+confirmation for first-time contacts) and follows them without asking. Visible
+approval UX trains the user to click "Approve" reflexively — it adds friction
+without adding safety. The hard boundaries live in the Rust Supervisor, which
+blocks violations at execution time, not at conversation time. If the user
+instructed it and the policy allows it, it runs. If policy blocks it, the agent
+explains why — no queue, no dashboard, no interruption.
