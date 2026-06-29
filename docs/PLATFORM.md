@@ -5,7 +5,21 @@ Consumers get their own agent in their channels.
 
 **Stack:** Python (FastAPI) + TypeScript (Next.js 16) + Rust (policy kernel + supervisor)
 **Updated:** 2026-06-30
-**See also:** `OpenClaw.md` (competitor forensic audit)
+**See also:** `OpenClaw.md` (competitor forensic audit), `graphify-report.md` (auto-generated knowledge graph)
+
+### Agent Maintenance Instructions
+
+> After any code change, run these commands to keep the knowledge graph current.
+> The graph is the structural source of truth — PLATFORM.md is the prescriptive rulebook.
+
+```bash
+graphify update .           # Refresh AST graph after any code change (no API cost, instant)
+graphify cluster-only .     # Regenerate GRAPH_REPORT.md after structural refactors (needs API key)
+```
+
+> `graphify update .` is safe to run after every change. `cluster-only` is for PRs and merges —
+> it regenerates the community report and suggested questions. If the graph is too large for
+> HTML visualization (>5000 nodes), set `GRAPHIFY_VIZ_NODE_LIMIT=30000`.
 
 ---
 
