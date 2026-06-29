@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable
 from server_modules import channel_execution_quota_adapter, error_response_service, quota_policy_service, quota_response_service
 from server_modules.channel_routing_models import ChannelExecutionResult, ChannelRoutingContext
 from server_modules.error_contracts import INTERNAL_ERROR
+from server_modules.platform_event import CHANNEL_EXECUTION_FAILED
 from server_modules.channel_turn_request_service import normalize_canonical_channel_result
 
 
@@ -64,7 +65,7 @@ async def _try_shop_assistant_evaluation(
         return None
 
     shop_status = str(result.get("status") or "")
-    shop_answer = str(result.get("answer") or "I can help with product questions, availability, and orders.")
+    shop_answer = str(result.get("answer") or "Product questions, availability, and orders can be handled.")
     approval = result.get("approval") if isinstance(result.get("approval"), dict) else {}
 
     if shop_status in ("answered", "approval_required", "approval_unavailable", "needs_connector"):
@@ -193,7 +194,7 @@ async def execute_prepared_channel_turn(
                 "request_id": str(context.shared_metadata.get("request_id") or "").strip() or None,
             },
         )
-        reply = "I hit an internal problem while handling this message. Please try again in a moment."
+        reply = CHANNEL_EXECUTION_FAILED.channel_text
         error = error_response_service.platform_error(
             code="channel_execution_failed",
             message=reply,

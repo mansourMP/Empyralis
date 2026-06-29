@@ -194,7 +194,7 @@ def reserve_direct_chat_hosted_usage_best_effort(
             if available <= 0 or available - active_total - amount_usd < 0:
                 connection.commit()
                 raise RuntimeError(
-                    "You've reached your AI limit. Open AI & Setup →"
+                    "AI usage limit reached. Open AI & Setup →"
                 )
             if active_total + amount_usd > max_active_usd:
                 connection.commit()

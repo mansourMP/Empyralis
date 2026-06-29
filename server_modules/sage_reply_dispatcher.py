@@ -27,14 +27,12 @@ import time
 from typing import Optional
 
 from server_modules.channel_transport import ChannelTransport
+from server_modules.platform_event import GUARANTEED_FALLBACK
 
 _logger = logging.getLogger(__name__)
 
 # ── Shared constants ──
-_GUARANTEED_FALLBACK = (
-    "I processed your message but couldn't produce a response. "
-    "Could you try again?"
-)
+_GUARANTEED_FALLBACK = GUARANTEED_FALLBACK.channel_text
 
 # ── Per-channel turn serialization ──────────────────────────────────────
 # Channel paths (Telegram, Discord, Slack, etc.) bypass the web session

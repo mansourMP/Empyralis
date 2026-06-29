@@ -53,10 +53,10 @@ def _direct_reply(manifest: AgentManifest, goal: str) -> str:
     if re.search(r"\b(refund|discount|legal|privacy)\b", normalized, re.IGNORECASE):
         return "This request should stay in Owner Mode so the final decision follows the agent policy and approval boundary."
     if re.search(r"\b(order|book|schedule|charge)\b", normalized, re.IGNORECASE):
-        return "Before I take that action, I need one clarifying detail so I stay within the owner policy."
+        return "One clarifying detail is needed before taking that action, to stay within the owner policy."
     return (
         f"{manifest.identity.name} is operating from its owner-authored Bible. "
-        "I can answer directly when the request stays inside that context, or use a bound skill when live business facts are required."
+        "Direct answers are available when the request stays inside that context, or a bound skill can be used when live business facts are required."
     )
 
 
@@ -215,7 +215,7 @@ def run_policy_critic(
         items = skill_result.get("items") if isinstance(skill_result, dict) else None
         if not isinstance(items, list) or len(items) == 0:
             violations.append("inventory_claim_without_live_evidence")
-            draft_reply = "I need to check the live inventory tool before I confirm stock or price. One moment."
+            draft_reply = "The live inventory tool must be checked before stock or price can be confirmed. One moment."
 
     if (
         re.search(r"\b(order|book|schedule|charge)\b", lower_goal)
@@ -223,13 +223,13 @@ def run_policy_critic(
         and "?" not in draft_reply
     ):
         violations.append("clarification_required")
-        draft_reply = "Before I take that action, I need one clarifying detail so I stay inside the owner policy."
+        draft_reply = "One clarifying detail is needed before taking that action, to stay within the owner policy."
 
     if re.search(r"\b(refund|discount|legal|privacy)\b", lower_goal) and "escalat" in policy_text:
         violations.append("owner_escalation_required")
         return {
             "mode": "escalate",
-            "reply": "This request should move to Owner Mode before I answer, because the manifest marks it as an escalation case.",
+            "reply": "This request should move to Owner Mode before answering — the manifest marks it as an escalation case.",
             "violations": violations,
         }
 

@@ -549,7 +549,7 @@ def hosted_sage_ai_access_state(
         # If the user had a credit balance that is now depleted, give a
         # friendlier message directing them to add their own key.
         if credit_balance_credits <= 0 and remaining_usd <= 0:
-            message = "You've reached your AI limit. Open AI & Setup →"
+            message = "AI usage limit reached. Open AI & Setup →"
         else:
             message = "Hosted Sage AI monthly cap is reached for this workspace."
         return {

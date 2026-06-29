@@ -7,9 +7,9 @@ from server_modules import skills_service
 
 
 PUBLIC_GENERATION_ERROR_MESSAGES = (
-    "sage hit a temporary error while generating the response. please try again in a moment.",
-    "sage took too long to respond. please try again.",
-    "sage is temporarily at capacity. please try again in a moment.",
+    "a temporary error occurred while generating the response. please try again in a moment.",
+    "the response took too long. please try again.",
+    "the service is temporarily at capacity. please try again in a moment.",
     "thread not found.",
 )
 

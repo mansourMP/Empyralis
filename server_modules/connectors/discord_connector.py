@@ -1045,7 +1045,7 @@ async def _handle_dm_via_gateway(message: Any) -> None:
         _hdlr_log.getLogger("discord_bot").warning(
             "DM gateway handler failed: %s", _exc
         )
-        _reply = "Sorry, something went wrong. Try again."
+        _reply = "Something went wrong. Please try again."
 
     if _reply:
         try:

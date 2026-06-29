@@ -248,7 +248,7 @@ async def execute_inventory_skill(
     except Exception:
         return {
             "status": "unavailable",
-            "reply": "My inventory system is currently updating, one moment.",
+            "reply": "The inventory system is currently updating, one moment.",
             "artifact": None,
             "steps": [
                 {"label": "Resolving inventory query", "detail": goal, "status": "done", "kind": "thinking"},
@@ -259,7 +259,7 @@ async def execute_inventory_skill(
     if not items:
         return {
             "status": "no_match",
-            "reply": "I could not confirm that part in stock yet. Let me double-check the catalog and fitment before I promise availability.",
+            "reply": "That part could not be confirmed in stock yet. Double-checking catalog and fitment before confirming availability.",
             "artifact": {
                 "label": "Inventory lookup result",
                 "kind": "inventory-live-data",
@@ -286,7 +286,7 @@ async def execute_inventory_skill(
     quantity = int(top.get("quantity_available") or 0)
     unit_price = float(top.get("unit_price") or 0)
     currency = _normalize_text(top.get("currency") or "USD")
-    reply = f"I found {quantity} {top['product_name']} in stock. Price: ${unit_price:.2f}."
+    reply = f"Found {quantity} {top['product_name']} in stock. Price: ${unit_price:.2f}."
     artifact_lines = [
         "# Live inventory result",
         "",

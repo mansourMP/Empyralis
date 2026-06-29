@@ -643,7 +643,7 @@ class TelegramIngressService:
             reply_text = (
                 "We recorded your data deletion request. The deployment owner can now remove your saved conversation data for this channel."
                 if isinstance(deletion_request, dict) and str(deletion_request.get("id") or "").strip()
-                else "I couldn't record your deletion request right now. Please try again shortly."
+                else "The deletion request could not be recorded right now. Please try again shortly."
             )
             reply_text = privacy_service.append_privacy_policy_line(
                 reply_text,

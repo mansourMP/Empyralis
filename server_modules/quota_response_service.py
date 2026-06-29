@@ -11,6 +11,15 @@ from server_modules.channel_routing_models import ChannelExecutionResult
 from server_modules.channel_user_acquisition_service import CHANNEL_ATTRIBUTION_QUERY_PARAM
 from server_modules import error_response_service
 from server_modules.error_contracts import EXECUTION_TIMEOUT, RATE_LIMIT
+from server_modules.platform_event import (
+    AGENT_LIMIT_EXCEEDED,
+    QUOTA_REPLY_MAP,
+    RUNTIME_CAP_EXCEEDED,
+    SYSTEM_BUSY_FALLBACK,
+    THREAD_BUSY,
+    WORKSPACE_LIMIT_EXCEEDED,
+    WORKSPACE_RATE_LIMITED,
+)
 from server_modules.quota_policy_service import QuotaDecision
 
 
@@ -27,11 +36,11 @@ _HTTP_DETAIL_BY_REASON = {
 }
 
 _CHANNEL_REPLY_BY_REASON = {
-    "thread_busy": "I’m still finishing the previous message in this conversation. One moment.",
-    "agent_limit_exceeded": "This Business Agent is helping other customers right now. Please try again in a moment.",
-    "workspace_limit_exceeded": "The workspace is helping other customers right now. Please try again in a moment.",
-    "workspace_rate_limited": "I’m receiving too many requests right now. Please try again in a moment.",
-    "runtime_cap_exceeded": "I’m taking longer than the current service window allows. Please try again in a moment.",
+    "thread_busy": THREAD_BUSY.channel_text,
+    "agent_limit_exceeded": AGENT_LIMIT_EXCEEDED.channel_text,
+    "workspace_limit_exceeded": WORKSPACE_LIMIT_EXCEEDED.channel_text,
+    "workspace_rate_limited": WORKSPACE_RATE_LIMITED.channel_text,
+    "runtime_cap_exceeded": RUNTIME_CAP_EXCEEDED.channel_text,
 }
 
 _CHANNEL_STATUS_BY_REASON = {
@@ -128,7 +137,7 @@ def channel_reply_for_reason(
             reply,
             workspace_id=str((deployed_agent or {}).get("owner_workspace_id") or "").strip() or None,
         )
-    return _CHANNEL_REPLY_BY_REASON.get(normalized_reason, "The system is busy. Please try again in a moment.")
+    return _CHANNEL_REPLY_BY_REASON.get(normalized_reason, SYSTEM_BUSY_FALLBACK.channel_text)
 
 
 def http_exception_from_quota_decision(decision: QuotaDecision) -> HTTPException:

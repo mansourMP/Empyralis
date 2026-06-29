@@ -502,8 +502,8 @@ def _build_mcp_tool_inventory(*, workspace_id: str) -> str:
             entry += f" — {desc}"
         lines.append(entry)
     lines.append(
-        "\nTo use an MCP tool, ask me to perform its described function. "
-        "I will automatically route your request to the correct tool."
+        "\nTo use an MCP tool, request its described function. "
+        "Requests are automatically routed to the correct tool."
     )
     return "\n".join(lines)
 
@@ -945,7 +945,7 @@ def _guard_sage_visible_reply(value: Any) -> tuple[str, dict[str, Any]]:
     # Strip any leaked tool-call syntax before the reply reaches the user
     text = sanitize_agent_reply(text)
     if raw and "internal_tool_markup" in guarded.findings and not text:
-        text = "I couldn't show internal tool instructions. Please try again with Agent Computer connected."
+        text = "Internal tool instructions could not be displayed. Please try again with Agent Computer connected."
     return text, guarded.metadata()
 
 

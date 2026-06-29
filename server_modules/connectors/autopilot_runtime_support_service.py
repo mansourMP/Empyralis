@@ -129,35 +129,56 @@ class AutopilotRuntimeSupportService:
         return any(marker in text for marker in self.non_retryable_run_error_hints)
 
     def friendly_run_error(self, detail: str) -> str:
+        from server_modules.platform_event import (
+            AI_SCOPE_MISSING,
+            AUTH_FAILED,
+            NO_AI_ACCOUNT,
+            RUN_FINISHED,
+        )
+
         text = str(detail or "").strip()
         lower = text.lower()
         if "missing scopes" in lower or "api.responses.write" in lower:
-            return "AI account authorization failed. Missing required scope: api.responses.write. Open Setup and reconnect your AI account."
+            return AI_SCOPE_MISSING.channel_text
         if (
             "invalid api key" in lower
             or "incorrect api key" in lower
             or "unauthorized" in lower
             or "forbidden" in lower
         ):
-            return "AI account authorization failed. Open Setup and reconnect your AI account."
+            return AUTH_FAILED.channel_text
         if "no credentials available" in lower or "api key is required" in lower or "api_key is required" in lower:
-            return "No valid AI account is connected. Open Setup and connect an account."
-        return text or "Run failed."
+            return NO_AI_ACCOUNT.channel_text
+        return text or RUN_FINISHED.channel_text
 
     def humanize_telegram_run_summary(self, summary: str) -> str:
+        from server_modules.platform_event import (
+            RUN_APPROVAL_TIMEOUT,
+            RUN_FAILED,
+            RUN_GATEWAY_OFFLINE,
+            RUN_GATEWAY_TIMEOUT,
+            RUN_GENERIC_ERROR,
+            RUN_MODEL_REPLY_FAILED,
+            RUN_NEEDS_GATEWAY,
+            RUN_NO_MODEL_CONNECTION,
+            RUN_NOT_FOUND,
+            RUN_SAFETY_BLOCKED,
+            RUN_TIMEOUT,
+        )
+
         text = str(summary or "").strip()
         if not text:
-            return "Something went wrong. Please try again."
+            return RUN_GENERIC_ERROR.channel_text
 
         lower = text.lower()
         if "run timed out waiting on local companion" in lower or "run timed out waiting on gateway" in lower:
-            return "Still working on it, but Gateway is taking too long. Give me a moment and try again."
+            return RUN_GATEWAY_TIMEOUT.channel_text
         if "local companion is offline" in lower or "gateway is offline" in lower:
-            return "Gateway is offline right now. Start it in Setup and try again."
+            return RUN_GATEWAY_OFFLINE.channel_text
         if lower == "run not found." or "run not found" in lower:
-            return "I lost track of that request. Please send it again."
+            return RUN_NOT_FOUND.channel_text
         if "missing required scope" in lower or "api.responses.write" in lower:
-            return "I couldn’t get a model reply right now. Please retry in a moment."
+            return RUN_MODEL_REPLY_FAILED.channel_text
         if (
             "ai account authorization failed" in lower
             or "invalid api key" in lower
@@ -165,19 +186,19 @@ class AutopilotRuntimeSupportService:
             or "unauthorized" in lower
             or "forbidden" in lower
         ):
-            return "I couldn’t get a model reply right now. Please retry in a moment."
+            return RUN_MODEL_REPLY_FAILED.channel_text
         if "no valid ai account is connected" in lower or "no credentials available" in lower:
-            return "I don’t have a working model connection right now. Please retry in a moment."
+            return RUN_NO_MODEL_CONNECTION.channel_text
         if "approval window timed out" in lower or "approval timeout" in lower:
-            return "I waited too long for approval. Please send the request again and approve it when prompted."
+            return RUN_APPROVAL_TIMEOUT.channel_text
         if "requires local companion execution" in lower or "requires gateway execution" in lower:
-            return "That task needs Gateway first. Start Gateway in Setup and try again."
+            return RUN_NEEDS_GATEWAY.channel_text
         if "run blocked by safety policy" in lower or "action policy blocked" in lower:
-            return "That action is blocked by your current safety settings. Review approvals or trust settings and try again."
+            return RUN_SAFETY_BLOCKED.channel_text
         if lower == "run failed." or "run failed on attempt" in lower:
-            return "Something went wrong while I was handling that. Please try again."
+            return RUN_FAILED.channel_text
         if "run timed out while waiting for completion" in lower:
-            return "I am taking longer than expected. Please try again in a moment."
+            return RUN_TIMEOUT.channel_text
         return text
 
     def summarize_run_terminal_result(self, run: Dict[str, Any], summary_limit: int) -> str:

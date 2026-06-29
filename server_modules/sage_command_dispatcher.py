@@ -13,74 +13,59 @@ import string
 from datetime import datetime, timezone
 from typing import Optional
 
+from server_modules.platform_event import (
+    AI_LIMIT_REACHED,
+    AUTH_FAILED,
+    GENERIC_ERROR,
+    PROVIDER_UNREACHABLE,
+    SAGE_APPROVED as _SAGE_APPROVED,
+    SAGE_COMPACT_NOT_NEEDED as _SAGE_COMPACT_NOT_NEEDED,
+    SAGE_COMPACTED as _SAGE_COMPACTED,
+    SAGE_DENIED as _SAGE_DENIED,
+    SAGE_HELP as _SAGE_HELP,
+    SAGE_MAIN_RETURN as _SAGE_MAIN_RETURN,
+    SAGE_NEW_SESSION as _SAGE_NEW_SESSION,
+    SAGE_NO_MEMORIES as _SAGE_NO_MEMORIES,
+    SAGE_NO_PENDING_APPROVALS as _SAGE_NO_PENDING_APPROVALS,
+    SAGE_OVERFLOW as _SAGE_OVERFLOW,
+    SAGE_UNAVAILABLE as _SAGE_UNAVAILABLE,
+    SERVICE_RATE_LIMITED,
+    AI_LIMIT_REACHED_WEB,
+    AUTH_FAILED_WEB,
+)
+
 _logger = logging.getLogger(__name__)
 
 SUPPORTED_COMMANDS = ["/compact", "/new", "/main", "/approve", "/deny", "/help", "/memory"]
 
 # ── Standardized error / status messages ──
-SAGE_OVERFLOW_REPLY = "📦 My context was too full — I've compacted it. Please resend your message."
-SAGE_UNAVAILABLE_REPLY = "😴 I'm temporarily unavailable. Please try again in a moment."
-SAGE_NO_PENDING_APPROVALS = "No pending approvals."
-SAGE_APPROVED = "✅ Approved."
-SAGE_DENIED = "❌ Denied."
-SAGE_COMPACTED = "✅ Context compacted."
-SAGE_COMPACT_NOT_NEEDED = "Nothing to compact — context is still small."
-SAGE_NEW_SESSION = "🆕 New session started. Type /main to return to your main thread."
-SAGE_MAIN_RETURN = "🏠 Back to your main thread."
-SAGE_NO_MEMORIES = "📭 No memories saved yet."
+# All sourced from platform_event.py — channel layer never speaks as agent.
+SAGE_OVERFLOW_REPLY = _SAGE_OVERFLOW.channel_text
+SAGE_UNAVAILABLE_REPLY = _SAGE_UNAVAILABLE.channel_text
+SAGE_NO_PENDING_APPROVALS = _SAGE_NO_PENDING_APPROVALS.channel_text
+SAGE_APPROVED = _SAGE_APPROVED.channel_text
+SAGE_DENIED = _SAGE_DENIED.channel_text
+SAGE_COMPACTED = _SAGE_COMPACTED.channel_text
+SAGE_COMPACT_NOT_NEEDED = _SAGE_COMPACT_NOT_NEEDED.channel_text
+SAGE_NEW_SESSION = _SAGE_NEW_SESSION.channel_text
+SAGE_MAIN_RETURN = _SAGE_MAIN_RETURN.channel_text
+SAGE_NO_MEMORIES = _SAGE_NO_MEMORIES.channel_text
 
 # ── AI limit / attention messages (ONE source of truth for all channels) ──
-# These are the ONLY user-facing AI-stop messages.  They are generic,
-# non-prescriptive, and brand-free.  The AI & Setup tab is where the
-# user sees what happened and chooses what to do.
 _SAGE_AI_SETUP_LABEL = "AI \\& Setup"
 
 # ── Error classification constants ────────────────────────────────────────
-# classify_error() below maps raw error strings to ONE of these five
-# buckets.  Every channel (Telegram, Discord, WhatsApp, route handlers)
-# uses this SINGLE function to build user-facing error text.
-
-# Bucket 1 — Credits exhausted
-SAGE_AI_LIMIT_REPLY = (
-    "⚠️ Heads up — credit exhausted. "
-    "Add your own API key or top up to continue."
-)
-
-# Bucket 2 — Rate limited
-SAGE_RATE_LIMITED_REPLY = (
-    "⚠️ Heads up — service is being rate limited. "
-    "Try again in a moment."
-)
-
-# Bucket 3 — Auth / key failed
-SAGE_AI_NEEDS_ATTENTION_REPLY = (
-    "⚠️ Heads up — AI service authentication failed. "
-    "Check your API key."
-)
-
-# Bucket 4 — Provider unreachable
-SAGE_PROVIDER_UNREACHABLE_REPLY = (
-    "⚠️ Heads up — AI service is unreachable right now. "
-    "Try again shortly."
-)
-
-# Bucket 5 — Catch-all
-SAGE_ERROR_REPLY = "⚠️ Heads up — something went wrong. Try again."
+SAGE_AI_LIMIT_REPLY = AI_LIMIT_REACHED.channel_text
+SAGE_RATE_LIMITED_REPLY = SERVICE_RATE_LIMITED.channel_text
+SAGE_AI_NEEDS_ATTENTION_REPLY = AUTH_FAILED.channel_text
+SAGE_PROVIDER_UNREACHABLE_REPLY = PROVIDER_UNREACHABLE.channel_text
+SAGE_ERROR_REPLY = GENERIC_ERROR.channel_text
 
 # Web-chat plain-text variants (no Telegram markdown escaping)
-SAGE_AI_LIMIT_MESSAGE = "You've reached your AI limit. Open AI & Setup →"
-SAGE_AI_NEEDS_ATTENTION_MESSAGE = "Your AI needs attention. Open AI & Setup →"
+SAGE_AI_LIMIT_MESSAGE = AI_LIMIT_REACHED_WEB.channel_text
+SAGE_AI_NEEDS_ATTENTION_MESSAGE = AUTH_FAILED_WEB.channel_text
 
-SAGE_HELP_TEXT = (
-    "Available commands:\n"
-    "/compact — summarize and clear old context\n"
-    "/new — start a new task session\n"
-    "/main — return to your main Sage thread\n"
-    "/approve — approve pending action\n"
-    "/deny — deny pending action\n"
-    "/memory — show what I remember about you\n"
-    "/help — show this message"
-)
+SAGE_HELP_TEXT = _SAGE_HELP.channel_text
 
 
 # ── Error classification ──────────────────────────────────────────────────
