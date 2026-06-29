@@ -5,7 +5,7 @@ Consumers get their own agent in their channels.
 
 **Stack:** Python (FastAPI) + TypeScript (Next.js 16) + Rust (policy kernel + supervisor)
 **Updated:** 2026-06-30
-**See also:** `OpenClaw.md` (competitor forensic audit), `graphify-report.md` (auto-generated knowledge graph)
+**See also:** `OpenClaw.md` (business model reference — zero shared code), `graphify-report.md` (auto-generated knowledge graph)
 
 ### Agent Maintenance Instructions
 

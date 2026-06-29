@@ -1,4 +1,8 @@
-🔬 OpenClaw Architecture — Full Forensic Audit
+# OpenClaw Architecture — Business Model Reference
+
+> **Empyralis has zero shared code with OpenClaw.** This document studies OpenClaw's architecture
+> solely as a business model reference — it validated market demand for AI agents in messaging channels.
+> Empyralis is a completely different stack: Python FastAPI + Next.js 16 + Rust supervisor vs OpenClaw's TypeScript/Node.js.
 
 Source: /opt/homebrew/lib/node_modules/openclaw/ (npm install v2026.5.27)
 GitHub: https://github.com/openclaw/openclaw
