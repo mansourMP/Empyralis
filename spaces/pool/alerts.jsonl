@@ -1,2 +1,0 @@
-{"id":"pool-demo-after-hours","ts":"2026-03-20T20:18:00+08:00","space_id":"pool","severity":"critical","code":"after_hours_activity","message":"Pool activity was detected outside business hours.","resolved":false}
-{"id": "80f07e67-3177-4166-8f1a-de182d8bea1b", "ts": "2026-03-21T14:01:39.194106+08:00", "space_id": "pool", "severity": "warning", "code": "high_occupancy", "message": "Pool occupancy is 25, above threshold 15.", "resolved": false}

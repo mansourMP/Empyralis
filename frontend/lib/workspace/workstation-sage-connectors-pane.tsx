@@ -1122,14 +1122,13 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
   },
   canva: {
     description:
-      'Connect Canva to let your agent search, read, and manage your designs and brand assets. It can find templates, browse folders, export designs, and help you keep brand materials organized and accessible.',
+      'Search, create, and export Canva designs directly from your agent.',
     examplePrompts: [
-      'Find my Canva designs related to the marketing campaign',
-      'Search for brand templates in the shared folder',
-      'Export the latest version of the social media banner',
-      'List all designs in the product launch folder',
+      'Find my latest pitch deck design',
+      'Create a new presentation template for the Q3 review',
+      'Export my brand kit assets',
     ],
-    suggestedToolNames: ['canva.search', 'canva.read_design', 'canva.export', 'canva.list_folders', 'canva.create_folder'],
+    suggestedToolNames: ['design.search', 'design.create', 'design.export', 'folder.list', 'asset.read'],
   },
   dropbox: {
     description:
@@ -1145,15 +1144,304 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
   },
   todoist: {
     description:
-      'Connect Todoist to let your agent manage your tasks and projects. It can create tasks from conversations, reschedule overdue items, summarize your day, and help you stay organized — turning natural language into structured task management.',
+      'Create tasks, manage projects, and track your Todoist inbox with your agent.',
     examplePrompts: [
-      'Add "Review Q3 budget" to my tasks for tomorrow',
-      'What tasks are overdue this week?',
-      'Move all tasks from the old project to the new one',
-      'Show me tasks labeled "urgent" across all projects',
+      'Add buy groceries to my inbox',
+      'What tasks are due today',
+      'Create a project for the website redesign',
     ],
-    suggestedToolNames: ['todoist.get_tasks', 'todoist.create_task', 'todoist.update_task', 'todoist.get_projects', 'todoist.quick_add'],
-    mcpEndpoint: 'https://ai.todoist.net/mcp',
+    suggestedToolNames: ['task.create', 'task.list', 'task.close', 'project.list', 'label.read'],
+  },
+  asana: {
+    description:
+      'Let your agent create tasks, update projects, and track work across your Asana workspace.',
+    examplePrompts: [
+      'Create a task for the design review due Friday',
+      'What tasks are assigned to me this week',
+      'Mark the onboarding project milestone as complete',
+    ],
+    suggestedToolNames: ['task.create', 'task.list', 'task.update', 'project.list', 'portfolio.read'],
+  },
+  hubspot: {
+    description:
+      'Give your agent access to your CRM — contacts, deals, companies, and sales activity.',
+    examplePrompts: [
+      'Find all deals closing this month',
+      'Create a contact for John Smith at Acme Corp',
+      "What's the status of the Enterprise deal pipeline",
+    ],
+    suggestedToolNames: ['contact.search', 'deal.list', 'deal.create', 'company.read', 'activity.log'],
+  },
+  zoom: {
+    description:
+      'Schedule meetings, read transcripts, and manage your Zoom calendar from your agent.',
+    examplePrompts: [
+      'Schedule a 30-minute Zoom with the team tomorrow',
+      "Get the transcript from yesterday's product meeting",
+      'List all my upcoming Zoom meetings this week',
+    ],
+    suggestedToolNames: ['meeting.create', 'meeting.list', 'transcript.read', 'recording.list', 'participant.list'],
+  },
+  airtable: {
+    description:
+      'Read and update your Airtable bases, records, and views directly from your agent.',
+    examplePrompts: [
+      'Show me all records in the CRM base added this week',
+      'Add a new row to the product roadmap table',
+      'Filter the inventory base by status = In Stock',
+    ],
+    suggestedToolNames: ['record.list', 'record.create', 'record.update', 'base.list', 'view.read'],
+  },
+  jira: {
+    description:
+      'Manage issues, sprints, and projects in Jira from your agent.',
+    examplePrompts: [
+      'List all open bugs assigned to me',
+      'Create a ticket for the login page crash',
+      "What's in the current sprint",
+    ],
+    suggestedToolNames: ['issue.search', 'issue.create', 'issue.update', 'sprint.list', 'project.read'],
+  },
+  stripe: {
+    description:
+      'Query payments, customers, subscriptions, and revenue data from your Stripe account.',
+    examplePrompts: [
+      'Show me all failed payments from last week',
+      'Find the subscription for customer@example.com',
+      'What was total revenue in May',
+    ],
+    suggestedToolNames: ['payment.list', 'customer.search', 'subscription.read', 'invoice.list', 'balance.read'],
+  },
+  salesforce: {
+    description:
+      'Access leads, opportunities, accounts, and activity in Salesforce from your agent.',
+    examplePrompts: [
+      'List all open opportunities closing this quarter',
+      'Find the account for Acme Corporation',
+      'Create a follow-up task for the Enterprise lead',
+    ],
+    suggestedToolNames: ['opportunity.list', 'lead.search', 'account.read', 'task.create', 'report.run'],
+  },
+  webhook: {
+    description:
+      'Trigger your agent from any external service. Send a webhook to Empyralis and your agent runs automatically.',
+    examplePrompts: [
+      'When a form is submitted, summarize it and send me a Telegram message',
+      'Trigger a workflow when a payment lands in Stripe',
+    ],
+    suggestedToolNames: ['receive_webhook', 'parse_payload', 'trigger_run'],
+  },
+  calendly: {
+    description:
+      'Schedule meetings and manage your Calendly events without leaving your workflow. Your agent can check availability, book meetings, and manage event types.',
+    examplePrompts: [
+      'Find open slots next week for a 30-minute coaching session',
+      'Book a meeting on Thursday at 2pm with Jane from the sales team',
+      'Cancel my 3pm coaching session tomorrow',
+    ],
+    suggestedToolNames: ['event_types.list', 'meetings.list', 'meetings.create', 'availability.schedule', 'scheduling_links.create'],
+    mcpEndpoint: 'https://mcp.calendly.com',
+  },
+  clickup: {
+    description:
+      'Manage tasks, docs, sprints, and time tracking across your ClickUp workspace. Your agent can create tasks, check project status, and help you stay on top of deadlines.',
+    examplePrompts: [
+      'Create a task for the design review due Friday in the Marketing folder',
+      'Show me all high-priority tasks assigned to me this sprint',
+      'What tasks are overdue in the product launch list?',
+    ],
+    suggestedToolNames: ['task.create', 'task.list', 'task.update', 'list.get', 'folder.get', 'space.get'],
+    mcpEndpoint: 'https://mcp.clickup.com/mcp',
+  },
+  webflow: {
+    description:
+      'Manage your Webflow sites, pages, CMS collections, and styles. Your agent can read site structure, update content, and help you maintain your web presence.',
+    examplePrompts: [
+      'List all pages on my marketing site',
+      'Add a new blog post to the CMS collection',
+      'Show me the latest form submissions from the contact page',
+    ],
+    suggestedToolNames: ['sites.list', 'pages.list', 'cms.items', 'assets.list', 'domains.list'],
+    mcpEndpoint: 'https://mcp.webflow.com/mcp',
+  },
+  monday: {
+    description:
+      'Manage boards, items, docs, and dashboards across your monday.com workspace. Your agent can create tasks, track progress, and organize work across teams.',
+    examplePrompts: [
+      'Create an item in the sprint board for the new login feature',
+      'Show me all items assigned to me in the engineering board',
+      'What\'s the status of items in the product roadmap board?',
+    ],
+    suggestedToolNames: ['board.get_items', 'item.create', 'item.update', 'workspace.list', 'board.list'],
+    mcpEndpoint: 'https://mcp.monday.com/mcp',
+  },
+  box: {
+    description:
+      'Search, read, and manage files and folders across your Box account. Your agent can find documents, create shared links, and use Box AI to answer questions about your content.',
+    examplePrompts: [
+      'Find the latest version of the contract in my Box account',
+      'Create a shared link for the Q3 report',
+      'Search Box for any files named "proposal" from the last month',
+    ],
+    suggestedToolNames: ['file.search', 'file.read', 'file.upload', 'folder.list', 'folder.create', 'shared_link.create'],
+    mcpEndpoint: 'https://mcp.box.com',
+  },
+  gitlab: {
+    description:
+      'Manage issues, merge requests, pipelines, and repositories in GitLab. Your agent can create issues, review MRs, check CI status, and search across your projects.',
+    examplePrompts: [
+      'Create an issue for the login page crash in the frontend project',
+      'Show me all open merge requests that need my review',
+      'What\'s the status of the latest pipeline on main?',
+    ],
+    suggestedToolNames: ['issue.create', 'issue.search', 'merge_request.get', 'merge_request.list', 'pipeline.list', 'search.projects'],
+  },
+  bitbucket: {
+    description:
+      'Manage repositories, pull requests, pipelines, and deployments in Bitbucket. Your agent can review PRs, check build status, and manage branches.',
+    examplePrompts: [
+      'List all open pull requests in the backend repository',
+      'Show me the latest pipeline status for the API project',
+      'Create a pull request for the feature branch into main',
+    ],
+    suggestedToolNames: ['repository.list', 'pull_request.list', 'pull_request.create', 'pipeline.list', 'branch.get', 'commit.list'],
+  },
+  confluence: {
+    description:
+      'Search, read, and create pages across your Confluence spaces. Your agent can find documentation, summarize pages, and update team knowledge bases.',
+    examplePrompts: [
+      'Search Confluence for pages about the API architecture',
+      'Create a new page in the engineering space with the sprint retro notes',
+      'Summarize the onboarding guide for new hires',
+    ],
+    suggestedToolNames: ['page.search', 'page.get', 'page.create', 'page.update', 'space.list', 'comment.create'],
+    mcpEndpoint: 'https://mcp.atlassian.com/v1/mcp/authv2',
+  },
+  miro: {
+    description:
+      'Create and manage Miro boards, diagrams, docs, and tables. Your agent can visualize ideas, create flowcharts, add sticky notes, and organize collaboration spaces.',
+    examplePrompts: [
+      'Create a new Miro board for the sprint planning session',
+      'Add a flowchart to the architecture review board',
+      'List all items on the product brainstorm board',
+    ],
+    suggestedToolNames: ['board.create', 'board.list', 'layout.create', 'diagram.create', 'doc.create', 'comment.list'],
+    mcpEndpoint: 'https://mcp.miro.com/',
+  },
+  mailchimp: {
+    description:
+      'Manage audiences, campaigns, and marketing automation in Mailchimp. Your agent can check campaign performance, manage subscribers, and create new campaigns.',
+    examplePrompts: [
+      'Show me the performance of the last newsletter campaign',
+      'Add jane@example.com to the product launch audience',
+      'List all campaigns sent this month',
+    ],
+    suggestedToolNames: ['campaign.list', 'campaign.get', 'audience.list', 'audience.members', 'report.summary', 'template.list'],
+  },
+  pipedrive: {
+    description:
+      'Manage deals, contacts, activities, and pipeline in Pipedrive. Your agent can create deals, update opportunities, and track your sales pipeline.',
+    examplePrompts: [
+      'List all open deals closing this month',
+      'Create a new deal for the Acme Corp opportunity worth $50k',
+      'Show me all activities scheduled for today',
+    ],
+    suggestedToolNames: ['deal.list', 'deal.create', 'deal.update', 'person.list', 'organization.list', 'activity.list'],
+  },
+  intercom: {
+    description:
+      'Read conversations, contacts, and Help Center articles in Intercom. Your agent can search support conversations, find customer details, and manage knowledge base articles.',
+    examplePrompts: [
+      'Search conversations for mentions of a billing issue from this week',
+      'Find the contact profile for jane@example.com',
+      'Create a new Help Center article about the updated refund policy',
+    ],
+    suggestedToolNames: ['conversation.search', 'conversation.get', 'contact.search', 'contact.get', 'article.list', 'article.create'],
+    mcpEndpoint: 'https://mcp.intercom.com/mcp',
+  },
+  docusign: {
+    description:
+      'Manage envelopes, templates, and recipients in DocuSign. Your agent can check signing status, send documents for signature, and create envelopes from templates.',
+    examplePrompts: [
+      'Check the signing status of the vendor agreement I sent yesterday',
+      'Send the employment offer letter template to candidate@example.com',
+      'List all envelopes waiting for my signature',
+    ],
+    suggestedToolNames: ['envelope.list', 'envelope.get', 'envelope.send', 'template.list', 'envelope.create_from_template', 'recipient.list'],
+    mcpEndpoint: 'https://mcp-d.docusign.com/mcp',
+  },
+  square: {
+    description:
+      'Access payments, orders, customers, invoices, and catalog from your Square account. Your agent can look up transactions, manage customers, and check inventory.',
+    examplePrompts: [
+      'Show me all payments from yesterday',
+      'Find the customer profile for the order number #12345',
+      'List all items in the catalog that are low on inventory',
+    ],
+    suggestedToolNames: ['payment.list', 'order.list', 'customer.search', 'invoice.list', 'catalog.list', 'inventory.get'],
+    mcpEndpoint: 'https://mcp.squareup.com/sse',
+  },
+  typeform: {
+    description:
+      'Manage forms, responses, and workspaces in Typeform. Your agent can check survey responses, create new forms, and analyze feedback data.',
+    examplePrompts: [
+      'Show me the latest responses to the customer satisfaction survey',
+      'Create a new feedback form for the product launch event',
+      'How many people completed the onboarding questionnaire this week?',
+    ],
+    suggestedToolNames: ['form.list', 'form.get', 'response.list', 'workspace.list', 'theme.list', 'webhook.list'],
+    mcpEndpoint: 'https://api.typeform.com/mcp',
+  },
+  quickbooks: {
+    description:
+      'Access invoices, customers, vendors, bills, and reports from QuickBooks Online. Your agent can check outstanding invoices, review financial reports, and manage accounts.',
+    examplePrompts: [
+      'Show me all unpaid invoices over 30 days old',
+      'Create an invoice for the consulting work completed for Acme Corp',
+      'What was the total revenue last month?',
+    ],
+    suggestedToolNames: ['invoice.list', 'invoice.create', 'customer.list', 'bill.list', 'report.profit_and_loss', 'account.list'],
+  },
+  xero: {
+    description:
+      'Access invoices, contacts, accounts, bank transactions, and reports from Xero. Your agent can check financials, create invoices, and reconcile transactions.',
+    examplePrompts: [
+      'List all unpaid invoices from the last quarter',
+      'Create a new contact for the Smith & Co account',
+      'Show me the profit and loss report for this month',
+    ],
+    suggestedToolNames: ['invoice.list', 'invoice.create', 'contact.list', 'account.list', 'report.profit_and_loss', 'bank_transaction.list'],
+  },
+  freshbooks: {
+    description:
+      'Manage invoices, clients, expenses, projects, and time tracking in FreshBooks. Your agent can create invoices, log expenses, and track billable hours.',
+    examplePrompts: [
+      'Create an invoice for the 10 hours of design work for Client X',
+      'Show me all unpaid expenses from this month',
+      'Log 3 hours of development time to the website redesign project',
+    ],
+    suggestedToolNames: ['invoice.list', 'invoice.create', 'client.list', 'expense.list', 'project.list', 'time_entry.list'],
+  },
+  vercel: {
+    description:
+      'Manage your Vercel projects, deployments, domains, and logs. Your agent can check build status, review deployment logs, and manage project settings.',
+    examplePrompts: [
+      'Show me the latest deployment status for the frontend project',
+      'Fetch the build logs for the failed deployment of the API project',
+      'List all domains configured for my team',
+    ],
+    suggestedToolNames: ['project.list', 'deployment.list', 'deployment.get', 'runtime_logs.get', 'domain.list', 'build_logs.get'],
+    mcpEndpoint: 'https://mcp.vercel.com',
+  },
+  microsoft_365: {
+    description:
+      'Connect Outlook mail, calendar, and OneDrive in one Microsoft 365 connection. Your agent can read and send email, manage your calendar, and work with files in OneDrive.',
+    examplePrompts: [
+      'Check my calendar for any conflicts next Tuesday afternoon',
+      'Send an email to the team summarizing the project status',
+      'Find the latest version of the budget spreadsheet in my OneDrive',
+    ],
+    suggestedToolNames: ['mail.list', 'mail.send', 'calendar.list_events', 'calendar.create_event', 'drive.search', 'drive.read'],
   },
 };
 
@@ -3456,7 +3744,7 @@ export function WorkstationSageConnectorsPane({
     const connected = statusItem ? statusItem.connected === true : record.connected;
     const fallbackConnectionId = readString(record.definition.connectorIds?.[0]) || record.id;
     const connectionId = readString(statusItem?.id) || fallbackConnectionId || null;
-    const opensAdvancedSetup = record.id === 'webhook';
+    const opensAdvancedSetup = false;
     const locked = connectionLaunchLocked(statusItem)
       || CONNECTOR_STATIC_LOCKED_IDS.has(record.id)
       || CONNECTOR_STATIC_LOCKED_IDS.has(fallbackConnectionId);
@@ -6352,8 +6640,7 @@ export function WorkstationSageConnectorsPane({
             {`${record.label} is connected${accountLabel ? ` as ${accountLabel}` : ''}.`}
           </div>
         ) : null}
-        {!showConnectorCredentialForm && !connectedConnector ? <div className="sage-unified-expand__text">{record.summary}</div> : null}
-        {!showConnectorCredentialForm && !connectedConnector && record.nextStep ? <div className="sage-unified-expand__text">{record.nextStep}</div> : null}
+        {!showConnectorCredentialForm && !connectedConnector && !CONNECTOR_DETAIL_MAP[record.connectorCardId ?? ''] ? <div className="sage-unified-expand__text">{record.summary}</div> : null}
         {record.consumerSetupMessage && !connectedConnector ? (
           <AppNotice tone="warning">{record.consumerSetupMessage}</AppNotice>
         ) : null}
@@ -6411,6 +6698,10 @@ export function WorkstationSageConnectorsPane({
               type="button"
               className="app-button app-button--primary"
               onClick={() => {
+                if (record.id === 'connector_webhook') {
+                  openIntegrationSection('advanced');
+                  return;
+                }
                 if (record.actionTarget === 'computer') {
                   openComputerConnectSheet();
                   return;
@@ -6515,8 +6806,7 @@ export function WorkstationSageConnectorsPane({
                   type="button"
                   className="sage-app-detail__prompt-chip"
                   onClick={() => {
-                    const query = encodeURIComponent(prompt);
-                    window.open(`/?query=${query}`, '_blank');
+                    navigator.clipboard.writeText(prompt).catch(() => {});
                   }}
                 >
                   {prompt}

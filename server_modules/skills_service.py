@@ -1162,6 +1162,42 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["url"],
             },
         ),
+        ToolDescriptor(
+            tool_name="query_tool_registry",
+            label="Query tool registry",
+            connector_id="sage_service",
+            action_id="query_tool_registry",
+            description=(
+                "Search for available tools and capabilities that are not in your "
+                "default tool set. Call this when you need to perform an action "
+                "(send email, manage calendar, control browser, edit files, etc.) "
+                "but do not see the relevant tool in your available tools. "
+                "Returns the 3-5 most relevant tools with their full schemas so "
+                "you can call them in subsequent steps."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_description": {
+                        "type": "string",
+                        "description": (
+                            "Describe what you need to do in plain language, e.g. "
+                            "'send an email to client', 'search Gmail for invoices', "
+                            "'create a calendar event', 'take a screenshot', "
+                            "'read a file from the computer'. Be specific about the "
+                            "service and action."
+                        ),
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of tools to return (default 5, max 10).",
+                        "minimum": 1,
+                        "maximum": 10,
+                    },
+                },
+                "required": ["task_description"],
+            },
+        ),
     ]
 
 

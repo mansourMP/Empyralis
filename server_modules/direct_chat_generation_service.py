@@ -15,6 +15,7 @@ from server_modules import empyralis_model_tier_routing_service
 from server_modules import healthguide_safety_service
 from server_modules import response_leak_guard_service
 from server_modules import secret_redaction_service
+from server_modules import tool_registry_service
 from server_modules import workspace_context_memory_adapter
 from server_modules.direct_chat_context_service import is_public_generation_error_message
 from server_modules.direct_chat_intervention_service import build_intervention
@@ -623,8 +624,42 @@ def stream_provider_backed_direct_chat(
     resolved_chat_max_iterations: int,
     direct_tool_result_summary_system_message: str,
     assistant_plan_tools: Optional[List[Dict[str, Any]]] = None,
+    tool_registry: Optional[List[Any]] = None,
 ) -> Iterator[Dict[str, Any]]:
-    print(f"[DG_ENTRY] provider={metadata.get('provider')!r} model={metadata.get('model')!r} message_len={len(normalized_message)} tools_count={len(tools)} max_iter={resolved_chat_max_iterations}", flush=True)
+    print(f"[DG_ENTRY] provider={metadata.get('provider')!r} model={metadata.get('model')!r} message_len={len(normalized_message)} tools_count={len(tools)} max_iter={resolved_chat_max_iterations} registry_entries={len(tool_registry) if tool_registry else 0}", flush=True)
+    # ── DeepSeek tool count guard: trim to 20 tools max ──
+    provider_id = str(metadata.get("provider") or "").strip().lower()
+    if provider_id == "deepseek" and len(tools) > 20:
+        # Priority: connected app tools first, then built-in Sage tools, then rest
+        connected_tools = []
+        sage_tools = []
+        other_tools = []
+        connected_prefixes = set()
+        for system in connected_systems:
+            connected_prefixes.add(system.lower().replace('-', '_'))
+        for tool in tools:
+            tool_name = str(tool.get("function", {}).get("name") or "").strip().lower()
+            # Check if tool belongs to a connected system
+            is_connected = any(
+                tool_name.startswith(prefix + "__") or tool_name.startswith(prefix + ".")
+                for prefix in connected_prefixes
+            )
+            if is_connected:
+                connected_tools.append(tool)
+            elif tool_name.startswith("memory") or tool_name.startswith("sage_") or tool_name.startswith("hardware"):
+                sage_tools.append(tool)
+            else:
+                other_tools.append(tool)
+        trimmed_tools = connected_tools + sage_tools
+        remaining_slots = 20 - len(trimmed_tools)
+        if remaining_slots > 0:
+            trimmed_tools.extend(other_tools[:remaining_slots])
+        original_count = len(tools)
+        tools = trimmed_tools
+        metadata["tools"] = trimmed_tools
+        context["tools"] = trimmed_tools
+        print(f"[DG_TOOL_TRIM] trimmed from {original_count} to {len(tools)} tools for provider {provider_id}", flush=True)
+    # ── End tool count guard ──
     usage_masked: Dict[str, Any] = {}
     attempted_providers = ""
     llm_error = ""
@@ -651,6 +686,7 @@ def stream_provider_backed_direct_chat(
             normalized_reasoning_effort = None
 
     executed_any_tools = False
+    final_reply = ""
     conversation_messages: List[Dict[str, Any]] = []
     conversation_messages.extend(compacted_prior_messages)
     current_prompt = normalized_message
@@ -907,6 +943,12 @@ def stream_provider_backed_direct_chat(
                 actual_model = str(event.get("model") or actual_model or "").strip() or actual_model
                 iteration_tool_calls = event.get("tool_calls") if isinstance(event.get("tool_calls"), list) else []
                 print(f"[DG_RESULT] iteration={iteration} reply_len={len(final_reply)} error={llm_error!r} tool_calls_count={len(iteration_tool_calls)} provider={actual_provider} model={actual_model}", flush=True)
+                if attempted_providers and ',' in attempted_providers:
+                    providers_list = [p.strip() for p in attempted_providers.split(',') if p.strip()]
+                    if len(providers_list) >= 2:
+                        from_provider = providers_list[-2]
+                        to_provider = providers_list[-1]
+                        print(f"[DG_FALLBACK] falling back from {from_provider} to {to_provider}", flush=True)
                 if not iteration_tool_calls:
                     final_reply, assistant_shell_plan_tool_calls = _extract_assistant_shell_plan_tool_call(
                         final_reply,
@@ -1081,11 +1123,71 @@ def stream_provider_backed_direct_chat(
                                 if isinstance(nested_input, dict):
                                     argument_payload = nested_input
                             step_id = f"tool:{thinking_iteration}:{tool_index}"
-                            tool_item_id = uuid.uuid4().hex
                             tool_call_id = str(tool_call.get("id") or "").strip() or f"toolcall_{uuid.uuid4().hex}"
                             if isinstance(tool_call, dict) and not str(tool_call.get("id") or "").strip():
                                 tool_call["id"] = tool_call_id
                             tool_name = str(tool_call.get("name") or f"{connector_id}__{action_id}").strip()
+                            tool_item_id = uuid.uuid4().hex
+                            # ── query_tool_registry: lazy-load tools from registry ──
+                            if tool_name == "query_tool_registry" and tool_registry:
+                                query_text = str(argument_payload.get("task_description") or "").strip()
+                                max_res = int(argument_payload.get("max_results") or 5)
+                                if not query_text:
+                                    query_text = str(argument_payload.get("input") or "").strip()
+                                if not query_text:
+                                    tool_result = "query_tool_registry requires a 'task_description' parameter describing what you need to do."
+                                else:
+                                    matched = direct_chat_tool_catalog_service.search_tool_registry(
+                                        query_text,
+                                        tool_registry,
+                                        max_results=min(max_res, 10),
+                                        availability_payload=availability_payload,
+                                    )
+                                    tool_result = direct_chat_tool_catalog_service.format_registry_result(matched, query_text)
+                                    # Inject matched tools for subsequent iterations
+                                    new_tool_names = []
+                                    for mt in matched:
+                                        func = mt.get("function", {}) if isinstance(mt, dict) else {}
+                                        name = str(func.get("name") or mt.get("name") or "").strip()
+                                        if name and name not in {str(t.get("function", {}).get("name") or t.get("name") or "") for t in tools}:
+                                            tools.append(mt)
+                                            new_tool_names.append(name)
+                                    if new_tool_names:
+                                        if isinstance(metadata, dict):
+                                            metadata["tools"] = tools
+                                        if isinstance(context, dict):
+                                            context["tools"] = tools
+                                    print(f"[DG_TOOL_REGISTRY] query={query_text!r} matched={len(matched)} injected={new_tool_names}", flush=True)
+                                executed_any_tools = True
+                                tool_result_for_context = tool_result
+                                conversation_messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call_id,
+                                        "name": tool_name,
+                                        "content": tool_result_for_context,
+                                    }
+                                )
+                                tool_done = _emit_trace_event(
+                                    trace_context,
+                                    event_type="plan.item.updated",
+                                    data={
+                                        "item_id": tool_item_id,
+                                        "status": "done",
+                                        "summary": "Searched tool registry.",
+                                    },
+                                    persisted=True,
+                                    item_id=tool_item_id,
+                                )
+                                if tool_done is not None:
+                                    yield tool_done
+                                current_prompt = (
+                                    "The tool registry results above show additional tools now available "
+                                    "to you. Use them to fulfill the user's request, or respond if you "
+                                    "have enough information."
+                                )
+                                continue
+                            # ── End query_tool_registry handler ──
                             tool_trace_metadata = direct_tool_execution_service.build_direct_tool_trace_metadata(
                                 connector_id,
                                 action_id,

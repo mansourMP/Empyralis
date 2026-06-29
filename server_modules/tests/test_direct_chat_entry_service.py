@@ -43,6 +43,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2000,
@@ -89,9 +91,11 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 resolve_direct_chat_availability_fn=lambda workspace_id, requested_provider, availability_override=None: {"ai_ready": True, "provider": requested_provider or "openai"},
                 connected_system_labels_fn=lambda _availability: ["Memory"],
                 context_tool_capabilities_fn=lambda _availability: [{"id": "memory", "connected": True}],
-                build_direct_chat_tools_fn=lambda _tool_capabilities: [{"name": "memory_search"}],
-                build_local_direct_chat_tools_fn=lambda _availability: [{"name": "file__read"}],
-                build_builtin_direct_chat_tools_fn=lambda: [{"name": "web__search"}],
+                build_direct_chat_tools_fn=lambda _tool_capabilities: [{"name": "app_tool"}],
+                build_local_direct_chat_tools_fn=lambda _availability: [{"name": "local_tool"}],
+                build_builtin_direct_chat_tools_fn=lambda: [{"name": "builtin_tool"}],
+                build_always_on_direct_chat_tools_fn=lambda: [{"name": "always_on_core"}],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [{"name": "registry_tool"}],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2000,
@@ -100,9 +104,12 @@ class DirectChatEntryServiceTests(unittest.TestCase):
         self.assertEqual(prepared.normalized_requested_provider, "openai")
         self.assertEqual(prepared.normalized_requested_model, "gpt-5.4")
         self.assertEqual(prepared.normalized_message, "Continue with the task")
-        self.assertEqual(prepared.tools[0]["name"], "memory_search")
-        self.assertEqual(prepared.tools[1]["name"], "file__read")
-        self.assertEqual(prepared.tools[2]["name"], "web__search")
+        # Two-tier assembly: tools = always-on only
+        self.assertEqual(len(prepared.tools), 1)
+        self.assertEqual(prepared.tools[0]["name"], "always_on_core")
+        # Registry contains everything else
+        self.assertEqual(len(prepared.tool_registry), 1)
+        self.assertEqual(prepared.tool_registry[0]["name"], "registry_tool")
         self.assertEqual(prepared.proactive_suggestions, ["next"])
 
     def test_prepare_direct_chat_request_respects_thread_clear_and_compaction(self) -> None:
@@ -142,6 +149,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2000,
@@ -200,6 +209,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2000,
@@ -250,6 +261,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2000,
@@ -311,6 +324,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=8_000,
@@ -367,6 +382,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2000,
@@ -419,6 +436,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=8_000,
@@ -464,6 +483,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2_000,
@@ -510,6 +531,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2_000,
@@ -556,6 +579,8 @@ class DirectChatEntryServiceTests(unittest.TestCase):
                 build_direct_chat_tools_fn=lambda _tool_capabilities: [],
                 build_local_direct_chat_tools_fn=lambda _availability: [],
                 build_builtin_direct_chat_tools_fn=lambda: [],
+                build_always_on_direct_chat_tools_fn=lambda: [],
+                build_registry_entries_fn=lambda tool_capabilities, availability_payload: [],
                 normalize_direct_approved_action_fn=lambda _value: None,
                 build_context_used_fn=lambda **kwargs: kwargs,
                 direct_chat_compaction_token_limit=2_000,

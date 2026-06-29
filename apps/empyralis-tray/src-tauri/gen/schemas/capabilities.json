@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Default permissions for the Empyralis tray popover","local":true,"windows":["tray-popover"],"permissions":["core:default"]}}

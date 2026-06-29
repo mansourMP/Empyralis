@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Sequence
 
 from server_modules import skills_service
+from server_modules import tool_registry_service
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,53 @@ def build_direct_chat_tools(tool_capabilities: List[Dict[str, Any]]) -> List[Dic
 
 def build_builtin_direct_chat_tools() -> List[Dict[str, Any]]:
     return skills_service.build_builtin_direct_chat_tools()
+
+
+def build_always_on_direct_chat_tools() -> List[Dict[str, Any]]:
+    """Return only the always-on tier tools (~8 tools, ~800 tokens).
+
+    These are injected every turn. All other tools live in the registry
+    and are loaded on demand via query_tool_registry.
+    """
+    return tool_registry_service.build_always_on_tool_definitions()
+
+
+def build_registry_entries(
+    tool_capabilities: List[Dict[str, Any]],
+    availability_payload: Dict[str, Any],
+    *,
+    local_worker_available: Any = None,
+) -> List[tool_registry_service.RegistryEntry]:
+    """Build the full tool registry for lazy-loading via query_tool_registry."""
+    return tool_registry_service.build_registry_entries(
+        tool_capabilities,
+        availability_payload,
+        local_worker_available=local_worker_available,
+    )
+
+
+def search_tool_registry(
+    query: str,
+    registry: List[tool_registry_service.RegistryEntry],
+    *,
+    max_results: int = 5,
+    availability_payload: Any = None,
+) -> List[Dict[str, Any]]:
+    """Search the tool registry by keyword matching."""
+    return tool_registry_service.search_tool_registry(
+        query,
+        registry,
+        max_results=max_results,
+        availability_payload=availability_payload,
+    )
+
+
+def format_registry_result(
+    matched_tools: List[Dict[str, Any]],
+    query: str,
+) -> str:
+    """Format registry search results for the agent."""
+    return tool_registry_service.format_registry_result(matched_tools, query)
 
 
 def registered_direct_chat_tool_names_for_logging() -> List[str]:

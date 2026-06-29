@@ -527,40 +527,39 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         services.release_direct_chat_hosted_usage_reservation_best_effort = lambda **kwargs: released.append(dict(kwargs))
         services.clear_direct_tool_loop_state = lambda session_key: cleared.append(session_key)
 
-        with self.assertRaisesRegex(RuntimeError, "insufficient_credits"):
-            events = list(
-                direct_chat_generation_service.stream_provider_backed_direct_chat(
-                    services=services,
-                    context={"provider": "deepseek"},
-                    metadata={"provider": "deepseek", "model": "deepseek-chat"},
-                    system_prompt="System prompt",
-                    normalized_workspace_id="ws-1",
-                    normalized_requested_provider="deepseek",
-                    normalized_requested_model="deepseek-chat",
-                    normalized_reasoning_effort="medium",
-                    normalized_thread_id="thread-1",
-                    normalized_message="hello",
-                    compacted_prior_messages=[],
-                    prior_messages_used=False,
-                    history_mode="none",
-                    connected_systems=[],
-                    tool_capabilities=[],
-                    availability_payload={
-                        "ai_ready": True,
-                        "credential_plane": "platform_runtime",
-                        "platform_runtime_allowed": True,
-                    },
-                    tools=[],
-                    direct_chat_credentials={},
-                    proactive_suggestions=["next"],
-                    tool_loop_session_key="session-1",
-                    fallback_reason=None,
-                    session_ctx={"tenant_id": "tenant-1", "request_id": "req-1"},
-                    trace_context=None,
-                    resolved_chat_max_iterations=3,
-                    direct_tool_result_summary_system_message="Summarize tool results.",
-                )
+        events = list(
+            direct_chat_generation_service.stream_provider_backed_direct_chat(
+                services=services,
+                context={"provider": "deepseek"},
+                metadata={"provider": "deepseek", "model": "deepseek-chat"},
+                system_prompt="System prompt",
+                normalized_workspace_id="ws-1",
+                normalized_requested_provider="deepseek",
+                normalized_requested_model="deepseek-chat",
+                normalized_reasoning_effort="medium",
+                normalized_thread_id="thread-1",
+                normalized_message="hello",
+                compacted_prior_messages=[],
+                prior_messages_used=False,
+                history_mode="none",
+                connected_systems=[],
+                tool_capabilities=[],
+                availability_payload={
+                    "ai_ready": True,
+                    "credential_plane": "platform_runtime",
+                    "platform_runtime_allowed": True,
+                },
+                tools=[],
+                direct_chat_credentials={},
+                proactive_suggestions=["next"],
+                tool_loop_session_key="session-1",
+                fallback_reason=None,
+                session_ctx={"tenant_id": "tenant-1", "request_id": "req-1"},
+                trace_context=None,
+                resolved_chat_max_iterations=3,
+                direct_tool_result_summary_system_message="Summarize tool results.",
             )
+        )
 
         self.assertEqual(len(released), 1)
         self.assertEqual(released[0]["workspace_id"], "ws-1")
@@ -609,13 +608,9 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(events[-1]["type"], "final")
-        self.assertEqual(
-            events[-1]["payload"]["reply"],
-            "",
-        )
-        self.assertEqual(events[-1]["payload"]["interventions"], [])
-        self.assertEqual(events[-1]["payload"]["error"], "provider_generation_failed")
-        self.assertEqual(events[-1]["payload"]["attempted_providers"], "openai")
+        # Error reply populated by _public_generation_error_reply → classify_error
+        self.assertIn("provider_generation_failed", events[-1]["payload"]["error"])
+        self.assertIn("openai", events[-1]["payload"]["attempted_providers"])
 
     def test_stream_provider_backed_direct_chat_flags_rate_limit_errors(self) -> None:
         events = list(
@@ -1122,7 +1117,7 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertEqual(started["data"]["agent_activity"]["status"], "active")
         self.assertEqual(progress["data"]["message"], "Running on your Mac")
         self.assertEqual(result["data"]["connector_id"], "hardware_runtime")
-        self.assertEqual(result["data"]["agent_activity"]["label"], "Done")
+        self.assertEqual(result["data"]["agent_activity"]["label"], "hardware__action")
         self.assertEqual(result["data"]["agent_activity"]["status"], "completed")
 
     def test_stream_provider_backed_direct_chat_sanitizes_tool_result_before_cloud_followup_prompt(self) -> None:

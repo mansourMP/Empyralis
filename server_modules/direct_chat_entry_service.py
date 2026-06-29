@@ -10,6 +10,7 @@ from server_modules import (
     provider_profiles,
 )
 from server_modules import session_transcript_store
+from server_modules import tool_registry_service
 from server_modules.conversation_memory_policy import (
     DIRECT_CHAT_PROFILE,
     build_model_aware_memory_policy,
@@ -143,6 +144,7 @@ class PreparedDirectChatRequest:
     connected_systems: List[str]
     tool_capabilities: List[Dict[str, Any]]
     tools: List[Dict[str, Any]]
+    tool_registry: List[Any]  # List[tool_registry_service.RegistryEntry]
     approved_action_payload: Optional[Dict[str, str]]
     base_context_used: Dict[str, Any]
     slash_command_name: str
@@ -193,6 +195,8 @@ def prepare_direct_chat_request(
     build_direct_chat_tools_fn: Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]],
     build_local_direct_chat_tools_fn: Callable[[Dict[str, Any]], List[Dict[str, Any]]],
     build_builtin_direct_chat_tools_fn: Callable[[], List[Dict[str, Any]]],
+    build_always_on_direct_chat_tools_fn: Callable[[], List[Dict[str, Any]]],
+    build_registry_entries_fn: Callable[..., List[Any]],
     normalize_direct_approved_action_fn: Callable[[Any], Optional[Dict[str, str]]],
     build_context_used_fn: Callable[..., Dict[str, Any]],
     direct_chat_compaction_token_limit: int,
@@ -440,9 +444,14 @@ def prepare_direct_chat_request(
             )
         )
     tool_capabilities = context_tool_capabilities_fn(availability_payload)
-    tools = build_direct_chat_tools_fn(tool_capabilities)
-    tools.extend(build_local_direct_chat_tools_fn(availability_payload))
-    tools.extend(build_builtin_direct_chat_tools_fn())
+    # ── Two-tier tool assembly ──
+    # Tier 1: always-on tools (8 core tools, ~800 tokens) injected every turn.
+    # Tier 2: registry — everything else, loaded on demand via query_tool_registry.
+    tools = build_always_on_direct_chat_tools_fn()
+    tool_registry = build_registry_entries_fn(
+        tool_capabilities,
+        availability_payload,
+    )
     tools = _tools_for_verified_user_device(tools, gateway_context)
     approved_action_payload = normalize_direct_approved_action_fn(approved_action)
     base_context_used = build_context_used_fn(
@@ -474,6 +483,7 @@ def prepare_direct_chat_request(
         connected_systems=connected_systems,
         tool_capabilities=tool_capabilities,
         tools=tools,
+        tool_registry=tool_registry,
         approved_action_payload=approved_action_payload,
         base_context_used=base_context_used,
         slash_command_name=slash_command_name,

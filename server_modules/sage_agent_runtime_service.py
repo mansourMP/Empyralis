@@ -1163,19 +1163,12 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str) -> tuple[list[dict[
     except Exception:
         availability = {}
 
-    tools: list[dict[str, Any]] = []
-    try:
-        tools.extend(direct_chat_runtime_exports._build_direct_chat_tools(tool_capabilities))
-    except Exception:
-        pass
-    try:
-        tools.extend(direct_chat_runtime_exports._build_local_direct_chat_tools(availability))
-    except Exception:
-        pass
-    try:
-        tools.extend(direct_chat_runtime_exports._build_builtin_direct_chat_tools())
-    except Exception:
-        pass
+    # ── Two-tier tool assembly (same code path as web) ──
+    # Tier 1: always-on tools (8 core tools) injected every turn.
+    # Tier 2: registry — everything else, loaded on demand via query_tool_registry.
+    tools: list[dict[str, Any]] = list(direct_chat_tool_catalog_service.build_always_on_direct_chat_tools())
+    _registry = direct_chat_tool_catalog_service.build_registry_entries(tool_capabilities, availability)
+    availability["_tool_registry"] = _registry
 
     browser_status = _sage_agent_computer_browser_status(availability)
     print(f"[TOOL_FILTER] browser_status={browser_status!r} tool_count_before={len(tools)}", flush=True)
@@ -1587,27 +1580,8 @@ async def _run_sage_action_loop_v3(
         )
         system_prompt = (system_prompt or "") + blocked_context
 
-    # MCP skills are still skill-registry backed in this pass. Keep that
-    # existing approved path instead of teaching the provider about MCP internals.
-    if mcp_skill is not None:
-        mcp_result = await _run_sage_action_loop_v2(
-            workspace_id=workspace_id,
-            tenant_id=tenant_id,
-            message=message,
-            provider=provider,
-            model=model,
-            credentials=credentials,
-            trace_id=trace_id,
-            actor_user_id=actor_user_id,
-
-        )
-        if mcp_result is not None:
-            mcp_result["action_loop_version"] = _SAGE_OPERATOR_LOOP_VERSION
-            mcp_result["route_decision"] = route_decision
-            for call in list(mcp_result.get("tool_calls") or []):
-                if isinstance(call, dict):
-                    call["action_loop_version"] = _SAGE_OPERATOR_LOOP_VERSION
-            return mcp_result
+    # ── All messages go through the LLM with query_tool_registry for tool discovery.
+    # No keyword-based MCP routing — the LLM decides which tools to use.
 
     generation_services = direct_chat_runtime_exports._direct_chat_generation_services()
     session_ctx = {
@@ -1625,7 +1599,7 @@ async def _run_sage_action_loop_v3(
             "user_id": actor_user_id or None,
             "channel_origin": channel_origin or "sage",
         },
-        "sender_id": sender_id or "",
+        "sender_id": actor_user_id or "",
         "agent_turn_request": {
             "tenant_id": tenant_id or "default",
             "workspace_id": workspace_id,
@@ -1749,6 +1723,7 @@ async def _run_sage_action_loop_v3(
                 resolved_chat_max_iterations=_SAGE_OPERATOR_LOOP_MAX_ITERATIONS,
                 direct_tool_result_summary_system_message="Use the Sage tool results to answer the user's request. Do not paste raw tool output.",
                 assistant_plan_tools=tools,
+                tool_registry=availability.get("_tool_registry"),
             )
         return list(direct_chat_generation_service.wrap_generation_with_sink(_gen))
 
@@ -1841,7 +1816,7 @@ async def _run_sage_action_loop_v2(
             "sage_agent_id": SAGE_MAIN_AGENT_ID,
             "channel_origin": channel_origin or "sage",
         },
-        "sender_id": sender_id or "",
+        "sender_id": actor_user_id or "",
         "agent_turn_request": {
             "tenant_id": tenant_id or "default",
             "workspace_id": workspace_id,
@@ -1861,6 +1836,8 @@ async def _run_sage_action_loop_v2(
         },
     }
 
+    from server_modules import runtime_config as _rc
+
     direct_tool_calls: list[dict[str, Any]] = []
     if services is not None:
         direct_tool_calls = _plan_sage_direct_tool_calls(
@@ -1870,22 +1847,12 @@ async def _run_sage_action_loop_v2(
         )
         direct_tool_calls, budget_blocked_tools = _budget_sage_tool_calls(direct_tool_calls)
         blocked_tools.extend(budget_blocked_tools)
-        if not direct_tool_calls:
-            from server_modules import runtime_config as _rc2
-            if _rc2.AGENT_MACHINE_MODE == "agent":
-                blocked = None
-            else:
-                from server_modules import runtime_config as _rc_check
-    if _rc_check.AGENT_MACHINE_MODE == "agent":
+    if _rc.AGENT_MACHINE_MODE == "agent":
         blocked = None
     else:
-        from server_modules import runtime_config as _rc_check
-        if _rc_check.AGENT_MACHINE_MODE == "agent":
-            blocked = None
-        else:
-            blocked = _blocked_agent_computer_tool_for_message(message, availability)
-            if blocked is not None:
-                blocked_tools.append(blocked)
+        blocked = _blocked_agent_computer_tool_for_message(message, availability)
+        if blocked is not None:
+            blocked_tools.append(blocked)
 
     mcp_skill = _matching_mcp_skill(workspace_id=workspace_id, message=message)
     if not direct_tool_calls and mcp_skill is None and not blocked_tools:

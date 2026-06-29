@@ -215,6 +215,8 @@ class DirectChatOperatorShellBindings:
     build_local_direct_chat_tools: Any
     build_direct_chat_tools: Any
     build_builtin_direct_chat_tools: Any
+    build_always_on_direct_chat_tools: Any
+    build_registry_entries: Any
     registered_direct_chat_tool_names_for_logging: Any
     state_bindings: DirectChatOperatorStateBindings
     availability_bindings: DirectChatOperatorAvailabilityBindings
@@ -1691,6 +1693,8 @@ def build_direct_chat_shell_bindings(
         ),
         build_direct_chat_tools=direct_chat_tool_catalog_service.build_direct_chat_tools,
         build_builtin_direct_chat_tools=direct_chat_tool_catalog_service.build_builtin_direct_chat_tools,
+        build_always_on_direct_chat_tools=direct_chat_tool_catalog_service.build_always_on_direct_chat_tools,
+        build_registry_entries=direct_chat_tool_catalog_service.build_registry_entries,
         registered_direct_chat_tool_names_for_logging=direct_chat_tool_catalog_service.registered_direct_chat_tool_names_for_logging,
         state_bindings=state_bindings,
         availability_bindings=availability_bindings,
@@ -2232,6 +2236,8 @@ def build_direct_chat_shell_export_map(
         "_build_local_direct_chat_tools": shell_bindings.build_local_direct_chat_tools,
         "_build_direct_chat_tools": shell_bindings.build_direct_chat_tools,
         "_build_builtin_direct_chat_tools": shell_bindings.build_builtin_direct_chat_tools,
+        "_build_always_on_direct_chat_tools": shell_bindings.build_always_on_direct_chat_tools,
+        "_build_registry_entries": shell_bindings.build_registry_entries,
         "registered_direct_chat_tool_names_for_logging": shell_bindings.registered_direct_chat_tool_names_for_logging,
         "_direct_chat_tool_routing_bindings": tool_routing_bindings,
         "_message_requests_http_request_tool": tool_routing_bindings.message_requests_http_request_tool,

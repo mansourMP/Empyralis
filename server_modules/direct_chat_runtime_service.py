@@ -729,6 +729,7 @@ def build_direct_operator_reply(
     connected_systems = prepared.connected_systems
     tool_capabilities = prepared.tool_capabilities
     tools = prepared.tools
+    tool_registry = prepared.tool_registry
     approved_action_payload = prepared.approved_action_payload
     base_context_used = prepared.base_context_used
     slash_command_name = prepared.slash_command_name
@@ -868,7 +869,9 @@ def build_direct_operator_reply(
         yield {"type": "final", "payload": browser_unavailable_payload}
         return
     hosted_platform_runtime = str(availability_payload.get("credential_plane") or "").strip().lower() == "platform_runtime"
-    lock_selected_provider = bool(normalized_requested_provider or normalized_requested_model or hosted_platform_runtime)
+    lock_selected_provider = bool(normalized_requested_provider or normalized_requested_model)
+    if hosted_platform_runtime and provider != 'deepseek':
+        lock_selected_provider = True
     # ── Use the SAME model resolution as Sage/channels ──
     from scripts.orion_local_worker_llm import resolve_requested_model as _resolve_model
     selected_model = (
@@ -1086,6 +1089,7 @@ def build_direct_operator_reply(
         resolved_chat_max_iterations=resolved_chat_max_iterations,
         direct_tool_result_summary_system_message="Use the tool results to answer the user's request.",
         assistant_plan_tools=tools,
+        tool_registry=tool_registry,
     )
     yield from direct_chat_generation_service.wrap_generation_with_sink(_direct_gen)
 

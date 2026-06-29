@@ -155,39 +155,60 @@ export async function GET(request: NextRequest) {
     completionUrl.searchParams.set('provider', 'google');
     completionUrl.searchParams.set('next', '/');
 
-    // Next.js strips set-cookie headers from redirect responses, so we set
-    // cookies client-side via JavaScript instead. Parse the upstream cookies
-    // and embed them in a self-redirecting HTML page.
+    // Next.js strips set-cookie headers from redirect responses, so we return
+    // a 200 HTML page. Set cookies server-side on the response (preserving
+    // HttpOnly) so the browser receives the auth tokens correctly. The JS-only
+    // approach dropped HttpOnly cookies (access/refresh tokens), breaking login.
     const upstreamCookies = upstream.headers.getSetCookie
       ? upstream.headers.getSetCookie()
       : splitCombinedSetCookieHeader(upstream.headers.get('set-cookie') || '');
 
-    const cookieJsLines = upstreamCookies.map(raw => {
-      // Parse name=value from the raw Set-Cookie string
-      const [nvPair] = raw.split(';');
-      const [name, ...vr] = nvPair.trim().split('=');
-      const value = vr.join('=');
-      if (!name || !value) return '';
-      // Only set non-HttpOnly cookies via JS; HttpOnly cookies can only be
-      // set server-side, so we strip HttpOnly and set with JS for local dev.
-      const cleanAttrs = raw
-        .split(';')
-        .map(s => s.trim())
-        .filter(s => s.toLowerCase() !== 'httponly')
-        .join('; ');
-      return `document.cookie = ${JSON.stringify(cleanAttrs)};`;
-    }).filter(Boolean).join('\n');
-
     const redirectUrl = completionUrl.toString();
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
-${cookieJsLines}
 window.location.href = ${JSON.stringify(redirectUrl)};
 </script></body></html>`;
 
-    return new NextResponse(html, {
+    const response = new NextResponse(html, {
       status: 200,
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
     });
+
+    // Forward Set-Cookie headers from the backend as real browser cookies
+    // (server-side set, so HttpOnly is preserved — unlike document.cookie).
+    for (const raw of upstreamCookies) {
+      const parts = raw.split(';').map(s => s.trim());
+      const [nvPair] = parts;
+      const eqIdx = nvPair.indexOf('=');
+      if (eqIdx <= 0) continue;
+      const name = nvPair.slice(0, eqIdx).trim();
+      const value = nvPair.slice(eqIdx + 1);
+      if (!name || !value) continue;
+
+      const options: {
+        httpOnly?: boolean;
+        secure?: boolean;
+        sameSite?: 'strict' | 'lax' | 'none';
+        maxAge?: number;
+        path?: string;
+        domain?: string;
+      } = {};
+      for (const attr of parts.slice(1)) {
+        const lower = attr.toLowerCase();
+        if (lower === 'httponly') options.httpOnly = true;
+        else if (lower === 'secure') options.secure = true;
+        else if (lower.startsWith('samesite=')) {
+          const v = attr.split('=')[1]?.toLowerCase();
+          if (v === 'strict' || v === 'lax' || v === 'none') options.sameSite = v;
+        } else if (lower.startsWith('max-age=')) {
+          const n = parseInt(attr.split('=')[1], 10);
+          if (Number.isFinite(n)) options.maxAge = n;
+        } else if (lower.startsWith('path=')) options.path = attr.split('=')[1];
+        else if (lower.startsWith('domain=')) options.domain = attr.split('=')[1];
+      }
+      response.cookies.set(name, value, options);
+    }
+
+    return response;
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : 'unknown';
     logGoogleAuthFailure('Google OAuth callback failed.', { message: errMsg });

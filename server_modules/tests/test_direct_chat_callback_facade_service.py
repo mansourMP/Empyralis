@@ -51,6 +51,8 @@ def _inputs() -> service.DirectChatCallbackFacadeInputs:
         build_direct_chat_tools=lambda **kwargs: [],
         build_local_direct_chat_tools=lambda **kwargs: [],
         build_builtin_direct_chat_tools=lambda **kwargs: [],
+        build_always_on_direct_chat_tools=lambda: [],
+        build_registry_entries=lambda tool_capabilities, availability_payload: [],
         normalize_direct_approved_action=lambda value: value,
         direct_chat_compaction_token_limit=12000,
         with_context_used=lambda payload, context: {**payload, "context_used": context},

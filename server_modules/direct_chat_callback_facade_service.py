@@ -55,6 +55,8 @@ class DirectChatCallbackFacadeInputs:
     build_direct_chat_tools: Callable[..., List[Dict[str, Any]]]
     build_local_direct_chat_tools: Callable[..., List[Dict[str, Any]]]
     build_builtin_direct_chat_tools: Callable[..., List[Dict[str, Any]]]
+    build_always_on_direct_chat_tools: Callable[[], List[Dict[str, Any]]]
+    build_registry_entries: Callable[..., List[Any]]
     normalize_direct_approved_action: Callable[[Any], Dict[str, str] | None]
     direct_chat_compaction_token_limit: int
     with_context_used: Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]
@@ -144,6 +146,8 @@ def build_direct_chat_runtime_facade_callbacks(
         build_direct_chat_tools=inputs.build_direct_chat_tools,
         build_local_direct_chat_tools=inputs.build_local_direct_chat_tools,
         build_builtin_direct_chat_tools=inputs.build_builtin_direct_chat_tools,
+        build_always_on_direct_chat_tools=inputs.build_always_on_direct_chat_tools,
+        build_registry_entries=inputs.build_registry_entries,
         normalize_direct_approved_action=inputs.normalize_direct_approved_action,
         build_context_used=inputs.build_context_used,
         direct_chat_compaction_token_limit=inputs.direct_chat_compaction_token_limit,
