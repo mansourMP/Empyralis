@@ -19,7 +19,6 @@ from fastapi import HTTPException
 from server_modules.agent_turn import AgentTurnRequest, bind_agent_turn_metadata, resolve_run_start_turn_request
 from server_modules import agent_trace_service
 from server_modules import app_bridge_service
-from server_modules import browser_approval_service
 from server_modules import deployed_agent_cost_cap_service
 from server_modules.doctor_gate import build_doctor_run_gate_live
 from server_modules.direct_tool_config_service import run_async_tool_call
@@ -1024,9 +1023,6 @@ def _durable_approval_request_payload(
             if str(item or "").strip()
         ],
     }
-    browser_summary = browser_approval_service.browser_approval_summary(safe_metadata)
-    if browser_summary is not None:
-        payload["browser"] = browser_summary
     return payload
 
 
@@ -1148,7 +1144,6 @@ def begin_run_pending_confirmation(
             ),
             operation=f"approval.requested:{run_id}:{approval_id}",
         )
-    browser_summary = browser_approval_service.browser_approval_summary(safe_metadata)
     emit_log_fn(
         run["logs"],
         "warn",
@@ -1161,7 +1156,6 @@ def begin_run_pending_confirmation(
             "expires_at": expires_at,
             "scope": APPROVAL_SCOPE_ONCE,
             "reusable": False,
-            "browser": browser_summary,
             **safe_metadata,
         },
     )
@@ -1398,11 +1392,6 @@ def wait_for_human_response(
                     "scope": "once",
                     "reusable": False,
                     "resumed_after_restart": True,
-                    "browser": browser_approval_service.browser_approval_summary(
-                        get_pending_confirmation_fn(run).get("metadata")
-                        if isinstance(get_pending_confirmation_fn(run), dict)
-                        else {}
-                    ),
                 },
             )
             append_approval_audit_fn(
@@ -1607,9 +1596,6 @@ def wait_for_human_response(
                 "escalated": bool(escalated),
                 "scope": "once",
                 "reusable": False,
-                "browser": browser_approval_service.browser_approval_summary(
-                    pending.get("metadata") if isinstance(pending.get("metadata"), dict) else {}
-                ),
             },
         )
         append_approval_audit_fn(
@@ -3425,13 +3411,11 @@ def execute_workflow_local_tool(
                 file_mount_grants,
                 execution_target,
             )
-        browser_context = browser_approval_service.prepare_browser_local_tool_context(
-            config,
-            permissions,
-            normalize_action_id_fn=normalize_action_id_fn,
-            browser_auth_actions=browser_auth_actions,
-            browser_automation_policy_from_operations_fn=browser_automation_policy_from_operations_fn,
-        )
+        browser_context = {
+            "browser_permissions": {},
+            "browser_actions": [],
+            "session_profile": None,
+        }
         browser_permissions = browser_context["browser_permissions"]
         browser_actions = browser_context["browser_actions"]
         session_profile = browser_context["session_profile"]
@@ -4894,9 +4878,7 @@ def mark_local_execution_tools_approved(metadata: Dict[str, Any]) -> None:
 
 
 def apply_browser_execution_metadata(metadata: Dict[str, Any]) -> None:
-    precheck = metadata.get("tool_policy_precheck") if isinstance(metadata.get("tool_policy_precheck"), dict) else {}
-    browser_policy = precheck.get("browser_automation_policy") if isinstance(precheck.get("browser_automation_policy"), dict) else {}
-    browser_approval_service.apply_browser_policy_metadata(metadata, browser_policy)
+    return
 
 
 def build_run_start_request_from_turn(
@@ -6343,7 +6325,7 @@ def create_run_from_prepared_request(
     status = "starting"
     if rust_requires_approval:
         approval_labels = []
-        approval_prompt = "Run requires approval before execution."
+        approval_prompt = "Run requires confirmation before execution."
         approval_source = "run_service_approval"
         pending_metadata = {
             "target": metadata.get("execution_target_selected"),

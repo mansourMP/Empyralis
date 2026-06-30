@@ -73,11 +73,6 @@ from server_modules.sage_agent_runtime_contract import (
     normalize_sage_surface,
     SageTurnResult,
 )
-from server_modules.sage_approval_service import (
-    create_approval,
-    APPROVAL_TOKEN_PREFIX,
-    APPROVAL_TTL_MINUTES,
-)
 from server_modules.skill_registry import list_skill_definitions
 from server_modules.sage_transparency_service import emit_sage_turn_transparency_events
 from server_modules.transparency_event_store_service import persist_transparency_events
@@ -639,52 +634,6 @@ def _build_agent_computer_decision_for_skill(
     return decision.as_dict()
 
 
-def _create_approval_for_blocked_action(
-    *,
-    workspace_id: str,
-    tenant_id: str,
-    trace_id: str,
-    skill_id: str,
-    label: str,
-    action_class: str,
-    requester_actor: str = "",
-) -> dict | None:
-    """Create a pending approval record for a blocked tool action.
-
-    Returns the approval metadata dict for the response, or None if persistence fails.
-    Fail-closed: if the write fails, the action stays blocked.
-    """
-    try:
-        record = create_approval(
-            workspace_id=workspace_id,
-            tenant_id=tenant_id,
-            trace_id=trace_id,
-            action="channel_send_draft",
-            description=f"Approve {label} ({action_class}) action",
-            action_payload={
-                "channel": "sage_chat",
-                "recipient": requester_actor or "owner",
-                "message_text": f"Approved action for {label}",
-                "skill_id": skill_id,
-                "label": label,
-                "action_class": action_class,
-            },
-            requester_actor=requester_actor,
-        )
-        return {
-            "type": "tool_action",
-            "skill_id": skill_id,
-            "label": label,
-            "action_class": action_class,
-            "reason": "Requires explicit owner approval before write/execute action.",
-            "approval_token": record.approval_token,
-            "status": record.status,
-            "action": record.action,
-            "description": record.description,
-            "expires_at": record.expires_at,
-        }
-    except RuntimeError:
-        return None
 
 
 def _dedupe_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

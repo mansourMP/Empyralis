@@ -9,7 +9,7 @@ from server_modules import product_catalog_live_data_service
 from server_modules import studio_proof_agent_seed_service
 
 
-APPROVAL_GATE_PATTERNS = {
+ELEVATED_ACTION_PATTERNS = {
     "discount": re.compile(r"\b(discount|price match|price-match|cheaper|coupon|deal)\b", re.IGNORECASE),
     "refund": re.compile(r"\b(refund|return money|money back|chargeback)\b", re.IGNORECASE),
     "payment_link": re.compile(r"\b(payment link|pay now|checkout link|invoice link)\b", re.IGNORECASE),
@@ -41,10 +41,10 @@ def _truncate_summary(value: Any, *, limit: int = 180) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def _approval_gate_for_message(message: str) -> Optional[str]:
-    for gate, pattern in APPROVAL_GATE_PATTERNS.items():
+def _elevated_action_for_message(message: str) -> Optional[str]:
+    for action, pattern in ELEVATED_ACTION_PATTERNS.items():
         if pattern.search(message):
-            return gate
+            return action
     return None
 
 
@@ -71,7 +71,6 @@ def _activity_event(
     deployed_agent_id: str,
     customer_message: str,
     status: str = "logged",
-    approval_required: bool = False,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
@@ -79,7 +78,6 @@ def _activity_event(
         "actor_type": "deployed_agent",
         "actor_id": deployed_agent_id,
         "status": status,
-        "approval_required": approval_required,
         "customer_message_summary": _truncate_summary(customer_message),
         "metadata": dict(metadata or {}),
     }
@@ -122,7 +120,7 @@ def build_shop_assistant_backend_package() -> Dict[str, Any]:
             "summary": "Returns are accepted only for unworn items within 14 days.",
             "owner_exception_required": True,
         },
-        "approval_gates": {
+        "elevated_actions": {
             "discount": "owner_required",
             "refund": "owner_required",
             "payment_link": "owner_required",
@@ -132,7 +130,7 @@ def build_shop_assistant_backend_package() -> Dict[str, Any]:
             "studio.proof.shop_assistant.conversation_handled",
             "studio.proof.shop_assistant.inventory_hit",
             "studio.proof.shop_assistant.intent_captured",
-            "studio.proof.shop_assistant.owner_approval_required",
+            "studio.proof.shop_assistant.elevated_action_triggered",
             "studio.proof.shop_assistant.faq_answered",
             "studio.proof.shop_assistant.order_status_requested",
         ],
@@ -203,8 +201,8 @@ def build_shop_assistant_activity_billing_evidence(
         "tier_label": _public_tier_label(public_tier_token),
         "used_credits": used_credits,
         "credit_line_items": [_line_item_public_projection(item) for item in credit_line_items],
-        "approval_required": bool(approval.get("required")),
-        "approval_gate": approval.get("gate"),
+        "elevated_action": bool(approval.get("required")),
+        "elevated_action_type": approval.get("action"),
         "roi_metrics": _coerce_dict(evaluation_result.get("roi_metrics")),
     }
     admin_audit = {
@@ -217,8 +215,8 @@ def build_shop_assistant_activity_billing_evidence(
         "credit_line_items": [_line_item_admin_projection(item) for item in credit_line_items],
         "activity_events": activity_events,
         "safety_decision": {
-            "approval_required": bool(approval.get("required")),
-            "approval_gate": approval.get("gate"),
+            "elevated_action": bool(approval.get("required")),
+            "elevated_action_type": approval.get("action"),
             "risk_class": approval.get("risk_class"),
         },
     }
@@ -243,18 +241,17 @@ def evaluate_shop_assistant_customer_question(
     deployed_agent_id = _normalize_text(deployed_agent.get("id"), default="deployed_agent")
     package = build_shop_assistant_backend_package()
     events: List[Dict[str, Any]] = []
-    approval_gate = _approval_gate_for_message(message)
+    elevated_action = _elevated_action_for_message(message)
     purchase_intent = bool(PURCHASE_INTENT_PATTERN.search(message))
 
-    if approval_gate:
+    if elevated_action:
         events.append(
             _activity_event(
-                event="studio.proof.shop_assistant.owner_approval_required",
+                event="studio.proof.shop_assistant.elevated_action_triggered",
                 deployed_agent_id=deployed_agent_id,
                 customer_message=message,
-                status="approval_required",
-                approval_required=True,
-                metadata={"approval_gate": approval_gate},
+                status="elevated_action",
+                metadata={"elevated_action": elevated_action},
             )
         )
         if purchase_intent:
@@ -268,14 +265,14 @@ def evaluate_shop_assistant_customer_question(
             )
         return {
             "ok": True,
-            "status": "approval_required",
-            "intent": approval_gate,
-            "answer": _approval_answer(approval_gate),
+            "status": "elevated_action",
+            "intent": elevated_action,
+            "answer": _elevated_action_response(elevated_action),
             "approval": {
                 "required": True,
-                "gate": approval_gate,
+                "action": elevated_action,
                 "risk_class": "ORANGE",
-                "reason": "Owner approval is required before this customer-visible business action.",
+                "reason": "Owner notification required before this customer-visible business action.",
             },
             "activity_events": events,
             "roi_metrics": compute_shop_assistant_roi_metrics(events),
@@ -390,21 +387,21 @@ def evaluate_shop_assistant_customer_question(
     }
 
 
-def _approval_answer(approval_gate: str) -> str:
-    if approval_gate == "discount":
-        return "I can note the discount request, but owner approval is required before applying or promising a discount."
-    if approval_gate == "refund":
-        return "I can collect the refund details, but owner approval is required before approving or promising a refund."
-    if approval_gate == "payment_link":
-        return "I can capture purchase intent, but owner approval is required before sending a payment link."
-    if approval_gate == "mass_message":
-        return "Mass customer messages require owner approval before anything is sent."
-    return "Owner approval is required before this action can continue."
+def _elevated_action_response(elevated_action: str) -> str:
+    if elevated_action == "discount":
+        return "I can note the discount request, but an owner needs to review before applying or promising a discount."
+    if elevated_action == "refund":
+        return "I can collect the refund details, but an owner needs to review before processing a refund."
+    if elevated_action == "payment_link":
+        return "I can capture purchase intent, but an owner needs to review before sending a payment link."
+    if elevated_action == "mass_message":
+        return "Mass customer messages need an owner to review before anything is sent."
+    return "An owner needs to review before this action can continue."
 
 
 def compute_shop_assistant_roi_metrics(activity_events: List[Dict[str, Any]]) -> Dict[str, Any]:
     questions_handled = sum(1 for event in activity_events if event.get("event") == "studio.proof.shop_assistant.conversation_handled")
-    escalations = sum(1 for event in activity_events if bool(event.get("approval_required")))
+    escalations = sum(1 for event in activity_events if bool(event.get("owner_notification_required")))
     inventory_hits = sum(1 for event in activity_events if event.get("event") == "studio.proof.shop_assistant.inventory_hit")
     intent_captures = sum(1 for event in activity_events if event.get("event") == "studio.proof.shop_assistant.intent_captured")
     estimated_saved_minutes = round((questions_handled * 3.0) + (inventory_hits * 2.0) + (intent_captures * 1.5), 2)

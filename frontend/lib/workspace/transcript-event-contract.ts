@@ -7,8 +7,6 @@ export const TRANSCRIPT_EVENT_LIMIT = 200;
 export const TRANSCRIPT_EVENT_TYPES = ['trace', 'step'] as const;
 export const TRANSCRIPT_TRACE_EVENT_EXACT = [
   'artifact.created',
-  'approval.requested',
-  'approval.resolved',
   'browser.action',
   'browser.screenshot',
   'computer.browser.action',
@@ -23,7 +21,6 @@ export const TRANSCRIPT_TRACE_EVENT_EXACT = [
   'trace.failed',
 ] as const;
 export const TRANSCRIPT_TRACE_EVENT_PREFIXES = [
-  'approval.',
   'artifact.',
   'browser.',
   'computer.',

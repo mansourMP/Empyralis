@@ -18,15 +18,12 @@ from server_modules.platform_event import (
     AUTH_FAILED,
     GENERIC_ERROR,
     PROVIDER_UNREACHABLE,
-    SAGE_APPROVED as _SAGE_APPROVED,
     SAGE_COMPACT_NOT_NEEDED as _SAGE_COMPACT_NOT_NEEDED,
     SAGE_COMPACTED as _SAGE_COMPACTED,
-    SAGE_DENIED as _SAGE_DENIED,
     SAGE_HELP as _SAGE_HELP,
     SAGE_MAIN_RETURN as _SAGE_MAIN_RETURN,
     SAGE_NEW_SESSION as _SAGE_NEW_SESSION,
     SAGE_NO_MEMORIES as _SAGE_NO_MEMORIES,
-    SAGE_NO_PENDING_APPROVALS as _SAGE_NO_PENDING_APPROVALS,
     SAGE_OVERFLOW as _SAGE_OVERFLOW,
     SAGE_UNAVAILABLE as _SAGE_UNAVAILABLE,
     SERVICE_RATE_LIMITED,
@@ -36,15 +33,12 @@ from server_modules.platform_event import (
 
 _logger = logging.getLogger(__name__)
 
-SUPPORTED_COMMANDS = ["/compact", "/new", "/main", "/approve", "/deny", "/help", "/memory"]
+SUPPORTED_COMMANDS = ["/compact", "/new", "/main", "/help", "/memory"]
 
 # ── Standardized error / status messages ──
 # All sourced from platform_event.py — channel layer never speaks as agent.
 SAGE_OVERFLOW_REPLY = _SAGE_OVERFLOW.channel_text
 SAGE_UNAVAILABLE_REPLY = _SAGE_UNAVAILABLE.channel_text
-SAGE_NO_PENDING_APPROVALS = _SAGE_NO_PENDING_APPROVALS.channel_text
-SAGE_APPROVED = _SAGE_APPROVED.channel_text
-SAGE_DENIED = _SAGE_DENIED.channel_text
 SAGE_COMPACTED = _SAGE_COMPACTED.channel_text
 SAGE_COMPACT_NOT_NEEDED = _SAGE_COMPACT_NOT_NEEDED.channel_text
 SAGE_NEW_SESSION = _SAGE_NEW_SESSION.channel_text
@@ -371,22 +365,6 @@ async def _handle_main(workspace_id: str, channel_origin: str) -> str:
         return SAGE_MAIN_RETURN
     except Exception as exc:
         _logger.warning("/main failed for workspace=%s: %s", workspace_id, exc)
-        return SAGE_ERROR_REPLY
-
-
-async def _handle_approve(workspace_id: str, *, approved: bool) -> str:
-    try:
-        from server_modules import gateway_state_repository
-        pending = gateway_state_repository.list_gateway_action_approvals(
-            gateway_id="",
-            status="pending",
-            limit=1,
-        )
-        if not pending or len(pending) == 0:
-            return SAGE_NO_PENDING_APPROVALS
-        return SAGE_NO_PENDING_APPROVALS
-    except Exception as exc:
-        _logger.warning("approve/deny failed for workspace=%s: %s", workspace_id, exc)
         return SAGE_ERROR_REPLY
 
 

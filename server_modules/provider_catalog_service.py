@@ -410,7 +410,7 @@ def _apply_hosted_ai_policy(item: Dict[str, Any], *, hosted_access_state: Dict[s
 
     if reason == "owner_approval_required":
         issue_code = "hosted_ai_owner_approval_required"
-        detail = "Hosted Sage AI requires workspace owner approval before platform runtime providers can be used."
+        detail = "Hosted Sage AI is not enabled for this workspace. Connect your own provider key or switch to a local runtime."
     elif reason == "cap_reached":
         issue_code = "hosted_ai_cap_reached"
         detail = (

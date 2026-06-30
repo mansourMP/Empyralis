@@ -22,9 +22,6 @@ from server_modules import (
     safe_mode_service,
     secret_redaction_service,
 )
-from server_modules.agent_computer_approval_decision_service import (
-    decide_agent_computer_action,
-)
 from server_modules.agent_computer_policy_service import (
     DECISION_ALLOW,
     DECISION_APPROVAL_REQUIRED,
@@ -209,6 +206,9 @@ def evaluate_action_policy(
     # classification and return "allow" — those are governed by
     # policy_service.evaluate_tool_policy_decision() separately.
     try:
+        from server_modules.agent_computer_approval_decision_service import (
+            decide_agent_computer_action,
+        )
         approval_decision = decide_agent_computer_action(
             workspace_id=workspace_id,
             actor_user_id=actor_user_id or "owner",

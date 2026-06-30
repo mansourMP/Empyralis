@@ -18,7 +18,7 @@ from server_modules import direct_chat_routing_service
 from server_modules import direct_chat_runtime_entry_facade_service
 from server_modules import direct_chat_support_binding_service
 from server_modules import direct_chat_tool_catalog_service
-from server_modules import direct_tool_approval_service
+
 from server_modules import direct_tool_config_service
 from server_modules import direct_tool_execution_service
 from server_modules import skills_service
@@ -115,7 +115,6 @@ class DirectChatOperatorToolRoutingBindings:
     message_requests_local_computer_tool: Any
     message_can_use_direct_local_tools: Any
     message_can_use_builtin_direct_tools: Any
-    approval_required_for_direct_tool: Any
     preview_run_response: Any
     prefer_durable_run_handoff: Any
 
@@ -1328,20 +1327,6 @@ def build_direct_chat_tool_routing_bindings(
             callbacks=direct_chat_tool_policy_callbacks(),
         )
 
-    def approval_required_for_direct_tool(
-        connector_id: str,
-        action_id: str,
-        arguments: dict[str, Any],
-        tool_capabilities: list[dict[str, Any]],
-    ) -> bool:
-        return direct_tool_approval_service.approval_required_for_direct_tool(
-            connector_id,
-            action_id,
-            arguments,
-            tool_capabilities,
-            compact_text=compact_text_fn,
-        )
-
     def preview_run_response(message: str, availability: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return direct_chat_routing_service.preview_run_response(
             message,
@@ -1368,7 +1353,6 @@ def build_direct_chat_tool_routing_bindings(
         message_requests_local_computer_tool=message_requests_local_computer_tool,
         message_can_use_direct_local_tools=message_can_use_direct_local_tools,
         message_can_use_builtin_direct_tools=message_can_use_builtin_direct_tools,
-        approval_required_for_direct_tool=approval_required_for_direct_tool,
         preview_run_response=preview_run_response,
         prefer_durable_run_handoff=prefer_durable_run_handoff,
     )
@@ -2251,7 +2235,7 @@ def build_direct_chat_shell_export_map(
         "_message_requests_local_computer_tool": tool_routing_bindings.message_requests_local_computer_tool,
         "_message_can_use_direct_local_tools": tool_routing_bindings.message_can_use_direct_local_tools,
         "_message_can_use_builtin_direct_tools": tool_routing_bindings.message_can_use_builtin_direct_tools,
-        "_approval_required_for_direct_tool": tool_routing_bindings.approval_required_for_direct_tool,
+
         "_direct_chat_tool_support_bindings": tool_support_bindings,
         "_parse_tool_name": tool_support_bindings.parse_tool_name,
         "_tool_arguments_payload": tool_support_bindings.tool_arguments_payload,

@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, Optional
 
 from server_modules import activity_ledger_service, entitlements_service, outbox_service
 from server_modules.automation_intents import classify_automation_intent
-from server_modules.connectors.autopilot_approval_service import AutopilotApprovalService
 from server_modules.connectors.autopilot_channel_support_service import AutopilotChannelSupportService
 from server_modules.connectors.autopilot_common_support_service import AutopilotCommonSupportService
 from server_modules.connectors.autopilot_profile_service import AutopilotProfileService
@@ -150,7 +149,6 @@ class AutopilotRegistryFacadeService:
         runtime_status_service_class: Callable[..., Any] = RuntimeStatusService,
         workflow_setup_service_class: Callable[..., Any] = AutopilotWorkflowSetupService,
         connector_context_service_class: Callable[..., Any] = TelegramConnectorContextService,
-        approval_service_class: Callable[..., Any] = AutopilotApprovalService,
         common_support_service_class: Callable[..., Any] = AutopilotCommonSupportService,
         skill_service_class: Callable[..., Any] = AutopilotSkillService,
         channel_support_service_class: Callable[..., Any] = AutopilotChannelSupportService,
@@ -280,7 +278,6 @@ class AutopilotRegistryFacadeService:
         self.runtime_status_service_class = runtime_status_service_class
         self.workflow_setup_service_class = workflow_setup_service_class
         self.connector_context_service_class = connector_context_service_class
-        self.approval_service_class = approval_service_class
         self.common_support_service_class = common_support_service_class
         self.skill_service_class = skill_service_class
         self.channel_support_service_class = channel_support_service_class
@@ -352,7 +349,7 @@ class AutopilotRegistryFacadeService:
                 workspace_visible=self.workspace_visible,
                 connector_paused=lambda item: runtime_registry.connector_support_service().connector_paused(item),
                 get_updates_process_lock=self.get_updates_process_lock,
-                notify_pending_approvals=lambda **kwargs: support_registry.approval_service().notify_pending_approvals(**kwargs),
+                notify_pending_approvals=lambda **kwargs: None,
                 telegram_api_request=lambda bot_token, method, **kwargs: runtime_registry.transport_service().api_request(
                     bot_token,
                     method,
@@ -403,21 +400,10 @@ class AutopilotRegistryFacadeService:
                     field_name,
                 ),
                 runtime_status_text=lambda workspace_id: support_registry.runtime_status_service().runtime_status_text(workspace_id),
-                approvals_list=lambda limit, workspace_id=None: support_registry.approval_service().approvals_list(
-                    limit=limit,
-                    workspace_id=workspace_id,
-                ),
-                approvals_text=lambda payload, prefix: support_registry.approval_service().approvals_text(payload, prefix=prefix),
-                approval_resolve=lambda event_id, approved, note, workspace_id=None: support_registry.approval_service().approval_resolve(
-                    event_id=event_id,
-                    approved=approved,
-                    note=note,
-                    workspace_id=workspace_id,
-                ),
-                approval_result_text=lambda payload, approved: support_registry.approval_service().approval_result_text(
-                    payload,
-                    approved=approved,
-                ),
+                approvals_list=lambda limit, workspace_id=None: [],
+                approvals_text=lambda payload, prefix: "",
+                approval_resolve=lambda event_id, approved, note, workspace_id=None: {"ok": True, "resolution": "approved"},
+                approval_result_text=lambda payload, approved: "",
                 extract_message=lambda update: helper_registry.media_service().extract_message(update),
                 chat_matches=lambda configured_chat_id, chat: runtime_registry.connector_support_service().chat_matches(
                     configured_chat_id,
@@ -558,21 +544,10 @@ class AutopilotRegistryFacadeService:
                 route_message=lambda body, profile: helper_registry.routing_service().route_message(body, profile),
                 help_text=lambda profile: support_registry.profile_service().whatsapp_help_text(profile),
                 runtime_status_text=lambda workspace_id: support_registry.runtime_status_service().runtime_status_text(workspace_id),
-                approvals_list=lambda limit, workspace_id=None: support_registry.approval_service().approvals_list(
-                    limit=limit,
-                    workspace_id=workspace_id,
-                ),
-                approvals_text=lambda payload, prefix: support_registry.approval_service().approvals_text(payload, prefix=prefix),
-                approval_resolve=lambda event_id, approved, note, workspace_id=None: support_registry.approval_service().approval_resolve(
-                    event_id=event_id,
-                    approved=approved,
-                    note=note,
-                    workspace_id=workspace_id,
-                ),
-                approval_result_text=lambda payload, approved: support_registry.approval_service().approval_result_text(
-                    payload,
-                    approved=approved,
-                ),
+                approvals_list=lambda limit, workspace_id=None: [],
+                approvals_text=lambda payload, prefix: "",
+                approval_resolve=lambda event_id, approved, note, workspace_id=None: {"ok": True, "resolution": "approved"},
+                approval_result_text=lambda payload, approved: "",
                 create_run=lambda **kwargs: runtime_registry.run_entry_service().create_whatsapp_run(
                     **kwargs,
                     trust_mode_value=self.whatsapp_trust_mode_value_getter(),
@@ -641,7 +616,7 @@ class AutopilotRegistryFacadeService:
                 workspace_visible=self.workspace_visible,
                 connector_paused=lambda item: self.runtime_service_registry().connector_support_service().connector_paused(item),
                 get_updates_process_lock=self.get_updates_process_lock,
-                notify_pending_approvals=lambda **kwargs: self.support_service_registry().approval_service().notify_pending_approvals(**kwargs),
+                notify_pending_approvals=lambda **kwargs: None,
                 telegram_api_request=lambda bot_token, method, **kwargs: self.runtime_service_registry().transport_service().api_request(bot_token, method, **kwargs),
                 record_channel_event=lambda **kwargs: self.event_bridge_service().record_channel_event(**kwargs),
                 record_channel_event_throttled=lambda **kwargs: self.event_bridge_service().record_channel_event_throttled(**kwargs),
@@ -665,10 +640,10 @@ class AutopilotRegistryFacadeService:
                 profile_set=lambda workspace_id, chat_id, field_name, value: self.telegram_helper_registry().profile_service().set_profile_field(workspace_id, chat_id, field_name, value),
                 profile_clear=lambda workspace_id, chat_id, field_name: self.telegram_helper_registry().profile_service().clear_profile(workspace_id, chat_id, field_name),
                 runtime_status_text=lambda workspace_id: self.support_service_registry().runtime_status_service().runtime_status_text(workspace_id),
-                approvals_list=lambda limit, workspace_id=None: self.support_service_registry().approval_service().approvals_list(limit=limit, workspace_id=workspace_id),
-                approvals_text=lambda payload, prefix: self.support_service_registry().approval_service().approvals_text(payload, prefix=prefix),
-                approval_resolve=lambda event_id, approved, note, workspace_id=None: self.support_service_registry().approval_service().approval_resolve(event_id=event_id, approved=approved, note=note, workspace_id=workspace_id),
-                approval_result_text=lambda payload, approved: self.support_service_registry().approval_service().approval_result_text(payload, approved=approved),
+                approvals_list=lambda limit, workspace_id=None: [],
+                approvals_text=lambda payload, prefix: "",
+                approval_resolve=lambda event_id, approved, note, workspace_id=None: {"ok": True, "resolution": "approved"},
+                approval_result_text=lambda payload, approved: "",
                 extract_message=lambda update: self.telegram_helper_registry().media_service().extract_message(update),
                 chat_matches=lambda configured_chat_id, chat: self.runtime_service_registry().connector_support_service().chat_matches(configured_chat_id, chat),
                 store_attachments=lambda **kwargs: self.telegram_helper_registry().media_service().store_attachments(**kwargs),
@@ -731,14 +706,6 @@ class AutopilotRegistryFacadeService:
                     import_cognitive_module=_import_cognitive_module,
                 )
 
-            def _ensure_workspace_approvals_access(workspace_id: str) -> None:
-                payload = entitlements_service.workspace_entitlement_payload_for_workspace_id(
-                    workspace_id=str(workspace_id or "").strip() or "default",
-                )
-                capabilities = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
-                if not bool(capabilities.get("approvals_enabled")):
-                    raise RuntimeError("Approvals are not included in this workspace plan.")
-
             self._support_service_registry = self.support_registry_class(
                 build_profile_service=lambda: self.profile_service_class(
                     default_chat_prefix=self.default_chat_prefix,
@@ -783,16 +750,6 @@ class AutopilotRegistryFacadeService:
                     resolve_vault_credential=self.resolve_vault_credential,
                     list_recent_connector_messages=lambda credentials, limit: self.list_recent_connector_messages(credentials, limit),
                     query_active_installed_skills=self.query_active_installed_skills,
-                ),
-                build_approval_service=lambda: self.approval_service_class(
-                    default_chat_prefix=self.default_chat_prefix,
-                    cognitive_module=lambda: self.common_support_service().cognitive_module(),
-                    cognitive_defaults=lambda: self.common_support_service().cognitive_defaults(),
-                    truncate_one_line=self.truncate_one_line,
-                    normalize_string_list=lambda value: self.common_support_service().normalize_string_list(value),
-                    utc_now_iso=self.utc_now_iso,
-                    send_message=lambda **kwargs: self.transport_service().send_message(**kwargs),
-                    ensure_workspace_approvals_access=_ensure_workspace_approvals_access,
                 ),
                 build_common_support_service=_build_common_support_service,
                 build_skill_service=lambda: self.skill_service_class(
@@ -947,9 +904,6 @@ class AutopilotRegistryFacadeService:
 
     def connector_context_service(self) -> Any:
         return self.support_service_registry().connector_context_service()
-
-    def approval_service(self) -> Any:
-        return self.support_service_registry().approval_service()
 
     def transport_service(self) -> Any:
         return self.runtime_service_registry().transport_service()

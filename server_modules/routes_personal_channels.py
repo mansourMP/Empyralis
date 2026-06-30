@@ -228,18 +228,10 @@ def _enforce_personal_channel_approval_request(
     decision_class = str(decision.get("decision") or "").strip()
     next_action = str(decision.get("next_action") or "").strip()
     if decision_class == "block":
-        detail = str(decision.get("reason") or "rust_personal_channel_approval_request_denied").strip()
+        detail = str(decision.get("reason") or "rust_personal_channel_request_denied").strip()
         raise HTTPException(
             status_code=409,
-            detail=f"Rust gateway-service gate blocked approval_request: {detail}",
-        )
-    if decision_class != "requires_approval" or next_action != "request_gateway_owner_approval":
-        raise HTTPException(
-            status_code=423,
-            detail=(
-                "Rust gateway-service gate returned unexpected decision/next_action for approval_request: "
-                f"{decision_class or 'missing'} / {next_action or 'missing'}"
-            ),
+            detail=f"Rust gateway-service gate blocked request: {detail}",
         )
     return decision
 

@@ -12,7 +12,6 @@ from server_modules import runtime_history_service as _runtime_history_service
 from server_modules import runtime_request_service as _runtime_request_service
 from server_modules import runtime_route_request_handlers_service as _runtime_route_request_handlers_service
 from server_modules import runtime_route_run_handlers_service as _runtime_route_run_handlers_service
-from server_modules import runtime_run_approval_service as _runtime_run_approval_service
 from server_modules import runtime_run_control_service as _runtime_run_control_service
 from server_modules import runtime_run_delegation_service as _runtime_run_delegation_service
 from server_modules import runtime_run_entry_service as _runtime_run_entry_service
@@ -26,17 +25,6 @@ from server_modules import entitlements_service
 from server_modules import safe_mode_service
 from server_modules import run_state_repository
 
-
-def _run_workspace_id_for_approval(run: Any, run_record: Any) -> str:
-    payload = run if isinstance(run, dict) else run_record if isinstance(run_record, dict) else {}
-    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-    metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
-    return str(
-        payload.get("workspace_id")
-        or context.get("workspace_id")
-        or metadata.get("workspace_id")
-        or "default"
-    ).strip() or "default"
 
 
 def _run_api_scope_from_record(run: Any, run_record: Any) -> dict[str, str]:
@@ -133,62 +121,6 @@ def _run_id_from_record(run: Any, run_record: Any) -> str:
     return ""
 
 
-def _enforce_registered_run_approval_decision(
-    *,
-    operation: str,
-    approval_id: str,
-    current_user: Any,
-    payload: Any,
-    run: Any = None,
-    run_record: Any = None,
-    run_id: str = "",
-) -> dict[str, Any]:
-    scope = _run_api_scope_from_record(run, run_record)
-    payload_map = _payload_dict(payload)
-    actor_user_id = str((current_user or {}).get("user_id") or "").strip() or "user"
-    resolved_run_id = str(run_id or _run_id_from_record(run, run_record) or payload_map.get("run_id") or "").strip()
-    decision_text = str(payload_map.get("decision") or payload_map.get("resolution") or "").strip()
-    status_text = str(payload_map.get("approval_status") or payload_map.get("status") or "").strip()
-    rust_payload = {
-        "operation": operation,
-        "workspace_id": scope["workspace_id"],
-        "tenant_id": scope["tenant_id"],
-        "run_id": resolved_run_id,
-        "approval_id": str(approval_id or payload_map.get("approval_id") or payload_map.get("id") or "").strip(),
-        "actor_role": "member",
-        "actor_user_id": actor_user_id,
-        "user_id": actor_user_id,
-        "approvals_enabled": True,
-        "workspace_access_denied": False,
-        "decision": decision_text,
-        "resolution": decision_text,
-        "approval_status": status_text,
-        "status": status_text,
-    }
-    try:
-        decision = rust_runtime_kernel_client.run_runtime_kernel_enforced("run-approval-decision", rust_payload)
-    except rust_runtime_kernel_client.RustKernelDecisionError as exc:
-        raise HTTPException(status_code=409, detail=f"Rust run-approval gate blocked {operation}: {exc.reason}") from exc
-    expected_next_action = {
-        "resolve_approval": "resolve_run_approval",
-    }.get(operation)
-    next_action = str(decision.get("next_action") or "").strip()
-    if expected_next_action and next_action != expected_next_action:
-        raise HTTPException(
-            status_code=423,
-            detail=f"Rust run-approval gate returned unexpected next_action for {operation}: {next_action or 'missing'}",
-        )
-    return decision
-
-
-def _ensure_workspace_approvals_access(workspace_id: str) -> None:
-    payload = entitlements_service.workspace_entitlement_payload_for_workspace_id(
-        workspace_id=str(workspace_id or "default").strip() or "default",
-    )
-    capabilities = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
-    if not bool(capabilities.get("approvals_enabled")):
-        raise HTTPException(status_code=403, detail="Approvals are not included in this workspace plan.")
-
 
 def register_runtime_run_routes(
     app,
@@ -210,7 +142,6 @@ def register_runtime_run_routes(
     run_auto_delegation_request_class: Any,
     run_delegation_retry_request_class: Any,
     decision_payload_class: Any,
-    approval_resolve_payload_class: Any,
     workspace_memory_snapshot,
     delete_memory,
     read_workspace_context_files,
@@ -236,8 +167,6 @@ def register_runtime_run_routes(
     usage_snapshots_for_user_fn,
     aggregate_usage_summary_fn,
     list_usage_runs_fn,
-    submit_run_decision_callbacks,
-    resolve_run_approval_callbacks,
     resume_waiting_run_callbacks,
     pause_run_callbacks,
     enforce_run_owner_access,
@@ -251,7 +180,6 @@ def register_runtime_run_routes(
     runtime_run_query_service=_runtime_run_query_service,
     runtime_run_entry_service=_runtime_run_entry_service,
     runtime_run_replay_service=_runtime_run_replay_service,
-    runtime_run_approval_service=_runtime_run_approval_service,
     runtime_run_control_service=_runtime_run_control_service,
     runtime_history_service=_runtime_history_service,
     runtime_usage_service=_runtime_usage_service,
@@ -721,165 +649,8 @@ def register_runtime_run_routes(
             iter_logs_for_run=iter_logs_for_run,
         )
 
-    @app.post("/runs/{run_id}/decision", dependencies=[depends(member_dependency)])
-    async def submit_run_decision(
-        run_id: uuid.UUID,
-        payload: decision_payload_class,
-        current_user=depends(member_dependency),
-    ):
-        refresh_server_exports()
-        run_payload = runs.get(str(run_id))
-        run_record = run_state_repository.sync_get_live_run(str(run_id))
-        _ensure_workspace_approvals_access(_run_workspace_id_for_approval(run_payload, run_record))
-        _enforce_registered_run_api_decision(
-            operation="approve_run",
-            run_id=str(run_id),
-            current_user=current_user,
-            run=run_payload,
-            run_record=run_record,
-            user_role="admin",
-            body={"approval_payload_present": True},
-        )
-        return runtime_route_run_handlers_service.submit_run_decision_route_response(
-            run_id,
-            payload=payload,
-            current_user=current_user,
-            submit_run_decision_fn=runtime_run_approval_service.submit_run_decision,
-            run=run_payload,
-            run_record=run_record,
-            callbacks=submit_run_decision_callbacks,
-        )
 
-    @app.post("/runs/{run_id}/approvals/{approval_id}/resolve", dependencies=[depends(member_dependency)])
-    async def resolve_run_approval(
-        run_id: uuid.UUID,
-        approval_id: str,
-        payload: approval_resolve_payload_class,
-        current_user=depends(member_dependency),
-    ):
-        refresh_server_exports()
-        run_payload = runs.get(str(run_id))
-        run_record = run_state_repository.sync_get_live_run(str(run_id))
-        _ensure_workspace_approvals_access(_run_workspace_id_for_approval(run_payload, run_record))
-        _enforce_registered_run_api_decision(
-            operation="approve_run",
-            run_id=str(run_id),
-            current_user=current_user,
-            run=run_payload,
-            run_record=run_record,
-            user_role="admin",
-            body={"approval_payload_present": True, "approval_id": str(approval_id or "").strip()},
-        )
-        _enforce_registered_run_approval_decision(
-            operation="resolve_approval",
-            approval_id=approval_id,
-            current_user=current_user,
-            payload=payload,
-            run=run_payload,
-            run_record=run_record,
-            run_id=str(run_id),
-        )
-        return runtime_route_run_handlers_service.resolve_run_approval_route_response(
-            run_id,
-            approval_id,
-            payload=payload,
-            current_user=current_user,
-            resolve_run_approval_fn=runtime_run_approval_service.resolve_run_approval,
-            run=run_payload,
-            run_record=run_record,
-            callbacks=resolve_run_approval_callbacks,
-        )
 
-    @app.post("/approvals/{approval_id}/resolve", dependencies=[depends(member_dependency)])
-    async def resolve_standalone_approval(
-        approval_id: str,
-        request: Request,
-        current_user=depends(member_dependency),
-    ):
-        refresh_server_exports()
-        payload = await runtime_request_service.read_json_object_payload(
-            request,
-            invalid_detail="Approval resolution body must be an object.",
-        )
-        from server_modules import hardware_action_broker_service, outbox_service, run_state_repository
-
-        query_params = getattr(request, "query_params", {})
-        workspace_id = str(
-            query_params.get("workspace_id") if hasattr(query_params, "get") else ""
-        ).strip() or None
-        hardware_approval = await hardware_action_broker_service.get_runtime_hardware_approval(
-            approval_id,
-            workspace_id=workspace_id,
-        )
-        if isinstance(hardware_approval, dict):
-            _ensure_workspace_approvals_access(str(hardware_approval.get("workspace_id") or workspace_id or "default"))
-            _enforce_registered_run_approval_decision(
-                operation="resolve_approval",
-                approval_id=approval_id,
-                current_user=current_user,
-                payload=payload,
-                run=hardware_approval,
-                run_record=hardware_approval,
-            )
-            decision = str(payload.get("decision") or payload.get("resolution") or "").strip().lower()
-            approved = decision in {"proceed", "approve", "approved", "yes", "y", "continue", "ok"}
-            result = await hardware_action_broker_service.resolve_runtime_hardware_approval(
-                approval_id,
-                decision="approved" if approved else "rejected",
-                actor=str((current_user or {}).get("user_id") or "user").strip() or "user",
-                note=str(payload.get("note") or payload.get("reason") or "").strip(),
-                workspace_id=workspace_id,
-                approval_scope=str(payload.get("approval_scope") or "").strip() or None,
-            )
-            status = str(result.get("status") or "").strip().lower()
-            resolution = "approved" if status in {"approved", "executed", "completed", "running"} else "rejected"
-            return {
-                "ok": True,
-                "source": "hardware_runtime",
-                "approval_id": approval_id,
-                "run_id": str(hardware_approval.get("run_id") or "").strip() or None,
-                "status": resolution,
-                "resolution": resolution,
-                "decision_kind": resolution,
-                "actor": str((current_user or {}).get("user_id") or "user").strip() or "user",
-                "runtime_session": result.get("runtime_session"),
-                "hardware_result": result,
-            }
-        matched_run = run_state_repository.sync_find_live_run_by_approval_id(approval_id)
-        if isinstance(matched_run, dict):
-            _ensure_workspace_approvals_access(_run_workspace_id_for_approval(matched_run, matched_run))
-            _enforce_registered_run_approval_decision(
-                operation="resolve_approval",
-                approval_id=approval_id,
-                current_user=current_user,
-                payload=payload,
-                run=matched_run,
-                run_record=matched_run,
-            )
-        else:
-            approval_record = run_state_repository.sync_get_approval_record(approval_id)
-            if isinstance(approval_record, dict):
-                _ensure_workspace_approvals_access(str(approval_record.get("workspace_id") or "default"))
-                _enforce_registered_run_approval_decision(
-                    operation="resolve_approval",
-                    approval_id=approval_id,
-                    current_user=current_user,
-                    payload=payload,
-                    run=approval_record,
-                    run_record=approval_record,
-                )
-
-        return runtime_run_approval_service.resolve_standalone_approval(
-            approval_id,
-            payload=payload,
-            current_user=current_user,
-            runs=runs,
-            resolve_run_approval_fn=runtime_run_approval_service.resolve_run_approval,
-            resolve_run_approval_callbacks=resolve_run_approval_callbacks,
-            record_approval_resolution_fn=run_state_repository.sync_record_approval_resolution,
-            emit_approval_resolved_event_fn=outbox_service.emit_approval_resolved_event,
-            resume_run_after_persist_fn=resolve_run_approval_callbacks.get("schedule_restored_run_resume"),
-        )
 
     @app.post("/runs/{run_id}/resume", dependencies=[depends(member_dependency)])
     async def resume_run(run_id: uuid.UUID, current_user=depends(member_dependency)):

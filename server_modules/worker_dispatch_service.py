@@ -442,15 +442,13 @@ def complete_local_run(
                 continue
             tool_id = str(action.get("tool") or action.get("action") or "local_worker").strip() or "local_worker"
             status_token = str(action.get("status") or "completed").strip().lower() or "completed"
-            if status_token not in {"completed", "failed", "blocked", "approval_required"}:
+            if status_token not in {"completed", "failed", "blocked"}:
                 status_token = "completed"
             record_fn = (
                 agent_action_metering_service.record_failed_sync
                 if status_token == "failed"
                 else agent_action_metering_service.record_blocked_sync
                 if status_token == "blocked"
-                else agent_action_metering_service.record_approval_required_sync
-                if status_token == "approval_required"
                 else agent_action_metering_service.record_completed_sync
             )
             record_fn(

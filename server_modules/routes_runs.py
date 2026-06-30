@@ -116,12 +116,7 @@ async def cleanup_local_run_queue(body: LocalQueueCleanupRequest, current_user=D
         reason=body.reason,
     )
 
-router.add_api_route("/cognitive/approvals", history.list_cognitive_approvals, methods=['GET'], dependencies=[Depends(require_api_key)])
-router.add_api_route("/cognitive/approvals/{event_id}/resolve", history.resolve_cognitive_approval, methods=['POST'], dependencies=[Depends(require_api_key)])
-router.add_api_route("/approvals/audit", history.get_approval_audit, methods=['GET'], dependencies=[Depends(require_api_key)])
-router.add_api_route("/approvals", history.list_pending_approvals, methods=['GET'], dependencies=[Depends(require_api_key)])
-router.add_api_route("/approvals/{approval_id}/resolve", history.resolve_approval, methods=['POST'], dependencies=[Depends(require_api_key)])
-router.add_api_route("/audit", history.get_audit, methods=['GET'], dependencies=[Depends(require_api_key)])
+# Phase 3: Approval API routes removed — agent acts on its own reasoning
 router.add_api_route("/schedules", list_schedules, methods=['GET'])
 router.add_api_route("/schedules", create_schedule, methods=['POST'])
 router.add_api_route("/schedules/{schedule_id}", update_schedule, methods=['PATCH'])

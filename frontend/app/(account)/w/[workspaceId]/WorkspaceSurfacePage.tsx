@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 
 import { useWorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
 import { WorkstationActivityPane } from '@/lib/workspace/workstation-activity-pane';
-import { WorkstationApprovalsPane } from '@/lib/workspace/workstation-approvals-pane';
 import { WorkstationArtifactsPane } from '@/lib/workspace/workstation-artifacts-pane';
 import { WorkstationChatPane } from '@/lib/workspace/workstation-chat-pane';
 import { WorkstationDeployedAgentsPane } from '@/lib/workspace/workstation-deployed-agents-pane';
@@ -41,10 +40,6 @@ const WORKSPACE_SURFACE_RENDERERS: Record<WorkspaceRouteId, SurfaceRouteRenderer
   memory: {
     destinationId: 'sage',
     render: () => <WorkstationActivityPane />,
-  },
-  approvals: {
-    destinationId: 'sage',
-    render: () => <WorkstationApprovalsPane />,
   },
   artifacts: {
     destinationId: 'sage',
@@ -101,10 +96,6 @@ const WORKSPACE_SURFACE_RENDERERS: Record<WorkspaceRouteId, SurfaceRouteRenderer
   hardware: {
     destinationId: 'hardware',
     render: () => <WorkstationHardwarePane />,
-  },
-  gatewayApprovals: {
-    destinationId: 'gateway',
-    render: () => <WorkstationGatewayOperatorPane initialSection="approvals" />,
   },
   gatewayActivity: {
     destinationId: 'gateway',

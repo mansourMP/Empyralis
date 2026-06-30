@@ -541,7 +541,7 @@ def hosted_sage_ai_access_state(
             "total_available_credits": int(round(total_available_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
             **credit_fields,
             "reason": "owner_approval_required",
-            "message": "Hosted Sage AI needs owner approval before this workspace can use it.",
+            "message": "Hosted Sage AI is not enabled for this workspace. Connect your own provider key or switch to a local runtime.",
         }
     if total_available_usd <= 0:
         credit_balance_credits = int(round(credit_balance_usd * HOSTED_SAGE_AI_CREDITS_PER_USD))

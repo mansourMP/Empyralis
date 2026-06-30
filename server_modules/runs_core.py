@@ -17,11 +17,15 @@ from server_modules.turn_runtime import (
     build_execute_unowned_system_run_start_request_via_turn_runtime,
     execute_built_unowned_system_run_start_request_via_turn_runtime,
 )
-from server_modules.runs_history import (
-    _append_approval_audit,
-    _approval_correlation_id,
-    _load_approval_audit,
-)
+# Phase 3 stubs: approval system removed — these were imported from runs_history
+def _approval_correlation_id(approval_id: str, run_id: str | None = None, event_id: str | None = None) -> str:
+    return f"corr-{approval_id or run_id or event_id or 'unknown'}"
+
+def _append_approval_audit(**kwargs: Any) -> None:
+    pass  # Phase 3: approval audit is removed
+
+def _load_approval_audit() -> None:
+    pass  # Phase 3: approval audit is removed
 from server_modules.runs_output import (
     _archive_run_if_terminal,
     _json_safe,

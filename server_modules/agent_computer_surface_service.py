@@ -9,7 +9,7 @@ AGENT_COMPUTER_RUNNING_LABEL = "Running on your Mac"
 AGENT_COMPUTER_DONE_LABEL = "Done"
 AGENT_COMPUTER_REQUIRED_LABEL = "Needs Agent Computer"
 AGENT_COMPUTER_OFFLINE_LABEL = "Agent Computer offline"
-AGENT_COMPUTER_APPROVAL_LABEL = "Sage needs your approval"
+AGENT_COMPUTER_APPROVAL_LABEL = "Sage needs confirmation"
 
 _CONNECTING_STATES = {"queued", "connecting", "starting", "started", "pending"}
 _RUNNING_STATES = {"running"}

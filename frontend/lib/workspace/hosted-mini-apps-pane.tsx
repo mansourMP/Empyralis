@@ -260,7 +260,7 @@ function publicationStatusText(item: AppCard): string {
     return 'Published to Discovery';
   }
   if (status === 'publish_requested') {
-    return 'Awaiting owner approval';
+    return 'Awaiting owner review';
   }
   if (status === 'draft') {
     return 'Draft blueprint';

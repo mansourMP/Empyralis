@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from server_modules import entitlements_service, runs_history, runtime_run_approval_service
+from server_modules import entitlements_service, runs_history
 import server_modules.auth as auth_module
 import server_modules.channel_pairing_service as channel_pairing_service_module
 import server_modules.control_plane_repository as control_plane_repository_module
@@ -215,99 +215,3 @@ def test_phase80_paid_mobile_and_free_channel_boundaries():
     assert paid_flags["artifacts_enabled"] is True
 
 
-def test_phase80_workspace_pending_approval_is_visible_and_resolvable():
-    current_user = {
-        "auth_type": "bearer",
-        "user_id": "user-1",
-        "email": "user-1@example.com",
-        "workspace_access": {
-            "ws-paid": {
-                "workspace_id": "ws-paid",
-                "tenant_id": "tenant-1",
-                "role": "owner",
-                "tenant_role": "owner",
-            }
-        },
-    }
-    live_run = {
-        "run_id": "run-1",
-        "status": "waiting_for_input",
-        "context": {
-            "workspace_id": "ws-paid",
-            "tenant_id": "tenant-1",
-            "metadata": {
-                "owner_user_id": "user-1",
-                "owner_email": "user-1@example.com",
-                "trace_id": "trace-phase80",
-            },
-        },
-        "pending_approval": {
-            "approval_id": "approval-1",
-            "prompt": "Approve sending the update",
-            "status": "pending",
-            "scope": "once",
-            "metadata": {
-                "approval_labels": ["email"],
-                "approval_capabilities": ["send"],
-            },
-        },
-        "pending_confirmation": {
-            "approval_id": "approval-1",
-            "correlation_id": "corr-phase80",
-        },
-        "logs": object(),
-        "input_queue": queue.Queue(),
-    }
-
-    with patch.object(
-        runs_history,
-        "_workspace_entitlement_payload",
-        return_value={"capabilities": {"approvals_enabled": True}},
-    ), patch.object(
-        runs_history.run_state_repository,
-        "sync_list_live_runs",
-        return_value=[live_run],
-    ):
-        pending = asyncio.run(
-            runs_history.list_pending_approvals(
-                workspace_id="default",
-                current_user=current_user,
-            )
-        )
-
-    assert pending["count"] == 1
-    assert pending["items"][0]["approval_id"] == "approval-1"
-    assert pending["items"][0]["run_id"] == "run-1"
-
-    with patch.object(
-        runtime_run_approval_service.run_state_repository,
-        "sync_find_live_run_by_approval_id",
-        return_value={"run_id": "run-1", **live_run},
-    ):
-        resolved = runtime_run_approval_service.resolve_standalone_approval(
-            "approval-1",
-            payload={"approval_id": "approval-1", "resolution": "approved", "actor": "user-1", "reason": "ok"},
-            current_user=current_user,
-            runs={"run-1": live_run},
-            resolve_run_approval_fn=lambda run_id, approval_id, **kwargs: {
-                "status": "ok",
-                "run_id": run_id,
-                "approval_id": approval_id,
-            },
-            resolve_run_approval_callbacks={},
-            record_approval_resolution_fn=lambda *args: None,
-            emit_approval_resolved_event_fn=lambda **kwargs: type(
-                "Event",
-                (),
-                {
-                    "event_id": "evt-phase80",
-                    "event_type": "approval_resolved",
-                    "trace_id": "trace-phase80",
-                    "payload": kwargs,
-                },
-            )(),
-        )
-
-    assert resolved["run_id"] == "run-1"
-    assert resolved["approval_id"] == "approval-1"
-    assert resolved["resolution"] == "approved"

@@ -200,7 +200,7 @@ def get_pilot_operations_contract() -> Dict[str, Any]:
         "acceptance_criteria": [
             "10-20 known users can participate without public signup.",
             "One WhatsApp/Telegram workflow completes end to end.",
-            "Risky actions require approval or are blocked.",
+            "Risky actions are blocked in the current safety mode.",
             "Owner/admin can find trace_id and audit events for every failure.",
             "Daily report shows metrics, failures, blocked actions, risky events, and feedback.",
         ],

@@ -198,13 +198,7 @@ def _enforce_runtime_state_store_decision(
 ) -> Dict[str, Any]:
     payload_text = _json_payload(payload or {})
     if state_class is None:
-        if operation in {
-            "create_or_update_approval_request",
-            "resolve_approval_if_pending",
-            "record_approval_resolution",
-        }:
-            state_class = "run_approvals"
-        elif operation == "archive_run":
+        if operation == "archive_run":
             state_class = "run_archive"
         elif operation == "upsert_runtime_registration":
             state_class = "runtime_registrations"

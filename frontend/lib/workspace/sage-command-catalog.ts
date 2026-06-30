@@ -113,14 +113,6 @@ export const SAGE_WORKSPACE_COMMAND_CATALOG: readonly SageWorkspaceCommandMetada
     keywords: ['context', 'facts', 'profile', 'knowledge', 'preference'],
   },
   {
-    id: 'approvals',
-    title: 'Approvals',
-    description: 'Open pending approval requests awaiting user confirmation.',
-    routeId: 'approvals',
-    icon: CircleAlert,
-    keywords: ['review', 'approve', 'pending', 'guarded action', 'ok'],
-  },
-  {
     id: 'integrations',
     title: 'Connectors',
     description: 'Open Sage channels, apps, skills, plugins, and AI accounts.',

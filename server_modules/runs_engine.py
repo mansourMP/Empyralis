@@ -2,7 +2,12 @@ from server_modules import runtime_config as config
 from server_modules import run_service
 from server_modules import shared as shared
 from server_modules import runtime_common as common
-from server_modules.runs_history import _append_approval_audit, _approval_correlation_id
+# Phase 3 stubs: approval system removed — these were from runs_history
+def _approval_correlation_id(approval_id: str, run_id: str | None = None, event_id: str | None = None) -> str:
+    return f"corr-{approval_id or run_id or event_id or 'unknown'}"
+
+def _append_approval_audit(**kwargs: Any) -> None:
+    pass
 from server_modules.runs_output import _compact_event_text, _json_safe
 
 globals().update({key: value for key, value in vars(config).items() if not key.startswith("__")})
@@ -19,7 +24,7 @@ configure_runtime_model_context(
 )
 
 RUN_TOOL_LOOP_REPEAT_LIMIT = 3
-RUN_TOOL_LOOP_REPLY = "I appear to be stuck in a loop. Please clarify what you want me to do."
+RUN_TOOL_LOOP_REPLY = "A tool loop was detected. Please rephrase the request or break it into smaller steps."
 _RUN_TOOL_LOOP_STATE: Dict[str, Dict[str, Any]] = {}
 
 

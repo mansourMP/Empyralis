@@ -115,7 +115,7 @@ export function LandingClient({
             </div>
             <div>
               <dt>Controls</dt>
-              <dd>Approvals, policies, and audit</dd>
+              <dd>Security policies and audit</dd>
             </div>
             <div>
               <dt>External boundary</dt>

@@ -356,7 +356,6 @@ from server_modules.runtime_models import (
     ToolPolicyEvaluateRequest,
     RuntimeSkillsStateUpsertRequest,
     ProviderProfileUpsertRequest,
-    ApprovalResolvePayload,
     CredentialUpsertRequest,
     CredentialTestRequest,
     ConnectorUpsertRequest,
@@ -517,8 +516,6 @@ ORION_CHANNEL_DEAD_LETTER_FILE = _resolve_state_file(
     "channels/dead_letters.json",
 )
 ORION_CHANNEL_DEAD_LETTER_LIMIT = config_int("ORION_CHANNEL_DEAD_LETTER_LIMIT", 500)
-ORION_APPROVAL_AUDIT_FILE = _resolve_state_file("ORION_APPROVAL_AUDIT_FILE", "approvals/audit.json")
-ORION_APPROVAL_AUDIT_LIMIT = config_int("ORION_APPROVAL_AUDIT_LIMIT", 2000)
 ORION_SCHEDULES_FILE = _resolve_state_file("ORION_SCHEDULES_FILE", "automations/weekly_schedules.json")
 ORION_WEBHOOK_TRIGGERS_FILE = _resolve_state_file("ORION_WEBHOOK_TRIGGERS_FILE", "automations/webhooks.json")
 ORION_SETUP_SESSIONS_FILE = _resolve_state_file("ORION_SETUP_SESSIONS_FILE", "setup/sessions.json")
@@ -555,7 +552,6 @@ ORION_LOCAL_LEASE_SECONDS = config_int("ORION_LOCAL_LEASE_SECONDS", 120)
 # treat SQLite or JSON side stores as peer authorities.
 RUNTIME_STATE_AUTHORITIES: Dict[str, str] = {
     "live_runs": "postgres",
-    "run_approvals": "postgres",
     "runtime_outbox": "postgres",
     "local_queue_claims": "postgres",
     "server_runtime_sessions": "postgres",
@@ -570,7 +566,6 @@ RUNTIME_STATE_JSON_SIDE_STORES: Dict[str, str] = {
     "ORION_HISTORY_FILE": "legacy_json_mirror",
     "ORION_CHANNEL_EVENTS_FILE": "legacy_json_mirror",
     "ORION_CHANNEL_DEAD_LETTER_FILE": "legacy_json_mirror",
-    "ORION_APPROVAL_AUDIT_FILE": "legacy_json_mirror",
     "ORION_SCHEDULES_FILE": "config_state",
     "ORION_WEBHOOK_TRIGGERS_FILE": "config_state",
     "ORION_SETUP_SESSIONS_FILE": "config_state",
@@ -678,8 +673,8 @@ def _resolve_agent_machine_mode(raw_mode: Any) -> str:
         return "personal"
     if mode == "agent" and _resolved_environment() in {"staging", "production", "prod"}:
         raise RuntimeError(
-            "AGENT_MACHINE_MODE=agent is not allowed in staging/production because it bypasses "
-            "owner approval gates. Use AGENT_MACHINE_MODE=personal and explicit approvals."
+            "AGENT_MACHINE_MODE=agent is not allowed in staging/production. "
+            "Use AGENT_MACHINE_MODE=personal."
         )
     return mode
 

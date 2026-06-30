@@ -1880,7 +1880,6 @@ def decide_runtime_action_execution(
     action_type = str(clean_classification.get("action_type") or ACTION_TYPE_REVERSIBLE_WRITE).strip().lower()
     external_visibility = bool(clean_classification.get("external_visibility"))
     destructive_risk = bool(clean_classification.get("destructive_risk"))
-    requires_contract_approval = bool(clean_classification.get("requires_contract_approval"))
     allowed_classes = set(elevated.get("allowed_action_classes") or [])
     denied_classes = set(elevated.get("denied_action_classes") or [])
     runtime_trust_zone = str(elevated.get("runtime_trust_zone") or RUNTIME_TRUST_ZONE_SHARED_CLOUD)
@@ -1897,14 +1896,6 @@ def decide_runtime_action_execution(
         return {
             "execution_decision": "require_confirmation",
             "reason": f"Elevated access excludes {action_type} actions.",
-            "runtime_trust_zone": elevated.get("runtime_trust_zone"),
-            "elevated": elevated,
-        }
-
-    if requires_contract_approval:
-        return {
-            "execution_decision": "require_confirmation",
-            "reason": "Capability contract requires approval before execution.",
             "runtime_trust_zone": elevated.get("runtime_trust_zone"),
             "elevated": elevated,
         }
@@ -1968,7 +1959,7 @@ def decide_runtime_action_execution(
         }
     return {
         "execution_decision": "require_confirmation",
-        "reason": "This action requires approval in default mode.",
+        "reason": "This action requires confirmation in default mode.",
         "runtime_trust_zone": runtime_trust_zone,
         "elevated": elevated,
     }
@@ -1987,13 +1978,13 @@ def plan_requires_human_approval(
     destructive_matches = sorted({kw for kw in PLAN_DESTRUCTIVE_ACTION_KEYWORDS if kw in raw})
 
     if normalized_trust_mode == TRUST_MODE_STRICT and elevated.get("mode") != ELEVATED_MODE_FULL:
-        return True, "Strict mode requires explicit approval before execution."
+        return True, "Strict mode requires explicit confirmation before execution."
 
     if elevated.get("mode") == ELEVATED_MODE_FULL and bool(elevated.get("active")):
         if destructive_matches:
-            return True, f"Elevated mode still requires approval for destructive actions ({', '.join(destructive_matches[:4])})."
+            return True, f"Elevated mode blocks destructive actions ({', '.join(destructive_matches[:4])})."
         if external_matches:
-            return True, f"Elevated mode still requires approval for external actions ({', '.join(external_matches[:4])})."
+            return True, f"Elevated mode blocks external actions ({', '.join(external_matches[:4])})."
         return False, ""
 
     matched = [kw for kw in RISKY_ACTION_KEYWORDS if kw in raw]
@@ -3450,13 +3441,13 @@ def pack_approval_policy(trust_mode: str, result_data: Dict[str, Any], metadata:
 
     if elevated.get("mode") == ELEVATED_MODE_FULL and bool(elevated.get("active")):
         if outbound_actions > 0 or connector_actions > 0:
-            return True, "Elevated mode still requires approval for outbound or connector actions."
+            return True, "Elevated mode blocks outbound or connector actions."
         return False, ""
 
     if trust_mode == TRUST_MODE_AUTO:
         return False, ""
     if trust_mode == TRUST_MODE_STRICT:
-        return True, "Strict mode requires explicit approval before finalizing actions."
+        return True, "Strict mode requires explicit confirmation before finalizing actions."
     if trust_mode == TRUST_MODE_COST_GUARD:
         if outbound_actions > max_outbound_auto or urgent_count > max_urgent_auto:
             return (

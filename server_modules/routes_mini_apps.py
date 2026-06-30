@@ -1064,30 +1064,6 @@ async def request_app_publication(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/workspaces/{workspace_id}/apps/{app_id}/approve-publication")
-async def approve_app_publication(
-    workspace_id: str,
-    app_id: str,
-    body: AppPublicationDecisionRequest,
-    current_user=Depends(get_current_user),
-):
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
-    try:
-        return mini_apps_service.approve_app_publication(
-            resolved_workspace_id,
-            app_id,
-            actor_label=_current_user_creator_label(current_user),
-            actor_id=_current_user_id(current_user),
-            note=body.note,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @router.get("/workspaces/{workspace_id}/apps/{app_id}")
 async def get_app(
     workspace_id: str,

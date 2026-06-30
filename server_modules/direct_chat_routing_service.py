@@ -56,7 +56,7 @@ def preview_run_response(
             "interventions": [
                 build_intervention(
                     "workflow_offer",
-                    "Ready to turn this into a workflow",
+                    "Workflow available for this request",
                     detail="This request looks like a repeatable workflow.",
                     severity="info",
                     status="ready",
@@ -71,7 +71,7 @@ def preview_run_response(
             "interventions": [
                 build_intervention(
                     "run_offer",
-                    "Ready to run this task",
+                    "Durable run available for this request",
                     detail="This request looks like an execution task the runtime can perform directly.",
                     severity="info",
                     status="ready",

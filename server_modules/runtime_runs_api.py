@@ -80,7 +80,6 @@ from server_modules.runtime_state_store import (
 from server_modules import runtime_heartbeat_service
 from server_modules import runtime_local_execution_approval_service
 from server_modules import runtime_route_registration_service
-from server_modules import runtime_run_approval_service
 from server_modules import runtime_run_access_service
 from server_modules import runtime_run_detail_service
 from server_modules import runtime_run_query_service
@@ -1101,58 +1100,6 @@ def register_run_routes(app) -> None:
             parse_utc_ts=_late_server_export("_parse_utc_ts"),
         )
         return payload
-
-    @app.get("/approvals", dependencies=[Depends(viewer_dependency)])
-    async def list_approvals(
-        workspace_id: Optional[str] = None,
-        current_user=Depends(viewer_dependency),
-    ):
-        _refresh_server_exports()
-        allowed_workspaces = allowed_workspace_ids(current_user)
-        requested_workspace_id = (
-            enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
-            if workspace_id
-            else None
-        )
-        payload = runtime_run_approval_service.list_pending_approvals_payload(
-            workspace_id=requested_workspace_id,
-            limit=100,
-            current_user=current_user,
-            allowed_workspace_ids=allowed_workspaces,
-            enforce_workspace_access_fn=enforce_workspace_access,
-            workspace_entitlement_payload_fn=_workspace_entitlement_payload,
-            current_user_is_privileged_fn=_current_user_is_privileged,
-            extract_run_owner_user_id_fn=_extract_run_owner_user_id,
-            list_pending_approvals_fn=lambda limit: run_state_repository.sync_list_pending_approvals_page(
-                limit=limit,
-                offset=0,
-                workspace_id=requested_workspace_id,
-            ),
-        )
-        items = list(payload.get("items") or [])
-        return {
-            "items": items,
-            "pending": items,
-            "count": len(items),
-            "total": len(items),
-            "workspace_id": str(requested_workspace_id or "default").strip() or "default",
-        }
-
-    @app.get("/approvals/{approval_id}", dependencies=[Depends(viewer_dependency)])
-    async def get_approval_detail(
-        approval_id: str,
-        current_user=Depends(viewer_dependency),
-    ):
-        _refresh_server_exports()
-        return runtime_run_approval_service.build_approval_detail_response(
-            approval_id,
-            current_user=current_user,
-            enforce_workspace_access_fn=enforce_workspace_access,
-            workspace_entitlement_payload_fn=_workspace_entitlement_payload,
-            current_user_is_privileged_fn=_current_user_is_privileged,
-            find_run_snapshot_for_approval_fn=run_state_repository.sync_find_run_snapshot_for_approval_id,
-            enforce_run_owner_access_fn=_enforce_run_owner_access,
-        )
 
     @app.post("/sessions", dependencies=[Depends(member_dependency)], response_model=ApiSessionResponse)
     async def create_runtime_session(

@@ -31,14 +31,7 @@ export type CanonicalRunSummary = Record<string, unknown> & {
   created_at?: string | null;
 };
 
-export type CanonicalApprovalSummary = Record<string, unknown> & {
-  approval_id?: string | null;
-  id?: string | null;
-  status?: string | null;
-  prompt?: string | null;
-};
-
-type LiveTraceTransport = 'external' | 'trace-stream';
+export type LiveTraceTransport = 'external' | 'trace-stream';
 
 export type LiveTraceState = {
   traceId: string | null;
@@ -107,7 +100,7 @@ export type SendFailureNotice = {
   retryDraft?: string | null;
   actions?: {
     label: string;
-    target: 'gateway' | 'hardware' | 'integrations' | 'approvals';
+    target: 'gateway' | 'hardware' | 'integrations';
     url?: string;
   }[];
 };
@@ -239,19 +232,14 @@ export function useChatComposerState() {
   };
 }
 
-export function useChatRunAndApprovalState(queryClient: ChatQueryCache, runsQueryKey: string, approvalsQueryKey: string) {
+export function useChatRunState(queryClient: ChatQueryCache, runsQueryKey: string) {
   const [runs, setRuns] = useState<CanonicalRunSummary[]>(
     () => queryClient.peek<CanonicalRunSummary[]>(runsQueryKey) ?? [],
-  );
-  const [approvals, setApprovals] = useState<CanonicalApprovalSummary[]>(
-    () => queryClient.peek<CanonicalApprovalSummary[]>(approvalsQueryKey) ?? [],
   );
 
   return {
     runs,
     setRuns,
-    approvals,
-    setApprovals,
   };
 }
 
@@ -394,10 +382,8 @@ export function useChatUiPanelsState() {
   const [isRetryingSageSetup, setIsRetryingSageSetup] = useState(false);
   const [hasEnteredConversationFlow, setHasEnteredConversationFlow] = useState(false);
   const [smallModelWarningVisible, setSmallModelWarningVisible] = useState(false);
-  const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
   const [mutatingMemory, setMutatingMemory] = useState<string | null>(null);
   const [memoryFilter, setMemoryFilter] = useState<string>('all');
-  const [isApprovalsSheetOpen, setIsApprovalsSheetOpen] = useState(false);
   const [isMemorySheetOpen, setIsMemorySheetOpen] = useState(false);
 
   return {
@@ -413,14 +399,10 @@ export function useChatUiPanelsState() {
     setHasEnteredConversationFlow,
     smallModelWarningVisible,
     setSmallModelWarningVisible,
-    resolvingApprovalId,
-    setResolvingApprovalId,
     mutatingMemory,
     setMutatingMemory,
     memoryFilter,
     setMemoryFilter,
-    isApprovalsSheetOpen,
-    setIsApprovalsSheetOpen,
     isMemorySheetOpen,
     setIsMemorySheetOpen,
   };

@@ -157,35 +157,7 @@ def build_notification_from_outbox_event(event: Any) -> Optional[Dict[str, Any]]
     metadata: Dict[str, Any] = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
     browser_payload = payload.get("browser") if isinstance(payload.get("browser"), dict) else None
 
-    if event_type == "approval_requested":
-        action = "approval_requested"
-        title = "Approval required"
-        text = str(payload.get("prompt") or "").strip() or f"Approval requested for run {run_id or 'unknown'}."
-        priority = "high"
-        metadata = {
-            **metadata,
-            "status": str(metadata.get("status") or "pending").strip().lower() or "pending",
-            "approval_id": str(payload.get("approval_id") or "").strip() or None,
-            **({"browser": browser_payload} if browser_payload is not None else {}),
-        }
-    elif event_type == "approval_resolved":
-        resolution = str(payload.get("resolution") or "approved").strip().lower() or "approved"
-        action = f"approval_{resolution}"
-        title = "Approval approved" if resolution == "approved" else "Approval rejected"
-        reason = str(payload.get("reason") or "").strip()
-        text = reason or f"Approval {resolution} for run {run_id or 'unknown'}."
-        priority = "normal"
-        metadata = {
-            **metadata,
-            "activity_event_class": "approval",
-            "activity_actor_type": "system",
-            "activity_actor_id": "runtime",
-            "status": resolution,
-            "approval_id": str(payload.get("approval_id") or "").strip() or None,
-            **({"browser": browser_payload} if browser_payload is not None else {}),
-            "path": str(metadata.get("path") or "").strip() or _default_path_for_action("run_completed", run_id=run_id),
-        }
-    elif event_type == "run_transition":
+    if event_type == "run_transition":
         to_state = str(payload.get("to_state") or "").strip().lower()
         if to_state not in {"completed", "failed"}:
             return None

@@ -72,7 +72,6 @@ SHARED_STATE_BACKING: Dict[str, str] = {
 
 NON_DURABLE_SHARED_STATE: Dict[str, str] = {
     "RUN_QUEUE_INDEX": "ephemeral queue-object index rebuilt from live runs on startup",
-    "APPROVAL_AUDIT": "history mirror loaded from durable approval audit store",
     "CHANNEL_EVENTS": "runtime_events mirror loaded from durable channel event store",
     "WEEKLY_SCHEDULES": "automation mirror loaded from schedules file",
     "RUNTIME_SKILLS_STATE": "skills mirror loaded from runtime skills file",
@@ -87,8 +86,8 @@ runs = ACP_MANAGER.runs
 RUN_QUEUE_INDEX: Dict[int, str] = {}
 RUN_HISTORY_LOCK = threading.Lock()
 RUN_HISTORY = ACP_MANAGER.run_history
-APPROVAL_AUDIT_LOCK = threading.Lock()
-APPROVAL_AUDIT: List[Dict[str, Any]] = []
+APPROVAL_AUDIT_LOCK = threading.Lock()  # Phase 3 stub: approval system removed
+APPROVAL_AUDIT: List[Dict[str, Any]] = []  # Phase 3 stub: approval system removed
 CHANNEL_EVENTS_LOCK = threading.Lock()
 CHANNEL_EVENTS: List[Dict[str, Any]] = []
 SCHEDULES_LOCK = threading.Lock()

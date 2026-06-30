@@ -253,7 +253,7 @@ export function selfHostedNodeHealthLabel(node: RuntimeAttachmentSnapshot | null
     return 'Not selected';
   }
   if (!node.ownerApproved) {
-    return 'Pending owner approval';
+    return 'Pending owner review';
   }
   if (!node.online) {
     return 'Offline';

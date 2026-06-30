@@ -557,7 +557,7 @@ def record_notification_activity(*, event: Any, notification: Dict[str, Any]) ->
     actor_type = str(
         metadata.get("activity_actor_type")
         or payload.get("activity_actor_type")
-        or ("system" if event_class in {"approval", "blocked_action", "run_status", "system_activity"} else "application")
+        or ("system" if event_class in {"blocked_action", "run_status", "system_activity"} else "application")
     ).strip().lower() or "system"
     actor_id = str(
         metadata.get("activity_actor_id")

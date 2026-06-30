@@ -73,7 +73,7 @@ SAGE_OVERFLOW = PlatformEvent(
     title="Context compacted",
     detail="Context was too full and has been automatically compacted. Please resend the message.",
     channel_text="Context was too full and has been compacted. Please resend the message.",
-    severity="info",
+    severity="warning",
 )
 
 SAGE_UNAVAILABLE = PlatformEvent(
@@ -124,30 +124,6 @@ SAGE_NO_MEMORIES = PlatformEvent(
     severity="info",
 )
 
-SAGE_NO_PENDING_APPROVALS = PlatformEvent(
-    code="sage_no_pending_approvals",
-    title="No pending approvals",
-    detail="No pending approvals.",
-    channel_text="No pending approvals.",
-    severity="info",
-)
-
-SAGE_APPROVED = PlatformEvent(
-    code="sage_approved",
-    title="Approved",
-    detail="Approved.",
-    channel_text="Approved.",
-    severity="info",
-)
-
-SAGE_DENIED = PlatformEvent(
-    code="sage_denied",
-    title="Denied",
-    detail="Denied.",
-    channel_text="Denied.",
-    severity="info",
-)
-
 SAGE_HELP = PlatformEvent(
     code="sage_help",
     title="Help",
@@ -155,16 +131,12 @@ SAGE_HELP = PlatformEvent(
     "/compact — summarize and clear old context\n"
     "/new — start a new task session\n"
     "/main — return to the main Sage thread\n"
-    "/approve — approve pending action\n"
-    "/deny — deny pending action\n"
     "/memory — show stored memory\n"
     "/help — show this message",
     channel_text="Available commands:\n"
     "/compact — summarize and clear old context\n"
     "/new — start a new task session\n"
     "/main — return to the main Sage thread\n"
-    "/approve — approve pending action\n"
-    "/deny — deny pending action\n"
     "/memory — show stored memory\n"
     "/help — show this message",
     severity="info",
@@ -367,14 +339,6 @@ RUN_NO_MODEL_CONNECTION = PlatformEvent(
     severity="error",
 )
 
-RUN_APPROVAL_TIMEOUT = PlatformEvent(
-    code="run_approval_timeout",
-    title="Approval timed out",
-    detail="The approval window timed out. Please send the request again and approve it when prompted.",
-    channel_text="The approval window timed out. Please send the request again and approve it when prompted.",
-    severity="warning",
-)
-
 RUN_NEEDS_GATEWAY = PlatformEvent(
     code="run_needs_gateway",
     title="Gateway required",
@@ -386,8 +350,8 @@ RUN_NEEDS_GATEWAY = PlatformEvent(
 RUN_SAFETY_BLOCKED = PlatformEvent(
     code="run_safety_blocked",
     title="Action blocked by safety",
-    detail="That action is blocked by the current safety settings. Review approvals or trust settings and try again.",
-    channel_text="That action is blocked by the current safety settings. Review approvals or trust settings and try again.",
+    detail="That action is blocked by the current safety settings. Review trust settings and try again.",
+    channel_text="That action is blocked by the current safety settings. Review trust settings and try again.",
     severity="warning",
 )
 
@@ -430,40 +394,6 @@ AI_SCOPE_MISSING = PlatformEvent(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Deletion / ingress
-# ═══════════════════════════════════════════════════════════════════════════
-
-DELETION_RECORD_FAILED = PlatformEvent(
-    code="deletion_record_failed",
-    title="Deletion not recorded",
-    detail="The deletion request could not be recorded right now. Please try again shortly.",
-    channel_text="The deletion request could not be recorded right now. Please try again shortly.",
-    severity="error",
-)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# MCP / tools
-# ═══════════════════════════════════════════════════════════════════════════
-
-TOOL_INSTRUCTIONS_HIDDEN = PlatformEvent(
-    code="tool_instructions_hidden",
-    title="Instructions unavailable",
-    detail="Internal tool instructions could not be displayed. Please try again with Agent Computer connected.",
-    channel_text="Internal tool instructions could not be displayed. Please try again with Agent Computer connected.",
-    severity="warning",
-)
-
-TOOL_ROUTING_INFO = PlatformEvent(
-    code="tool_routing_info",
-    title="Automatic tool routing",
-    detail="Requests are automatically routed to the correct tool.",
-    channel_text="Requests are automatically routed to the correct MCP tool.",
-    severity="info",
-)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # Guaranteed fallback
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -473,51 +403,6 @@ GUARANTEED_FALLBACK = PlatformEvent(
     detail="The message was processed but no response could be produced. Please try again.",
     channel_text="The message was processed but no response could be produced. Please try again.",
     severity="warning",
-)
-
-GENERIC_CHANNEL_ERROR = PlatformEvent(
-    code="generic_channel_error",
-    title="Something went wrong",
-    detail="Something went wrong. Please try again.",
-    channel_text="Something went wrong. Please try again.",
-    severity="error",
-)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Operator / policy
-# ═══════════════════════════════════════════════════════════════════════════
-
-CLARIFYING_DETAIL_NEEDED = PlatformEvent(
-    code="clarifying_detail_needed",
-    title="Clarifying detail needed",
-    detail="One clarifying detail is needed before taking that action, to stay within the owner policy.",
-    channel_text="One clarifying detail is needed before taking that action, to stay within the owner policy.",
-    severity="info",
-)
-
-DIRECT_ANSWER_CONTEXT = PlatformEvent(
-    code="direct_answer_context",
-    title="Context-bound answer",
-    detail="Direct answers are available when the request stays inside the defined context, or a bound skill can be used when live business facts are required.",
-    channel_text="Direct answers are available within the defined context. A bound skill can provide live business facts.",
-    severity="info",
-)
-
-INVENTORY_CHECK_NEEDED = PlatformEvent(
-    code="inventory_check_needed",
-    title="Inventory check needed",
-    detail="The live inventory tool must be checked before stock or price can be confirmed.",
-    channel_text="The inventory tool must be checked before stock or price can be confirmed.",
-    severity="info",
-)
-
-OWNER_MODE_REQUIRED = PlatformEvent(
-    code="owner_mode_required",
-    title="Owner mode required",
-    detail="This request should stay in Owner Mode so the final decision follows the agent policy and approval boundary.",
-    channel_text="This request should stay in Owner Mode so the final decision follows the agent policy and approval boundary.",
-    severity="info",
 )
 
 
@@ -565,7 +450,6 @@ RUN_SUMMARY_MAP: dict[str, PlatformEvent] = {
     "ai_auth_failed": RUN_AI_AUTH_FAILED,
     "no_ai_account": RUN_NO_AI_ACCOUNT,
     "no_model_connection": RUN_NO_MODEL_CONNECTION,
-    "approval_timeout": RUN_APPROVAL_TIMEOUT,
     "needs_gateway": RUN_NEEDS_GATEWAY,
     "safety_blocked": RUN_SAFETY_BLOCKED,
     "run_failed": RUN_FAILED,

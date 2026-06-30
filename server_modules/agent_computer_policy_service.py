@@ -52,9 +52,8 @@ AUTONOMY_ALIASES = {
 }
 
 DECISION_ALLOW = "allow"
-DECISION_APPROVAL_REQUIRED = "approval_required"
 DECISION_BLOCK = "block"
-DECISIONS = {DECISION_ALLOW, DECISION_APPROVAL_REQUIRED, DECISION_BLOCK}
+DECISIONS = {DECISION_ALLOW, DECISION_BLOCK}
 
 CAPABILITY_BROWSER_READ = "browser.read"
 CAPABILITY_BROWSER_CLICK = "browser.click"
@@ -158,7 +157,6 @@ class AgentComputerPolicy:
     policy_version: int
     autonomy_mode: str
     allowed_capabilities: tuple[str, ...] = field(default_factory=tuple)
-    approval_required_capabilities: tuple[str, ...] = field(default_factory=tuple)
     blocked_capabilities: tuple[str, ...] = field(default_factory=tuple)
     domain_allowlist: tuple[str, ...] = field(default_factory=tuple)
     filesystem_scope: tuple[str, ...] = field(default_factory=tuple)
@@ -167,10 +165,10 @@ class AgentComputerPolicy:
     external_message_policy: str = "draft_only"
     credential_policy: str = "never_expose"
     screenshot_retention: str = "off"
-    cloud_storage_policy: str = "approval_required"
-    browser_access_policy: str = "approval_required"
-    app_access_policy: str = "approval_required"
-    network_policy: str = "approval_required"
+    cloud_storage_policy: str = "blocked"
+    browser_access_policy: str = "blocked"
+    app_access_policy: str = "blocked"
+    network_policy: str = "blocked"
     max_runtime_seconds: int = 0
     max_budget_cents: int = 0
     emergency_stop_enabled: bool = True
@@ -184,7 +182,6 @@ class AgentComputerPolicy:
             "policy_version": self.policy_version,
             "autonomy_mode": self.autonomy_mode,
             "allowed_capabilities": list(self.allowed_capabilities),
-            "approval_required_capabilities": list(self.approval_required_capabilities),
             "blocked_capabilities": list(self.blocked_capabilities),
             "domain_allowlist": list(self.domain_allowlist),
             "filesystem_scope": list(self.filesystem_scope),
@@ -218,10 +215,6 @@ class AgentComputerPolicyDecision:
         return self.decision == DECISION_ALLOW
 
     @property
-    def approval_required(self) -> bool:
-        return self.decision == DECISION_APPROVAL_REQUIRED
-
-    @property
     def blocked(self) -> bool:
         return self.decision == DECISION_BLOCK
 
@@ -229,7 +222,6 @@ class AgentComputerPolicyDecision:
         return {
             "decision": self.decision,
             "allowed": self.allowed,
-            "approval_required": self.approval_required,
             "blocked": self.blocked,
             "capability": self.capability,
             "reason": self.reason,
@@ -382,8 +374,7 @@ def build_default_agent_computer_policy(
         policy_version=1,
         autonomy_mode=mode,
         allowed_capabilities=tuple(sorted(allowed)),
-        approval_required_capabilities=tuple(sorted(approval - blocked - allowed)),
-        blocked_capabilities=tuple(sorted(blocked - allowed)),
+        blocked_capabilities=tuple(sorted((blocked | approval) - allowed)),
         domain_allowlist=_ordered_strings(domain_allowlist),
         filesystem_scope=_ordered_strings(filesystem_scope),
         blocked_filesystem_scope=tuple(),
@@ -396,10 +387,10 @@ def build_default_agent_computer_policy(
         ),
         external_message_policy="approved_contacts" if mode in {AUTONOMY_YOLO, AUTONOMY_TRUSTED_WORKSTATION} else "draft_only",
         screenshot_retention="session_only" if mode in {AUTONOMY_YOLO, AUTONOMY_SAFE_AUTOPILOT, AUTONOMY_TRUSTED_WORKSTATION} else "off",
-        cloud_storage_policy="allow" if mode == AUTONOMY_YOLO else "approval_required",
-        browser_access_policy="allow" if mode in {AUTONOMY_YOLO, AUTONOMY_TRUSTED_WORKSTATION} else "approval_required",
-        app_access_policy="allow" if mode in {AUTONOMY_YOLO, AUTONOMY_TRUSTED_WORKSTATION} else "approval_required",
-        network_policy="allow" if mode in {AUTONOMY_YOLO, AUTONOMY_TRUSTED_WORKSTATION} else ("allowlist" if domain_allowlist else "approval_required"),
+        cloud_storage_policy="allow" if mode == AUTONOMY_YOLO else "blocked",
+        browser_access_policy="allow" if mode in {AUTONOMY_YOLO, AUTONOMY_TRUSTED_WORKSTATION} else "blocked",
+        app_access_policy="allow" if mode in {AUTONOMY_YOLO, AUTONOMY_TRUSTED_WORKSTATION} else "blocked",
+        network_policy="allow" if mode in {AUTONOMY_YOLO, AUTONOMY_TRUSTED_WORKSTATION} else ("allowlist" if domain_allowlist else "blocked"),
         max_runtime_seconds=0,
         max_budget_cents=0,
         emergency_stop_enabled=True,
@@ -415,7 +406,6 @@ def normalize_agent_computer_policy(payload: Mapping[str, Any] | None) -> AgentC
         filesystem_scope=list(data.get("filesystem_scope") or []),
     )
     allowed = _ordered_capabilities(data.get("allowed_capabilities") or base.allowed_capabilities)
-    approval = _ordered_capabilities(data.get("approval_required_capabilities") or base.approval_required_capabilities)
     blocked = _ordered_capabilities(data.get("blocked_capabilities") or base.blocked_capabilities)
     overlap = set(allowed) & set(blocked)
     if overlap:
@@ -425,7 +415,6 @@ def normalize_agent_computer_policy(payload: Mapping[str, Any] | None) -> AgentC
         policy_version=max(int(data.get("policy_version") or base.policy_version), 1),
         autonomy_mode=base.autonomy_mode,
         allowed_capabilities=allowed,
-        approval_required_capabilities=tuple(item for item in approval if item not in set(blocked) and item not in set(allowed)),
         blocked_capabilities=blocked,
         domain_allowlist=base.domain_allowlist,
         filesystem_scope=base.filesystem_scope,
@@ -550,7 +539,7 @@ def _rust_policy_decision(value: Any) -> str:
     if token == "allow":
         return DECISION_ALLOW
     if token in {"require_approval", "approval_required"}:
-        return DECISION_APPROVAL_REQUIRED
+        return DECISION_BLOCK
     return DECISION_BLOCK
 
 
@@ -558,8 +547,8 @@ def _rust_policy_reason(value: Any, decision: str) -> str:
     token = str(value or "").strip()
     if decision == DECISION_ALLOW:
         return "policy_allowed"
-    if decision == DECISION_APPROVAL_REQUIRED:
-        return "owner_approval_required"
+    if decision == DECISION_BLOCK:
+        return "policy_blocked"
     if token == "domain_outside_policy_scope":
         return "domain_not_allowed"
     if token in {"path_outside_policy_scope", "path_blocked_by_policy_scope"}:
@@ -572,8 +561,6 @@ def _rust_policy_reason(value: Any, decision: str) -> str:
 def _expected_policy_next_action(decision: str) -> str:
     if decision == DECISION_ALLOW:
         return "allow_agent_computer_request"
-    if decision == DECISION_APPROVAL_REQUIRED:
-        return "request_agent_computer_approval"
     return ""
 
 

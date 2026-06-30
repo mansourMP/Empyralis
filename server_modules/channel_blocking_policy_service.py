@@ -71,7 +71,7 @@ def check_personal_channel_control_command(
         "command": command["command"],
         "sender_role": normalized_role or None,
         "reason": "owner_authorization_required",
-        "reply": "That control command needs owner approval in Empyralis. I did not run it.",
+        "reply": "This control command requires owner approval. The action was not executed.",
         "thread_command": thread_command.as_dict() if thread_command else None,
     }
 

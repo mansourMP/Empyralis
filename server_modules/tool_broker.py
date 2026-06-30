@@ -347,8 +347,9 @@ def _require_runtime_allowed(definition: skill_registry.SkillDefinition, runtime
 def _require_approval_if_needed(claims: Dict[str, Any], definition: skill_registry.SkillDefinition) -> None:
     if definition.requires_approval and not bool(claims.get("approval_granted")):
         raise ToolExecutionDeniedError(
-            "approval_required",
-            f"{definition.label} requires owner approval before it can execute.",
+            "elevated_action_blocked",
+            f"{definition.label} is not available in the current safety mode. "
+            "Switch to a less restrictive mode or rephrase the request.",
         )
 
 
@@ -473,7 +474,7 @@ async def execute_skill(
             action_type=definition.action_class,
             connector_id=",".join(definition.connector_scopes) or None,
             risk_level="high" if definition.requires_approval else None,
-            approval_required=definition.requires_approval,
+            elevated=definition.requires_approval,
             policy_decision="blocked",
             error_code=exc.code,
             output_summary=exc.detail,
@@ -500,7 +501,7 @@ async def execute_skill(
                 action_type=definition.action_class,
                 connector_id=",".join(definition.connector_scopes) or None,
                 risk_level="high" if definition.requires_approval else None,
-                approval_required=definition.requires_approval,
+                elevated=definition.requires_approval,
                 policy_decision="allowed",
             )
             result = await skill_registry.execute_skill(
@@ -517,7 +518,7 @@ async def execute_skill(
                 action_type=definition.action_class,
                 connector_id=",".join(definition.connector_scopes) or None,
                 risk_level="high" if definition.requires_approval else None,
-                approval_required=definition.requires_approval,
+                elevated=definition.requires_approval,
                 policy_decision="allowed",
                 output_summary=(result.get("reply") if isinstance(result, dict) else ""),
             )
@@ -528,7 +529,7 @@ async def execute_skill(
                 action_type=definition.action_class,
                 connector_id=",".join(definition.connector_scopes) or None,
                 risk_level="high" if definition.requires_approval else None,
-                approval_required=definition.requires_approval,
+                elevated=definition.requires_approval,
                 policy_decision="blocked",
                 error_code="egress_denied",
                 output_summary=error.detail,
@@ -540,7 +541,7 @@ async def execute_skill(
                 action_type=definition.action_class,
                 connector_id=",".join(definition.connector_scopes) or None,
                 risk_level="high" if definition.requires_approval else None,
-                approval_required=definition.requires_approval,
+                elevated=definition.requires_approval,
                 policy_decision="allowed",
                 error_code=type(error).__name__,
                 output_summary=str(error),
@@ -558,7 +559,7 @@ def authorize_connector_action(
     connector_scope: str,
     action_class: ToolActionClass,
     connector_class: str | None = None,
-    approval_required: bool | None = None,
+    elevated: bool | None = None,
 ) -> Dict[str, Any]:
     claims = verify_capability_token(
         capability_token,
@@ -584,10 +585,11 @@ def authorize_connector_action(
         connector_scope=_normalize_token(connector_scope),
         surface="connector",
     )
-    if bool(approval_required if approval_required is not None else normalized_action_class != "read") and not bool(claims.get("approval_granted")):
+    if bool(elevated if elevated is not None else normalized_action_class != "read") and not bool(claims.get("approval_granted")):
         raise ToolExecutionDeniedError(
-            "approval_required",
-            f"{connector_scope} connector actions require owner approval before they can execute.",
+            "elevated_action_blocked",
+            f"{connector_scope} connector actions are not available in the current safety mode. "
+            "Switch to a less restrictive mode or rephrase the request.",
         )
     return claims
 

@@ -225,7 +225,6 @@ async def execute_sage_turn(
         tool_calls=list(result.get("tool_calls", [])),
         available_tools=list(result.get("available_tools", [])),
         blocked_tools=list(result.get("blocked_tools", [])),
-        approvals_required=list(result.get("approvals_required", [])),
         memory_updates=list(result.get("memory_updates", [])),
         tool_progress_messages=list(result.get("tool_progress_messages", [])),
         trace_id=result.get("trace_id", ""),

@@ -852,8 +852,8 @@ function readAgentTemplateProofDetails(packagePayload: Record<string, unknown>):
   const runtimeTierToken = readString(runtimeTierRecommendation.tier, readString(agentTemplatePayload.runtime_tier, 'hosted_secure'));
   const runtimeTier = runtimeTierToken ? humanizeToken(runtimeTierToken) : 'Hosted secure';
   const safetyPolicy = readString(approvalPolicy.default_mode)
-    ? `${humanizeToken(readString(approvalPolicy.default_mode))} (${readStringList(approvalPolicy.owner_approval_required_for).length} owner approvals)`
-    : 'Owner approval policy defined in template';
+    ? `${humanizeToken(readString(approvalPolicy.default_mode))} (${readStringList(approvalPolicy.owner_approval_required_for).length} owner-reviewed actions)`
+    : 'Owner review policy defined in template';
   return {
     does: readString(proofContract.description, readString(packagePayload.description, 'Business behavior is defined in this template contract.')),
     channels: channels.length ? channels : readStringList(agentTemplatePayload.required_connectors),

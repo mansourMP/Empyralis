@@ -312,28 +312,6 @@ def emit_sage_turn_transparency_events(
             )
         )
 
-    # ── 6. approvals_required ───────────────────────────────────
-    approvals_required = _safe_list(sage_result.get("approvals_required"))
-    if approvals_required:
-        events.append(
-            AgentTransparencyEvent(
-                event_id=f"stevt-{uuid4().hex[:12]}",
-                trace_id=trace_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                actor_type="sage",
-                surface="chat",
-                audience=audience,
-                visibility_level=visibility_level,
-                event_type="approval_required",
-                title="Approval required",
-                summary=f"{len(approvals_required)} action(s) need approval",
-                status="running",
-                timestamp=_now(),
-                metadata={"approval_count": len(approvals_required)},
-            )
-        )
-
     # ── 7. error / llm failure ──────────────────────────────────
     sage_error = _safe_label(sage_result.get("error"))
     if sage_error:

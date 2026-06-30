@@ -88,14 +88,6 @@ class ApiRunListResponse(BaseModel):
     next_offset: Optional[int] = None
 
 
-class ApiApprovalListResponse(BaseModel):
-    items: List[Dict[str, Any]] = Field(default_factory=list)
-    pending: List[Dict[str, Any]] = Field(default_factory=list)
-    count: int = 0
-    total: int = 0
-    workspace_id: str = "default"
-
-
 class ApiNotificationItem(BaseModel):
     id: Optional[str] = None
     ts: Optional[str] = None
@@ -240,24 +232,6 @@ class ApiThreadListResponse(BaseModel):
     count: int = 0
     workspace_id: str = "default"
     tenant_id: Optional[str] = None
-
-
-class ApiApprovalResolveRequest(BaseModel):
-    approval_id: Optional[str] = None
-    resolution: Literal["approved", "rejected"]
-    actor: str = "user"
-    reason: Optional[str] = None
-    approval_scope: Optional[Literal["once", "session"]] = None
-
-
-class ApiApprovalResolveResponse(BaseModel):
-    status: str = "ok"
-    approval_id: str
-    run_id: Optional[str] = None
-    resolution: Literal["approved", "rejected"]
-    actor: str = "user"
-    reason: str = ""
-    outbox_event: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ApiMachineListResponse(BaseModel):
@@ -469,7 +443,6 @@ def normalize_agent_turn_result(
         thread_id=str(result.get("thread_id") or turn_request.thread_id or turn_request.session_id or "").strip() or None,
         session_id=str(result.get("session_id") or turn_request.session_id or "").strip() or None,
         artifacts=list(result.get("artifacts") or []),
-        approvals=list(result.get("approvals") or []),
         interventions=list(result.get("interventions") or []),
         metadata={
             **result_metadata,

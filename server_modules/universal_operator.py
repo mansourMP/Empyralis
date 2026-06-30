@@ -75,10 +75,11 @@ def _tool_broker_denial_reply(
             f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
             "but the owner has not bound that skill to this manifest yet."
         )
-    if error.code == "approval_required":
+    if error.code == "elevated_action_blocked":
         return (
             f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but the current policy requires owner approval before that capability can execute."
+            "but that capability is not available in the current safety mode. "
+            "Switch to a less restrictive mode or rephrase the request."
         )
     if error.code == "skill_disabled":
         return (
@@ -374,21 +375,21 @@ async def execute_customer_turn_in_process(
     if normalized_runtime_mode == "privileged_device" and not privileged_runtime_approved:
         steps.append({
             "label": "Privileged runtime gate",
-            "detail": "Owner approval is required before customer-visible execution can use a privileged device runtime.",
+            "detail": "Privileged device execution is not available in the current trust configuration. Switch to a less restrictive mode or connect the device explicitly.",
             "status": "error",
             "kind": "thinking",
         })
         return {
-            "status": "approval_required",
-            "reply": "This agent is configured for privileged device execution. Owner approval is required before it can run in Customer View.",
+            "status": "blocked",
+            "reply": "Privileged device execution is not available in the current trust configuration. Switch to a less restrictive mode or connect the device explicitly.",
             "artifact": None,
             "steps": steps,
             "system_prompt": system_prompt,
             "needed_skill_id": None,
             "critic": {
                 "mode": "escalate",
-                "reply": "This agent is configured for privileged device execution. Owner approval is required before it can run in Customer View.",
-                "violations": ["privileged_runtime_approval_required"],
+                "reply": "Privileged device execution is not available in the current trust configuration. Switch to a less restrictive mode or connect the device explicitly.",
+                "violations": ["privileged_runtime_configuration_required"],
             },
         }
 

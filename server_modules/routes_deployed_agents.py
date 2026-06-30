@@ -407,26 +407,6 @@ async def list_deployed_agent_business_insights(
     )
 
 
-@router.post("/deployed-agents/{deployed_agent_id}/business-insights/{insight_id}/approve")
-async def approve_deployed_agent_business_insight(
-    deployed_agent_id: str,
-    insight_id: str,
-    workspace_id: str,
-    body: DeployedAgentBusinessInsightReviewRequest,
-    request: Request,
-    current_user=Depends(get_current_user),
-):
-    auth_module.validate_csrf(request)
-    return await deployed_agent_business_insights_service.review_owner_business_insight(
-        current_user=current_user,
-        workspace_id=workspace_id,
-        deployed_agent_id=deployed_agent_id,
-        insight_id=insight_id,
-        status="approved",
-        note=body.note,
-    )
-
-
 @router.post("/deployed-agents/{deployed_agent_id}/business-insights/{insight_id}/dismiss")
 async def dismiss_deployed_agent_business_insight(
     deployed_agent_id: str,

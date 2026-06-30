@@ -12,8 +12,8 @@ from server_modules.sage_agent_runtime_contract import SAGE_MODE, SageTurnResult
 VOICE_SURFACE = "voice"
 VOICE_APPROVAL_BLOCKED_ERROR = "voice_cannot_resolve_approval"
 VOICE_APPROVAL_BLOCKED_MESSAGE = (
-    "I can take this as a voice instruction, but I cannot approve actions from voice. "
-    "Open the approval in Empyralis to approve, reject, or edit it."
+    "Voice instructions are accepted, but actions cannot be confirmed from voice. "
+    "Open the request in Empyralis to review or edit it."
 )
 
 _APPROVAL_TOKEN_PATTERN = re.compile(r"\b(?:sap|apr)_[A-Za-z0-9_-]{8,}\b")

@@ -11,8 +11,6 @@ const AGENT_COMPUTER_RUNNING_LABEL = 'Running on your Mac';
 const AGENT_COMPUTER_DONE_LABEL = 'Done';
 const AGENT_COMPUTER_REQUIRED_LABEL = 'Needs Agent Computer';
 const AGENT_COMPUTER_OFFLINE_LABEL = 'Agent Computer offline';
-const AGENT_COMPUTER_APPROVAL_LABEL = 'Sage needs your approval';
-
 function readString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }

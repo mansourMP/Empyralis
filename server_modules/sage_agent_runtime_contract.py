@@ -14,7 +14,6 @@ SAGE_RESPONSE_KEYS: tuple[str, ...] = (
     "tool_calls",
     "available_tools",
     "blocked_tools",
-    "approvals_required",
     "memory_updates",
     "proof_log",
     "proof_log_id",
@@ -49,7 +48,6 @@ class SageTurnResult:
     tool_calls: list[dict] = field(default_factory=list)
     available_tools: list[dict] = field(default_factory=list)
     blocked_tools: list[dict] = field(default_factory=list)
-    approvals_required: list[dict] = field(default_factory=list)
     memory_updates: list[dict] = field(default_factory=list)
     tool_progress_messages: list[str] = field(default_factory=list)
     proof_log: Optional[dict] = None
@@ -67,7 +65,6 @@ class SageTurnResult:
             "tool_calls": list(self.tool_calls),
             "available_tools": list(self.available_tools),
             "blocked_tools": list(self.blocked_tools),
-            "approvals_required": list(self.approvals_required),
             "memory_updates": list(self.memory_updates),
             "tool_progress_messages": list(self.tool_progress_messages),
             "proof_log": self.proof_log,

@@ -1564,8 +1564,6 @@ def approval_required_for_direct_tool(
                 and skills_service._safe_direct_shell_command(_hardware_shell_command_argument(arguments))
             ):
                 return False
-            from server_modules import gateway_approval_service
-
             return False
         return True
     if normalized_connector_id in {"file", "shell", "screenshot", "computer"}:

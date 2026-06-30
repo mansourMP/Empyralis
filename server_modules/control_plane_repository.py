@@ -12474,8 +12474,7 @@ async def list_deployed_agent_session_analytics(
                     MAX(created_at) AS last_activity_at,
                     BOOL_OR(
                         COALESCE(event_class, '') = 'blocked_action'
-                        OR COALESCE(event_class, '') = 'approval'
-                        OR COALESCE(action, '') IN ('approval_requested', 'escalate', 'escalated')
+                        OR COALESCE(action, '') IN ('escalate', 'escalated')
                         OR COALESCE(
                             NULLIF(BTRIM(payload->>'resolution'), ''),
                             NULLIF(BTRIM(metadata->>'resolution'), '')

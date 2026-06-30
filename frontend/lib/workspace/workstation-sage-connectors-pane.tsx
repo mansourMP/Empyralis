@@ -1677,7 +1677,7 @@ function describeHostedSageAi(hostedSageAi: HostedSageAiSnapshot, hostedProvider
     return `${formatCredits(hostedSageAi.monthlyCreditsRemaining)} / ${formatCredits(hostedSageAi.monthlyCreditCap)} monthly usage left · hosted model not configured`;
   }
   if (hostedSageAi.reason === 'owner_approval_required') {
-    return 'Workspace AI needs workspace owner approval before use.';
+    return 'Workspace AI is not enabled for this workspace. Connect your own provider key or switch to a local runtime.';
   }
   if (hostedSageAi.reason === 'cap_reached') {
     return "You've reached your AI limit.";

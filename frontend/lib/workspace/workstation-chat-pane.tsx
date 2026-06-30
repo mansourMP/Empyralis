@@ -29,17 +29,13 @@ import type {
   WorkstationChatArtifactReference,
   WorkstationChatMessageRecord,
 } from '@/lib/workspace/chat-message';
-import { CodexChatCell, type CodexApprovalAction } from '@/lib/workspace/codex-chat/cell-components';
+import { CodexChatCell } from '@/lib/workspace/codex-chat/cell-components';
 import type { CodexTranscriptCell, TimelineProjectionEvent } from '@/lib/workspace/codex-chat/cells';
 import {
   resolveModelContextWindow,
 } from '@/lib/workspace/model-capabilities';
 import { useWorkstationDesktopBridge } from '@/lib/workspace/workstation-desktop-bridge';
 import type { WorkspaceBootstrapRuntimeTarget } from '@/lib/workspace/workspace-bootstrap';
-import {
-  resolveWorkstationApproval,
-  subscribeWorkstationApprovalResolved,
-} from '@/lib/workspace/workstation-approval-events';
 import {
   emitWorkstationChatHistoryInvalidated,
   emitWorkstationChatThreadSelected,
@@ -70,7 +66,6 @@ import {
   type WorkspaceAiRoutePayload,
 } from '@/lib/workspace/workstation-client';
 import {
-  type CanonicalApprovalSummary,
   type CanonicalChatThreadState,
   type CanonicalRunSummary,
   type ChatAutonomyMode,
@@ -92,13 +87,12 @@ import {
   useChatMemoryEditorState,
   useChatMemoryProfileState,
   useChatProviderModelState,
-  useChatRunAndApprovalState,
+  useChatRunState,
   useChatStreamRunState,
   useChatThreadState,
   useChatUiPanelsState,
 } from '@/lib/workspace/workstation-chat-pane-hooks';
 import {
-  isApprovalsPlanError,
   loadChatMemorySnapshot,
   loadChatProfileSnapshot,
 } from '@/lib/workspace/workstation-chat-memory-loaders';
@@ -113,7 +107,6 @@ import {
   CHAT_THINKING_RECOVERY_MS,
   ACTIVE_THREAD_QUERY_KEY,
   RUNS_QUERY_KEY,
-  APPROVALS_QUERY_KEY,
   SAGE_MEMORY_QUERY_KEY,
   SAGE_PROFILE_QUERY_KEY,
   RECENT_THREADS_QUERY_KEY,
@@ -138,7 +131,6 @@ import {
   isProviderGateTranscriptCell,
   normalizeCanonicalChatThread,
   normalizeCanonicalRunItems,
-  normalizeCanonicalApprovalItems,
   normalizeProviderCatalogRecords,
   normalizeProviderProfiles,
   sortProviderProfiles,
@@ -531,10 +523,9 @@ export function WorkstationChatPane() {
   } = useChatComposerState();
   const isSendingRef = useRef(isSending);
   useEffect(() => { isSendingRef.current = isSending; }, [isSending]);
-  const { runs, setRuns, approvals, setApprovals } = useChatRunAndApprovalState(
+  const { runs, setRuns } = useChatRunState(
     services.queryClient,
     RUNS_QUERY_KEY,
-    APPROVALS_QUERY_KEY,
   );
   const {
     profileSnapshot,
@@ -609,12 +600,8 @@ export function WorkstationChatPane() {
     setHasEnteredConversationFlow,
     smallModelWarningVisible,
     setSmallModelWarningVisible,
-    resolvingApprovalId,
-    setResolvingApprovalId,
     mutatingMemory,
     setMutatingMemory,
-    isApprovalsSheetOpen,
-    setIsApprovalsSheetOpen,
     isMemorySheetOpen,
     setIsMemorySheetOpen,
   } = useChatUiPanelsState();
@@ -850,15 +837,11 @@ export function WorkstationChatPane() {
 
   const writeOverview = ({
     nextRuns,
-    nextApprovals,
   }: {
     nextRuns: CanonicalRunSummary[];
-    nextApprovals: CanonicalApprovalSummary[];
   }) => {
     services.queryClient.set(RUNS_QUERY_KEY, nextRuns);
-    services.queryClient.set(APPROVALS_QUERY_KEY, nextApprovals);
     setRuns(nextRuns);
-    setApprovals(nextApprovals);
   };
 
   const writeMemorySnapshot = (nextSnapshot: SageMemorySnapshot) => {
@@ -913,7 +896,6 @@ export function WorkstationChatPane() {
 
   const loadOverview = async () => {
     const runsFallback = services.queryClient.peek<CanonicalRunSummary[]>(RUNS_QUERY_KEY) ?? runs;
-    const approvalsFallback = services.queryClient.peek<CanonicalApprovalSummary[]>(APPROVALS_QUERY_KEY) ?? approvals;
     const recentThreadsFallback = services.queryClient.peek<RecentThreadSummary[]>(RECENT_THREADS_QUERY_KEY) ?? recentThreads;
 
     const runsRequest = services.client.listRuns({
@@ -921,17 +903,6 @@ export function WorkstationChatPane() {
     }).then(normalizeCanonicalRunItems).catch((error) => {
       if (isTransientBackgroundReadError(error)) {
         return runsFallback;
-      }
-      throw error;
-    });
-    const approvalsRequest = services.client.listApprovals({
-      limit: 24,
-    }).then(normalizeCanonicalApprovalItems).catch((error) => {
-      if (isApprovalsPlanError(error)) {
-        return [] satisfies CanonicalApprovalSummary[];
-      }
-      if (isTransientBackgroundReadError(error)) {
-        return approvalsFallback;
       }
       throw error;
     });
@@ -954,13 +925,12 @@ export function WorkstationChatPane() {
     });
 
     await withTimeout(services.queryClient.run('chat:canonical:overview', async () => {
-      const [nextRuns, nextApprovals, timelineItems, threadItems] = await Promise.all([
+      const [nextRuns, timelineItems, threadItems] = await Promise.all([
         runsRequest,
-        approvalsRequest,
         timelineRequest,
         threadListRequest,
       ]);
-      writeOverview({ nextRuns, nextApprovals });
+      writeOverview({ nextRuns });
       if (threadItems.length > 0) {
         writeRecentThreads(threadItems);
         return;
@@ -1085,82 +1055,12 @@ export function WorkstationChatPane() {
     }
   };
 
-  const handleResolveApproval = async (
-    approvalId: string,
-    resolution: 'approved' | 'rejected',
-    approvalScope: 'once' | 'session' = 'once',
-  ) => {
-    if (!approvalId || resolvingApprovalId) {
-      return;
-    }
-    setResolvingApprovalId(approvalId);
-    setStatusMessage(null);
-    try {
-      await resolveWorkstationApproval(services.client, {
-        approvalId,
-        resolution,
-        approvalScope,
-      });
-      services.streams.touchActivity();
-    } catch (error) {
-      setStatusMessage(
-        error instanceof WorkstationClientError || error instanceof Error
-          ? error.message
-          : 'Approval resolution failed.',
-      );
-    } finally {
-      setResolvingApprovalId(null);
-    }
-  };
-
-  const handleResolveCodexApproval = (approvalId: string, action: CodexApprovalAction) => {
-    void handleResolveApproval(
-      approvalId,
-      action === 'deny' ? 'rejected' : 'approved',
-      action === 'allow_session' ? 'session' : 'once',
-    );
-  };
-
   useEffect(() => () => {
     if (transcriptScrollFrameRef.current !== null) {
       window.cancelAnimationFrame(transcriptScrollFrameRef.current);
       transcriptScrollFrameRef.current = null;
     }
   }, []);
-
-  useEffect(() => {
-    if (approvals.length === 0 || resolvingApprovalId) {
-      return undefined;
-    }
-    const approval = approvals[0];
-    const approvalId = readString(approval?.approval_id || approval?.id);
-    if (!approvalId) {
-      return undefined;
-    }
-    const handleApprovalShortcut = (event: globalThis.KeyboardEvent) => {
-      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || isTextEditingTarget(event.target)) {
-        return;
-      }
-      if (event.key === '1') {
-        event.preventDefault();
-        handleResolveCodexApproval(approvalId, 'allow_once');
-        return;
-      }
-      if (event.key === '2') {
-        event.preventDefault();
-        handleResolveCodexApproval(approvalId, 'allow_session');
-        return;
-      }
-      if (event.key === '3') {
-        event.preventDefault();
-        handleResolveCodexApproval(approvalId, 'deny');
-      }
-    };
-    window.addEventListener('keydown', handleApprovalShortcut);
-    return () => {
-      window.removeEventListener('keydown', handleApprovalShortcut);
-    };
-  }, [approvals, resolvingApprovalId]);
 
   useEffect(() => {
     const handleCommandShortcut = (event: globalThis.KeyboardEvent) => {
@@ -1328,16 +1228,6 @@ export function WorkstationChatPane() {
       setThread(cachedThread);
     }
   }, [activeThreadId, services]);
-
-  useEffect(() => subscribeWorkstationApprovalResolved((detail) => {
-    void refreshCanonicalState(activeThreadId)
-      .then(() => {
-        setStatusMessage(detail.message);
-      })
-      .catch((error) => {
-        setStatusMessage(error instanceof Error ? error.message : detail.message);
-      });
-  }), [activeThreadId]);
 
   useEffect(() => {
     if (activityVersion === 0) {
@@ -1514,7 +1404,6 @@ export function WorkstationChatPane() {
   }, [isSending, legacyTraceEventsByTraceId, services.client, thread.messages]);
 
   const projectionOptions = useMemo(() => ({
-    approvals,
     threadMessages: thread.messages,
     pendingUserMessage,
     isSending,
@@ -1528,7 +1417,6 @@ export function WorkstationChatPane() {
     projectedAssistantLooksSynthetic,
     readString,
   }), [
-    approvals,
     thread.messages,
     pendingUserMessage,
     isSending,
@@ -1827,10 +1715,6 @@ export function WorkstationChatPane() {
     () => routeManifest.routeIndex.settings?.href ?? `/w/${encodeURIComponent(bootstrap.workspace.id)}/settings`,
     [bootstrap.workspace.id, routeManifest.routeIndex.settings],
   );
-  const approvalsHref = useMemo(
-    () => routeManifest.routeIndex.approvals?.href ?? `/w/${encodeURIComponent(bootstrap.workspace.id)}/approvals`,
-    [bootstrap.workspace.id, routeManifest.routeIndex.approvals],
-  );
   const hardwareHref = useMemo(
     () => routeManifest.routeIndex.hardware?.href ?? `/w/${encodeURIComponent(bootstrap.workspace.id)}/hardware`,
     [bootstrap.workspace.id, routeManifest.routeIndex.hardware],
@@ -1926,16 +1810,12 @@ export function WorkstationChatPane() {
     })),
     [selectedModelOption.reasoningLevels],
   );
-  const nextStepTitle = approvals.length > 0
-    ? 'Approval is waiting'
-    : latestRun
-      ? 'Task is in progress'
-      : 'Sage is ready for the next turn';
-  const nextStepMeta = approvals.length > 0
-    ? `${approvals.length} waiting`
-    : latestRun
-      ? readString(latestRun.status) || 'unknown'
-      : 'Idle';
+  const nextStepTitle = latestRun
+    ? 'Task is in progress'
+    : 'Sage is ready for the next turn';
+  const nextStepMeta = latestRun
+    ? readString(latestRun.status) || 'unknown'
+    : 'Idle';
   const handleSlashCommandSelect = useCallback((composerCommand: ComposerSlashCommand) => {
     const command = SAGE_COMMAND_CATALOG.find((item) => item.id === composerCommand.id) as SageCommandMetadata | undefined;
     if (!command) {
@@ -1965,15 +1845,11 @@ export function WorkstationChatPane() {
   }, [hardwareHref, integrationsHref, refreshBrowserGatewayReadiness, router, runtimeStatus.label, setDraft, setStatusMessage, settingsHref]);
   const handleWorkspaceCommandSelect = useCallback((command: SageWorkspaceCommandMetadata) => {
     setWorkspaceCommandPaletteOpen(false);
-    if (command.routeId === 'approvals') {
-      setIsApprovalsSheetOpen(true);
-      return;
-    }
     const href = routeManifest.routeIndex[command.routeId]?.href ?? null;
     if (href) {
       router.push(href);
     }
-  }, [routeManifest.routeIndex, router, setIsApprovalsSheetOpen]);
+  }, [routeManifest.routeIndex, router]);
   const memoryMeta = assistantTurnCount > 0
     ? `${assistantTurnCount} Sage repl${assistantTurnCount === 1 ? 'y' : 'ies'} retained`
     : 'The first turn will establish memory';
@@ -3093,7 +2969,6 @@ export function WorkstationChatPane() {
           threadId: nextThreadId,
         });
       }
-      const hasPendingApprovals = Array.isArray(normalizedResponse.approvals) && normalizedResponse.approvals.length > 0;
       const hasProviderFailure = Boolean(providerFailureIntervention);
       const providerGateDetected = hasProviderFailure
         || isProviderRuntimeGateMessage(readString(normalizedResponse.reply));
@@ -3110,13 +2985,9 @@ export function WorkstationChatPane() {
       setStatusMessage(
         providerGateDetected
           ? null
-          : hasPendingApprovals
-            ? responseExecutionTarget === 'local_companion'
-              ? 'Sage is waiting for approval before using Agent Computer.'
-              : 'Approval is waiting.'
-            : needsUserIntervention && !hasProviderFailure && !connectorSetupInterventionOnly
-              ? 'Sage needs your input before it can continue.'
-              : null,
+          : needsUserIntervention && !hasProviderFailure && !connectorSetupInterventionOnly
+            ? 'Sage needs your input before it can continue.'
+            : null,
       );
       setSendFailureNotice(
         providerGateDetected
@@ -3174,11 +3045,7 @@ export function WorkstationChatPane() {
           || normalizedRawMessage.includes('not available')
         );
         const localComputerNeedsAttention = isLocalCompanionGateMessage(rawMessage) || normalizedRawMessage.includes('gateway offline');
-        const approvalNeedsAttention = normalizedRawMessage.includes('requires owner approval')
-          || normalizedRawMessage.includes('approval-required')
-          || normalizedRawMessage.includes('approval required')
-          || normalizedRawMessage.includes('interactive approvals are disabled');
-        const authNeedsAttention = !approvalNeedsAttention && (normalizedError?.status === 401 || normalizedError?.status === 403);
+        const authNeedsAttention = normalizedError?.status === 401 || normalizedError?.status === 403;
         const rateLimitFailure = normalizedError?.status === 429 || /rate.?limit|capacity/i.test(normalizedRawMessage);
         const timeoutFailure = /timed out|too long to respond|request timeout/i.test(normalizedRawMessage);
         const transportFailure = /failed to fetch|could not connect|network error|transport failure|connection/i.test(normalizedRawMessage);
@@ -3190,9 +3057,7 @@ export function WorkstationChatPane() {
             ? "You've reached your AI limit. Open AI & Setup →"
             : providerNeedsAttention
             ? 'The selected AI path is not ready. Use the workspace AI route, connect your own AI account, connect Agent Computer, or choose another model in Connections.'
-            : approvalNeedsAttention
-              ? 'Sage needs approval before using that capability. Review the pending request instead of retrying blindly.'
-              : authNeedsAttention
+            : authNeedsAttention
                 ? 'Your session needs attention before Sage can continue. Refresh the page or sign in again.'
                 : rateLimitFailure
                   ? 'Sage is temporarily at capacity. Try again in a moment or switch AI model.'
@@ -3215,9 +3080,7 @@ export function WorkstationChatPane() {
             ? [{ label: 'Open AI & Setup', target: 'integrations' }]
             : localComputerNeedsAttention
               ? [{ label: 'Open Hardware', target: 'hardware' }]
-              : approvalNeedsAttention
-                ? [{ label: 'Review approvals', target: 'approvals' }]
-                : authNeedsAttention
+              : authNeedsAttention
                   ? undefined
                   : providerNotice?.actions,
           retryDraft: outboundMessage,
@@ -3666,8 +3529,6 @@ export function WorkstationChatPane() {
                 <CodexChatCell
                   key={`${cell.kind}:${cell.id}:${index}`}
                   cell={cell}
-                  resolvingApprovalId={resolvingApprovalId}
-                  onResolveApproval={handleResolveCodexApproval}
                 />
               ))}
 
@@ -3675,8 +3536,6 @@ export function WorkstationChatPane() {
                 <CodexChatCell
                   key={`pinned:${cell.kind}:${cell.id}:${index}`}
                   cell={cell}
-                  resolvingApprovalId={resolvingApprovalId}
-                  onResolveApproval={handleResolveCodexApproval}
                 />
               ))}
             </div>
@@ -3721,9 +3580,7 @@ export function WorkstationChatPane() {
                     router.push(
                       action?.target === 'gateway'
                         ? hardwareHref
-                        : action?.target === 'approvals'
-                          ? approvalsHref
-                          : integrationsHref,
+                        : integrationsHref,
                     );
                   },
                 }
@@ -3853,7 +3710,7 @@ export function WorkstationChatPane() {
               key={command.id}
               type="button"
               className="sage-workspace-command-palette__item"
-              disabled={!command.href && command.routeId !== 'approvals'}
+              disabled={!command.href}
               onClick={() => {
                 handleWorkspaceCommandSelect(command);
               }}
@@ -3865,56 +3722,6 @@ export function WorkstationChatPane() {
               <span className="sage-workspace-command-palette__hint">Open</span>
             </button>
           ))}
-        </div>
-      </CommandSheet>
-
-      <CommandSheet
-        open={isApprovalsSheetOpen}
-        title="Approvals"
-        description="Review pending requests for this conversation."
-        onClose={() => {
-          setIsApprovalsSheetOpen(false);
-        }}
-      >
-        <div className="app-stack-3">
-          {approvals.length === 0 ? (
-            <AppNotice>No pending approvals.</AppNotice>
-          ) : approvals.map((approval, index) => (
-            <section key={readString(approval.approval_id) || readString(approval.id) || `approval-${index}`} className="app-surface-notice">
-              <strong className="app-surface-title">{readString(approval.prompt) || `Approval ${index + 1}`}</strong>
-              <span className="app-surface-description">
-                {readString(approval.status) || 'pending'}
-              </span>
-              <div className="app-inline-actions">
-                <AppButton
-                  type="button"
-                  disabled={Boolean(resolvingApprovalId)}
-                  onClick={() => {
-                    void handleResolveApproval(readString(approval.approval_id || approval.id), 'approved');
-                  }}
-                >
-                  {resolvingApprovalId && resolvingApprovalId === readString(approval.approval_id || approval.id)
-                    ? 'Allowing…'
-                    : 'Allow this time'}
-                </AppButton>
-                <AppButton
-                  type="button"
-                  tone="danger"
-                  disabled={Boolean(resolvingApprovalId)}
-                  onClick={() => {
-                    void handleResolveApproval(readString(approval.approval_id || approval.id), 'rejected');
-                  }}
-                >
-                  Deny
-                </AppButton>
-              </div>
-            </section>
-          ))}
-          <div>
-            <Link href={`/w/${encodeURIComponent(bootstrap.workspace.id)}/tasks`} className="app-link-button app-link-button--primary">
-              Open Tasks
-            </Link>
-          </div>
         </div>
       </CommandSheet>
 

@@ -215,9 +215,9 @@ def emit_deployed_agent_test_turn_events(
                 surface="studio_test",
                 audience=audience,
                 visibility_level=visibility_level,
-                event_type="approval_required",
-                title="Approval required",
-                summary="This action requires owner approval",
+                event_type="safety_gate",
+                title="Safety gate",
+                summary="This action is gated by the current safety mode",
                 status="running",
                 timestamp=_now(),
             )

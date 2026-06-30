@@ -698,7 +698,7 @@ async def execute_install_agent_turn(
     if runtime_mode in {"local_secure", "privileged_device"} and str(runtime_profile.get("runtime_class") or "").strip() != "desktop_companion":
         raise HTTPException(status_code=409, detail="This specialist requires a desktop companion runtime profile.")
     if runtime_mode == "privileged_device" and not bool(normalized_policy_context.get("privileged_runtime_approved")):
-        raise HTTPException(status_code=409, detail="Privileged device execution requires explicit owner approval.")
+        raise HTTPException(status_code=409, detail="Privileged device execution is not available in the current trust configuration.")
     turn_payload = {
         "tenant_id": str(install.get("tenant_id") or "").strip(),
         "workspace_id": workspace_id,
@@ -854,33 +854,6 @@ def register_agent_registry_routes(app) -> None:
         )
         return result
 
-    @app.post("/agent-registry/self-hosted-nodes/{runtime_profile_id}/approve", dependencies=[Depends(member_dependency)])
-    async def approve_self_hosted_node(
-        runtime_profile_id: str,
-        body: SelfHostedNodeApproveRequest,
-        current_user=Depends(member_dependency),
-    ):
-        _refresh_server_exports()
-        resolved_workspace_id = enforce_workspace_access(
-            current_user,
-            _workspace_id_from_query_or_body(query_workspace_id=None, body_workspace_id=body.workspace_id),
-            minimum_role="owner",
-        )
-        tenant_id = _tenant_id_for_request(current_user, resolved_workspace_id)
-        owner_user_id = str((current_user or {}).get("user_id") or (current_user or {}).get("id") or "").strip() or "owner"
-        try:
-            record = await agent_registry_repository.approve_self_hosted_runtime_profile(
-                runtime_profile_id=runtime_profile_id,
-                tenant_id=tenant_id,
-                workspace_id=resolved_workspace_id,
-                approved_by_user_id=owner_user_id,
-            )
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-        if not isinstance(record, dict):
-            raise HTTPException(status_code=404, detail="Self-hosted node not found.")
-        return {"runtime_profile": record}
-
     @app.get("/agent-registry/mcp/servers", dependencies=[Depends(member_dependency)])
     async def list_mcp_servers(
         workspace_id: Optional[str] = None,
@@ -989,98 +962,6 @@ def register_agent_registry_routes(app) -> None:
         if not isinstance(record, dict):
             raise HTTPException(status_code=404, detail="MCP server not found after refresh.")
         return {"advanced_only": True, **record}
-
-    @app.post("/agent-registry/mcp/servers/{server_id}/tools/approve", dependencies=[Depends(member_dependency)])
-    async def approve_mcp_server_tool(
-        server_id: str,
-        body: McpToolApproveRequest,
-        current_user=Depends(member_dependency),
-    ):
-        _refresh_server_exports()
-        resolved_workspace_id = enforce_workspace_access(
-            current_user,
-            _workspace_id_from_query_or_body(query_workspace_id=None, body_workspace_id=body.workspace_id),
-            minimum_role="owner",
-        )
-        try:
-            record = mcp_registry_service.approve_mcp_tool(
-                workspace_id=resolved_workspace_id,
-                server_id=server_id,
-                tool_name=body.tool_name,
-            )
-        except Exception as error:
-            _raise_mcp_registry_error(error)
-        enriched = next(
-            (
-                item
-                for item in mcp_registry_service.list_workspace_mcp_servers(resolved_workspace_id)
-                if str(item.get("id") or "").strip() == str(record.get("id") or server_id).strip().lower()
-            ),
-            record,
-        )
-        return {"advanced_only": True, **enriched}
-
-    @app.post("/agent-registry/mcp/servers/{server_id}/tools/{tool_name}/approve", dependencies=[Depends(member_dependency)])
-    async def approve_mcp_server_tool_by_path(
-        server_id: str,
-        tool_name: str,
-        workspace_id: Optional[str] = None,
-        current_user=Depends(member_dependency),
-    ):
-        _refresh_server_exports()
-        resolved_workspace_id = enforce_workspace_access(
-            current_user,
-            _workspace_id_from_query_or_body(query_workspace_id=workspace_id),
-            minimum_role="owner",
-        )
-        try:
-            record = mcp_registry_service.approve_mcp_tool(
-                workspace_id=resolved_workspace_id,
-                server_id=server_id,
-                tool_name=tool_name,
-            )
-        except Exception as error:
-            _raise_mcp_registry_error(error)
-        enriched = next(
-            (
-                item
-                for item in mcp_registry_service.list_workspace_mcp_servers(resolved_workspace_id)
-                if str(item.get("id") or "").strip() == str(record.get("id") or server_id).strip().lower()
-            ),
-            record,
-        )
-        return {"advanced_only": True, **enriched}
-
-    @app.post("/agent-registry/mcp/servers/{server_id}/tools/{tool_name}/deny", dependencies=[Depends(member_dependency)])
-    async def deny_mcp_server_tool(
-        server_id: str,
-        tool_name: str,
-        workspace_id: Optional[str] = None,
-        current_user=Depends(member_dependency),
-    ):
-        _refresh_server_exports()
-        resolved_workspace_id = enforce_workspace_access(
-            current_user,
-            _workspace_id_from_query_or_body(query_workspace_id=workspace_id),
-            minimum_role="owner",
-        )
-        try:
-            record = mcp_registry_service.deny_mcp_tool(
-                workspace_id=resolved_workspace_id,
-                server_id=server_id,
-                tool_name=tool_name,
-            )
-        except Exception as error:
-            _raise_mcp_registry_error(error)
-        enriched = next(
-            (
-                item
-                for item in mcp_registry_service.list_workspace_mcp_servers(resolved_workspace_id)
-                if str(item.get("id") or "").strip() == str(record.get("id") or server_id).strip().lower()
-            ),
-            record,
-        )
-        return {"advanced_only": True, **enriched}
 
     @app.get("/agent-registry/mcp/servers/{server_id}/tools", dependencies=[Depends(member_dependency)])
     async def list_mcp_server_tools_route(

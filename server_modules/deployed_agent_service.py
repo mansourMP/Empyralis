@@ -10,6 +10,8 @@ import uuid
 
 from fastapi import HTTPException
 
+_logger = logging.getLogger(__name__)
+
 from server_modules import activity_ledger_service
 from server_modules import agent_specialist_repository
 from server_modules import auth as auth_module
@@ -570,8 +572,6 @@ def _deployed_agent_activity_kind(row: Dict[str, Any]) -> str:
         if any(token in action for token in {"paused", "resumed", "suspended", "killed", "archived"}):
             return "lifecycle_control"
         return "lifecycle"
-    if event_class == "approval" or "approval" in action:
-        return "approval"
     if event_class == "memory_update" or "memory" in action:
         return "memory_write"
     if "connector" in action or _normalize_text(payload.get("connector")).lower() or _normalize_text(payload.get("connector_id")).lower():
@@ -1881,9 +1881,10 @@ async def verify_deployed_agent_knowledge_retrieval(
             payer="local",
         )
     except Exception as exc:
+        _logger.warning("Knowledge retrieval index unavailable for agent %s in workspace %s: %s", deployed_agent_id, resolved_workspace_id, exc)
         retrieval = {
             "status": "index_missing",
-            "message": f"Knowledge retrieval index is unavailable: {exc}",
+            "message": "Knowledge retrieval is temporarily unavailable. Please try again.",
             "content_retrieval_available": False,
             "matched_chunks": [],
             "confidence_score": 0.0,
@@ -2760,16 +2761,8 @@ def _approval_id_from_payload(payload: Dict[str, Any]) -> Optional[str]:
 
 
 def _is_approval_activity(row: Dict[str, Any]) -> bool:
-    action = _normalize_text(row.get("action")).lower()
-    event_class = _normalize_text(row.get("event_class")).lower()
-    payload = _coerce_dict(row.get("payload"))
-    metadata = _coerce_dict(row.get("metadata"))
-    return (
-        event_class == "approval"
-        or "approval" in action
-        or _approval_id_from_payload(payload) is not None
-        or _approval_id_from_payload(metadata) is not None
-    )
+    # Phase 3: Approval system removed. No events carry event_class="approval".
+    return False
 
 
 def _is_escalation_activity(row: Dict[str, Any]) -> bool:
@@ -4013,83 +4006,9 @@ async def evaluate_deployed_shop_assistant_customer_question(
         except Exception:
             pass
 
-    # Phase 4: When approval is required, create a durable approval request and a business insight.
-    approval = _coerce_dict(result.get("approval"))
-    if bool(approval.get("required")):
-        customer_summary = _normalize_text(customer_message)[:180]
-        approval_gate = str(approval.get("gate", "unknown"))
-        channel_key = str(connector_id or "web")
-        approval_id = str(uuid.uuid4())
-        approval_created = False
-        try:
-            run_state_repository.sync_create_or_update_approval_request(
-                run_id=deployed_agent_id,
-                approval_id=approval_id,
-                request_payload={
-                    "approval_id": approval_id,
-                    "prompt": f"Shop Assistant approval required: {approval_gate}",
-                    "actions": [approval_gate],
-                    "target": deployed_agent_id,
-                    "workspace_id": resolved_workspace_id,
-                    "tenant_id": tenant_id,
-                    "owner_user_id": str((current_user or {}).get("user_id") or "").strip() or None,
-                    "correlation_id": approval_id,
-                    "scope": "once",
-                },
-                actor="system",
-                trace_id=approval_id,
-                metadata={
-                    "source_type": "deployed_agent",
-                    "gate": approval_gate,
-                    "risk_class": str(approval.get("risk_class", "ORANGE")),
-                    "customer_message_summary": customer_summary,
-                    "connector_id": connector_id,
-                    "channel_key": channel_key,
-                    "deployed_agent_id": deployed_agent_id,
-                    "approval_target": deployed_agent_id,
-                },
-            )
-            result["approval_id"] = approval_id
-            approval_created = True
-        except Exception:
-            LOGGER.exception(
-                "Failed to create durable shop assistant approval",
-                extra={
-                    "workspace_id": resolved_workspace_id,
-                    "deployed_agent_id": deployed_agent_id,
-                    "approval_gate": approval_gate,
-                    "connector_id": connector_id,
-                },
-            )
-        if not approval_created:
-            approval["workflow_error"] = "approval_creation_failed"
-            result["approval"] = approval
-            result["status"] = "approval_unavailable"
-            result["answer"] = "Owner approval is temporarily unavailable. I paused this action so nothing risky happens without review."
-        try:
-            await control_plane_repository.upsert_deployed_agent_business_insight_candidate(
-                tenant_id=tenant_id,
-                workspace_id=resolved_workspace_id,
-                deployed_agent_id=deployed_agent_id,
-                pattern_key=f"shop_approval_{approval_gate}",
-                insight_type="approval_required",
-                title=f"Shop Assistant approval required: {approval_gate}",
-                summary=f"Customer asked for a {approval_gate}: {customer_summary}",
-                recommendation=result.get("answer", "Owner review is required before proceeding."),
-                sensitivity="orange",
-                channel_key=channel_key,
-                confidence=1.0,
-                redacted_examples=[customer_summary],
-                metadata={
-                    "approval_gate": approval_gate,
-                    "risk_class": approval.get("risk_class"),
-                    "deployed_agent_id": deployed_agent_id,
-                    "customer_message_summary": customer_summary,
-                    "approval_id": approval_id,
-                },
-            )
-        except Exception:
-            pass
+    # Phase 4: Agent acts on its own reasoning. If the action is bounded
+    # and reasonable it executes; if more info is needed the agent asks
+    # the customer in conversation. No approval records are created.
 
     # Phase 5: Persist billing evidence as activity events for the credit ledger.
     billing_evidence = _coerce_dict(result.get("activity_billing_evidence"))

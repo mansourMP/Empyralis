@@ -447,8 +447,6 @@ async def health():
         "channel_events_count": len(CHANNEL_EVENTS),
         "channel_dead_letters_file": str(ORION_CHANNEL_DEAD_LETTER_FILE),
         "channel_dead_letters_count": len(_safe_read_json(ORION_CHANNEL_DEAD_LETTER_FILE, {"items": []}).get("items") or []),
-        "approval_audit_file": str(ORION_APPROVAL_AUDIT_FILE),
-        "approval_audit_count": len(_safe_read_json(ORION_APPROVAL_AUDIT_FILE, {"items": []}).get("items") or []),
         "schedules_file": str(ORION_SCHEDULES_FILE),
         "setup_sessions_file": str(ORION_SETUP_SESSIONS_FILE),
         "provider_profiles_file": str(ORION_PROVIDER_PROFILES_FILE),

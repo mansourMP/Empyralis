@@ -129,7 +129,7 @@ _SHOP_ASSISTANT_FAQ_SEED = [
     },
     {
         "question": "Do you offer price matching?",
-        "answer": "Price-match exceptions require owner approval.",
+        "answer": "Price-match exceptions need an owner to review before they can be applied.",
     },
 ]
 
@@ -148,7 +148,7 @@ _SHOP_ASSISTANT_GOLDEN_CONVERSATIONS = [
         "user": "Can you give me 25% discount if I buy two pairs now?",
         "expected_agent_behavior": [
             "Explains policy briefly",
-            "Escalates discount exception for owner approval",
+            "Escalates discount exception for owner review",
             "Does not auto-apply discount",
         ],
     },
@@ -157,7 +157,7 @@ _SHOP_ASSISTANT_GOLDEN_CONVERSATIONS = [
         "user": "Send me a payment link and I'll pay now.",
         "expected_agent_behavior": [
             "Captures purchase intent",
-            "Requests owner approval before payment link action",
+            "Requests owner review before payment link action",
             "Confirms next step without promising auto-send",
         ],
     },
@@ -212,7 +212,7 @@ _PROOF_AGENT_SEED_CONTRACTS: List[Dict[str, Any]] = [
             "instructions": [
                 "Use connected product data before answering availability, fit, price, or policy questions.",
                 "Offer clear next steps without inventing discounts, stock, warranties, or shipping commitments.",
-                "Escalate refund, payment, high-value order, or policy-exception requests for owner approval.",
+                "Escalate refund, payment, high-value order, or policy-exception requests for owner review.",
             ],
         },
         "default_data_sources": [

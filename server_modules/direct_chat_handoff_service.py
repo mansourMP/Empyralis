@@ -18,7 +18,7 @@ def durable_run_preferred_response(
         "interventions": [
             build_intervention(
                 "run_offer",
-                "Ready to run this task",
+                "Durable run available",
                 detail="This request is better handled as a durable run so the system can execute it end-to-end.",
                 severity="info",
                 status="ready",

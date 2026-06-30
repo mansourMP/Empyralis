@@ -141,7 +141,7 @@ _CONNECTOR_CONTRACT_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "capability_patterns": ["browse_drive", "read_mail", "create_calendar_event"],
         "allowed_secret_fields": ["access_token"],
         "actions": {
-            "browse_drive": {"action_class": "read", "approval_required": False},
+            "browse_drive": {"action_class": "read", "elevated": False},
         },
     },
     # DEPRECATED: github custom tools replaced by MCP pipeline (api.githubcopilot.com/mcp/).
@@ -347,15 +347,15 @@ def connector_action_contract(connector_id: str, action_id: str) -> Dict[str, An
     explicit = dict(contract.get("actions", {}).get(action_token) or {})
     if not explicit:
         if action_token.startswith(("browse", "list", "get", "read", "search", "fetch")):
-            explicit = {"action_class": "read", "approval_required": False}
+            explicit = {"action_class": "read", "elevated": False}
         elif contract["connector_class"] == CONNECTOR_CLASS_BROWSER and action_token.startswith(
             ("navigate", "authenticate", "scrape", "form", "interactive", "upload", "click", "type")
         ):
-            explicit = {"action_class": "execute", "approval_required": True}
+            explicit = {"action_class": "execute", "elevated": True}
         elif contract["connector_class"] == CONNECTOR_CLASS_MEDIA:
-            explicit = {"action_class": "execute", "approval_required": True}
+            explicit = {"action_class": "execute", "elevated": True}
         else:
-            explicit = {"action_class": "write", "approval_required": True}
+            explicit = {"action_class": "write", "elevated": True}
     action_class = str(explicit.get("action_class") or "read").strip().lower() or "read"
     capability_pattern = str(explicit.get("capability_pattern") or action_token).strip().lower() or action_token
     return {
@@ -364,7 +364,7 @@ def connector_action_contract(connector_id: str, action_id: str) -> Dict[str, An
         "surface_role": contract["surface_role"],
         "action_id": action_token,
         "action_class": action_class,
-        "approval_required": bool(explicit.get("approval_required", action_class != "read")),
+        "elevated": bool(explicit.get("elevated", action_class != "read")),
         "capability_pattern": capability_pattern,
     }
 
@@ -421,7 +421,7 @@ def _authorize_connector_execution(
                 connector_scope=contract["connector_id"],
                 connector_class=contract["connector_class"],
                 action_class=action["action_class"],
-                approval_required=action["approval_required"],
+                elevated=action["elevated"],
             )
         except tool_broker.ToolExecutionDeniedError as exc:
             raise HTTPException(status_code=403, detail=exc.detail) from exc

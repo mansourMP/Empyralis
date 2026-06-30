@@ -31,7 +31,7 @@ from server_modules import direct_chat_provider_facade_service
 from server_modules import direct_chat_routing_service
 from server_modules import direct_chat_runtime_facade_service
 from server_modules import direct_chat_tool_catalog_service
-from server_modules import direct_tool_approval_service
+
 from server_modules import direct_tool_config_service
 from server_modules import direct_tool_execution_service
 from server_modules import memory_service
@@ -303,7 +303,7 @@ _DIRECT_CHAT_MEMORY_EXTRACTION_PROMPT = (
     "What important facts about the user or their preferences were revealed in this conversation? "
     "Reply with a JSON list or empty list."
 )
-_DIRECT_CHAT_LOOP_REPLY = "I appear to be stuck in a loop. Please clarify what you want me to do."
+_DIRECT_CHAT_LOOP_REPLY = "A tool loop was detected. Please rephrase the request or break it into smaller steps."
 _DIRECT_TOOL_LOOP_STATE: Dict[str, Dict[str, Any]] = {}
 _DIRECT_CHAT_MODEL_PREFERENCES: Dict[str, Dict[str, Optional[str]]] = {}
 _DIRECT_CHAT_CLEAR_MARKERS: set[str] = set()

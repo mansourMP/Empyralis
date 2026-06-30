@@ -10,7 +10,7 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 import uuid
 
-from server_modules import browser_approval_service, rust_runtime_kernel_client
+from server_modules import rust_runtime_kernel_client
 from server_modules.runtime_state_store import replace_local_runtime_state
 
 
@@ -221,92 +221,6 @@ def emit_runtime_event(
     )
     _persist_outbox_event(event, persist_outbox_event_fn=persist_outbox_event_fn)
     return event
-
-
-def emit_approval_requested_event(
-    *,
-    approval_id: str,
-    run_id: str,
-    tenant_id: str,
-    workspace_id: str,
-    prompt: str,
-    ttl_seconds: int,
-    expires_at: str,
-    correlation_id: str,
-    source: str = "runtime",
-    actor: str = "system",
-    target: Optional[str] = None,
-    actions: Optional[Sequence[str]] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    trace_id: str = "",
-    persist_outbox_event_fn: Optional[Callable[..., Any]] = None,
-) -> OutboxEvent:
-    approval_token = str(approval_id or "").strip()
-    action_items = [str(item).strip() for item in (actions or []) if str(item).strip()]
-    safe_metadata = dict(metadata or {})
-    browser_summary = browser_approval_service.browser_approval_summary(safe_metadata)
-    return emit_runtime_event(
-        event_type="approval_requested",
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        run_id=run_id,
-        trace_id=trace_id,
-        idempotency_key=f"approval_requested:{approval_token}",
-        payload={
-            "approval_id": approval_token,
-            "run_id": str(run_id or "").strip(),
-            "prompt": str(prompt or "").strip(),
-            "ttl_seconds": max(0, int(ttl_seconds or 0)),
-            "expires_at": str(expires_at or "").strip(),
-            "correlation_id": str(correlation_id or "").strip(),
-            "source": str(source or "runtime").strip() or "runtime",
-            "actor": str(actor or "system").strip() or "system",
-            "target": str(target or "").strip() or None,
-            "actions": action_items,
-            "metadata": safe_metadata,
-            "browser": browser_summary,
-            "emitted_at": _utc_now_iso(),
-        },
-        persist_outbox_event_fn=persist_outbox_event_fn,
-    )
-
-
-def emit_approval_resolved_event(
-    *,
-    approval_id: str,
-    run_id: str,
-    tenant_id: str,
-    workspace_id: str,
-    resolution: str,
-    actor: str,
-    reason: str = "",
-    metadata: Optional[Dict[str, Any]] = None,
-    trace_id: str = "",
-    persist_outbox_event_fn: Optional[Callable[..., Any]] = None,
-) -> OutboxEvent:
-    approval_token = str(approval_id or "").strip()
-    resolution_token = str(resolution or "").strip() or "approved"
-    safe_metadata = dict(metadata or {})
-    browser_summary = browser_approval_service.browser_approval_summary(safe_metadata)
-    return emit_runtime_event(
-        event_type="approval_resolved",
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        run_id=run_id,
-        trace_id=trace_id,
-        idempotency_key=f"approval_resolved:{approval_token}:{resolution_token}",
-        payload={
-            "approval_id": approval_token,
-            "run_id": str(run_id or "").strip(),
-            "resolution": resolution_token,
-            "actor": str(actor or "").strip() or "system",
-            "reason": str(reason or ""),
-            "metadata": safe_metadata,
-            "browser": browser_summary,
-            "emitted_at": _utc_now_iso(),
-        },
-        persist_outbox_event_fn=persist_outbox_event_fn,
-    )
 
 
 def emit_run_transition_event(
