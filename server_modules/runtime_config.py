@@ -111,7 +111,6 @@ from server_modules.connectors.autopilot_runtime_exports import (
 from server_modules.connector_validators import (
     validate_airtable_connector as _validate_airtable_connector,
     validate_asana_connector as _validate_asana_connector,
-    validate_bitbucket_connector as _validate_bitbucket_connector,
     validate_box_connector as _validate_box_connector,
     validate_calendly_connector as _validate_calendly_connector,
     validate_canva_connector as _validate_canva_connector,
@@ -120,14 +119,12 @@ from server_modules.connector_validators import (
     validate_docusign_connector as _validate_docusign_connector,
     validate_dropbox_connector as _validate_dropbox_connector,
     validate_figma_connector as _validate_figma_connector,
-    validate_freshbooks_connector as _validate_freshbooks_connector,
     validate_github_connector as _validate_github_connector,
     validate_gitlab_connector as _validate_gitlab_connector,
     validate_hubspot_connector as _validate_hubspot_connector,
     validate_intercom_connector as _validate_intercom_connector,
     validate_jira_connector as _validate_jira_connector,
     validate_linear_connector as _validate_linear_connector,
-    validate_mailchimp_connector as _validate_mailchimp_connector,
     validate_miro_connector as _validate_miro_connector,
     validate_monday_connector as _validate_monday_connector,
     validate_notion_connector as _validate_notion_connector,
@@ -140,8 +137,6 @@ from server_modules.connector_validators import (
     validate_whatsapp_twilio_connector as _validate_whatsapp_twilio_connector,
     validate_discord_bot_connector as _validate_discord_bot_connector,
     validate_slack_connector as _validate_slack_connector,
-    validate_pipedrive_connector as _validate_pipedrive_connector,
-    validate_quickbooks_connector as _validate_quickbooks_connector,
     validate_salesforce_connector as _validate_salesforce_connector,
     validate_square_connector as _validate_square_connector,
     validate_stripe_connector as _validate_stripe_connector,
@@ -149,7 +144,6 @@ from server_modules.connector_validators import (
     validate_typeform_connector as _validate_typeform_connector,
     validate_vercel_connector as _validate_vercel_connector,
     validate_webflow_connector as _validate_webflow_connector,
-    validate_xero_connector as _validate_xero_connector,
     validate_zoom_connector as _validate_zoom_connector,
     validate_instagram_business_connector as _validate_instagram_business_connector,
     validate_irc_connector as _validate_irc_connector,
@@ -893,24 +887,12 @@ CONNECTOR_CATALOG = {
         "label": "GitLab",
         "auth": ["access_token"],
     },
-    "bitbucket": {
-        "label": "Bitbucket",
-        "auth": ["access_token"],
-    },
     "confluence": {
         "label": "Confluence",
         "auth": ["access_token"],
     },
     "miro": {
         "label": "Miro",
-        "auth": ["access_token"],
-    },
-    "mailchimp": {
-        "label": "Mailchimp",
-        "auth": ["access_token"],
-    },
-    "pipedrive": {
-        "label": "Pipedrive",
         "auth": ["access_token"],
     },
     "intercom": {
@@ -927,18 +909,6 @@ CONNECTOR_CATALOG = {
     },
     "typeform": {
         "label": "Typeform",
-        "auth": ["access_token"],
-    },
-    "quickbooks": {
-        "label": "QuickBooks",
-        "auth": ["access_token"],
-    },
-    "xero": {
-        "label": "Xero",
-        "auth": ["access_token"],
-    },
-    "freshbooks": {
-        "label": "FreshBooks",
         "auth": ["access_token"],
     },
     "vercel": {

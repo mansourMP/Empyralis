@@ -646,18 +646,12 @@ validate_webflow_connector = lambda credentials: _validate_webflow_connector(cre
 validate_monday_connector = lambda credentials: _validate_monday_connector(credentials, http_json_request)
 validate_box_connector = lambda credentials: _validate_box_connector(credentials, http_json_request)
 validate_gitlab_connector = lambda credentials: _validate_gitlab_connector(credentials, http_json_request)
-validate_bitbucket_connector = lambda credentials: _validate_bitbucket_connector(credentials, http_json_request)
 validate_confluence_connector = lambda credentials: _validate_confluence_connector(credentials, http_json_request)
 validate_miro_connector = lambda credentials: _validate_miro_connector(credentials, http_json_request)
-validate_mailchimp_connector = lambda credentials: _validate_mailchimp_connector(credentials, http_json_request)
-validate_pipedrive_connector = lambda credentials: _validate_pipedrive_connector(credentials, http_json_request)
 validate_intercom_connector = lambda credentials: _validate_intercom_connector(credentials, http_json_request)
 validate_docusign_connector = lambda credentials: _validate_docusign_connector(credentials, http_json_request)
 validate_square_connector = lambda credentials: _validate_square_connector(credentials, http_json_request)
 validate_typeform_connector = lambda credentials: _validate_typeform_connector(credentials, http_json_request)
-validate_quickbooks_connector = lambda credentials: _validate_quickbooks_connector(credentials, http_json_request)
-validate_xero_connector = lambda credentials: _validate_xero_connector(credentials, http_json_request)
-validate_freshbooks_connector = lambda credentials: _validate_freshbooks_connector(credentials, http_json_request)
 validate_vercel_connector = lambda credentials: _validate_vercel_connector(credentials, http_json_request)
 validate_s3_connector = lambda credentials: _validate_s3_connector(credentials, http_json_request)
 validate_notion_connector = lambda credentials: _validate_notion_connector(credentials, http_json_request)
@@ -678,7 +672,7 @@ def list_recent_connector_messages(
             return google_workspace_local_list_recent_messages(credentials, limit=safe_limit)
 
         listing = http_json_request(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q=in%3Ainbox&maxResults={safe_limit}",
             headers={"Authorization": f"Bearer {str(credentials.get('access_token') or '').strip()}"},
             payload=None,
             timeout=20,
