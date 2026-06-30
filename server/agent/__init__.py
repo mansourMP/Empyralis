@@ -4,9 +4,28 @@ No subclasses. No agent kinds. No approval gates."""
 
 from dataclasses import dataclass, field
 import os
+from pathlib import Path
 from typing import Any, Callable
 
 import anthropic
+
+
+def _load_dotenv() -> None:
+    """Minimal .env parser — no python-dotenv dependency."""
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    if not env_path.is_file():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+_load_dotenv()
 
 ToolDef = dict[str, Any]
 ToolHandler = Callable[..., str]
@@ -37,10 +56,19 @@ class Runner:
     def register(self, name: str, handler: ToolHandler) -> None:
         self._registry[name] = handler
 
-    def run(self, message: str) -> str:
-        messages: list[dict] = [{"role": "user", "content": message}]
+    def run(self, message: str, max_turns: int = 25) -> str:
+        messages: list[dict] = [
+            {"role": "user", "content": [{"type": "text", "text": message}]}
+        ]
+        turns = 0
 
         while True:
+            turns += 1
+            if turns > max_turns:
+                return (
+                    f"Run halted: exceeded {max_turns} turns. "
+                    "Sage may be stuck in a tool loop."
+                )
             resp = self._client.messages.create(
                 model=self.agent.model,
                 max_tokens=4096,
@@ -54,11 +82,10 @@ class Runner:
                 texts = [b for b in resp.content if b.type == "text"]
                 return "\n".join(b.text for b in texts)
 
-            # Append assistant content with tool_use blocks
-            messages.append({
-                "role": "assistant",
-                "content": [self._serialize_block(b) for b in resp.content],
-            })
+            # Append assistant content (skip thinking blocks)
+            serialized = [s for b in resp.content
+                          if (s := self._serialize_block(b)) is not None]
+            messages.append({"role": "assistant", "content": serialized})
 
             # Execute each tool and append results
             tool_results = []
@@ -81,8 +108,13 @@ class Runner:
 
     @staticmethod
     def _serialize_block(block: Any) -> dict:
-        """Convert an Anthropic content block to a dict for message history."""
+        """Convert an Anthropic content block to a dict for message history.
+
+        Skips thinking/redacted_thinking blocks — those are Claude-internal
+        and must not be sent back to the API."""
         d: dict = {"type": block.type}
+        if block.type in ("thinking", "redacted_thinking"):
+            return None  # type: ignore — filtered by caller
         if block.type == "text":
             d["text"] = block.text
         elif block.type == "tool_use":

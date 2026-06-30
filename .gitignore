@@ -98,3 +98,4 @@ dump.rdb
 *.rdb
 *.dmg
 graphify-out/
+.venv-v2/
