@@ -100,7 +100,7 @@ def slash_command_payload(
         return services.with_context_used({"reply": services.slash_command_help_text(), "actions": [], "suggestions": proactive_suggestions, "mode": "answer"}, base_context_used)
     if slash_command_name in ("export-trajectory", "export"):
         return services.with_context_used({
-            "reply": "Trajectory export requested. Session transcript and trace data will be compiled. Use the diagnostics API for structured export: GET /api/diagnostics/sessions/{session_id}/export",
+            "reply": "Session export is available. Use the export tool in settings to download your session data.",
             "actions": [], "suggestions": proactive_suggestions, "mode": "answer",
         }, base_context_used)
     if slash_command_name == "thinking":

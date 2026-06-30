@@ -414,7 +414,7 @@ def _register_builtins() -> None:
              inline_shortcut=True)
 
     # Memory
-    register("memory", _handle_memory, description="Show what I remember about you")
+    register("memory", _handle_memory, description="View saved memory entries for this workspace")
 
     # Tasks & agents
     register("tasks", _handle_tasks, description="List background tasks")
@@ -930,15 +930,10 @@ async def _handle_mcp(
         for s in servers:
             sid = str(s.get("id") or "?")
             label = str(s.get("label") or sid)
-            transport = str(s.get("transport") or "?")
             enabled = bool(s.get("enabled"))
             tools = int(s.get("tool_count") or 0)
-            status = "enabled" if enabled else "disabled"
-            endpoint = str(s.get("endpoint") or "")[:50]
-            lines.append(f"  {label}")
-            lines.append(f"    id: {sid}  transport: {transport}  status: {status}  tools: {tools}")
-            if endpoint:
-                lines.append(f"    endpoint: {endpoint}")
+            status = "connected" if enabled else "not connected"
+            lines.append(f"  {label} — {status}  [{tools} tool{'s' if tools != 1 else ''}]")
         return {"reply": "\n".join(lines)}
     except Exception as exc:
         import logging as _ml
@@ -1195,7 +1190,7 @@ async def _handle_bash(
     except Exception as exc:
         import logging as _bl
         _bl.getLogger(__name__).warning("_handle_bash failed: %s", exc)
-        return {"reply": f"Shell command failed: {exc}"}
+        return {"reply": "The shell command could not be executed. Try again or simplify the command."}
 
 
 _register_builtins()

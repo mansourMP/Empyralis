@@ -422,9 +422,9 @@ RUN_FINISHED = PlatformEvent(
 
 AI_SCOPE_MISSING = PlatformEvent(
     code="ai_scope_missing",
-    title="AI account scope missing",
-    detail="AI account authorization failed. Missing required scope: api.responses.write. Open Setup and reconnect the AI account.",
-    channel_text="AI account authorization failed. Missing required scope: api.responses.write. Open Setup and reconnect the AI account.",
+    title="AI account permissions needed",
+    detail="Additional permissions are required for this action. Open Setup and reconnect the affected app.",
+    channel_text="Additional permissions are required for this action. Open Setup and reconnect the affected app.",
     severity="error",
 )
 
