@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
+import httpx
+
 from server_modules import agent_action_metering_service, rust_runtime_kernel_client
 from server_modules.config_loader import config_str
 from server_modules.url_security import assert_safe_outbound_url
@@ -406,19 +408,85 @@ def _run_async_from_sync(coro_factory: Any) -> Any:
     return result.get("value")
 
 
+def _is_transient_mcp_error(exc: BaseException) -> bool:
+    """Return True if the error is likely transient and worth retrying.
+
+    Retryable: httpx connection/timeout/protocol errors, HTTP 5xx/429,
+    asyncio TimeoutError, OSError (connection reset/refused).
+    Non-retryable: HTTP 4xx (auth, bad request, not found), and our own
+    RuntimeError messages for permanent failures.
+    """
+    # httpx transport errors — always transient
+    if isinstance(exc, httpx.ConnectError):
+        return True
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout)):
+        return True
+    if isinstance(exc, httpx.RemoteProtocolError):
+        return True
+    # httpx HTTPStatusError — retry only 5xx and 429
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = getattr(exc.response, "status_code", 0)
+        return status in {408, 425, 429, 500, 502, 503, 504}
+    # asyncio timeout and OS-level network errors
+    if isinstance(exc, (TimeoutError, ConnectionRefusedError, ConnectionResetError, OSError)):
+        return True
+    # RuntimeError — retry only our "timed out" wrapper; never retry permanent failures
+    if isinstance(exc, RuntimeError):
+        msg = str(exc).lower()
+        permanent = (
+            "not installed" in msg
+            or "not approved" in msg
+            or "not found" in msg
+            or "disabled" in msg
+            or "not supported" in msg
+        )
+        if permanent:
+            return False
+        return "timed out" in msg or "timeout" in msg
+    return False
+
+
 async def _list_tools_streamable_http_async(
     *,
     endpoint: str,
     http_client: Any = None,
     client_session_cls: Any = ClientSession,
     streamable_http_client_fn: Any = streamable_http_client,
+    discover_timeout_seconds: float = 30.0,
 ) -> List[Dict[str, Any]]:
     if client_session_cls is None or streamable_http_client_fn is None:
         raise RuntimeError("The MCP client dependency is not installed.")
-    async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
-        async with client_session_cls(read_stream, write_stream) as session:
-            await session.initialize()
-            result = await session.list_tools()
+    max_attempts = 2
+    base_delay = 1.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with asyncio.timeout(discover_timeout_seconds):
+                async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
+                    async with client_session_cls(read_stream, write_stream) as session:
+                        await session.initialize()
+                        result = await session.list_tools()
+            break
+        except TimeoutError:
+            if attempt < max_attempts:
+                _log.warning(
+                    "MCP tool discovery attempt %d/%d timed out after %.0fs for endpoint %s, retrying...",
+                    attempt, max_attempts, discover_timeout_seconds, endpoint,
+                )
+                await asyncio.sleep(base_delay * attempt)
+                continue
+            raise RuntimeError(
+                f"MCP tool discovery timed out after {max_attempts} attempts "
+                f"({discover_timeout_seconds:.0f}s each) for endpoint {endpoint}"
+            ) from None
+        except Exception as exc:
+            if attempt < max_attempts and _is_transient_mcp_error(exc):
+                _log.warning(
+                    "MCP tool discovery attempt %d/%d failed for endpoint %s: %s, retrying...",
+                    attempt, max_attempts, endpoint, exc,
+                )
+                await asyncio.sleep(base_delay * attempt)
+                continue
+            raise
     return _tool_items_from_list_result(result, server_id="temporary")
 
 
@@ -444,7 +512,10 @@ def _build_mcp_auth_headers(credential: Optional[Dict[str, Any]]) -> Dict[str, s
     return {}
 
 
-def _build_mcp_http_client(credential: Optional[Dict[str, Any]]) -> Any:
+def _build_mcp_http_client(
+    credential: Optional[Dict[str, Any]],
+    timeout_seconds: float = 60.0,
+) -> Any:
     """Build an httpx.AsyncClient with MCP defaults and auth headers from a credential.
 
     Returns None if no credential is provided or if the SDK is not installed.
@@ -455,7 +526,8 @@ def _build_mcp_http_client(credential: Optional[Dict[str, Any]]) -> Any:
     headers = _build_mcp_auth_headers(credential)
     if not headers:
         return None
-    return create_mcp_http_client(headers=headers)
+    timeout = httpx.Timeout(timeout_seconds) if timeout_seconds > 0 else None
+    return create_mcp_http_client(headers=headers, timeout=timeout)
 
 
 def discover_mcp_server_tools(
@@ -961,6 +1033,100 @@ def _parse_goal_arguments(goal: str, tool_payload: Dict[str, Any]) -> Dict[str, 
     return {"input": compact}
 
 
+_MAX_ARGUMENT_STRING_LENGTH = 10_000
+
+
+def _validate_mcp_arguments(
+    arguments: Dict[str, Any],
+    input_schema: Dict[str, Any],
+    *,
+    tool_name: str = "",
+) -> Dict[str, Any]:
+    """Validate and sanitize arguments against the tool's input_schema.
+
+    Returns a cleaned arguments dict.  When *input_schema* is empty or
+    missing, the original arguments are returned unchanged.
+    """
+    if not isinstance(arguments, dict) or not arguments:
+        return dict(arguments) if isinstance(arguments, dict) else {}
+
+    schema = _normalize_input_schema(input_schema)
+    if not schema:
+        return dict(arguments)
+
+    properties: Dict[str, Any] = (
+        schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    )
+    required: List[str] = [
+        str(item).strip()
+        for item in (schema.get("required") if isinstance(schema.get("required"), list) else [])
+        if str(item).strip()
+    ]
+
+    cleaned: Dict[str, Any] = {}
+
+    # 1. Strip unknown keys
+    for key, value in arguments.items():
+        key_str = str(key).strip()
+        if properties and key_str not in properties:
+            _log.warning(
+                "MCP argument validation: stripping unknown key '%s' for tool '%s'",
+                key_str,
+                tool_name or "(unknown)",
+            )
+            continue
+        cleaned[key_str] = value
+
+    # 2. Check required keys are present
+    for req_key in required:
+        if req_key not in cleaned:
+            raise RuntimeError(
+                f"Missing required parameter: {req_key}"
+                + (f" for tool {tool_name}" if tool_name else "")
+            )
+
+    # 3. Type-check and convert basic types
+    for key, value in list(cleaned.items()):
+        prop_schema = properties.get(key)
+        if not isinstance(prop_schema, dict):
+            continue
+        expected_type = str(prop_schema.get("type") or "").strip().lower()
+        if not expected_type:
+            continue
+
+        if expected_type == "string":
+            if not isinstance(value, str):
+                cleaned[key] = str(value)
+            # 4. Cap string length
+            if isinstance(cleaned[key], str) and len(cleaned[key]) > _MAX_ARGUMENT_STRING_LENGTH:
+                _log.warning(
+                    "MCP argument validation: truncating string argument '%s' (%d chars) for tool '%s'",
+                    key,
+                    len(cleaned[key]),
+                    tool_name or "(unknown)",
+                )
+                cleaned[key] = cleaned[key][:_MAX_ARGUMENT_STRING_LENGTH]
+
+        elif expected_type in ("integer", "number"):
+            if isinstance(value, bool):
+                cleaned[key] = int(value)
+            elif isinstance(value, str):
+                stripped = value.strip()
+                try:
+                    if expected_type == "integer":
+                        cleaned[key] = int(stripped)
+                    else:
+                        cleaned[key] = float(stripped)
+                except (ValueError, TypeError):
+                    pass  # keep original string if conversion fails
+            elif isinstance(value, (int, float)):
+                if expected_type == "integer":
+                    cleaned[key] = int(value)
+                # else keep as-is (already a number)
+
+    return cleaned
+
+
 def _mcp_reply(payload: Any, *, agent_label: str, tool_name: str) -> str:
     if isinstance(payload, dict):
         for key in ("reply", "response", "answer", "text", "message", "summary"):
@@ -991,13 +1157,40 @@ async def _call_streamable_http_tool_async(
     http_client: Any = None,
     client_session_cls: Any = ClientSession,
     streamable_http_client_fn: Any = streamable_http_client,
+    call_timeout_seconds: float = 60.0,
 ) -> Any:
     if client_session_cls is None or streamable_http_client_fn is None:
         raise RuntimeError("The MCP client dependency is not installed.")
-    async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
-        async with client_session_cls(read_stream, write_stream) as session:
-            await session.initialize()
-            return await session.call_tool(tool_name, arguments)
+    max_attempts = 3
+    base_delay = 1.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with asyncio.timeout(call_timeout_seconds):
+                async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
+                    async with client_session_cls(read_stream, write_stream) as session:
+                        await session.initialize()
+                        return await session.call_tool(tool_name, arguments)
+        except TimeoutError:
+            if attempt < max_attempts:
+                _log.warning(
+                    "MCP tool call %s attempt %d/%d timed out after %.0fs, retrying...",
+                    tool_name, attempt, max_attempts, call_timeout_seconds,
+                )
+                await asyncio.sleep(base_delay * attempt)
+                continue
+            raise RuntimeError(
+                f"MCP tool call timed out after {max_attempts} attempts "
+                f"({call_timeout_seconds:.0f}s each): {tool_name} on {endpoint}"
+            ) from None
+        except Exception as exc:
+            if attempt < max_attempts and _is_transient_mcp_error(exc):
+                _log.warning(
+                    "MCP tool call %s attempt %d/%d failed: %s, retrying...",
+                    tool_name, attempt, max_attempts, exc,
+                )
+                await asyncio.sleep(base_delay * attempt)
+                continue
+            raise
 
 
 def invoke_workspace_mcp_skill(
@@ -1073,6 +1266,11 @@ def invoke_workspace_mcp_skill(
         )
         raise
     arguments = _parse_goal_arguments(goal, tool_payload)
+    arguments = _validate_mcp_arguments(
+        arguments,
+        tool_payload.get("input_schema"),
+        tool_name=parsed["tool_name"],
+    )
     credential = _resolve_mcp_credential(server, workspace_id)
     mcp_http_client = _build_mcp_http_client(credential)
     common_event = {
@@ -1231,6 +1429,11 @@ async def invoke_workspace_mcp_skill_async(
         )
         raise
     arguments = _parse_goal_arguments(goal, tool_payload)
+    arguments = _validate_mcp_arguments(
+        arguments,
+        tool_payload.get("input_schema"),
+        tool_name=parsed["tool_name"],
+    )
     credential = _resolve_mcp_credential(server, workspace_id)
     mcp_http_client = _build_mcp_http_client(credential)
     common_event = {
