@@ -48,10 +48,10 @@ class Agent:
 class Runner:
     """Stateless: takes (agent, message), runs the loop, returns response."""
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent, api_key: str | None = None):
         self.agent = agent
         self._client = anthropic.AsyncAnthropic(
-            api_key=os.environ["ANTHROPIC_API_KEY"]
+            api_key=api_key or os.environ["ANTHROPIC_API_KEY"]
         )
         self._registry: ToolRegistry = {}
         # MCP tool metadata: tool_name → {server_id, endpoint, credential_id, input_schema}
@@ -89,8 +89,12 @@ class Runner:
         return [t for t in all_tools if t["name"] in allowlist] or None
 
     async def run(self, message: str, max_turns: int = 25,
-                  message_history: list[dict] | None = None) -> str:
-        """Run the agent loop. Optionally prepend prior conversation messages."""
+                  message_history: list[dict] | None = None,
+                  on_token: callable | None = None) -> str:
+        """Run the agent loop. Optionally prepend prior conversation messages.
+
+        If on_token is provided, streams text chunks via callback while
+        collecting the full response. Non-streaming otherwise (CLI, Telegram)."""
         messages: list[dict] = []
         if message_history:
             for msg in message_history:
@@ -110,16 +114,33 @@ class Runner:
                     f"Run halted: exceeded {max_turns} turns. "
                     "Sage may be stuck in a tool loop."
                 )
-            resp = await self._client.messages.create(
-                model=self.agent.model,
-                max_tokens=4096,
-                system=self.agent.instructions,
-                tools=self._allowed_tools(),
-                messages=messages,
-            )
+
+            if on_token:
+                full_text = ""
+                async with self._client.messages.stream(
+                    model=self.agent.model,
+                    max_tokens=4096,
+                    system=self.agent.instructions,
+                    tools=self._allowed_tools(),
+                    messages=messages,
+                ) as stream:
+                    async for chunk in stream.text_stream:
+                        full_text += chunk
+                        await on_token(chunk)
+                    resp = await stream.get_final_message()
+            else:
+                resp = await self._client.messages.create(
+                    model=self.agent.model,
+                    max_tokens=4096,
+                    system=self.agent.instructions,
+                    tools=self._allowed_tools(),
+                    messages=messages,
+                )
 
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
             if not tool_uses:
+                if on_token:
+                    return full_text
                 texts = [b for b in resp.content if b.type == "text"]
                 return "\n".join(b.text for b in texts)
 
