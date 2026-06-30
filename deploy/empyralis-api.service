@@ -1,0 +1,16 @@
+[Unit]
+Description=Empyralis v2 API server
+After=network.target
+
+[Service]
+User=empyralis
+WorkingDirectory=/opt/empyralis
+EnvironmentFile=/opt/empyralis/.env
+ExecStart=/opt/empyralis/.venv/bin/python -m server.api
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/empyralis/api.log
+StandardError=append:/var/log/empyralis/api.log
+
+[Install]
+WantedBy=multi-user.target

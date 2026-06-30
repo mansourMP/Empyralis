@@ -1,0 +1,16 @@
+[Unit]
+Description=Empyralis v2 Telegram bot
+After=network.target
+
+[Service]
+User=empyralis
+WorkingDirectory=/opt/empyralis
+EnvironmentFile=/opt/empyralis/.env
+ExecStart=/opt/empyralis/.venv/bin/python -m server.bot
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/empyralis/bot.log
+StandardError=append:/var/log/empyralis/bot.log
+
+[Install]
+WantedBy=multi-user.target

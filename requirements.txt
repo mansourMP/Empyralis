@@ -1,0 +1,8 @@
+anthropic>=0.39.0
+fastapi>=0.100.0
+uvicorn>=0.22.0
+itsdangerous>=2.0.0
+python-multipart>=0.0.5
+aiogram>=3.0.0
+mcp>=1.0.0
+cryptography>=41.0.0

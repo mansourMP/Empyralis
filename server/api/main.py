@@ -33,14 +33,19 @@ from server.vault.store import get_credential, load_vault, save_vault, set_crede
 
 WORKSPACE = "default"
 CHANNEL = "web"
-REDIRECT_URI = "http://localhost:8000/oauth/callback"
-FRONTEND_URL = "http://localhost:3000"
+
+_BASE = os.getenv("EMPYRALIS_BASE_URL", "").strip().rstrip("/")
+# In production, frontend and API share the same origin (nginx reverse proxy).
+# In dev, they're on separate ports.
+FRONTEND_URL = _BASE or "http://localhost:3000"
+REDIRECT_URI = f"{_BASE or 'http://localhost:8000'}/api/oauth/callback"
+CORS_ORIGINS = [FRONTEND_URL, "http://localhost:3000"]
 
 app = FastAPI(title="Empyralis v2", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -122,6 +127,10 @@ async def _register_mcp_tools(runner: Runner) -> None:
 
 
 # ── routes ──────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 @app.post("/session")
 async def create_session(request: Request):
