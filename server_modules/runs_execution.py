@@ -2229,6 +2229,7 @@ def _sanitize_recent_email_tool_results(messages: Any, *, snippet_limit: int = 1
                 "to": str(item.get("to") or "").strip(),
                 "date": str(item.get("date") or "").strip(),
                 "snippet": snippet,
+                "body_text": (str(item.get("body_text") or "").strip()[:3000]) or None,
             }
         )
     return sanitized

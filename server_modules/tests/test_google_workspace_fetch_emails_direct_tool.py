@@ -157,7 +157,11 @@ class GoogleWorkspaceFetchEmailsDirectToolTests(unittest.TestCase):
         self.assertEqual(connector_action["action_id"], "fetch_emails")
         self.assertEqual(connector_action["result"][0]["subject"], "Launch")
         self.assertEqual(connector_action["result"][0]["threadId"], "thread-1")
-        self.assertNotIn("body_text", connector_action["result"][0])
+        self.assertIn("body_text", connector_action["result"][0])
+        self.assertEqual(
+            connector_action["result"][0]["body_text"],
+            "full private body must not pass through",
+        )
         self.assertLessEqual(len(connector_action["result"][0]["snippet"]), 1200)
 
     def test_google_workspace_calendar_events_direct_tool_executes_local_reader(self) -> None:
