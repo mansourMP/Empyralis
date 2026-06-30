@@ -88,10 +88,19 @@ class Runner:
             return all_tools if all_tools else None
         return [t for t in all_tools if t["name"] in allowlist] or None
 
-    async def run(self, message: str, max_turns: int = 25) -> str:
-        messages: list[dict] = [
-            {"role": "user", "content": [{"type": "text", "text": message}]}
-        ]
+    async def run(self, message: str, max_turns: int = 25,
+                  message_history: list[dict] | None = None) -> str:
+        """Run the agent loop. Optionally prepend prior conversation messages."""
+        messages: list[dict] = []
+        if message_history:
+            for msg in message_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                messages.append(
+                    {"role": role,
+                     "content": [{"type": "text", "text": str(content)}]})
+        messages.append(
+            {"role": "user", "content": [{"type": "text", "text": message}]})
         turns = 0
 
         while True:
