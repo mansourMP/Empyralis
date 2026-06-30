@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict
 from urllib import parse as urlparse
 from urllib import request as urlrequest
+import logging
 
 from fastapi import HTTPException, Request
 
@@ -17,6 +18,7 @@ from server_modules import connectors_actions
 from server_modules.connectors import slack_connector
 from server_modules.schemas import ConnectorCreate
 
+_log = logging.getLogger(__name__)
 
 _STATE_TTL_SECONDS = 600
 
@@ -406,22 +408,6 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://gitlab.com/api/v4/user",
     ),
-    "bitbucket": OAuthProviderConfig(
-        label="Bitbucket",
-        env_vars={
-            "client_id": ("BITBUCKET_CLIENT_ID",),
-            "client_secret": ("BITBUCKET_CLIENT_SECRET",),
-        },
-        scopes=("account", "repository", "pullrequest", "issue"),
-        auth_url="https://bitbucket.org/site/oauth2/authorize",
-        token_url="https://bitbucket.org/site/oauth2/access_token",
-        auth_method="authorization_code",
-        token_parser="standard",
-        profile_probe="https://api.bitbucket.org/2.0/user",
-        token_auth="basic",
-        include_client_id_in_token_body=False,
-        include_client_secret_in_token_body=False,
-    ),
     "confluence": OAuthProviderConfig(
         label="Confluence",
         env_vars={
@@ -456,35 +442,6 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         auth_method="authorization_code",
         token_parser="standard",
         profile_probe="https://api.miro.com/v2/users/me",
-    ),
-    "mailchimp": OAuthProviderConfig(
-        label="Mailchimp",
-        env_vars={
-            "client_id": ("MAILCHIMP_CLIENT_ID",),
-            "client_secret": ("MAILCHIMP_CLIENT_SECRET",),
-        },
-        scopes=(),
-        auth_url="https://login.mailchimp.com/oauth2/authorize",
-        token_url="https://login.mailchimp.com/oauth2/token",
-        auth_method="authorization_code",
-        token_parser="standard",
-        profile_probe="https://login.mailchimp.com/oauth2/metadata",
-    ),
-    "pipedrive": OAuthProviderConfig(
-        label="Pipedrive",
-        env_vars={
-            "client_id": ("PIPEDRIVE_CLIENT_ID",),
-            "client_secret": ("PIPEDRIVE_CLIENT_SECRET",),
-        },
-        scopes=("deals:read", "deals:write", "contacts:read", "contacts:write", "activities:read", "activities:write"),
-        auth_url="https://oauth.pipedrive.com/oauth/authorize",
-        token_url="https://oauth.pipedrive.com/oauth/token",
-        auth_method="authorization_code",
-        token_parser="standard",
-        profile_probe="https://api.pipedrive.com/v1/users/me",
-        token_auth="basic",
-        include_client_id_in_token_body=False,
-        include_client_secret_in_token_body=False,
     ),
     "intercom": OAuthProviderConfig(
         label="Intercom",
@@ -547,51 +504,6 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://api.typeform.com/me",
     ),
-    "quickbooks": OAuthProviderConfig(
-        label="QuickBooks",
-        env_vars={
-            "client_id": ("QUICKBOOKS_CLIENT_ID", "INTUIT_CLIENT_ID"),
-            "client_secret": ("QUICKBOOKS_CLIENT_SECRET", "INTUIT_CLIENT_SECRET"),
-        },
-        scopes=("openid", "profile", "email", "com.intuit.quickbooks.accounting"),
-        auth_url="https://appcenter.intuit.com/connect/oauth2",
-        token_url="https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
-        auth_method="authorization_code",
-        token_parser="standard",
-        profile_probe="https://accounts.platform.intuit.com/v1/openid_connect/userinfo",
-        token_auth="basic",
-        include_client_id_in_token_body=False,
-        include_client_secret_in_token_body=False,
-    ),
-    "xero": OAuthProviderConfig(
-        label="Xero",
-        env_vars={
-            "client_id": ("XERO_CLIENT_ID",),
-            "client_secret": ("XERO_CLIENT_SECRET",),
-        },
-        scopes=("openid", "profile", "email", "offline_access", "accounting.contacts.read", "accounting.invoices.read", "accounting.settings.read"),
-        auth_url="https://login.xero.com/identity/connect/authorize",
-        token_url="https://identity.xero.com/connect/token",
-        auth_method="authorization_code",
-        token_parser="standard",
-        profile_probe="https://api.xero.com/connections",
-        token_auth="basic",
-        include_client_id_in_token_body=False,
-        include_client_secret_in_token_body=False,
-    ),
-    "freshbooks": OAuthProviderConfig(
-        label="FreshBooks",
-        env_vars={
-            "client_id": ("FRESHBOOKS_CLIENT_ID",),
-            "client_secret": ("FRESHBOOKS_CLIENT_SECRET",),
-        },
-        scopes=("user:profile:read", "user:clients:read", "user:invoices:read", "user:expenses:read"),
-        auth_url="https://my.freshbooks.com/service/auth/oauth/authorize",
-        token_url="https://api.freshbooks.com/auth/oauth/token",
-        auth_method="authorization_code",
-        token_parser="standard",
-        profile_probe="https://api.freshbooks.com/auth/api/v1/users/me",
-    ),
     "vercel": OAuthProviderConfig(
         label="Vercel",
         env_vars={
@@ -642,21 +554,13 @@ _CONNECTION_PROVIDER_ALIASES = {
     "monday.com": "monday",
     "box": "box",
     "gitlab": "gitlab",
-    "bitbucket": "bitbucket",
     "confluence": "confluence",
     "miro": "miro",
-    "mailchimp": "mailchimp",
-    "pipedrive": "pipedrive",
     "intercom": "intercom",
     "docusign": "docusign",
     "docu_sign": "docusign",
     "square": "square",
     "typeform": "typeform",
-    "quickbooks": "quickbooks",
-    "quick_books": "quickbooks",
-    "xero": "xero",
-    "freshbooks": "freshbooks",
-    "fresh_books": "freshbooks",
     "vercel": "vercel",
 }
 
@@ -1078,12 +982,19 @@ def _exchange_github(code: str, redirect_uri: str) -> Dict[str, Any]:
     access_token = str(payload.get("access_token") or "").strip()
     if not access_token:
         raise RuntimeError(str(payload.get("error_description") or payload.get("error") or "GitHub token exchange failed."))
-    return {
+    expires_in = int(payload.get("expires_in") or 0)
+    credentials: Dict[str, Any] = {
         "auth_mode": "oauth",
         "access_token": access_token,
         "scope": str(payload.get("scope") or "").strip(),
         "token_type": str(payload.get("token_type") or "bearer").strip() or "bearer",
     }
+    refresh_token = str(payload.get("refresh_token") or "").strip()
+    if refresh_token:
+        credentials["refresh_token"] = refresh_token
+    if expires_in > 0:
+        credentials["access_token_expires_at"] = int(time.time()) + expires_in
+    return credentials
 
 
 def _exchange_microsoft(code: str, redirect_uri: str) -> Dict[str, Any]:
@@ -1169,12 +1080,19 @@ def _exchange_linear(code: str, redirect_uri: str) -> Dict[str, Any]:
     access_token = str(payload.get("access_token") or "").strip()
     if not access_token:
         raise RuntimeError(str(payload.get("error_description") or payload.get("error") or "Linear token exchange failed."))
-    return {
+    expires_in = int(payload.get("expires_in") or 0)
+    credentials: Dict[str, Any] = {
         "auth_mode": "oauth",
         "access_token": access_token,
         "scope": str(payload.get("scope") or "").strip(),
         "token_type": str(payload.get("token_type") or "Bearer").strip() or "Bearer",
     }
+    refresh_token = str(payload.get("refresh_token") or "").strip()
+    if refresh_token:
+        credentials["refresh_token"] = refresh_token
+    if expires_in > 0:
+        credentials["access_token_expires_at"] = int(time.time()) + expires_in
+    return credentials
 
 
 def _exchange_dropbox(code: str, redirect_uri: str) -> Dict[str, Any]:
@@ -1335,6 +1253,107 @@ APP_MCP_SERVER_MAP: Dict[str, List[Dict[str, Optional[str]]]] = {
     # Source: todoist.com/help/articles/use-chatgpt-with-todoist
     "todoist": [
         {"server_id": "todoist", "label": "Todoist (MCP)", "endpoint": "https://ai.todoist.net/mcp"},
+    ],
+    # Calendly: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: developer.calendly.com/mcp
+    "calendly": [
+        {"server_id": "calendly", "label": "Calendly (MCP)", "endpoint": "https://mcp.calendly.com"},
+    ],
+    # ClickUp: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: clickup.com/mcp
+    "clickup": [
+        {"server_id": "clickup", "label": "ClickUp (MCP)", "endpoint": "https://mcp.clickup.com/mcp"},
+    ],
+    # Webflow: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: developers.webflow.com/mcp
+    "webflow": [
+        {"server_id": "webflow", "label": "Webflow (MCP)", "endpoint": "https://mcp.webflow.com/mcp"},
+    ],
+    # Monday.com: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: developer.monday.com/mcp
+    "monday": [
+        {"server_id": "monday", "label": "Monday.com (MCP)", "endpoint": "https://mcp.monday.com/mcp"},
+    ],
+    # Box: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: developer.box.com/mcp
+    "box": [
+        {"server_id": "box", "label": "Box (MCP)", "endpoint": "https://mcp.box.com"},
+    ],
+    # Miro: official remote MCP server. Auth: OAuth 2.1 (Enterprise plan). Streamable HTTP.
+    # Source: developers.miro.com/docs/miro-mcp
+    "miro": [
+        {"server_id": "miro", "label": "Miro (MCP)", "endpoint": "https://mcp.miro.com/"},
+    ],
+    # Intercom: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: developers.intercom.com/mcp
+    "intercom": [
+        {"server_id": "intercom", "label": "Intercom (MCP)", "endpoint": "https://mcp.intercom.com/mcp"},
+    ],
+    # Typeform: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: typeform.com/developers/mcp
+    "typeform": [
+        {"server_id": "typeform", "label": "Typeform (MCP)", "endpoint": "https://api.typeform.com/mcp"},
+    ],
+    # Vercel: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: vercel.com/docs/mcp
+    "vercel": [
+        {"server_id": "vercel", "label": "Vercel (MCP)", "endpoint": "https://mcp.vercel.com"},
+    ],
+    # Confluence: Atlassian MCP server (separate auth endpoint from Jira).
+    # Endpoint uses /authv2 path vs Jira's /v1/mcp. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: developer.atlassian.com/mcp
+    "confluence": [
+        {"server_id": "confluence", "label": "Confluence (MCP)", "endpoint": "https://mcp.atlassian.com/v1/mcp/authv2"},
+    ],
+    # DocuSign: official remote MCP server. Auth: OAuth 2.0. Streamable HTTP.
+    # Source: developers.docusign.com
+    "docusign": [
+        {"server_id": "docusign", "label": "DocuSign (MCP)", "endpoint": "https://mcp-d.docusign.com/mcp"},
+    ],
+    # Square: official remote MCP server. Auth: OAuth 2.0.
+    # NOTE: frontend has /sse endpoint but /mcp responds 401 (exists, needs auth) —
+    # using streamable_http path. If Square only supports SSE transport, this may
+    # need SSE support added to _call_streamable_http_tool_async.
+    # Source: developer.squareup.com
+    "square": [
+        {"server_id": "square", "label": "Square (MCP)", "endpoint": "https://mcp.squareup.com/mcp"},
+    ],
+    # Stripe: official remote MCP server. GA Feb 2025. Auth: OAuth 2.0 or API key. Streamable HTTP.
+    # Source: docs.stripe.com/mcp
+    "stripe": [
+        {"server_id": "stripe", "label": "Stripe (MCP)", "endpoint": "https://mcp.stripe.com"},
+    ],
+    # Salesforce: official hosted MCP servers. GA Apr 2026. Auth: OAuth 2.0 + PKCE.
+    # Multiple product-specific servers under /platform/; base path for discovery.
+    # Source: developer.salesforce.com/blogs/2026/04/salesforce-hosted-mcp-servers-are-now-generally-available
+    "salesforce": [
+        {"server_id": "salesforce", "label": "Salesforce (MCP)", "endpoint": "https://api.salesforce.com/platform/mcp/v1/platform/"},
+    ],
+    # Airtable: official remote MCP server. GA since early 2025. Auth: OAuth 2.0 or PAT. Streamable HTTP.
+    # Source: airtable.com/mcp
+    "airtable": [
+        {"server_id": "airtable", "label": "Airtable (MCP)", "endpoint": "https://mcp.airtable.com/mcp"},
+    ],
+    # Canva: official remote MCP server. Released Jul 2025. Auth: OAuth 2.1. Streamable HTTP.
+    # Source: canva.dev/docs/mcp
+    "canva": [
+        {"server_id": "canva", "label": "Canva (MCP)", "endpoint": "https://mcp.canva.com/mcp"},
+    ],
+    # Asana: official remote MCP server. V2 GA Feb 2026. Auth: OAuth 2.0 (pre-registered client).
+    # Source: developers.asana.com/docs/integrating-with-asanas-mcp-server
+    "asana": [
+        {"server_id": "asana", "label": "Asana (MCP)", "endpoint": "https://mcp.asana.com/v2/mcp"},
+    ],
+    # Zoom: official remote MCP server. GA. Auth: OAuth 2.0 + PKCE. Streamable HTTP.
+    # Source: developers.zoom.us/docs/mcp/servers
+    "zoom": [
+        {"server_id": "zoom", "label": "Zoom (MCP)", "endpoint": "https://mcp.zoom.us/mcp/zoom/streamable"},
+    ],
+    # GitLab: official MCP server built into GitLab. Beta (GitLab 18.6). Auth: OAuth 2.0 + DCR.
+    # Premium/Ultimate tier required. Endpoint is instance-specific; gitlab.com shown.
+    # Source: docs.gitlab.com/user/gitlab_duo/model_context_protocol/mcp_server
+    "gitlab": [
+        {"server_id": "gitlab", "label": "GitLab (MCP)", "endpoint": "https://gitlab.com/api/v4/mcp"},
     ],
 }
 

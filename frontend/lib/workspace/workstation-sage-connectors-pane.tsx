@@ -854,16 +854,6 @@ const CONNECTOR_DEFINITIONS: ConnectorCardDefinition[] = [
     surfaceScope: 'all',
   },
   {
-    id: 'bitbucket',
-    label: 'Bitbucket',
-    image: '/brand-assets/apps/bitbucket.ico?v=3',
-    connectorIds: ['bitbucket'],
-    capabilityTags: ['Code', 'Pull requests'],
-    summary: 'Bitbucket lets Sage use repositories, pull requests, issues, and approved code workflows.',
-    setupHint: 'Connect Bitbucket when Sage should help with Atlassian code workflows.',
-    surfaceScope: 'all',
-  },
-  {
     id: 'confluence',
     label: 'Confluence',
     image: '/brand-assets/apps/confluence.ico?v=3',
@@ -881,26 +871,6 @@ const CONNECTOR_DEFINITIONS: ConnectorCardDefinition[] = [
     capabilityTags: ['Boards', 'Planning'],
     summary: 'Miro lets Sage use boards, whiteboards, and approved planning workflows.',
     setupHint: 'Connect Miro when Sage should help with planning and visual collaboration.',
-    surfaceScope: 'all',
-  },
-  {
-    id: 'mailchimp',
-    label: 'Mailchimp',
-    image: '/brand-assets/apps/mailchimp.ico?v=3',
-    connectorIds: ['mailchimp'],
-    capabilityTags: ['Marketing', 'Campaigns'],
-    summary: 'Mailchimp lets Sage use audiences, campaigns, reports, and approved marketing workflows.',
-    setupHint: 'Connect Mailchimp when Sage should help with marketing operations.',
-    surfaceScope: 'all',
-  },
-  {
-    id: 'pipedrive',
-    label: 'Pipedrive',
-    image: '/brand-assets/apps/pipedrive.ico?v=3',
-    connectorIds: ['pipedrive'],
-    capabilityTags: ['CRM', 'Deals'],
-    summary: 'Pipedrive lets Sage use deals, contacts, activities, and approved sales workflows.',
-    setupHint: 'Connect Pipedrive when Sage should help with sales pipeline work.',
     surfaceScope: 'all',
   },
   {
@@ -941,36 +911,6 @@ const CONNECTOR_DEFINITIONS: ConnectorCardDefinition[] = [
     capabilityTags: ['Forms', 'Responses'],
     summary: 'Typeform lets Sage use forms, responses, accounts, and approved form workflows.',
     setupHint: 'Connect Typeform when Sage should help with surveys and intake forms.',
-    surfaceScope: 'all',
-  },
-  {
-    id: 'quickbooks',
-    label: 'QuickBooks',
-    image: '/brand-assets/apps/quickbooks.png?v=3',
-    connectorIds: ['quickbooks'],
-    capabilityTags: ['Accounting', 'Invoices'],
-    summary: 'QuickBooks lets Sage use accounting context, customers, invoices, and finance workflows.',
-    setupHint: 'Connect QuickBooks when Sage should help with accounting operations.',
-    surfaceScope: 'all',
-  },
-  {
-    id: 'xero',
-    label: 'Xero',
-    image: '/brand-assets/apps/xero.ico?v=3',
-    connectorIds: ['xero'],
-    capabilityTags: ['Accounting', 'Contacts'],
-    summary: 'Xero lets Sage use accounting organisations, contacts, invoices, and finance workflows.',
-    setupHint: 'Connect Xero when Sage should help with accounting and finance work.',
-    surfaceScope: 'all',
-  },
-  {
-    id: 'freshbooks',
-    label: 'FreshBooks',
-    image: '/brand-assets/apps/freshbooks.ico?v=3',
-    connectorIds: ['freshbooks'],
-    capabilityTags: ['Accounting', 'Clients'],
-    summary: 'FreshBooks lets Sage use clients, invoices, expenses, and accounting workflows.',
-    setupHint: 'Connect FreshBooks when Sage should help with small-business accounting.',
     surfaceScope: 'all',
   },
   {
@@ -1129,6 +1069,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Export my brand kit assets',
     ],
     suggestedToolNames: ['design.search', 'design.create', 'design.export', 'folder.list', 'asset.read'],
+    mcpEndpoint: 'https://mcp.canva.com/mcp',
   },
   dropbox: {
     description:
@@ -1151,6 +1092,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Create a project for the website redesign',
     ],
     suggestedToolNames: ['task.create', 'task.list', 'task.close', 'project.list', 'label.read'],
+    mcpEndpoint: 'https://ai.todoist.net/mcp',
   },
   asana: {
     description:
@@ -1161,6 +1103,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Mark the onboarding project milestone as complete',
     ],
     suggestedToolNames: ['task.create', 'task.list', 'task.update', 'project.list', 'portfolio.read'],
+    mcpEndpoint: 'https://mcp.asana.com/v2/mcp',
   },
   hubspot: {
     description:
@@ -1171,6 +1114,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       "What's the status of the Enterprise deal pipeline",
     ],
     suggestedToolNames: ['contact.search', 'deal.list', 'deal.create', 'company.read', 'activity.log'],
+    mcpEndpoint: 'https://mcp.hubspot.com',
   },
   zoom: {
     description:
@@ -1181,6 +1125,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'List all my upcoming Zoom meetings this week',
     ],
     suggestedToolNames: ['meeting.create', 'meeting.list', 'transcript.read', 'recording.list', 'participant.list'],
+    mcpEndpoint: 'https://mcp.zoom.us/mcp/zoom/streamable',
   },
   airtable: {
     description:
@@ -1191,6 +1136,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Filter the inventory base by status = In Stock',
     ],
     suggestedToolNames: ['record.list', 'record.create', 'record.update', 'base.list', 'view.read'],
+    mcpEndpoint: 'https://mcp.airtable.com/mcp',
   },
   jira: {
     description:
@@ -1201,6 +1147,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       "What's in the current sprint",
     ],
     suggestedToolNames: ['issue.search', 'issue.create', 'issue.update', 'sprint.list', 'project.read'],
+    mcpEndpoint: 'https://mcp.atlassian.com/v1/mcp',
   },
   stripe: {
     description:
@@ -1211,6 +1158,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'What was total revenue in May',
     ],
     suggestedToolNames: ['payment.list', 'customer.search', 'subscription.read', 'invoice.list', 'balance.read'],
+    mcpEndpoint: 'https://mcp.stripe.com',
   },
   salesforce: {
     description:
@@ -1221,6 +1169,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Create a follow-up task for the Enterprise lead',
     ],
     suggestedToolNames: ['opportunity.list', 'lead.search', 'account.read', 'task.create', 'report.run'],
+    mcpEndpoint: 'https://api.salesforce.com/platform/mcp/v1/platform/',
   },
   webhook: {
     description:
@@ -1295,16 +1244,7 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'What\'s the status of the latest pipeline on main?',
     ],
     suggestedToolNames: ['issue.create', 'issue.search', 'merge_request.get', 'merge_request.list', 'pipeline.list', 'search.projects'],
-  },
-  bitbucket: {
-    description:
-      'Manage repositories, pull requests, pipelines, and deployments in Bitbucket. Your agent can review PRs, check build status, and manage branches.',
-    examplePrompts: [
-      'List all open pull requests in the backend repository',
-      'Show me the latest pipeline status for the API project',
-      'Create a pull request for the feature branch into main',
-    ],
-    suggestedToolNames: ['repository.list', 'pull_request.list', 'pull_request.create', 'pipeline.list', 'branch.get', 'commit.list'],
+    mcpEndpoint: 'https://gitlab.com/api/v4/mcp',
   },
   confluence: {
     description:
@@ -1327,26 +1267,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
     ],
     suggestedToolNames: ['board.create', 'board.list', 'layout.create', 'diagram.create', 'doc.create', 'comment.list'],
     mcpEndpoint: 'https://mcp.miro.com/',
-  },
-  mailchimp: {
-    description:
-      'Manage audiences, campaigns, and marketing automation in Mailchimp. Your agent can check campaign performance, manage subscribers, and create new campaigns.',
-    examplePrompts: [
-      'Show me the performance of the last newsletter campaign',
-      'Add jane@example.com to the product launch audience',
-      'List all campaigns sent this month',
-    ],
-    suggestedToolNames: ['campaign.list', 'campaign.get', 'audience.list', 'audience.members', 'report.summary', 'template.list'],
-  },
-  pipedrive: {
-    description:
-      'Manage deals, contacts, activities, and pipeline in Pipedrive. Your agent can create deals, update opportunities, and track your sales pipeline.',
-    examplePrompts: [
-      'List all open deals closing this month',
-      'Create a new deal for the Acme Corp opportunity worth $50k',
-      'Show me all activities scheduled for today',
-    ],
-    suggestedToolNames: ['deal.list', 'deal.create', 'deal.update', 'person.list', 'organization.list', 'activity.list'],
   },
   intercom: {
     description:
@@ -1391,36 +1311,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
     ],
     suggestedToolNames: ['form.list', 'form.get', 'response.list', 'workspace.list', 'theme.list', 'webhook.list'],
     mcpEndpoint: 'https://api.typeform.com/mcp',
-  },
-  quickbooks: {
-    description:
-      'Access invoices, customers, vendors, bills, and reports from QuickBooks Online. Your agent can check outstanding invoices, review financial reports, and manage accounts.',
-    examplePrompts: [
-      'Show me all unpaid invoices over 30 days old',
-      'Create an invoice for the consulting work completed for Acme Corp',
-      'What was the total revenue last month?',
-    ],
-    suggestedToolNames: ['invoice.list', 'invoice.create', 'customer.list', 'bill.list', 'report.profit_and_loss', 'account.list'],
-  },
-  xero: {
-    description:
-      'Access invoices, contacts, accounts, bank transactions, and reports from Xero. Your agent can check financials, create invoices, and reconcile transactions.',
-    examplePrompts: [
-      'List all unpaid invoices from the last quarter',
-      'Create a new contact for the Smith & Co account',
-      'Show me the profit and loss report for this month',
-    ],
-    suggestedToolNames: ['invoice.list', 'invoice.create', 'contact.list', 'account.list', 'report.profit_and_loss', 'bank_transaction.list'],
-  },
-  freshbooks: {
-    description:
-      'Manage invoices, clients, expenses, projects, and time tracking in FreshBooks. Your agent can create invoices, log expenses, and track billable hours.',
-    examplePrompts: [
-      'Create an invoice for the 10 hours of design work for Client X',
-      'Show me all unpaid expenses from this month',
-      'Log 3 hours of development time to the website redesign project',
-    ],
-    suggestedToolNames: ['invoice.list', 'invoice.create', 'client.list', 'expense.list', 'project.list', 'time_entry.list'],
   },
   vercel: {
     description:
@@ -1482,18 +1372,12 @@ const MANAGED_OAUTH_PROVIDER_IDS = new Set([
   'monday',
   'box',
   'gitlab',
-  'bitbucket',
   'confluence',
   'miro',
-  'mailchimp',
-  'pipedrive',
   'intercom',
   'docusign',
   'square',
   'typeform',
-  'quickbooks',
-  'xero',
-  'freshbooks',
   'vercel',
   'discord_bot',
   'slack',
@@ -3848,7 +3732,6 @@ export function WorkstationSageConnectorsPane({
       || card.id === 'monday'
       || card.id === 'box'
       || card.id === 'gitlab'
-      || card.id === 'bitbucket'
       || card.id === 'confluence'
       || card.id === 'miro'
       || card.id === 'typeform'
@@ -3913,18 +3796,12 @@ export function WorkstationSageConnectorsPane({
         || card.id === 'monday'
         || card.id === 'box'
         || card.id === 'gitlab'
-        || card.id === 'bitbucket'
         || card.id === 'confluence'
         || card.id === 'miro'
-        || card.id === 'mailchimp'
-        || card.id === 'pipedrive'
         || card.id === 'intercom'
         || card.id === 'docusign'
         || card.id === 'square'
         || card.id === 'typeform'
-        || card.id === 'quickbooks'
-        || card.id === 'xero'
-        || card.id === 'freshbooks'
         || card.id === 'vercel'
         || card.id === 's3'
         || card.id === 'smtp'
