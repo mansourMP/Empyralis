@@ -80,12 +80,29 @@ def list_vault_connectors(
     return out
 
 
+_OAUTH_REFRESH_IN_FLIGHT: set = set()
+
+
 def resolve_vault_credential(
     load_vault_fn: LoadVaultFn,
     decrypt_fn: DecryptFn,
     credential_id: str,
     workspace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    # Auto-refresh OAuth tokens before reading from vault.
+    # Guard against re-entry — refresh_oauth_token_if_needed calls this
+    # function internally, and we don't want to recurse.
+    normalized_id = str(credential_id or "").strip()
+    if normalized_id and normalized_id not in _OAUTH_REFRESH_IN_FLIGHT:
+        _OAUTH_REFRESH_IN_FLIGHT.add(normalized_id)
+        try:
+            from server_modules.connection_oauth_service import refresh_oauth_token_if_needed
+            refresh_oauth_token_if_needed(normalized_id)
+        except Exception:
+            pass
+        finally:
+            _OAUTH_REFRESH_IN_FLIGHT.discard(normalized_id)
+
     vault = load_vault_fn()
     for entry in vault.get("credentials", []):
         if entry.get("id") != credential_id:
