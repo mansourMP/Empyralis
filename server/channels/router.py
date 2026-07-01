@@ -7,5 +7,5 @@ from server.agent import Agent
 
 async def route(channel: str, chat_id: str | int) -> Agent:
     # MVP: single Sage for every message. Extend with binding config later.
-    from server.cli import SAGE_MANIFEST
+    from server.agent.manifest import SAGE_MANIFEST
     return SAGE_MANIFEST

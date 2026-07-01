@@ -4,12 +4,12 @@ Session cookie (itsdangerous-signed) → API key in vault → Sage streaming via
 Run: python -m server.api"""
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets
 import time
 import uuid
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,21 +19,37 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from itsdangerous import URLSafeSerializer
 
 from server.agent import Runner
+from server.agent.manifest import SAGE_MANIFEST
 from server.agent.providers import resolve_provider
+from server.agent.wiring import wire_runner
 from server.channels.router import route
-from server.cli import SAGE_MANIFEST
 from server.conversations import store
 from server.mcp.apps import APPS
-from server.mcp.client import discover_mcp_tools
-from server.memory.service import memory_list, memory_read, memory_write
+from server.memory.service import memory_list, memory_read, MEMORY_ROOT
 from server.oauth.exchange import exchange_code
 from server.oauth.provider_configs import PROVIDERS, get_provider
-from server.oauth.refresh import resolve_credential
-from server.tools.shell import run as shell_run
 from server.vault.store import get_credential, load_vault, save_vault, set_credential
 
-WORKSPACE = "default"
 CHANNEL = "web"
+
+
+def _derive_workspace(session_id: str) -> str:
+    """Return a stable per-tenant workspace identifier.
+
+    BYOK: hash the API key → same key always maps to same workspace.
+    Trial: use the session_id directly (session-scoped — no persistent identity)."""
+    vault = load_vault()
+    api_key_cred = get_credential(vault, f"session:{session_id}:byok:api_key")
+    if api_key_cred and api_key_cred.get("api_key"):
+        h = hashlib.sha256(api_key_cred["api_key"].encode()).hexdigest()[:16]
+        return f"byok:{h}"
+
+    trial = get_credential(vault, f"session:{session_id}:trial_credits")
+    if trial:
+        return f"trial:{session_id}"
+
+    # Fallback — should not happen for authenticated sessions
+    return f"session:{session_id}"
 
 _BASE = os.getenv("EMPYRALIS_BASE_URL", "").strip().rstrip("/")
 # In production, frontend and API share the same origin (nginx reverse proxy).
@@ -83,7 +99,7 @@ def _set_session_cookie(response: JSONResponse, session_data: dict) -> None:
     response.set_cookie(
         "empyralis_session",
         _serializer.dumps(session_data),
-        httponly=True, samesite="lax", max_age=86400 * 7,
+        httponly=True, samesite="lax", max_age=86400 * 7, secure=True,
     )
 
 
@@ -112,38 +128,6 @@ def _deduct_trial_credits(session_id: str, tokens_used: int) -> int:
     return remaining
 
 
-# ── runner wiring ───────────────────────────────────────────────────────────
-
-def _register_builtins(runner: Runner) -> None:
-    runner.register("shell", shell_run)
-    runner.register("memory_list", partial(memory_list, workspace="default", agent="sage"))
-    runner.register("memory_read", partial(memory_read, workspace="default", agent="sage"))
-    runner.register("memory_write", partial(memory_write, workspace="default", agent="sage"))
-
-
-async def _register_mcp_tools(runner: Runner, session_id: str) -> None:
-    vault = load_vault()
-    runner.set_vault(vault)
-    for provider_key, apps in APPS.items():
-        cred_id = f"session:{session_id}:mcp:{provider_key}"
-        credential = resolve_credential(vault, cred_id)
-        for app in apps:
-            try:
-                tools = await discover_mcp_tools(app.endpoint, credential=credential)
-                for tool in tools:
-                    name = tool.get("name", "")
-                    if not name:
-                        continue
-                    runner.register_mcp_tool(
-                        server_id=app.server_id, tool_name=name,
-                        endpoint=app.endpoint,
-                        input_schema=tool.get("input_schema"),
-                        credential_id=cred_id,
-                    )
-            except Exception:
-                pass
-
-
 # ── routes ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -165,7 +149,8 @@ async def create_session(request: Request):
         save_vault(vault)
 
         session_data = {"session_id": session_id, "created": time.time(), "trial": True}
-        resp = JSONResponse({"authenticated": True, "trial": True, "credits_remaining": 10000})
+        resp = JSONResponse({"authenticated": True, "trial": True,
+                              "session_id": session_id, "credits_remaining": 10000})
         _set_session_cookie(resp, session_data)
         return resp
 
@@ -186,7 +171,8 @@ async def create_session(request: Request):
     save_vault(vault)
 
     session_data = {"session_id": session_id, "created": time.time()}
-    resp = JSONResponse({"authenticated": True, "last_four": api_key[-4:]})
+    resp = JSONResponse({"authenticated": True, "session_id": session_id,
+                          "last_four": api_key[-4:]})
     _set_session_cookie(resp, session_data)
     return resp
 
@@ -255,9 +241,10 @@ async def chat(request: Request):
     if not message:
         raise HTTPException(400, "message is required")
 
+    workspace = _derive_workspace(sid)
     chat_id = str(sid)
-    history = store.load_window(WORKSPACE, CHANNEL, chat_id)
-    store.append(WORKSPACE, CHANNEL, chat_id, "user", message)
+    history = store.load_window(workspace, CHANNEL, chat_id)
+    store.append(workspace, CHANNEL, chat_id, "user", message)
 
     # ── select key: BYOK or platform trial key ───────────────────────────────
     if byok_key:
@@ -269,8 +256,7 @@ async def chat(request: Request):
 
     agent = await route(CHANNEL, chat_id)
     runner = Runner(agent, api_key=api_key)
-    _register_builtins(runner)
-    await _register_mcp_tools(runner, sid)
+    await wire_runner(runner, scope=f"session:{sid}")
 
     queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -306,7 +292,7 @@ async def chat(request: Request):
                 yield f"data: {json.dumps({'token': chunk})}\n\n"
             result = await task
             final_text = result or "".join(full_chunks)
-            store.append(WORKSPACE, CHANNEL, chat_id, "assistant", final_text)
+            store.append(workspace, CHANNEL, chat_id, "assistant", final_text)
 
             # ── trial: deduct credits ────────────────────────────────────────
             done_payload: dict = {"done": True}
@@ -319,6 +305,17 @@ async def chat(request: Request):
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/chat/history")
+async def chat_history(request: Request):
+    session = _get_session(request)
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+    sid = session["session_id"]
+    workspace = _derive_workspace(sid)
+    history = store.load_window(workspace, CHANNEL, str(sid))
+    return {"messages": history}
 
 
 @app.get("/oauth/start")
@@ -410,3 +407,86 @@ async def list_connected_apps(request: Request):
                 "connected": cred is not None,
             })
     return {"apps": result}
+
+
+# ── Memory (read-only viewer) ────────────────────────────────────────────────
+
+
+@app.get("/memory")
+async def get_memory(request: Request, agent: str = "sage"):
+    """Return all memory entries for the current tenant/agent.
+    Read-only — Sage manages its own memory; this is the human viewer."""
+    session = _get_session(request)
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+    workspace = _derive_workspace(session["session_id"])
+    entries: list[dict[str, str]] = []
+    agent_dir = MEMORY_ROOT / workspace / agent
+
+    index_path = agent_dir / "index.md"
+    if not index_path.exists():
+        return {"items": entries, "workspace": workspace, "agent": agent}
+
+    for line in index_path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- ["):
+            continue
+        # Parse markdown link: "- [name](name.md) — description"
+        try:
+            link_part = stripped.split("](")[1].split(".md")[0]
+            name = link_part.split("/")[-1]  # in case of subdirs
+            desc_part = stripped.split(" — ", 1)
+            description = desc_part[1] if len(desc_part) > 1 else ""
+            content = memory_read(name, workspace, agent)
+            entries.append({
+                "name": name,
+                "description": description,
+                "content": content,
+            })
+        except (IndexError, ValueError):
+            continue
+
+    return {"items": entries, "workspace": workspace, "agent": agent}
+
+
+# ── Tasks (activity feed, no engine) ─────────────────────────────────────────
+
+
+@app.get("/tasks")
+async def get_tasks(request: Request, channel: str = "web"):
+    """Return a lightweight activity feed from conversation history.
+    No task engine exists — this is derived from stored conversation files."""
+    session = _get_session(request)
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+    workspace = _derive_workspace(session["session_id"])
+    conv_dir = store.CONV_ROOT / workspace / channel
+    conversations: list[dict] = []
+
+    if conv_dir.exists():
+        for f in sorted(conv_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                chat_id = f.stem
+                lines = f.read_text().splitlines()
+                msg_count = len([l for l in lines if l.strip()])
+                mtime = f.stat().st_mtime
+                last_activity = None
+                if mtime:
+                    from datetime import datetime, timezone
+                    last_activity = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+                conversations.append({
+                    "chat_id": chat_id,
+                    "message_count": msg_count,
+                    "last_activity": last_activity,
+                })
+            except OSError:
+                continue
+
+    total_messages = sum(c["message_count"] for c in conversations)
+
+    return {
+        "conversations": conversations,
+        "total_messages": total_messages,
+        "workspace": workspace,
+        "channel": channel,
+    }

@@ -101,9 +101,6 @@ def _auth_headers(credential: dict[str, Any] | None) -> dict[str, str]:
     api_key = str(credential.get("api_key") or "").strip()
     if api_key:
         return {"Authorization": f"ApiKey {api_key}"}
-    bot_token = str(credential.get("bot_token") or "").strip()
-    if bot_token:
-        return {"Authorization": f"Bot {bot_token}"}
     return {}
 
 

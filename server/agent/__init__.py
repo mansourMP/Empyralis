@@ -13,7 +13,7 @@ import anthropic
 from server.agent.providers import resolve_provider
 
 
-def _load_dotenv() -> None:
+def load_dotenv() -> None:
     """Minimal .env parser — no python-dotenv dependency."""
     env_path = Path(__file__).resolve().parent.parent.parent / ".env"
     if not env_path.is_file():
@@ -28,7 +28,7 @@ def _load_dotenv() -> None:
             os.environ[key] = val
 
 
-_load_dotenv()
+load_dotenv()
 
 ToolDef = dict[str, Any]
 ToolHandler = Callable[..., str]

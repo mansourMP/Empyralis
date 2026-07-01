@@ -3,30 +3,34 @@
 Bot token from TELEGRAM_BOT_TOKEN env var."""
 
 import asyncio
+import hashlib
 import html
 import os
 import re
 import sys
-from functools import partial
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
 from server.agent import Runner
+from server.agent.wiring import wire_runner
 from server.channels.base import Channel
 from server.conversations import store
 from server.channels.router import route
-from server.tools.shell import run as shell_run
-from server.memory.service import (
-    memory_list, memory_read, memory_write,
-)
-from server.mcp.client import discover_mcp_tools
-from server.mcp.apps import APPS
-from server.vault.store import load_vault
-from server.oauth.refresh import resolve_credential
 
-WORKSPACE = "default"
 CHANNEL = "telegram"
+
+
+def _derive_workspace() -> str:
+    """Return a stable workspace ID derived from the bot token."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return "telegram:default"
+    h = hashlib.sha256(token.encode()).hexdigest()[:16]
+    return f"bot:{h}"
+
+
+__WORKSPACE = _derive_workspace()
 
 
 def _to_telegram_html(text: str) -> str:
@@ -54,32 +58,7 @@ class TelegramChannel(Channel):
 async def _build_runner(agent) -> Runner:
     """Wire a Runner with all tools (shell, memory, MCP)."""
     runner = Runner(agent)
-    runner.register("shell", shell_run)
-    runner.register("memory_list", partial(memory_list, workspace="default", agent="sage"))
-    runner.register("memory_read", partial(memory_read, workspace="default", agent="sage"))
-    runner.register("memory_write", partial(memory_write, workspace="default", agent="sage"))
-
-    # MCP tools
-    vault = load_vault()
-    runner.set_vault(vault)
-    for provider_key, apps in APPS.items():
-        cred_id = f"workspace:{WORKSPACE}:mcp:{provider_key}"
-        credential = resolve_credential(vault, cred_id)
-        for app in apps:
-            try:
-                tools = await discover_mcp_tools(app.endpoint, credential=credential)
-                for tool in tools:
-                    name = tool.get("name", "")
-                    if not name:
-                        continue
-                    runner.register_mcp_tool(
-                        server_id=app.server_id, tool_name=name,
-                        endpoint=app.endpoint,
-                        input_schema=tool.get("input_schema"),
-                        credential_id=cred_id,
-                    )
-            except Exception:
-                pass  # App not connected — skip
+    await wire_runner(runner, scope=f"workspace:{_WORKSPACE}")
     return runner
 
 
@@ -87,14 +66,14 @@ async def _handle_message(message: types.Message, channel: TelegramChannel) -> N
     text = message.text or ""
     chat_id = message.chat.id
 
-    history = store.load_window(WORKSPACE, CHANNEL, chat_id)
-    store.append(WORKSPACE, CHANNEL, chat_id, "user", text)
+    history = store.load_window(_WORKSPACE, CHANNEL, chat_id)
+    store.append(_WORKSPACE, CHANNEL, chat_id, "user", text)
 
     agent = await route(CHANNEL, chat_id)
     runner = await _build_runner(agent)
 
     response = await runner.run(text, message_history=history)
-    store.append(WORKSPACE, CHANNEL, chat_id, "assistant", response)
+    store.append(_WORKSPACE, CHANNEL, chat_id, "assistant", response)
 
     await channel.send(chat_id, response)
 
@@ -107,7 +86,7 @@ async def _cmd_start(message: types.Message, channel: TelegramChannel) -> None:
 
 
 async def _cmd_reset(message: types.Message, channel: TelegramChannel) -> None:
-    store.clear(WORKSPACE, CHANNEL, message.chat.id)
+    store.clear(_WORKSPACE, CHANNEL, message.chat.id)
     await channel.send(message.chat.id, "Conversation cleared. Starting fresh.")
 
 

@@ -84,8 +84,7 @@ def _resolve_passphrase() -> str:
 # ── public API ─────────────────────────────────────────────────────────────────
 
 
-def load_vault(passphrase: str | None = None) -> dict[str, Any]:
-    key = passphrase or _resolve_passphrase()
+def load_vault() -> dict[str, Any]:
     if not VAULT_PATH.exists():
         return {"version": 1, "credentials": []}
     raw = VAULT_PATH.read_text()
@@ -94,8 +93,7 @@ def load_vault(passphrase: str | None = None) -> dict[str, Any]:
     return json.loads(raw)
 
 
-def save_vault(vault: dict[str, Any], passphrase: str | None = None) -> None:
-    key = passphrase or _resolve_passphrase()
+def save_vault(vault: dict[str, Any]) -> None:
     VAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
     VAULT_PATH.write_text(json.dumps(vault, ensure_ascii=False, indent=2))
     VAULT_PATH.chmod(0o600)
@@ -130,11 +128,14 @@ def get_credential(vault: dict[str, Any], credential_id: str) -> dict[str, Any] 
     return None
 
 
-def delete_credential(vault: dict[str, Any], credential_id: str) -> bool:
-    normalized_id = credential_id.strip()
-    creds = vault.get("credentials", [])
-    for i, c in enumerate(creds):
-        if isinstance(c, dict) and c.get("id") == normalized_id:
-            creds.pop(i)
-            return True
-    return False
+def credential_id(*, scope: str, provider: str, kind: str = "mcp") -> str:
+    """Build a canonical credential ID.
+
+    scope semantics (INTENTIONAL isolation — do not unify):
+      - ``"global"``                    → ``f"{kind}:{provider}"``                (CLI)
+      - ``"session:<session_id>"``      → ``f"session:<sid>:{kind}:{provider}"``  (web)
+      - ``"workspace:<workspace_id>"``  → ``f"workspace:<ws>:{kind}:{provider}"`` (Telegram)
+    """
+    if scope == "global":
+        return f"{kind}:{provider}"
+    return f"{scope}:{kind}:{provider}"

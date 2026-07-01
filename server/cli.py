@@ -1,91 +1,21 @@
-"""Test harness. Run: python -m server.cli "your message"
+"""Dev harness + OAuth connect CLI.
 
-Week 2 adds: python -m server.cli connect <app>
-
-Wires Agent + shell + memory + MCP tools, runs the loop, prints response."""
+Run:  python -m server.cli "your message"
+      python -m server.cli connect <app>
+"""
 
 import asyncio
 import sys
 import urllib.parse
-from functools import partial
 
-from server.agent import Agent, Runner
-from server.tools.shell import run as shell_run, TOOL_DEF as SHELL_TOOL
-from server.memory.service import (
-    memory_list, memory_read, memory_write, ALL_MEMORY_TOOLS,
-)
+from server.agent import Runner
+from server.agent.manifest import SAGE_MANIFEST
+from server.agent.wiring import wire_runner
 from server.vault.store import load_vault, save_vault, set_credential
 from server.oauth.provider_configs import get_provider, PROVIDERS
 from server.oauth.exchange import exchange_code
-from server.mcp.client import discover_mcp_tools
-from server.mcp.apps import APPS
-
-SAGE_INSTRUCTIONS = """You are Sage, the Empyralis assistant.
-
-You act on your own reasoning — there are no approval gates. You have access to
-shell, memory, and MCP tools (Gmail, Calendar, Drive, Slack, Notion — if connected).
-Use them when they help answer the user's request.
-
-When running shell commands:
-- Prefer listing and reading over destructive actions
-- Explain what you're doing before running commands that modify state
-- The working directory is the user's home directory
-
-When using memory:
-- Check memory_list() before answering preference questions
-- Write important facts the user shares to memory_write()
-- Use memory_read() to recall specific stored facts
-
-When using MCP tools:
-- Use them freely — no approval needed
-- If a tool call fails, tell the user what went wrong
-- Prefer the most specific tool for the job
-
-Be concise. Don't ask permission — just act."""
-
-SAGE_MANIFEST = Agent(
-    name="Sage",
-    instructions=SAGE_INSTRUCTIONS,
-    tools=[SHELL_TOOL] + ALL_MEMORY_TOOLS,
-    model="claude-sonnet-4-6",
-    tool_allowlist=["*"],
-)
 
 REDIRECT_URI = "http://localhost:0/oauth/callback"
-
-
-def _register_builtins(runner: Runner) -> None:
-    runner.register("shell", shell_run)
-    runner.register("memory_list", partial(memory_list, workspace="default", agent="sage"))
-    runner.register("memory_read", partial(memory_read, workspace="default", agent="sage"))
-    runner.register("memory_write", partial(memory_write, workspace="default", agent="sage"))
-
-
-async def _register_mcp_tools(runner: Runner) -> None:
-    """Discover and register tools from all MCP apps with credentials in vault."""
-    vault = load_vault()
-    runner.set_vault(vault)
-    for provider_key, apps in APPS.items():
-        cred_id = f"mcp:{provider_key}"
-        from server.oauth.refresh import resolve_credential
-        credential = resolve_credential(vault, cred_id)
-        for app in apps:
-            try:
-                tools = await discover_mcp_tools(app.endpoint, credential=credential)
-                for tool in tools:
-                    name = tool.get("name", "")
-                    if not name:
-                        continue
-                    runner.register_mcp_tool(
-                        server_id=app.server_id,
-                        tool_name=name,
-                        endpoint=app.endpoint,
-                        input_schema=tool.get("input_schema"),
-                        credential_id=cred_id,
-                    )
-                    print(f"  [mcp] {app.server_id}/{name}")
-            except Exception as exc:
-                print(f"  [mcp] {app.server_id}: skipped ({exc})")
 
 
 def cmd_connect(app_name: str) -> None:
@@ -138,10 +68,8 @@ def cmd_connect(app_name: str) -> None:
 
 async def cmd_run(message: str) -> None:
     """Run a single message through Sage with all tools wired."""
-    agent = SAGE_MANIFEST
-    runner = Runner(agent)
-    _register_builtins(runner)
-    await _register_mcp_tools(runner)
+    runner = Runner(SAGE_MANIFEST)
+    await wire_runner(runner, scope="global")
     response = await runner.run(message)
     print(response)
 
