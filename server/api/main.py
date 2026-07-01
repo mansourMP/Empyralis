@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from itsdangerous import URLSafeSerializer
 
 from server.agent import Runner
+from server.agent.providers import resolve_provider
 from server.channels.router import route
 from server.cli import SAGE_MANIFEST
 from server.conversations import store
@@ -142,13 +143,10 @@ async def create_session(request: Request):
 
     import anthropic
     try:
-        if api_key.startswith("sk-ant"):
-            base_url = "https://api.anthropic.com"
-        else:
-            base_url = "https://api.deepseek.com/anthropic"
+        base_url, model = resolve_provider(api_key, "claude-sonnet-4-6")
         c = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
         await c.messages.create(
-            model="claude-sonnet-4-6", max_tokens=1,
+            model=model, max_tokens=1,
             messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
         )
     except Exception as exc:

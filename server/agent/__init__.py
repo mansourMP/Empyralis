@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 import anthropic
 
+from server.agent.providers import resolve_provider
+
 
 def _load_dotenv() -> None:
     """Minimal .env parser — no python-dotenv dependency."""
@@ -63,12 +65,9 @@ class Runner:
                 )
         # Route to the correct API: Anthropic keys start with sk-ant,
         # DeepSeek keys start with sk- (without ant).
-        if key.startswith("sk-ant"):
-            base_url = "https://api.anthropic.com"
-        else:
-            base_url = "https://api.deepseek.com/anthropic"
+        self._base_url, self._model = resolve_provider(key, self.agent.model)
         self._client = anthropic.AsyncAnthropic(
-            api_key=key, base_url=base_url
+            api_key=key, base_url=self._base_url
         )
         self._registry: ToolRegistry = {}
         # MCP tool metadata: tool_name → {server_id, endpoint, credential_id, input_schema}
@@ -135,7 +134,7 @@ class Runner:
             if on_token:
                 full_text = ""
                 async with self._client.messages.stream(
-                    model=self.agent.model,
+                    model=self._model,
                     max_tokens=4096,
                     system=self.agent.instructions,
                     tools=self._allowed_tools(),
@@ -147,7 +146,7 @@ class Runner:
                     resp = await stream.get_final_message()
             else:
                 resp = await self._client.messages.create(
-                    model=self.agent.model,
+                    model=self._model,
                     max_tokens=4096,
                     system=self.agent.instructions,
                     tools=self._allowed_tools(),
