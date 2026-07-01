@@ -43,7 +43,7 @@ export default function SetupPage() {
         <div>
           <h1 className="text-2xl font-semibold text-zinc-100">Empyralis</h1>
           <p className="text-zinc-400 mt-1">
-            Enter your Anthropic API key to start using Sage.
+            Enter your API key to start using Sage.
           </p>
         </div>
 
@@ -52,7 +52,7 @@ export default function SetupPage() {
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
-            placeholder="sk-ant-..."
+            placeholder="sk-..."
             className="w-full px-4 py-3 bg-zinc-900 border border-zinc-700 rounded-lg
                        text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
             autoFocus

@@ -106,11 +106,16 @@ class Runner:
 
     async def run(self, message: str, max_turns: int = 25,
                   message_history: list[dict] | None = None,
-                  on_token: Any | None = None) -> str:
+                  on_token: Any | None = None,
+                  on_usage: Callable[[int, int], Any] | None = None) -> str:
         """Run the agent loop. Optionally prepend prior conversation messages.
 
         If on_token is provided, streams text chunks via callback while
-        collecting the full response. Non-streaming otherwise (CLI, Telegram)."""
+        collecting the full response. Non-streaming otherwise (CLI, Telegram).
+
+        If on_usage is provided, fired after each completed API call with
+        (input_tokens, output_tokens). Fires once per turn — a multi-turn
+        tool-use run fires it multiple times; the caller accumulates."""
         messages: list[dict] = []
         if message_history:
             for msg in message_history:
@@ -144,6 +149,8 @@ class Runner:
                         full_text += chunk
                         await on_token(chunk)
                     resp = await stream.get_final_message()
+                    if on_usage and resp.usage:
+                        await on_usage(resp.usage.input_tokens, resp.usage.output_tokens)
             else:
                 resp = await self._client.messages.create(
                     model=self._model,
@@ -152,6 +159,8 @@ class Runner:
                     tools=self._allowed_tools(),
                     messages=messages,
                 )
+                if on_usage and resp.usage:
+                    await on_usage(resp.usage.input_tokens, resp.usage.output_tokens)
 
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
             if not tool_uses:

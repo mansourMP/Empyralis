@@ -16,6 +16,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [authed, setAuthed] = useState<null | boolean>(null);
+  const [creditsRemaining, setCreditsRemaining] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -23,7 +24,11 @@ export default function ChatPage() {
       .then((r) => r.json())
       .then((data) => {
         setAuthed(data.authenticated);
-        if (!data.authenticated) router.replace("/setup");
+        if (!data.authenticated) {
+          router.replace("/setup");
+        } else if (data.credits_remaining !== undefined) {
+          setCreditsRemaining(data.credits_remaining);
+        }
       })
       .catch(() => router.replace("/setup"));
   }, [router]);
@@ -73,7 +78,17 @@ export default function ChatPage() {
           if (!line.startsWith("data: ")) continue;
           try {
             const data = JSON.parse(line.slice(6));
-            if (data.token) {
+            if (data.trial_exhausted) {
+              setMessages((prev) => {
+                const copy = [...prev];
+                copy[asstIdx] = {
+                  ...copy[asstIdx],
+                  content: data.message || "Trial credits exhausted.",
+                };
+                return copy;
+              });
+              setTimeout(() => router.push("/setup"), 2000);
+            } else if (data.token) {
               setMessages((prev) => {
                 const copy = [...prev];
                 copy[asstIdx] = {
@@ -91,6 +106,8 @@ export default function ChatPage() {
                 };
                 return copy;
               });
+            } else if (data.done && data.credits_remaining !== undefined) {
+              setCreditsRemaining(data.credits_remaining);
             }
             // data.done is ignored — streaming already complete
           } catch {
@@ -163,6 +180,13 @@ export default function ChatPage() {
 
       {/* Input */}
       <div className="px-4 py-3 border-t border-zinc-800">
+        {creditsRemaining !== null && (
+          <p className="text-zinc-600 text-xs mb-2 text-center">
+            {creditsRemaining > 0
+              ? `${creditsRemaining.toLocaleString()} trial credits remaining`
+              : "Trial credits exhausted"}
+          </p>
+        )}
         <div className="flex gap-3">
           <input
             type="text"

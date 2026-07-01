@@ -10,10 +10,25 @@ export default function Home() {
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
+    // Check for existing session first
     fetch(`${API}/session`, { credentials: "include" })
       .then((r) => r.json())
       .then((data) => {
         if (data.authenticated) {
+          router.replace("/chat");
+        } else {
+          // No session — create a trial one automatically
+          return fetch(`${API}/session`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+        }
+      })
+      .then((r) => r && r.json())
+      .then((data) => {
+        if (data && data.authenticated) {
           router.replace("/chat");
         } else {
           router.replace("/setup");

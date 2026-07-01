@@ -95,6 +95,23 @@ def _get_api_key(session_id: str) -> str | None:
     return None
 
 
+def _get_trial_credits(session_id: str) -> dict | None:
+    """Return trial credits record for a session, or None if not a trial session."""
+    vault = load_vault()
+    return get_credential(vault, f"session:{session_id}:trial_credits")
+
+
+def _deduct_trial_credits(session_id: str, tokens_used: int) -> int:
+    """Subtract tokens from trial balance. Returns new remaining value. Floor at 0."""
+    vault = load_vault()
+    cred = get_credential(vault, f"session:{session_id}:trial_credits") or {}
+    remaining = max(0, cred.get("remaining", 0) - tokens_used)
+    cred["remaining"] = remaining
+    set_credential(vault, f"session:{session_id}:trial_credits", cred)
+    save_vault(vault)
+    return remaining
+
+
 # ── runner wiring ───────────────────────────────────────────────────────────
 
 def _register_builtins(runner: Runner) -> None:
@@ -138,9 +155,21 @@ async def create_session(request: Request):
     body = await request.json() if await request.body() else {}
     api_key = (body.get("api_key") or "").strip()
 
-    if not api_key:
-        raise HTTPException(400, "api_key is required — get one at https://console.anthropic.com/settings/keys")
+    session_id = str(uuid.uuid4())
 
+    # ── trial session (no key provided) ──────────────────────────────────────
+    if not api_key:
+        vault = load_vault()
+        set_credential(vault, f"session:{session_id}:trial_credits",
+                       {"remaining": 10000, "starting": 10000})
+        save_vault(vault)
+
+        session_data = {"session_id": session_id, "created": time.time(), "trial": True}
+        resp = JSONResponse({"authenticated": True, "trial": True, "credits_remaining": 10000})
+        _set_session_cookie(resp, session_data)
+        return resp
+
+    # ── BYOK session (key provided) ──────────────────────────────────────────
     import anthropic
     try:
         base_url, model = resolve_provider(api_key, "claude-sonnet-4-6")
@@ -152,7 +181,6 @@ async def create_session(request: Request):
     except Exception as exc:
         raise HTTPException(400, f"Invalid API key: {exc}") from exc
 
-    session_id = str(uuid.uuid4())
     vault = load_vault()
     set_credential(vault, f"session:{session_id}:byok:api_key", {"api_key": api_key})
     save_vault(vault)
@@ -168,13 +196,21 @@ async def get_session(request: Request):
     session = _get_session(request)
     if not session:
         return {"authenticated": False}
-    api_key = _get_api_key(session["session_id"])
+    sid = session["session_id"]
+
+    # ── trial session ────────────────────────────────────────────────────────
+    trial = _get_trial_credits(sid)
+    if trial:
+        return {"authenticated": True, "trial": True,
+                "credits_remaining": trial.get("remaining", 0)}
+
+    # ── BYOK session ─────────────────────────────────────────────────────────
+    api_key = _get_api_key(sid)
     if not api_key:
         return {"authenticated": False}
 
     connected = []
     vault = load_vault()
-    sid = session["session_id"]
     for provider_key in APPS:
         cred = get_credential(vault, f"session:{sid}:mcp:{provider_key}")
         if cred:
@@ -196,9 +232,23 @@ async def chat(request: Request):
     if not session:
         raise HTTPException(401, "Not authenticated")
     sid = session["session_id"]
-    api_key = _get_api_key(sid)
-    if not api_key:
+
+    byok_key = _get_api_key(sid)
+    trial = _get_trial_credits(sid) if not byok_key else None
+
+    if not byok_key and not trial:
         raise HTTPException(401, "Not authenticated")
+
+    # ── trial: check credits ─────────────────────────────────────────────────
+    if trial:
+        remaining = trial.get("remaining", 0)
+        if remaining <= 0:
+            async def exhausted_stream():
+                msg = json.dumps({"trial_exhausted": True,
+                    "message": "You've used your free trial credits. Add your own API key to keep chatting."})
+                yield f"data: {msg}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+            return StreamingResponse(exhausted_stream(), media_type="text/event-stream")
 
     body = await request.json()
     message = (body.get("message") or "").strip()
@@ -208,6 +258,14 @@ async def chat(request: Request):
     chat_id = str(sid)
     history = store.load_window(WORKSPACE, CHANNEL, chat_id)
     store.append(WORKSPACE, CHANNEL, chat_id, "user", message)
+
+    # ── select key: BYOK or platform trial key ───────────────────────────────
+    if byok_key:
+        api_key = byok_key
+    else:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise HTTPException(500, "Platform AI key not configured")
 
     agent = await route(CHANNEL, chat_id)
     runner = Runner(agent, api_key=api_key)
@@ -219,9 +277,19 @@ async def chat(request: Request):
     async def on_token(chunk: str) -> None:
         await queue.put(chunk)
 
+    # ── usage tracking for trial sessions ────────────────────────────────────
+    usage_totals = {"input": 0, "output": 0}
+
+    async def on_usage(inp: int, out: int) -> None:
+        usage_totals["input"] += inp
+        usage_totals["output"] += out
+
     async def run_agent() -> str:
         try:
-            return await runner.run(message, message_history=history, on_token=on_token)
+            kwargs = {"message": message, "message_history": history, "on_token": on_token}
+            if trial:
+                kwargs["on_usage"] = on_usage
+            return await runner.run(**kwargs)
         finally:
             await queue.put(None)
 
@@ -239,7 +307,14 @@ async def chat(request: Request):
             result = await task
             final_text = result or "".join(full_chunks)
             store.append(WORKSPACE, CHANNEL, chat_id, "assistant", final_text)
-            yield f"data: {json.dumps({'done': True})}\n\n"
+
+            # ── trial: deduct credits ────────────────────────────────────────
+            done_payload: dict = {"done": True}
+            if trial:
+                total_used = usage_totals["input"] + usage_totals["output"]
+                new_remaining = _deduct_trial_credits(sid, total_used)
+                done_payload["credits_remaining"] = new_remaining
+            yield f"data: {json.dumps(done_payload)}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
