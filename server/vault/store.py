@@ -128,13 +128,24 @@ def get_credential(vault: dict[str, Any], credential_id: str) -> dict[str, Any] 
     return None
 
 
+def delete_credential(vault: dict[str, Any], credential_id: str) -> bool:
+    """Remove a credential from the vault. Returns True if found and removed."""
+    normalized_id = credential_id.strip()
+    creds = vault.get("credentials", [])
+    for i, c in enumerate(creds):
+        if isinstance(c, dict) and c.get("id") == normalized_id:
+            del creds[i]
+            vault["credentials"] = creds
+            return True
+    return False
+
+
 def credential_id(*, scope: str, provider: str, kind: str = "mcp") -> str:
     """Build a canonical credential ID.
 
     scope semantics (INTENTIONAL isolation — do not unify):
       - ``"global"``                    → ``f"{kind}:{provider}"``                (CLI)
-      - ``"session:<session_id>"``      → ``f"session:<sid>:{kind}:{provider}"``  (web)
-      - ``"workspace:<workspace_id>"``  → ``f"workspace:<ws>:{kind}:{provider}"`` (Telegram)
+      - ``"workspace:<workspace_id>"``  → ``f"workspace:<ws>:{kind}:{provider}"`` (web, Telegram — both workspace-scoped)
     """
     if scope == "global":
         return f"{kind}:{provider}"

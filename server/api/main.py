@@ -28,7 +28,7 @@ from server.mcp.apps import APPS
 from server.memory.service import memory_list, memory_read, MEMORY_ROOT
 from server.oauth.exchange import exchange_code
 from server.oauth.provider_configs import PROVIDERS, get_provider
-from server.vault.store import get_credential, load_vault, save_vault, set_credential
+from server.vault.store import credential_id, delete_credential, get_credential, load_vault, save_vault, set_credential
 
 CHANNEL = "web"
 
@@ -55,7 +55,7 @@ _BASE = os.getenv("EMPYRALIS_BASE_URL", "").strip().rstrip("/")
 # In production, frontend and API share the same origin (nginx reverse proxy).
 # In dev, they're on separate ports.
 FRONTEND_URL = _BASE or "http://localhost:3000"
-REDIRECT_URI = f"{_BASE or 'http://localhost:8000'}/api/oauth/callback"
+REDIRECT_URI = f"{_BASE or 'http://localhost:8000'}/oauth/callback"
 CORS_ORIGINS = [FRONTEND_URL, "http://localhost:3000"]
 
 app = FastAPI(title="Empyralis v2", version="0.1.0")
@@ -256,7 +256,7 @@ async def chat(request: Request):
 
     agent = await route(CHANNEL, chat_id)
     runner = Runner(agent, api_key=api_key)
-    await wire_runner(runner, scope=f"session:{sid}")
+    await wire_runner(runner, scope=f"workspace:{workspace}")
 
     queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -377,7 +377,8 @@ async def oauth_callback(code: str = "", state: str = ""):
     try:
         creds = exchange_code(provider_key, code, REDIRECT_URI)
         vault = load_vault()
-        cred_id = f"session:{session_id}:mcp:{provider_key}" if session_id else f"mcp:{provider_key}"
+        scope = f"workspace:{_derive_workspace(session_id)}" if session_id else "global"
+        cred_id = credential_id(scope=scope, provider=provider_key)
         set_credential(vault, cred_id, creds)
         save_vault(vault)
     except Exception as exc:
@@ -396,9 +397,11 @@ async def list_connected_apps(request: Request):
 
     vault = load_vault()
     sid = session["session_id"]
+    workspace = _derive_workspace(sid)
+    scope = f"workspace:{workspace}"
     result = []
     for provider_key, apps in APPS.items():
-        cred = get_credential(vault, f"session:{sid}:mcp:{provider_key}")
+        cred = get_credential(vault, credential_id(scope=scope, provider=provider_key))
         for app in apps:
             result.append({
                 "id": app.server_id,
@@ -407,6 +410,24 @@ async def list_connected_apps(request: Request):
                 "connected": cred is not None,
             })
     return {"apps": result}
+
+
+@app.delete("/apps/{provider}")
+async def disconnect_app(provider: str, request: Request):
+    session = _get_session(request)
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+    if provider not in APPS:
+        raise HTTPException(404, f"Unknown app: {provider}")
+    vault = load_vault()
+    sid = session["session_id"]
+    workspace = _derive_workspace(sid)
+    scope = f"workspace:{workspace}"
+    cred_id = credential_id(scope=scope, provider=provider)
+    removed = delete_credential(vault, cred_id)
+    if removed:
+        save_vault(vault)
+    return {"disconnected": removed, "provider": provider, "credential_id": cred_id}
 
 
 # ── Memory (read-only viewer) ────────────────────────────────────────────────
