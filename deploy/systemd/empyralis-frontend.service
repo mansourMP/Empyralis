@@ -1,0 +1,20 @@
+[Unit]
+Description=Empyralis v2 Frontend (Next.js)
+After=network.target empyralis-api.service
+Wants=empyralis-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/empyralis/legacy/frontend
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=3000
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=empyralis-frontend
+
+[Install]
+WantedBy=multi-user.target

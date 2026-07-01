@@ -5,8 +5,8 @@ set -euo pipefail
 
 REPO_DIR="/opt/empyralis"
 VENV="$REPO_DIR/.venv"
-FRONTEND_DIR="$REPO_DIR/frontend/v2"
-WWW_DIR="/var/www/empyralis"
+FRONTEND_DIR="$REPO_DIR/legacy/frontend"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 
 # ── pull code ───────────────────────────────────────────────────────────────
 if [ -d "$REPO_DIR/.git" ]; then
@@ -22,6 +22,7 @@ python3 -m venv "$VENV" --clear
 "$VENV/bin/pip" install -r "$REPO_DIR/requirements.txt"
 
 # ── frontend build ──────────────────────────────────────────────────────────
+# MAN-30: legacy/frontend is SSR — built with next build, served via next start
 if [ -f "$REPO_DIR/.env" ]; then
     set -a; source "$REPO_DIR/.env"; set +a
 fi
@@ -32,13 +33,8 @@ cd "$FRONTEND_DIR"
 npm ci
 NEXT_PUBLIC_API_URL="$API_URL" npm run build
 
-# ── copy frontend ───────────────────────────────────────────────────────────
-rm -rf "$WWW_DIR"/*
-cp -r "$FRONTEND_DIR"/out/* "$WWW_DIR"/
-chown -R empyralis:empyralis "$WWW_DIR"
-
 # ── restart services ────────────────────────────────────────────────────────
-systemctl restart empyralis-api empyralis-bot
+systemctl restart empyralis-frontend empyralis-api empyralis-bot
 
 echo ""
 echo "✓ Deploy complete."
