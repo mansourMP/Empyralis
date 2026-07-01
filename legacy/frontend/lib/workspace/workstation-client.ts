@@ -1277,6 +1277,12 @@ export type WorkstationClient = {
     surface?: string | null;
     selectedGatewayId?: string | null;
   }) => Promise<ConnectionStatusPayload>;
+  // MAN-36: rewired to v2 backend GET /apps
+  listApps: () => Promise<Record<string, unknown>>;
+  // MAN-36: rewired to v2 backend DELETE /apps/{provider}
+  disconnectApp: (provider: string) => Promise<Record<string, unknown>>;
+  // MAN-36: v2 backend GET /oauth/start
+  getOAuthStartUrl: (app: string) => Promise<Record<string, unknown>>;
   getSageAgentComputerSelection: () => Promise<Record<string, unknown>>;
   setSageAgentComputerSelection: (options: {
     selectedGatewayId: string;
@@ -3280,6 +3286,25 @@ export function createWorkstationClient(
     listVaultCredentials: () =>
       requestJson<Record<string, unknown>>({
         path: paths.credentialsVault,
+        policy: READ_REQUEST_POLICY,
+      }) as Promise<Record<string, unknown>>,
+    // MAN-36: rewired to v2 backend GET /apps
+    listApps: () =>
+      requestJson<Record<string, unknown>>({
+        path: '/apps',
+        policy: READ_REQUEST_POLICY,
+      }) as Promise<Record<string, unknown>>,
+    // MAN-36: rewired to v2 backend DELETE /apps/{provider}
+    disconnectApp: (provider: string) =>
+      requestJson<Record<string, unknown>>({
+        path: `/apps/${encodeURIComponent(provider)}`,
+        init: { method: 'DELETE', headers: mergeJsonHeaders() },
+        policy: WRITE_REQUEST_POLICY,
+      }) as Promise<Record<string, unknown>>,
+    // MAN-36: v2 backend GET /oauth/start
+    getOAuthStartUrl: (app: string) =>
+      requestJson<Record<string, unknown>>({
+        path: `/oauth/start?app=${encodeURIComponent(app)}`,
         policy: READ_REQUEST_POLICY,
       }) as Promise<Record<string, unknown>>,
     listConnectorsVault: () =>
