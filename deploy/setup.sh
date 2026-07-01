@@ -9,7 +9,7 @@ apt-get install -y --no-upgrade \
     certbot python3-certbot-nginx \
     git \
     python3 python3-venv python3-pip \
-    nodejs npm
+    nodejs
 
 # ── system user ─────────────────────────────────────────────────────────────
 if ! id empyralis &>/dev/null; then

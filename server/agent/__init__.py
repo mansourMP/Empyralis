@@ -50,8 +50,25 @@ class Runner:
 
     def __init__(self, agent: Agent, api_key: str | None = None):
         self.agent = agent
+        if api_key:
+            key = api_key
+        else:
+            # Non-HTTP callers (CLI dev harness, Telegram bot) may omit api_key
+            # and rely on ANTHROPIC_API_KEY from the environment. The web API
+            # (server/api/main.py) MUST always pass an explicit key from the vault.
+            key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not key:
+                raise RuntimeError(
+                    "No API key provided and ANTHROPIC_API_KEY is not set in environment."
+                )
+        # Route to the correct API: Anthropic keys start with sk-ant,
+        # DeepSeek keys start with sk- (without ant).
+        if key.startswith("sk-ant"):
+            base_url = "https://api.anthropic.com"
+        else:
+            base_url = "https://api.deepseek.com/anthropic"
         self._client = anthropic.AsyncAnthropic(
-            api_key=api_key or os.environ["ANTHROPIC_API_KEY"]
+            api_key=key, base_url=base_url
         )
         self._registry: ToolRegistry = {}
         # MCP tool metadata: tool_name → {server_id, endpoint, credential_id, input_schema}
@@ -90,7 +107,7 @@ class Runner:
 
     async def run(self, message: str, max_turns: int = 25,
                   message_history: list[dict] | None = None,
-                  on_token: callable | None = None) -> str:
+                  on_token: Any | None = None) -> str:
         """Run the agent loop. Optionally prepend prior conversation messages.
 
         If on_token is provided, streams text chunks via callback while

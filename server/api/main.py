@@ -134,14 +134,19 @@ async def health():
 
 @app.post("/session")
 async def create_session(request: Request):
-    body = await request.json()
+    body = await request.json() if await request.body() else {}
     api_key = (body.get("api_key") or "").strip()
+
     if not api_key:
-        raise HTTPException(400, "api_key is required")
+        raise HTTPException(400, "api_key is required — get one at https://console.anthropic.com/settings/keys")
 
     import anthropic
     try:
-        c = anthropic.AsyncAnthropic(api_key=api_key)
+        if api_key.startswith("sk-ant"):
+            base_url = "https://api.anthropic.com"
+        else:
+            base_url = "https://api.deepseek.com/anthropic"
+        c = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
         await c.messages.create(
             model="claude-sonnet-4-6", max_tokens=1,
             messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
