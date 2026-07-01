@@ -110,9 +110,17 @@ async def main() -> None:
     channel = TelegramChannel(bot)
     dp = Dispatcher()
 
-    dp.message(Command("start"))(lambda msg: _cmd_start(msg, channel))
-    dp.message(Command("reset"))(lambda msg: _cmd_reset(msg, channel))
-    dp.message()(lambda msg: _handle_message(msg, channel))
+    @dp.message(Command("start"))
+    async def _start(msg: types.Message) -> None:
+        await _cmd_start(msg, channel)
+
+    @dp.message(Command("reset"))
+    async def _reset(msg: types.Message) -> None:
+        await _cmd_reset(msg, channel)
+
+    @dp.message()
+    async def _on_message(msg: types.Message) -> None:
+        await _handle_message(msg, channel)
 
     print("Sage bot polling...")
     await dp.start_polling(bot)
