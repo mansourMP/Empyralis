@@ -1,6 +1,5 @@
 export type { WorkstationChatMessageRecord } from '@/lib/workspace/chat-message';
 export type {
-  CanonicalApprovalSummary,
   CanonicalChatThreadState,
   CanonicalRunSummary,
   ChatAutonomyMode,

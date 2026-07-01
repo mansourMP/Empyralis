@@ -31,6 +31,9 @@ export type CanonicalRunSummary = Record<string, unknown> & {
   created_at?: string | null;
 };
 
+// MAN-30: kept for signature compatibility; approval types are vestigial
+export type CanonicalApprovalSummary = Record<string, unknown>;
+
 export type LiveTraceTransport = 'external' | 'trace-stream';
 
 export type LiveTraceState = {

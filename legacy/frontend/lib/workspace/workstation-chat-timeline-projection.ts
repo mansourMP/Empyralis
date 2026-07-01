@@ -14,7 +14,7 @@ import { workstationMessageToCodexCell } from '@/lib/workspace/codex-chat/messag
 import { transcriptProjectionEventsFromMetadata } from '@/lib/workspace/transcript-event-contract';
 
 export type TimelineProjectionOptions = {
-  approvals: (Record<string, unknown> & {
+  approvals?: (Record<string, unknown> & {
     approval_id?: string | null;
     id?: string | null;
     status?: string | null;
@@ -484,7 +484,7 @@ export function useWorkstationTimelineProjection(options: TimelineProjectionOpti
   const pinnedTimelineCells: CodexTranscriptCell[] = [];
 
   const pendingApprovalCells = useMemo<CodexTranscriptCell[]>(() => (
-    options.approvals.map((approval, index) => {
+    (options.approvals ?? []).map((approval, index) => {
       const approvalId = options.readString(approval.approval_id || approval.id) || `approval-${index}`;
       const approvalRecord = approval as Record<string, unknown>;
       return {

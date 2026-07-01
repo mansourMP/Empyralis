@@ -18,8 +18,6 @@ import {
   Laptop,
   ListTodo,
   Mail,
-  Mic,
-  MicOff,
   Paperclip,
   Plug,
   PlugZap,
@@ -239,7 +237,6 @@ export function ChatComposer({
   onDismissSmallModelWarning,
   slashCommands = [],
   onSlashCommandSelect,
-  onVoiceTranscribe,
   attachments = [],
   onRemoveAttachment,
 }: {
@@ -271,7 +268,6 @@ export function ChatComposer({
   slashCommands?: readonly ComposerSlashCommand[];
   onSlashCommandSelect?: (command: ComposerSlashCommand) => void;
   actionMenuItems?: readonly ComposerActionMenuItem[];
-  onVoiceTranscribe?: (audio: Blob) => Promise<string>;
   attachments?: any[];
   onRemoveAttachment?: (attachment: any) => void;
 }) {
@@ -280,12 +276,8 @@ export function ChatComposer({
   const actionLauncherRef = useRef<HTMLDivElement | null>(null);
   const commandPaletteRef = useRef<HTMLDivElement | null>(null);
   const fileDragDepthRef = useRef(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordedChunksRef = useRef<Blob[]>([]);
   const draftRef = useRef(draft);
   const [actionPaletteOpen, setActionPaletteOpen] = useState(false);
-  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
-  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const [fileDragActive, setFileDragActive] = useState(false);
   const [commandPaletteDismissed, setCommandPaletteDismissed] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
@@ -314,12 +306,6 @@ export function ChatComposer({
     [reasoningOptions],
   );
   const showInlineReasoningToggle = false;
-  const voiceSupported = typeof onVoiceTranscribe === 'function'
-    && typeof window !== 'undefined'
-    && typeof navigator !== 'undefined'
-    && Boolean(navigator.mediaDevices?.getUserMedia)
-    && typeof MediaRecorder !== 'undefined';
-
   const commandQuery = useMemo(() => {
     if (!draft.startsWith('/') || draft.includes('\n')) {
       return null;
@@ -444,79 +430,6 @@ export function ChatComposer({
     setCommandPaletteDismissed(true);
     setActionPaletteOpen(false);
     onSlashCommandSelect?.(command);
-  };
-
-  const stopVoiceRecording = () => {
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state === 'inactive') {
-      return;
-    }
-    recorder.stop();
-  };
-
-  const startVoiceRecording = async () => {
-    if (!voiceSupported) {
-      setVoiceNotice('Voice is unavailable in this browser.');
-      return;
-    }
-    setVoiceNotice(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      recordedChunksRef.current = [];
-      mediaRecorderRef.current = recorder;
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          recordedChunksRef.current.push(event.data);
-        }
-      };
-      recorder.onstop = () => {
-        stream.getTracks().forEach((track) => track.stop());
-        const audio = new Blob(recordedChunksRef.current, {
-          type: recorder.mimeType || 'audio/webm',
-        });
-        recordedChunksRef.current = [];
-        mediaRecorderRef.current = null;
-        if (!audio.size || !onVoiceTranscribe) {
-          setVoiceState('idle');
-          return;
-        }
-        setVoiceState('transcribing');
-        void onVoiceTranscribe(audio)
-          .then((transcript) => {
-            const cleanTranscript = transcript.trim();
-            if (!cleanTranscript) {
-              setVoiceNotice('No speech detected.');
-              return;
-            }
-            const currentDraft = draftRef.current.trim();
-            onDraftChange(currentDraft ? `${currentDraft}\n${cleanTranscript}` : cleanTranscript);
-            setVoiceNotice('Voice added. Press send when ready.');
-          })
-          .catch((error) => {
-            setVoiceNotice(error instanceof Error ? error.message : 'Voice could not be transcribed.');
-          })
-          .finally(() => {
-            setVoiceState('idle');
-          });
-      };
-      recorder.start();
-      setVoiceState('recording');
-    } catch {
-      setVoiceNotice('Microphone access was blocked.');
-      setVoiceState('idle');
-    }
-  };
-
-  const handleVoiceButton = () => {
-    if (voiceState === 'recording') {
-      stopVoiceRecording();
-      return;
-    }
-    if (voiceState === 'transcribing' || busy) {
-      return;
-    }
-    void startVoiceRecording();
   };
 
   const handleDraftChange = (nextDraft: string) => {
@@ -921,23 +834,6 @@ export function ChatComposer({
             {modelControl}
           </div>
 
-          <button
-            type="button"
-            className={joinClassNames(
-              'app-chat-composer__voice',
-              voiceState === 'recording' && 'app-chat-composer__voice--recording',
-            )}
-            disabled={busy || voiceState === 'transcribing'}
-            aria-label={voiceState === 'recording' ? 'Stop voice recording' : 'Record voice'}
-            onClick={handleVoiceButton}
-          >
-            {voiceState === 'recording' ? (
-              <MicOff size={17} strokeWidth={2.1} aria-hidden="true" />
-            ) : (
-              <Mic size={17} strokeWidth={2.1} aria-hidden="true" />
-            )}
-          </button>
-
           <AppButton
             type={busy ? 'button' : 'submit'}
             onClick={busy ? onStop : undefined}
@@ -958,14 +854,6 @@ export function ChatComposer({
         </div>
       </form>
 
-      {voiceNotice ? (
-        <PlatformNotification
-          tone={voiceNotice.toLowerCase().includes('blocked') || voiceNotice.toLowerCase().includes('could not') ? 'warning' : 'success'}
-          title="Voice input"
-          detail={voiceNotice}
-          onClose={() => setVoiceNotice(null)}
-        />
-      ) : null}
     </section>
   );
 }

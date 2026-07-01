@@ -98,7 +98,7 @@ const SAGE_SIDEBAR_NAV_ITEMS: readonly {
 }[] = [
   { routeId: 'memory', label: 'Memory', icon: Brain },
   { routeId: 'tasks', label: 'Tasks', icon: ListTodo },
-  { routeId: 'artifacts', label: 'Library', icon: BookOpen },
+  // artifacts (Library) — dropped (MAN-30), not ported to v2 backend
 ];
 
 const SAGE_SETUP_NAV_ITEMS: readonly {
@@ -227,8 +227,8 @@ const SAGE_FOOTER_NAV_ITEMS: readonly {
   routeId: WorkspaceRouteId;
   icon: LucideIcon;
 }[] = [
-  { id: 'agents', label: 'Agents', routeId: 'studio', icon: LayoutGrid },
-  { id: 'hardware', label: 'Hardware', routeId: 'hardware', icon: Monitor },
+  // agents (studio) — deferred to Phase 3 (MAN-30)
+  // hardware — deferred to Phase 6 (MAN-30)
 ];
 
 function readString(value: unknown, fallback = ''): string {

@@ -4,13 +4,12 @@ export {
   useChatMemoryEditorState,
   useChatMemoryProfileState,
   useChatProviderModelState,
-  useChatRunAndApprovalState,
+  useChatRunState,
   useChatStreamRunState,
   useChatThreadState,
   useChatUiPanelsState,
 } from '@/lib/workspace/workstation-chat-pane-hooks';
 export type {
-  CanonicalApprovalSummary,
   CanonicalChatThreadState,
   CanonicalRunSummary,
   ChatAutonomyMode,

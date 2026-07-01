@@ -9,6 +9,7 @@ import type {
 const AGENT_COMPUTER_CONNECTING_LABEL = 'Connecting to your Mac...';
 const AGENT_COMPUTER_RUNNING_LABEL = 'Running on your Mac';
 const AGENT_COMPUTER_DONE_LABEL = 'Done';
+const AGENT_COMPUTER_APPROVAL_LABEL = 'Approval Required';
 const AGENT_COMPUTER_REQUIRED_LABEL = 'Needs Agent Computer';
 const AGENT_COMPUTER_OFFLINE_LABEL = 'Agent Computer offline';
 function readString(value: unknown): string {

@@ -2391,38 +2391,39 @@ export function createWorkstationClient(
       }
     }
 
-    const session = await requestJson<WorkstationSessionRecord>({
-      path: paths.sessionCreate,
+    // MAN-30: rewired to v2 backend POST /session (BYOK/trial auth session)
+    const sessionPayload = await requestJson<Record<string, unknown>>({
+      path: '/session',
       init: {
         method: 'POST',
         headers: mergeJsonHeaders(),
-        body: JSON.stringify({
-          tenant_id: scope.tenantId,
-          workspace_id: scope.workspaceId,
-          channel,
-          actor,
-          metadata: {
-            thread_id: threadId,
-            source,
-          },
-        }),
+        body: JSON.stringify({}),
       },
     });
 
-    queryClient.set(cacheKey, session as WorkstationSessionRecord);
-    return session as WorkstationSessionRecord;
+    const session: WorkstationSessionRecord = {
+      session_id: readString(sessionPayload?.session_id) || 'unknown',
+      workspace_id: scope.workspaceId,
+      channel,
+      actor: actor as Record<string, unknown>,
+      status: 'active',
+    };
+
+    queryClient.set(cacheKey, session);
+    return session;
   }
 
+  // MAN-30: no-op — v2 backend POST /chat handles persistence internally
   async function persistUserTurn({
-    actor,
-    sessionId,
-    threadId,
-    message,
-    channel = 'web',
-    runtimeProfileId = null,
-    metadata = {},
-    clientRequestId = null,
-    attachments = [],
+    actor: _actor,
+    sessionId: _sessionId,
+    threadId: _threadId,
+    message: _message,
+    channel: _channel = 'web',
+    runtimeProfileId: _runtimeProfileId = null,
+    metadata: _metadata = {},
+    clientRequestId: _clientRequestId = null,
+    attachments: _attachments = [],
   }: {
     actor: WorkstationSessionActor;
     sessionId: string;
@@ -2434,27 +2435,7 @@ export function createWorkstationClient(
     clientRequestId?: string | null;
     attachments?: SageChatAttachment[];
   }): Promise<Record<string, unknown>> {
-    const resolvedRequestId = readString(clientRequestId) || createClientRequestId();
-    return (await requestJson<Record<string, unknown>>({
-      path: paths.threadTurns(threadId),
-      init: {
-        method: 'POST',
-        headers: mergeJsonHeaders(),
-        body: JSON.stringify({
-          tenant_id: scope.tenantId,
-          workspace_id: scope.workspaceId,
-          session_id: sessionId,
-          channel,
-          actor,
-          content: message,
-          runtime_profile_id: runtimeProfileId ?? undefined,
-          metadata,
-          client_request_id: resolvedRequestId,
-          attachments,
-        }),
-      },
-      policy: CHAT_TURN_PERSIST_REQUEST_POLICY,
-    })) as Record<string, unknown>;
+    return {};
   }
 
   async function submitTurn({
@@ -2618,23 +2599,24 @@ export function createWorkstationClient(
     };
   }
 
+  // MAN-30: rewired to v2 backend POST /chat (SSE stream)
   async function submitTurnStream({
-    actor,
+    actor: _actor,
     sessionId,
     threadId,
     message,
-    channel = 'web',
-    source = 'workstation_client',
-    runtimeTarget = null,
-    machineTarget = null,
-    provider = null,
-    model = null,
-    reasoningEffort = null,
-    policyContext = {},
+    channel: _channel = 'web',
+    source: _source = 'workstation_client',
+    runtimeTarget: _runtimeTarget = null,
+    machineTarget: _machineTarget = null,
+    provider: _provider = null,
+    model: _model = null,
+    reasoningEffort: _reasoningEffort = null,
+    policyContext: _policyContext = {},
     onEvent,
-    clientRequestId = null,
+    clientRequestId: _clientRequestId = null,
     abortHandle = null,
-    attachments = [],
+    attachments: _attachments = [],
   }: {
     actor: WorkstationSessionActor;
     sessionId: string;
@@ -2653,45 +2635,15 @@ export function createWorkstationClient(
     abortHandle?: WorkstationTurnStreamAbortHandle | null;
     attachments?: SageChatAttachment[];
   }): Promise<WorkstationTurnResponse> {
-    const resolvedRequestId = readString(clientRequestId) || createClientRequestId();
     let response: Response;
     try {
       response = await transport.request(
-        paths.turnSubmit,
+        '/chat',
         {
           method: 'POST',
           signal: abortHandle?.signal,
           headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            tenant_id: scope.tenantId,
-            workspace_id: scope.workspaceId,
-            thread_id: threadId,
-            session_id: sessionId,
-            client_request_id: resolvedRequestId,
-            channel,
-            actor,
-            message,
-            provider: provider ?? undefined,
-            model: model ?? undefined,
-            reasoning_effort: reasoningEffort ?? undefined,
-            machine_target: machineTarget ?? undefined,
-            attachments: attachments ?? [],
-            context_hints: {
-              source,
-              thread_id: threadId,
-              request_id: resolvedRequestId,
-              provider: provider ?? undefined,
-              model: model ?? undefined,
-              reasoning_effort: reasoningEffort ?? undefined,
-              force_direct_chat: true,
-            },
-            execution_mode: 'sync',
-            response_mode: 'stream',
-            policy_context: {
-              ...(policyContext ?? {}),
-              ...(runtimeTarget ? { execution_target: runtimeTarget } : {}),
-            },
-          }),
+          body: JSON.stringify({ message }),
         },
         resolveRequestPolicy({ method: 'POST' }, STREAM_REQUEST_POLICY),
       );
@@ -2699,12 +2651,7 @@ export function createWorkstationClient(
       if (abortHandle?.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
         throw new WorkstationClientError(
           'Sage stopped before finishing the response.',
-          0,
-          null,
-          'stream_aborted',
-          {
-            retryable: false,
-          },
+          0, null, 'stream_aborted', { retryable: false },
         );
       }
       throw normalizeTransportFailure(error);
@@ -2719,41 +2666,28 @@ export function createWorkstationClient(
     if (!/text\/event-stream/i.test(contentType)) {
       const payload = await readResponsePayload(response);
       if (payload && typeof payload === 'object') {
-        return normalizeStreamTurnResponse(
-          payload as Record<string, unknown>,
-          {
-            threadId,
-            sessionId,
-            traceId: readString((payload as Record<string, unknown>).metadata && typeof (payload as Record<string, unknown>).metadata === 'object'
-              ? ((payload as Record<string, unknown>).metadata as Record<string, unknown>).trace_id
-              : null),
-            fallbackReply: '',
-          },
-        );
+        const reply = readString((payload as Record<string, unknown>).reply);
+        return {
+          reply, status: 'completed', thread_id: threadId, session_id: sessionId,
+          metadata: {},
+        };
       }
       throw new WorkstationClientError(
-        'The workstation stream did not return an event stream.',
-        0,
-        payload,
-        'stream_protocol_error',
+        'The chat stream did not return an event stream.', 0, payload, 'stream_protocol_error',
       );
     }
 
     if (!response.body) {
       throw new WorkstationClientError(
-        'The workstation stream did not include a readable body.',
-        0,
-        null,
-        'stream_protocol_error',
+        'The chat stream did not include a readable body.', 0, null, 'stream_protocol_error',
       );
     }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let finalPayload: Record<string, unknown> | null = null;
-    let traceId: string | null = null;
     let streamedReply = '';
+    let finalPayload: Record<string, unknown> | null = null;
 
     while (true) {
       let readResult: ReadableStreamReadResult<Uint8Array>;
@@ -2762,13 +2696,7 @@ export function createWorkstationClient(
       } catch (error) {
         if (abortHandle?.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
           throw new WorkstationClientError(
-            'Sage stopped before finishing the response.',
-            0,
-            null,
-            'stream_aborted',
-            {
-              retryable: false,
-            },
+            'Sage stopped before finishing the response.', 0, null, 'stream_aborted', { retryable: false },
           );
         }
         throw error;
@@ -2777,70 +2705,49 @@ export function createWorkstationClient(
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }).replace(/\r/g, '');
 
       while (true) {
-        const delimiterIndex = buffer.indexOf('\n\n');
-        if (delimiterIndex < 0) {
-          break;
-        }
-        const block = buffer.slice(0, delimiterIndex);
-        buffer = buffer.slice(delimiterIndex + 2);
-        const event = parseSseBlock(block);
-        if (!event) {
-          continue;
-        }
-        if (event.event === 'trace') {
-          const candidateTraceId = readString(event.payload.trace_id);
-          if (candidateTraceId) {
-            traceId = candidateTraceId;
-          }
-        }
-        if (event.event === 'chunk') {
-          streamedReply = `${streamedReply}${readString(event.payload.delta)}`;
-        }
-        if (event.event === 'final') {
-          finalPayload = event.payload;
-        }
-        try {
-          onEvent?.(event);
-        } catch {
-          // UI callbacks must not break stream consumption.
+        const delim = buffer.indexOf('\n\n');
+        if (delim < 0) break;
+        const block = buffer.slice(0, delim);
+        buffer = buffer.slice(delim + 2);
+
+        // v2 backend SSE format: data: {"token":"...", ...}
+        const dataMatch = block.match(/^data:\s*(.+)$/m);
+        if (!dataMatch) continue;
+        let dataPayload: Record<string, unknown>;
+        try { dataPayload = JSON.parse(dataMatch[1]); }
+        catch { continue; }
+
+        if (typeof dataPayload.token === 'string') {
+          // per-token chunk → legacy chunk event
+          streamedReply += dataPayload.token;
+          onEvent?.({ id: null, event: 'chunk', payload: { delta: dataPayload.token } });
+        } else if (dataPayload.done) {
+          // final event
+          finalPayload = { status: 'completed', reply: streamedReply, thread_id: threadId, session_id: sessionId };
+          onEvent?.({ id: null, event: 'final', payload: finalPayload });
+        } else if (typeof dataPayload.error === 'string') {
+          finalPayload = { status: 'error', reply: '', error: dataPayload.error, thread_id: threadId, session_id: sessionId };
+          onEvent?.({ id: null, event: 'final', payload: finalPayload });
+        } else if (dataPayload.trial_exhausted) {
+          finalPayload = { status: 'exhausted', reply: readString(dataPayload.message), thread_id: threadId, session_id: sessionId };
+          onEvent?.({ id: null, event: 'final', payload: finalPayload });
         }
       }
 
-      if (done) {
-        break;
-      }
+      if (done) break;
     }
 
     if (!finalPayload) {
       if (streamedReply.trim()) {
-        return normalizeStreamTurnResponse({
-          status: 'incomplete',
-          reply: streamedReply,
-          thread_id: threadId,
-          session_id: sessionId,
-          metadata: {
-            incomplete: true,
-          },
-        }, {
-          threadId,
-          sessionId,
-          traceId,
-          fallbackReply: streamedReply,
-        });
+        return { status: 'incomplete', reply: streamedReply, thread_id: threadId, session_id: sessionId, metadata: { incomplete: true } };
       }
       throw new WorkstationClientError(
-        'The workstation stream ended before the final response arrived.',
-        0,
-        null,
-        'stream_incomplete',
+        'The chat stream ended before the final response arrived.', 0, null, 'stream_incomplete',
       );
     }
 
     return normalizeStreamTurnResponse(finalPayload, {
-      threadId,
-      sessionId,
-      traceId,
-      fallbackReply: streamedReply,
+      threadId, sessionId, traceId: null, fallbackReply: streamedReply,
     });
   }
 
@@ -2848,39 +2755,44 @@ export function createWorkstationClient(
     scope,
     paths,
     requestJson,
-    listThreads: ({ includeTurns = false, limit = 50 } = {}) =>
+    // MAN-30: rewired to v2 backend GET /chat/history
+    listThreads: ({ includeTurns: _includeTurns = false, limit: _limit = 50 } = {}) =>
       requestJson<Record<string, unknown>>({
-        path: paths.threads({ includeTurns, limit }),
-        allowStatuses: [],
-      }).then((payload) => payload ?? { items: [], count: 0 }),
-    getThread: ({ threadId, allowMissing = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.thread(threadId),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
-    listRuns: ({ limit = 80 } = {}) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.runs(limit),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    getRunDetail: ({ runId, allowMissing = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.runDetail(runId),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
-    listApprovals: ({ limit = 80 } = {}) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.approvals(limit),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    getApprovalDetail: ({ approvalId, allowMissing = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.approvalDetail(approvalId),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
+        path: '/chat/history',
+        init: { method: 'GET', headers: mergeJsonHeaders() },
+        allowStatuses: [401],
+      }).then((payload) => {
+        // Transform v2 flat message list → legacy thread list format
+        const messages = Array.isArray((payload as Record<string, unknown>)?.messages)
+          ? (payload as Record<string, unknown>).messages as Array<Record<string, unknown>>
+          : [];
+        if (messages.length === 0) return { items: [], count: 0 };
+        // Wrap all messages as a single "current" thread
+        return {
+          items: [{
+            id: 'current',
+            title: 'Current chat',
+            created_at: (messages[0] as Record<string, unknown>)?.ts ?? new Date().toISOString(),
+            turns: messages.map((m: Record<string, unknown>) => ({
+              role: m.role ?? 'user',
+              content: m.content ?? '',
+            })),
+          }],
+          count: 1,
+        };
+      }).catch(() => ({ items: [], count: 0 })),
+    // MAN-30: removed — v2 backend has no thread detail concept
+    getThread: ({ threadId: _threadId, allowMissing: _allowMissing = false }) =>
+      Promise.resolve({}),
+    // MAN-30: removed (approval-free)
+    listRuns: ({ limit: _limit = 80 } = {}) =>
+      Promise.resolve({ items: [], count: 0 } as unknown as Record<string, unknown>),
+    getRunDetail: ({ runId: _runId, allowMissing: _allowMissing = false }) =>
+      Promise.resolve({}),
+    listApprovals: ({ limit: _limit = 80 } = {}) =>
+      Promise.resolve({ items: [], count: 0 } as unknown as Record<string, unknown>),
+    getApprovalDetail: ({ approvalId: _approvalId, allowMissing: _allowMissing = false }) =>
+      Promise.resolve({}),
     listArtifacts: ({ limit = 80 } = {}) =>
       requestJson<Record<string, unknown>>({
         path: paths.artifacts(limit),
@@ -2914,11 +2826,9 @@ export function createWorkstationClient(
         },
         policy: WRITE_REQUEST_POLICY,
       }),
-    listActivityTimeline: ({ limit = 80, traceId = null } = {}) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.activity(limit, traceId),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
+    // MAN-30: removed — v2 backend has no activity timeline
+    listActivityTimeline: ({ limit: _limit = 80, traceId: _traceId = null } = {}) =>
+      Promise.resolve({ items: [], count: 0 } as unknown as Record<string, unknown>),
     getPilotProofReadiness: ({ days = 30, limit = 1000 } = {}) =>
       requestJson<Record<string, unknown>>({
         path: paths.pilotProofReadiness(days, limit),
@@ -2939,9 +2849,10 @@ export function createWorkstationClient(
         path: paths.pilotProofAdsReadiness(days, limit),
         policy: READ_REQUEST_POLICY,
       }) as Promise<Record<string, unknown>>,
+    // MAN-30: rewired to v2 backend GET /memory (read-only viewer)
     listSageMemory: () =>
       requestJson<Record<string, unknown>>({
-        path: paths.sageMemory,
+        path: '/memory',
         policy: READ_REQUEST_POLICY,
       }) as Promise<Record<string, unknown>>,
     getSageProfile: () =>
@@ -2949,9 +2860,10 @@ export function createWorkstationClient(
         path: paths.sageProfile,
         policy: READ_REQUEST_POLICY,
       }) as Promise<WorkstationSageProfileRecord>,
+    // MAN-30: rewired to v2 backend GET /tasks (activity feed — no task engine)
     getSageHeartbeat: () =>
       requestJson<WorkstationSageHeartbeatRecord>({
-        path: paths.sageHeartbeat,
+        path: '/tasks',
         policy: READ_REQUEST_POLICY,
       }) as Promise<WorkstationSageHeartbeatRecord>,
     listSageSkills: () =>
@@ -3494,30 +3406,14 @@ export function createWorkstationClient(
         path: paths.deployedAgentAuditExport(deployedAgentId, limit),
         policy: READ_REQUEST_POLICY,
       }) as Promise<Record<string, unknown>>,
-    transcribeSpeech: (audio) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.speechToText,
-        init: {
-          method: 'POST',
-          headers: {
-            accept: 'application/json',
-            'content-type': audio.type || 'audio/webm',
-          },
-          body: audio,
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    listTraces: (filters = {}) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.agentTraces(filters),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    getTraceReplay: ({ traceId, allowMissing = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.agentTraceDetail(traceId),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
+    // MAN-30: removed — speech-to-text not in v2 scope
+    transcribeSpeech: (_audio: Blob) =>
+      Promise.reject(new Error('Speech-to-text is not available.')),
+    // MAN-30: removed — v2 backend has no trace/telemetry
+    listTraces: (_filters: Record<string, unknown> = {}) =>
+      Promise.resolve({ items: [], count: 0 } as unknown as Record<string, unknown>),
+    getTraceReplay: ({ traceId: _traceId, allowMissing: _allowMissing = false }) =>
+      Promise.resolve({}),
     listDeployedAgents: ({ deploymentState = null } = {}) =>
       requestJson<Record<string, unknown>>({
         path: paths.deployedAgents(deploymentState),
@@ -4492,44 +4388,19 @@ export function createWorkstationClient(
         }
       }
     },
-    resolveApproval: ({ approvalId, payload, runId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.approvalResolve(approvalId, runId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify(payload),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    openTraceStream: (traceId) =>
-      realtime.trackEventSource(
-        new EventSource(
-          resolveAbsoluteUrl(getApiBaseUrl(), paths.agentTraceStream(traceId)),
-          { withCredentials: true },
-        ),
-      ),
-    openNotificationsStream: (options = {}) =>
-      realtime.trackEventSource(
-        new EventSource(
-          resolveAbsoluteUrl(getApiBaseUrl(), paths.notificationsStream(options)),
-          { withCredentials: true },
-        ),
-      ),
-    openChannelEventsStream: (options = {}) =>
-      realtime.trackEventSource(
-        new EventSource(
-          resolveAbsoluteUrl(getApiBaseUrl(), paths.channelEventsStream(options)),
-          { withCredentials: true },
-        ),
-      ),
-    openSageTurnStream: (workspaceId) =>
-      realtime.trackEventSource(
-        new EventSource(
-          resolveAbsoluteUrl(getApiBaseUrl(), paths.sageTurnsStream(workspaceId)),
-          { withCredentials: true },
-        ),
-      ),
+    // MAN-30: removed — approval-free architecture
+    resolveApproval: ({ approvalId: _approvalId, payload: _payload, runId: _runId }) =>
+      Promise.resolve({}),
+    // MAN-30: removed — SSE event streams not in v2 scope
+    openTraceStream: (_traceId: string) =>
+      (new EventSource('about:blank') as EventSource),
+    openNotificationsStream: (_options: Record<string, unknown> = {}) =>
+      (new EventSource('about:blank') as EventSource),
+    openChannelEventsStream: (_options: Record<string, unknown> = {}) =>
+      (new EventSource('about:blank') as EventSource),
+    // MAN-30: removed — no SSE push stream in v2
+    openSageTurnStream: (_workspaceId: string) =>
+      (new EventSource('about:blank') as EventSource),
     snapshot: () => ({
       scope,
       paths: {

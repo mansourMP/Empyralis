@@ -105,6 +105,15 @@ const WORKSPACE_SURFACE_RENDERERS: Record<WorkspaceRouteId, SurfaceRouteRenderer
     destinationId: 'settings',
     render: () => <WorkstationSettingsPane />,
   },
+  // MAN-30: hidden routes — no dedicated panes
+  approvals: {
+    destinationId: 'sage',
+    render: () => null,
+  },
+  gatewayApprovals: {
+    destinationId: 'gateway',
+    render: () => null,
+  },
 };
 
 export function WorkspaceSurfacePage({

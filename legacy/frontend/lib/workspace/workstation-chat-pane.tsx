@@ -3658,14 +3658,6 @@ export function WorkstationChatPane() {
         reasoningEffort={reasoningEffort}
         reasoningOptions={reasoningOptions}
         onReasoningEffortChange={handleReasoningEffortChange}
-        onVoiceTranscribe={async (audio) => {
-          const payload = await services.client.transcribeSpeech(audio);
-          const transcript = typeof payload.transcript === 'string' ? payload.transcript.trim() : '';
-          if (!transcript) {
-            throw new Error('No speech detected.');
-          }
-          return transcript;
-        }}
         contextWindowLabel={contextWindowLabel}
         busy={chatActivityBusy}
         controlsDisabled={isPersistingModelSelection}
