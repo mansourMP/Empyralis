@@ -3,7 +3,9 @@
 Bot token from TELEGRAM_BOT_TOKEN env var."""
 
 import asyncio
+import html
 import os
+import re
 import sys
 from functools import partial
 
@@ -27,17 +29,26 @@ WORKSPACE = "default"
 CHANNEL = "telegram"
 
 
+def _to_telegram_html(text: str) -> str:
+    """Escape HTML entities, then convert **bold** → <b>bold</b>."""
+    escaped = html.escape(text, quote=False)
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped, flags=re.DOTALL)
+
+
 class TelegramChannel(Channel):
     def __init__(self, bot: Bot):
         self._bot = bot
 
     async def send(self, chat_id: str | int, text: str) -> None:
         # Telegram max message is 4096 chars; split if needed
-        if len(text) <= 4000:
-            await self._bot.send_message(chat_id, text)
+        html_text = _to_telegram_html(text)
+        if len(html_text) <= 4000:
+            await self._bot.send_message(chat_id, html_text, parse_mode="HTML")
         else:
-            for i in range(0, len(text), 4000):
-                await self._bot.send_message(chat_id, text[i:i + 4000])
+            for i in range(0, len(html_text), 4000):
+                await self._bot.send_message(
+                    chat_id, html_text[i:i + 4000], parse_mode="HTML"
+                )
 
 
 async def _build_runner(agent) -> Runner:
@@ -52,7 +63,7 @@ async def _build_runner(agent) -> Runner:
     vault = load_vault()
     runner.set_vault(vault)
     for provider_key, apps in APPS.items():
-        cred_id = f"mcp:{provider_key}"
+        cred_id = f"workspace:{WORKSPACE}:mcp:{provider_key}"
         credential = resolve_credential(vault, cred_id)
         for app in apps:
             try:

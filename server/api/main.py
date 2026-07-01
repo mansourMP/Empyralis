@@ -87,9 +87,9 @@ def _set_session_cookie(response: JSONResponse, session_data: dict) -> None:
     )
 
 
-def _get_api_key() -> str | None:
+def _get_api_key(session_id: str) -> str | None:
     vault = load_vault()
-    cred = get_credential(vault, "byok:api_key")
+    cred = get_credential(vault, f"session:{session_id}:byok:api_key")
     if cred:
         return cred.get("api_key")
     return None
@@ -104,11 +104,11 @@ def _register_builtins(runner: Runner) -> None:
     runner.register("memory_write", partial(memory_write, workspace="default", agent="sage"))
 
 
-async def _register_mcp_tools(runner: Runner) -> None:
+async def _register_mcp_tools(runner: Runner, session_id: str) -> None:
     vault = load_vault()
     runner.set_vault(vault)
     for provider_key, apps in APPS.items():
-        cred_id = f"mcp:{provider_key}"
+        cred_id = f"session:{session_id}:mcp:{provider_key}"
         credential = resolve_credential(vault, cred_id)
         for app in apps:
             try:
@@ -152,11 +152,12 @@ async def create_session(request: Request):
     except Exception as exc:
         raise HTTPException(400, f"Invalid API key: {exc}") from exc
 
+    session_id = str(uuid.uuid4())
     vault = load_vault()
-    set_credential(vault, "byok:api_key", {"api_key": api_key})
+    set_credential(vault, f"session:{session_id}:byok:api_key", {"api_key": api_key})
     save_vault(vault)
 
-    session_data = {"session_id": str(uuid.uuid4()), "created": time.time()}
+    session_data = {"session_id": session_id, "created": time.time()}
     resp = JSONResponse({"authenticated": True, "last_four": api_key[-4:]})
     _set_session_cookie(resp, session_data)
     return resp
@@ -165,14 +166,17 @@ async def create_session(request: Request):
 @app.get("/session")
 async def get_session(request: Request):
     session = _get_session(request)
-    api_key = _get_api_key()
-    if not session or not api_key:
+    if not session:
+        return {"authenticated": False}
+    api_key = _get_api_key(session["session_id"])
+    if not api_key:
         return {"authenticated": False}
 
     connected = []
     vault = load_vault()
+    sid = session["session_id"]
     for provider_key in APPS:
-        cred = get_credential(vault, f"mcp:{provider_key}")
+        cred = get_credential(vault, f"session:{sid}:mcp:{provider_key}")
         if cred:
             connected.append(provider_key)
 
@@ -189,8 +193,11 @@ async def delete_session():
 @app.post("/chat")
 async def chat(request: Request):
     session = _get_session(request)
-    api_key = _get_api_key()
-    if not session or not api_key:
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+    sid = session["session_id"]
+    api_key = _get_api_key(sid)
+    if not api_key:
         raise HTTPException(401, "Not authenticated")
 
     body = await request.json()
@@ -198,14 +205,14 @@ async def chat(request: Request):
     if not message:
         raise HTTPException(400, "message is required")
 
-    chat_id = str(session["session_id"])
+    chat_id = str(sid)
     history = store.load_window(WORKSPACE, CHANNEL, chat_id)
     store.append(WORKSPACE, CHANNEL, chat_id, "user", message)
 
     agent = await route(CHANNEL, chat_id)
     runner = Runner(agent, api_key=api_key)
     _register_builtins(runner)
-    await _register_mcp_tools(runner)
+    await _register_mcp_tools(runner, sid)
 
     queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -240,7 +247,11 @@ async def chat(request: Request):
 
 
 @app.get("/oauth/start")
-async def oauth_start(app: str = ""):
+async def oauth_start(app: str = "", request: Request = None):
+    session = _get_session(request) if request else None
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+
     provider_key = app.strip().lower()
     if provider_key not in PROVIDERS and provider_key not in APPS:
         raise HTTPException(400, f"Unknown app: {app}")
@@ -256,7 +267,7 @@ async def oauth_start(app: str = ""):
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
         "scope": scopes,
-        "state": provider_key,
+        "state": f"{session['session_id']}:{provider_key}",
         **config.auth_params,
     }
     if provider_key == "slack":
@@ -273,9 +284,15 @@ async def oauth_callback(code: str = "", state: str = ""):
     if not code:
         return JSONResponse({"error": "No authorization code received"}, status_code=400)
 
-    # Determine provider from state or try all
-    # For MVP, state is just the provider key
-    provider_key = state.strip().lower() if state else ""
+    # Parse session_id:provider_key from state
+    session_id = ""
+    provider_key = ""
+    if state and ":" in state:
+        session_id, provider_key = state.split(":", 1)
+        provider_key = provider_key.strip().lower()
+    else:
+        provider_key = state.strip().lower() if state else ""
+
     if provider_key not in APPS:
         # Try to infer from which providers are configured
         for pk in APPS:
@@ -288,7 +305,8 @@ async def oauth_callback(code: str = "", state: str = ""):
     try:
         creds = exchange_code(provider_key, code, REDIRECT_URI)
         vault = load_vault()
-        set_credential(vault, f"mcp:{provider_key}", creds)
+        cred_id = f"session:{session_id}:mcp:{provider_key}" if session_id else f"mcp:{provider_key}"
+        set_credential(vault, cred_id, creds)
         save_vault(vault)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -305,9 +323,10 @@ async def list_connected_apps(request: Request):
         raise HTTPException(401, "Not authenticated")
 
     vault = load_vault()
+    sid = session["session_id"]
     result = []
     for provider_key, apps in APPS.items():
-        cred = get_credential(vault, f"mcp:{provider_key}")
+        cred = get_credential(vault, f"session:{sid}:mcp:{provider_key}")
         for app in apps:
             result.append({
                 "id": app.server_id,
