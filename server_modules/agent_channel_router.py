@@ -2262,6 +2262,8 @@ async def route_inbound_channel_message(
     allow_master_fallback: bool = False,
     privileged_runtime_approved: bool = False,
     trace_id: Optional[str] = None,
+    agent_installs: Optional[list] = None,
+    sage_agent_id: str = "",
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Route an inbound studio-connector message to the agent pipeline.
@@ -2270,9 +2272,29 @@ async def route_inbound_channel_message(
     :func:`execute_sage_turn` — the same unified pipeline used by every
     other channel.  Remaining channels return ``channel_unavailable``
     until their specialist routing is built.
+
+    Stage 4B: when agent_installs is provided, resolves the target agent
+    via channel_bindings before falling back to Sage.
     """
     resolved_workspace_id = str(workspace_id or "").strip()
     resolved_channel_key = str(channel_key or "").strip().lower()
+
+    # ── Stage 4B: resolve agent via channel bindings ──────────────────
+    resolved_agent_id = ""
+    if agent_installs and actor_id:
+        resolved_agent_id = _resolve_agent_for_inbound(
+            channel_type=resolved_channel_key,
+            bot_identifier=str(actor_id or "").strip(),
+            workspace_id=resolved_workspace_id,
+            agent_installs=agent_installs,
+            sage_agent_id=sage_agent_id,
+        )
+        if resolved_agent_id and resolved_agent_id != sage_agent_id:
+            # A specialist agent matched — log the routing decision.
+            # Currently all execution still goes through execute_sage_turn;
+            # specialist dispatch will be added when per-agent run loops
+            # are built (Stage 5).
+            pass
 
     # ── Sage-routed channels ───────────────────────────────────────────
     channel_origin = _SAGE_CHANNEL_ORIGIN_MAP.get(resolved_channel_key)

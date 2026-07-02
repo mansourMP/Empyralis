@@ -845,6 +845,8 @@ async def execute_skill(
     agent_label: str,
     hard_context: str,
     operational_policy: str,
+    agent_id: str = "",
+    agent_install_id: str = "",
 ) -> dict[str, Any]:
     definition = get_skill_definition(skill_id, workspace_id=workspace_id, include_disabled=True)
     if definition is None:

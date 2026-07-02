@@ -183,9 +183,31 @@ def claim_local_run(
     parse_utc_ts_fn: Optional[Callable[[Any], Any]] = None,
     now_fn: Optional[Callable[[], Any]] = None,
 ) -> Optional[str]:
+    # ── Stage 4A: resolve workspace from pending runs ──────────────────
+    resolved_ws = ""
+    if pending_run_ids and runs_by_id:
+        first_run_id = pending_run_ids[0] if pending_run_ids else None
+        if first_run_id and first_run_id in runs_by_id:
+            first_run = runs_by_id[first_run_id]
+            if isinstance(first_run, dict):
+                resolved_ws = str(
+                    first_run.get("workspace_id")
+                    or (first_run.get("context") or {}).get("workspace_id")
+                    or ""
+                ).strip()
+
+    if not resolved_ws:
+        from server_modules import workspace_scope as _ws
+        resolved_ws = _ws.resolve_workspace(
+            None, site="worker_dispatch_service:claim_run"
+        )
+        # If still unscoped, refuse the job
+        if resolved_ws.startswith("_unscoped_"):
+            return None  # job refused — no workspace scope
+
     _enforce_local_worker_decision(
         operation="claim_run",
-        workspace_id="default",
+        workspace_id=resolved_ws,
         worker_id=worker_id,
         actor_role="worker",
         required_capabilities=list(required_capabilities or []),

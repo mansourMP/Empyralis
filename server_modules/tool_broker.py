@@ -34,6 +34,25 @@ _INSECURE_BROKER_SECRETS = {
     "empyralis-dev-secrets-broker-secret",
 }
 
+# ── Stage 4B: missing-agent-id instrumentation ──────────────────────────
+_MISSING_AGENT_ID_COUNT = 0
+
+
+def _require_agent_id_flag() -> bool:
+    """Read EMPYRALIS_REQUIRE_AGENT_ID from env.
+
+    Default: false. When true, execute_skill raises if agent_id is missing.
+    Do NOT flip until all callers thread agent_id.
+    """
+    return os.getenv("EMPYRALIS_REQUIRE_AGENT_ID", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def missing_agent_id_count() -> int:
+    """Return total count of execute_skill calls missing agent_id."""
+    return _MISSING_AGENT_ID_COUNT
+
 
 @dataclass(frozen=True)
 class CapabilityGrant:
@@ -468,6 +487,49 @@ async def execute_skill(
     agent_id: str = "",
     agent_install_id: str = "",
 ) -> Dict[str, Any]:
+    # ── Stage 4B: missing-agent-id instrumentation ────────────────────
+    resolved_agent_id = str(agent_id or agent_install_id or "").strip()
+    if not resolved_agent_id:
+        _MISSING_AGENT_ID_COUNT += 1
+        try:
+            from server_modules import activity_ledger_service as _als
+            import asyncio as _aio
+            async def _emit():
+                await _als.append_activity_event(
+                    tenant_id="system",
+                    workspace_id=workspace_id,
+                    actor_type="platform",
+                    actor_id="tool_broker",
+                    event_class="platform_integrity",
+                    detail_level="audit_reference",
+                    action="tool_dispatch_missing_agent_id",
+                    title="Tool dispatch without agent_id",
+                    summary=(
+                        f"execute_skill called for '{skill_id}' without agent_id. "
+                        f"manifest_id={manifest_id}, caller requires agent_id "
+                        f"threading for Stage 4B enforcement."
+                    ),
+                    status="logged",
+                    metadata={
+                        "skill_id": skill_id,
+                        "manifest_id": manifest_id,
+                        "require_agent_id_flag": _require_agent_id_flag(),
+                    },
+                )
+            try:
+                _aio.get_running_loop()
+                _aio.create_task(_emit())
+            except RuntimeError:
+                _aio.run(_emit())
+        except Exception:
+            pass
+        if _require_agent_id_flag():
+            raise ToolExecutionDeniedError(
+                "missing_agent_id",
+                "agent_id is required for tool dispatch "
+                "(EMPYRALIS_REQUIRE_AGENT_ID is set).",
+            )
+
     source_event_id = agent_action_metering_service.build_source_event_id(
         source_surface="tool_broker_skill",
         run_id=manifest_id,

@@ -220,7 +220,54 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
 
 def _normalize_workspace_id(workspace_id: str) -> str:
-    return str(workspace_id or "default").strip() or "default"
+    """Normalize a workspace_id for memory scoping.
+
+    Stage 4A guard: if the resolved workspace is an _unscoped_ ephemeral
+    marker, raise MemoryWorkspaceUnresolvedError to block the write.
+    Persistent memory must never be written under an unscoped marker.
+    """
+    clean = str(workspace_id or "").strip()
+    if clean.startswith("_unscoped_"):
+        # Emit platform_integrity event (fire-and-forget)
+        try:
+            from server_modules import activity_ledger_service as _als
+            import asyncio as _aio
+
+            async def _emit():
+                await _als.append_activity_event(
+                    tenant_id="system",
+                    workspace_id="_platform",
+                    actor_type="platform",
+                    actor_id="memory_service",
+                    event_class="platform_integrity",
+                    detail_level="audit_reference",
+                    action="unscoped_write_blocked",
+                    title="Blocked memory write with unscoped workspace",
+                    summary=(
+                        f"Memory write attempted with workspace_id='{clean}'. "
+                        f"Unscoped markers must never reach persistent storage."
+                    ),
+                    status="blocked",
+                    metadata={"site": "memory_service:_normalize_workspace_id", "workspace_id": clean},
+                )
+
+            try:
+                _aio.get_running_loop()
+                _aio.create_task(_emit())
+            except RuntimeError:
+                _aio.run(_emit())
+        except Exception:
+            pass
+        raise MemoryWorkspaceUnresolvedError(
+            f"Cannot write memory with unscoped workspace marker: {clean}. "
+            f"Every persistent write must be scoped to a real workspace."
+        )
+    return clean or "default"
+
+
+class MemoryWorkspaceUnresolvedError(RuntimeError):
+    """Raised when a memory write is attempted with an unscoped workspace marker."""
+    pass
 
 
 def _enforce_memory_state_decision(

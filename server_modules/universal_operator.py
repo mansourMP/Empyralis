@@ -448,6 +448,8 @@ async def execute_customer_turn_in_process(
                     agent_label=manifest.identity.name,
                     hard_context=manifest.bible.hard_context,
                     operational_policy=manifest.bible.operational_policy,
+                    agent_id=str(manifest.manifest_id or "").strip(),
+                    agent_install_id=str(active_agent_install_id or "").strip(),
                 )
                 tool_status = str(skill_result.get("status") or "").strip() or None
                 draft_reply = str(skill_result.get("reply") or "").strip() or _direct_reply(manifest, goal)

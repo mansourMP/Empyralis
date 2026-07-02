@@ -3365,6 +3365,12 @@ def _require_scope_token(value: Any, label: str) -> str:
     token = _normalize_scope_token(value)
     if not token:
         raise ValueError(f"{label} is required for scoped control-plane access.")
+    # Stage 4A guard: unscoped markers must never reach the control plane
+    if token.startswith("_unscoped_"):
+        raise ValueError(
+            f"{label} resolved to an unscoped ephemeral marker ({token}). "
+            f"Every control-plane write must be scoped to a real workspace."
+        )
     return token
 
 
