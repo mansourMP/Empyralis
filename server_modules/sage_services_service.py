@@ -442,13 +442,13 @@ def _service_payload(service_id: str, service_state: Dict[str, Any]) -> Dict[str
 def _suggested_prompt(service_id: str, service_state: Dict[str, Any]) -> str:
     profile = dict(service_state.get("profile") or {})
     if service_id == "flashcards":
-        deck = _coerce_text(profile.get("active_deck")) or "my current deck"
-        return f"Use my flashcards service and help me review {deck}."
+        deck = _coerce_text(profile.get("active_deck")) or "the current deck"
+        return f"Use the flashcards service and help me review {deck}."
     if service_id == "language_coach":
-        language = _coerce_text(profile.get("target_language")) or "my target language"
-        return f"Use my language coach state and give me a short practice session for {language}."
+        language = _coerce_text(profile.get("target_language")) or "the target language"
+        return f"Use the language coach state and give me a short practice session for {language}."
     if service_id == "nutrition_log":
-        return "Use my nutrition log and summarize today’s meals against my targets."
+        return "Use the nutrition log and summarize today's meals against the targets."
     return "Use this Sage service in the next turn."
 
 

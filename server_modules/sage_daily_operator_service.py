@@ -367,7 +367,7 @@ def run_daily_operator_recipe(
         }
         return {
             "message": (
-                f"I cannot run {recipe.get('title', 'this recipe')} yet. "
+                f"The recipe {recipe.get('title', 'this recipe')} cannot be run yet. "
                 "Missing Google Workspace access: "
                 + ", ".join(required_connections)
                 + "."
