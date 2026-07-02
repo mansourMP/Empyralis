@@ -209,6 +209,18 @@ async def dispatch_sage_reply(
                 ok = await _send_one_chunk(transport, chunk, reply_to_id=reply_to_id)
                 if ok:
                     sent_any = True
+                    # ── Stage J: ledger channel send (redacted) ──────────
+                    try:
+                        from server_modules import ledger_audit as _la
+                        await _la.record_channel_send(
+                            workspace_id=workspace_id,
+                            channel_key=channel_origin,
+                            remote_jid=sender_id or "unknown",
+                            text=chunk,
+                            status="sent",
+                        )
+                    except Exception:
+                        pass  # ledger is best-effort, never blocks send
                 reply_to_id = None  # only first chunk gets reply-to
             except Exception as exc:
                 _logger.warning(

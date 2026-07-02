@@ -27,10 +27,17 @@ def is_local_dev() -> bool:
     return not db_url
 
 
-def shell_execute(command: str, *, timeout: int = _SHELL_TIMEOUT_SECONDS) -> Dict[str, Any]:
+def shell_execute(
+    command: str,
+    *,
+    timeout: int = _SHELL_TIMEOUT_SECONDS,
+    workspace_id: str = "",
+    agent_id: str = "",
+) -> Dict[str, Any]:
     """Run a shell command directly on the local machine.
 
     Returns dict with stdout, stderr, exit_code.
+    Stage J: ledgers every shell execution with hard redaction.
     """
     print(f"[LOCAL_EXECUTOR] shell_execute called: {command}", flush=True)
     if not command or not command.strip():
@@ -46,6 +53,30 @@ def shell_execute(command: str, *, timeout: int = _SHELL_TIMEOUT_SECONDS) -> Dic
             cwd=str(Path.home()),
             env={**os.environ},
         )
+        # ── Stage J: ledger shell execution (redacted) ─────────────────
+        if workspace_id:
+            try:
+                import asyncio as _aio
+                from server_modules import ledger_audit as _la
+
+                combined_bytes = len(result.stdout or "") + len(result.stderr or "")
+                async def _record():
+                    await _la.record_shell_exec(
+                        workspace_id=workspace_id,
+                        actor_id=agent_id or "sage",
+                        command=command,
+                        exit_code=result.returncode,
+                        combined_bytes=combined_bytes,
+                        status="completed" if result.returncode == 0 else "failed",
+                    )
+                try:
+                    _aio.get_running_loop()
+                    _aio.create_task(_record())
+                except RuntimeError:
+                    _aio.run(_record())
+            except Exception:
+                pass
+
         return {
             "stdout": result.stdout or "",
             "stderr": result.stderr or "",
@@ -109,10 +140,17 @@ def filesystem_read(path: str) -> Dict[str, Any]:
         return {"content": "", "path": str(target), "error": str(exc), "status": "error"}
 
 
-def filesystem_write(path: str, content: str) -> Dict[str, Any]:
+def filesystem_write(
+    path: str,
+    content: str,
+    *,
+    workspace_id: str = "",
+    agent_id: str = "",
+) -> Dict[str, Any]:
     """Write content to a file on the local filesystem.
 
     Returns dict with path, size_bytes, status.
+    Stage J: ledgers every file write with hard redaction.
     """
     target = _resolve_path(path)
     if target is None:
@@ -123,6 +161,26 @@ def filesystem_write(path: str, content: str) -> Dict[str, Any]:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(str(content or ""), encoding="utf-8")
         size = resolved.stat().st_size
+        # ── Stage J: ledger file write (redacted) ──────────────────────
+        if workspace_id:
+            try:
+                import asyncio as _aio
+                from server_modules import ledger_audit as _la
+                async def _record():
+                    await _la.record_file_write(
+                        workspace_id=workspace_id,
+                        actor_id=agent_id or "sage",
+                        path=path,
+                        byte_count=size,
+                        status="written",
+                    )
+                try:
+                    _aio.get_running_loop()
+                    _aio.create_task(_record())
+                except RuntimeError:
+                    _aio.run(_record())
+            except Exception:
+                pass
         return {
             "path": str(resolved),
             "size_bytes": size,
