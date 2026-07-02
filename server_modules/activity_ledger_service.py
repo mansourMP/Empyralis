@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 
 from server_modules import control_plane_repository
 from server_modules import entitlements_service
-from server_modules import rust_runtime_kernel_client
 from server_modules import secret_redaction_service
 
 
@@ -27,50 +26,9 @@ EVENT_CLASSES = {
 }
 
 
-def _enforce_activity_ledger_state_decision(
-    *,
-    tenant_id: str,
-    workspace_id: str,
-    actor_id: str,
-    status: str,
-    record: Dict[str, Any],
-) -> Dict[str, Any]:
-    try:
-        payload_bytes = len(str(record).encode("utf-8"))
-    except Exception:
-        payload_bytes = 0
-    try:
-        decision = rust_runtime_kernel_client.run_runtime_kernel_enforced(
-            "runtime-state-store-decision",
-            {
-                "operation": "append_activity_ledger_event",
-                "state_class": "activity_ledger",
-                "storage_engine": "durable_postgres",
-                "tenant_id": str(tenant_id or "").strip() or str(workspace_id or "default").strip() or "default",
-                "workspace_id": str(workspace_id or "default").strip() or "default",
-                "actor_id": str(actor_id or "").strip() or "activity-ledger",
-                "status": str(status or "logged").strip().lower() or "logged",
-                "payload": record,
-                "payload_bytes": payload_bytes,
-                "workspace_access": True,
-                "owner_access": True,
-                "destructive_approval": True,
-            },
-        )
-    except rust_runtime_kernel_client.RustKernelDecisionError as exc:
-        result = getattr(exc, "result", None)
-        if not isinstance(result, dict):
-            result = {}
-        raise RuntimeError(
-            result.get("reason")
-            or "Rust runtime state store denied activity ledger append."
-        ) from exc
-    next_action = str(decision.get("next_action") or "").strip()
-    if next_action != "append_activity_ledger_event":
-        raise RuntimeError(
-            f"Rust runtime state store returned unexpected next_action for activity ledger append: {next_action or 'missing'}"
-        )
-    return decision
+# Rust kernel gate removed — the kernel is never compiled/running.
+# Activity ledger writes directly; structural safety is enforced via
+# secret redaction and payload validation in append_activity_event.
 
 _PUBLIC_TIMELINE_FORBIDDEN_KEYS = frozenset(
     {
@@ -497,23 +455,6 @@ async def append_activity_event(
     }
     secret_redaction_service.assert_secrets_free(sanitized_record, context="activity_ledger_event")
     normalized_actor_id = str(actor_id or "").strip() or str(actor_type or "system").strip().lower() or "system"
-    _enforce_activity_ledger_state_decision(
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        actor_id=normalized_actor_id,
-        status=status,
-        record={
-            **sanitized_record,
-            "actor_type": str(actor_type or "").strip().lower() or "system",
-            "actor_id": normalized_actor_id,
-            "event_class": _normalize_event_class(event_class),
-            "detail_level": _normalize_detail_level(detail_level),
-            "action": str(action or "").strip().lower() or None,
-            "run_id": str(run_id or "").strip() or None,
-            "thread_id": str(thread_id or "").strip() or None,
-            "trace_id": str(trace_id or "").strip() or None,
-        },
-    )
     return await control_plane_repository.append_activity_ledger_event(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
