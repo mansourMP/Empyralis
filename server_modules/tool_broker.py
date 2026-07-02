@@ -372,6 +372,87 @@ def _require_broker_guard(
         raise ToolExecutionDeniedError(decision.code, decision.detail)
 
 
+# ── Stage 4B: per-agent tool/connector enforcement ──────────────────────
+
+async def _enforce_agent_tool_policy(
+    agent_install_id: str,
+    workspace_id: str,
+    tool_name: str,
+    connector_scopes: list,
+) -> None:
+    """Deny if the agent's install does not permit this tool or connector.
+
+    Writes a platform-voice denial to the ledger. Does NOT bypass via env var.
+    Existing agents default to ALL (no-op), so this is safe to enable now.
+    """
+    try:
+        from server_modules import agent_registry_repository as _reg
+        install = await _reg.get_workspace_agent_install_bundle(
+            agent_install_id, tenant_id=None, workspace_id=workspace_id
+        )
+    except Exception:
+        return  # can't load install — allow through (fail-open for now)
+
+    if not install or not isinstance(install, dict):
+        return
+
+    enabled_tools = install.get("enabled_tools")
+    enabled_connectors = install.get("enabled_connectors")
+
+    denial_reasons: list[str] = []
+
+    # Check tool
+    if enabled_tools is not None and isinstance(enabled_tools, list) and len(enabled_tools) > 0:
+        if tool_name not in enabled_tools:
+            denial_reasons.append(f"tool_not_enabled:{tool_name}")
+
+    # Check connectors
+    if (
+        enabled_connectors is not None
+        and isinstance(enabled_connectors, list)
+        and len(enabled_connectors) > 0
+        and connector_scopes
+    ):
+        for scope in connector_scopes:
+            if scope and scope not in enabled_connectors:
+                denial_reasons.append(f"connector_not_enabled:{scope}")
+
+    if denial_reasons:
+        detail = "; ".join(denial_reasons)
+        # Write ledger denial record
+        try:
+            from server_modules import activity_ledger_service
+
+            await activity_ledger_service.append_activity_event(
+                tenant_id="system",
+                workspace_id=workspace_id,
+                actor_type="agent",
+                actor_id=agent_install_id,
+                event_class="policy_denial",
+                detail_level="audit_reference",
+                action="tool_not_enabled",
+                title=f"Tool denied: {tool_name}",
+                summary=(
+                    f"Agent {agent_install_id} attempted {tool_name} "
+                    f"but is not authorized. {detail}"
+                ),
+                status="blocked",
+                metadata={
+                    "agent_install_id": agent_install_id,
+                    "tool": tool_name,
+                    "connector_scopes": connector_scopes,
+                    "denial_reasons": denial_reasons,
+                },
+            )
+        except Exception:
+            pass
+
+        raise ToolExecutionDeniedError(
+            "agent_tool_not_enabled",
+            f"Access not enabled for this agent. {detail}",
+        )
+
+
 async def execute_skill(
     *,
     capability_token: str,
@@ -384,6 +465,8 @@ async def execute_skill(
     agent_label: str,
     hard_context: str,
     operational_policy: str,
+    agent_id: str = "",
+    agent_install_id: str = "",
 ) -> Dict[str, Any]:
     source_event_id = agent_action_metering_service.build_source_event_id(
         source_surface="tool_broker_skill",
@@ -465,6 +548,17 @@ async def execute_skill(
             connector_scope=",".join(definition.connector_scopes),
             surface="skill",
         )
+
+        # ── Stage 4B: per-agent tool/connector enforcement ──────────
+        resolved_agent_id = str(agent_id or claims.get("agent_install_id") or "").strip()
+        if resolved_agent_id:
+            _enforce_agent_tool_policy(
+                resolved_agent_id,
+                workspace_id,
+                skill_id,
+                definition.connector_scopes,
+            )
+
         if definition.executor is not None:
             _require_runtime_allowed(definition, runtime_mode)
             _require_approval_if_needed(claims, definition)

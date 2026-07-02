@@ -66,6 +66,47 @@ LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
 }
 
 
+# ── Stage 4B: multi-agent channel binding resolution ─────────────────────
+
+def _resolve_agent_for_inbound(
+    channel_type: str,
+    bot_identifier: str,
+    workspace_id: str,
+    agent_installs: list | None = None,
+    sage_agent_id: str = "",
+) -> str:
+    """Resolve which agent handles an inbound channel message.
+
+    Matches channel_type + bot_identifier against each agent's
+    channel_bindings (jsonb array on workspace_agent_installs).
+
+    Returns:
+        agent_install_id if matched, sage_agent_id if unmatched,
+        or "" if no Sage fallback is available.
+
+    One router — no per-channel forks. Unmatched always falls back
+    to Sage, never to another specialist.
+    """
+    if agent_installs is None:
+        agent_installs = []
+
+    for install in agent_installs:
+        bindings = install.get("channel_bindings") or []
+        if not isinstance(bindings, list):
+            continue
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            if (
+                str(binding.get("channel_type") or "").strip() == channel_type
+                and str(binding.get("bot_token_hash") or "").strip() == bot_identifier
+            ):
+                return str(install.get("id") or "").strip()
+
+    # No match — fall back to Sage
+    return str(sage_agent_id or "").strip()
+
+
 def _enforce_personal_gateway_config_decision(
     *,
     gateway_id: str,
