@@ -4,8 +4,8 @@ Managed, reliable, safe agent platform. Cloud-first, hardware as upgrade.
 Consumers get their own agent in their channels.
 
 **Stack:** Python (FastAPI) + TypeScript (Next.js 16) + Rust (policy kernel + supervisor)
-**Updated:** 2026-06-30
-**See also:** `OpenClaw.md` (business model reference — zero shared code), `graphify-report.md` (auto-generated knowledge graph)
+**Updated:** 2026-07-02
+**See also:** `OpenClaw.md` (business model reference — zero shared code), `graphify-report.md` (auto-generated knowledge graph, regenerate via `graphify cluster-only .`), [Linear PLATFORM OVERVIEW](https://linear.app/mansurao/document/platform-overview-empyralis-one-agent-one-service-many-configurations-86a18989075a) (the settled target shape — read together with Section 0 below)
 
 ### Agent Maintenance Instructions
 
@@ -20,6 +20,20 @@ graphify cluster-only .     # Regenerate GRAPH_REPORT.md after structural refact
 > `graphify update .` is safe to run after every change. `cluster-only` is for PRs and merges —
 > it regenerates the community report and suggested questions. If the graph is too large for
 > HTML visualization (>5000 nodes), set `GRAPHIFY_VIZ_NODE_LIMIT=30000`.
+
+---
+
+## 0. Current Reality vs. Target Architecture — read this first
+
+Two true things that look contradictory unless you know both:
+
+**What's actually running in production right now** (empyralis.ai, VPS 165.227.25.201): the backend is `server_modules/` at repo root — ~190 Python service files, everything documented in Sections 2.8–2.9 below. The UI is root-level `frontend/`. This is real, deployed, and is what a user hits today. Nothing below this line is hypothetical.
+
+**Where it's declared to be going** (per [Linear PLATFORM OVERVIEW](https://linear.app/mansurao/document/platform-overview-empyralis-one-agent-one-service-many-configurations-86a18989075a), updated 2026-07-01 — the owner's settled source of truth, one day newer than this file's prior revision): `server/` becomes THE backend (one `Agent` class, one channel router, one OAuth vault, one MCP client). `legacy/` becomes reference-only. `legacy/frontend` gets rewired onto `server/` and stays as THE UI. `frontend/v2/` — a bare chat skeleton — gets deleted once that rewire is live.
+
+**The gap, verified 2026-07-02:** `server/` exists and its shape already matches the target (`agent/`, `tools/`, `oauth/`, `memory/`, `mcp/`, `vault/`, `channels/` — one file per concern, e.g. `oauth/refresh.py`, `oauth/exchange.py`, `mcp/client.py`, `channels/router.py`, `channels/telegram.py`). But it is skeletal — nowhere near feature parity with `server_modules/`'s ~190 files built up over months. Phase 1 of the Linear doc's 7-phase plan ("Backend unification — consolidate `server/`") has barely started. Today's `legacy/` directory is also not yet the clean two-folder split the plan describes — it's a broader, not-yet-pruned snapshot of the old repo (includes its own `frontend/`, `server_modules/`, gateway, supervisor, runtime-kernel copies).
+
+**How to read the rest of this document:** Sections 1–5 describe what's real and deployed today (`server_modules/`-centric). They are accurate for "how it ships right now." They are NOT the target architecture — for that, read the Linear doc above. Don't let an engineer "fix" `server_modules/` toward some idealized shape without knowing `server/` is where that consolidation is actually supposed to land, per [[v2-rebuild-2026]].
 
 ---
 
@@ -144,6 +158,11 @@ graph TD
 | `sage-chat-pane.tsx` | Main chat interface |
 | `sage-memory-pane.tsx` | Memory timeline view |
 | `cloud-vps-setup-panel.tsx` | VPS/node setup panel |
+| `workstation-chat-timeline-projection.ts` | Assembles thread messages + live/legacy trace events + pending approvals into one ordered chat timeline |
+| `workstation-runs-pane.tsx` | Surface listing durable background agent runs/threads |
+| `codex-chat/event-projector.ts` | Projects raw agent activity events (tool execution, Agent Computer status) into timeline-renderable cells |
+
+⚠️ **Undocumented subsystem:** `frontend/lib/workspace/codex-chat/` (`cells.ts`, `timeline-reducer.ts`, `message-adapter.ts`, `event-projector.ts`, plus `transcript-event-contract.ts` alongside it) is a whole agent-activity/tool-progress timeline layer not previously mapped here — labels like "Connecting to your Mac...", "Running on your Mac" suggest this is the frontend half of the hardware tool-progress streaming gap noted in `verified-status-channels-hardware` memory (chat goes silent during hardware work — `emit_tool_progress` never wired server-side). Worth a dedicated file-map pass; not fully audited in this update.
 
 ### 2.3 Frontend — UI System (`frontend/lib/ui/`)
 
