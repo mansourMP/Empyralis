@@ -133,9 +133,6 @@ function activityLabelForHardwareState(state: string): Pick<AgentActivityEvent, 
   if (['completed', 'complete', 'done', 'ready', 'success', 'succeeded', 'terminated', 'stopped', 'cancelled', 'canceled'].includes(state)) {
     return { type: 'done', label: AGENT_COMPUTER_DONE_LABEL, status: 'completed' };
   }
-  if (state === 'waiting_approval' || state === 'waiting' || state === 'approval_required') {
-    return { type: 'waiting_approval', label: AGENT_COMPUTER_APPROVAL_LABEL, status: 'active' };
-  }
   if (state === 'requires_agent_computer' || state === 'needs_agent_computer' || state === 'required') {
     return { type: 'error', label: AGENT_COMPUTER_REQUIRED_LABEL, status: 'failed' };
   }

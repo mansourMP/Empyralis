@@ -105,6 +105,14 @@ const WORKSPACE_SURFACE_RENDERERS: Record<WorkspaceRouteId, SurfaceRouteRenderer
     destinationId: 'settings',
     render: () => <WorkstationSettingsPane />,
   },
+  approvals: {
+    destinationId: 'sage',
+    render: () => null,
+  },
+  gatewayApprovals: {
+    destinationId: 'gateway',
+    render: () => null,
+  },
 };
 
 export function WorkspaceSurfacePage({

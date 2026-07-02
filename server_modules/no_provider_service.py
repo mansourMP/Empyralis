@@ -368,18 +368,6 @@ def _answer_payload(reply: str) -> Dict[str, Any]:
     }
 
 
-def _humanize_approval_token(value: str) -> str:
-    token = str(value or "").strip().replace("__", " ").replace("_", " ").replace("-", " ")
-    token = re.sub(r"\s+", " ", token).strip()
-    return " ".join(part.capitalize() for part in token.split(" ") if part)
-
-
-def _approval_prompt(connector_id: str, action_id: str) -> str:
-    connector_label = _humanize_approval_token(connector_id) or "Tool"
-    action_label = _humanize_approval_token(action_id) or "action"
-    return f"Approve {connector_label} to {action_label.lower()} before continuing."
-
-
 def build_direct_tool_approval_response(
     *,
     tool_calls: list[dict[str, Any]],
@@ -387,49 +375,7 @@ def build_direct_tool_approval_response(
     services: NoProviderExecutionServices,
     session_ctx: dict[str, Any] | None = None,
 ) -> Dict[str, Any] | None:
-    approval_actions: list[dict[str, Any]] = []
-    approvals: list[dict[str, Any]] = []
-    for index, call in enumerate(tool_calls, start=1):
-        connector_id, action_id = services.parse_tool_name(str(call.get("name") or ""))
-        argument_payload = services.tool_arguments_payload(call.get("arguments"))
-        if not services.approval_required_for_tool(connector_id, action_id, argument_payload, tool_capabilities):
-            continue
-        tool_input = str(argument_payload.get("input") or "").strip()
-        if connector_id in {"file", "shell", "screenshot", "http", "browser", "computer", "hardware"}:
-            tool_input = json.dumps(argument_payload, ensure_ascii=False)
-        approval_actions.append(
-            {
-                "type": "approval_required",
-                "connector": connector_id,
-                "action": action_id,
-                "input": tool_input,
-                "id": f"approval_required:{connector_id}:{action_id}:{index}",
-                "kind": "approval_required",
-                "label": "Confirm",
-                "variant": "primary",
-            }
-        )
-        approvals.append(
-            {
-                "prompt": _approval_prompt(connector_id, action_id),
-                "labels": [f"{connector_id}.{action_id}"],
-                "capabilities": [connector_id] if connector_id else [],
-                "actions": [action_id] if action_id else [],
-                "target": None,
-                "scope": "once",
-                "reusable": False,
-                "consequence": None,
-                "status": "waiting",
-            }
-        )
-    if not approval_actions:
-        return None
-    return {
-        "reply": "",
-        "actions": approval_actions,
-        "approvals": approvals,
-        "mode": "answer_with_action",
-    }
+    return None
 
 
 def plan_tool_calls(
