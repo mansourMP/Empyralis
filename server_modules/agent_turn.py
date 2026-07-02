@@ -686,8 +686,12 @@ def _canonical_direct_chat_thread_id(
         or str(fallback_actor_id or "").strip()
     )
     if owner_user_id:
+        from server_modules import workspace_scope as _ws
+
         return agent_registry_repository.build_master_thread_id(
-            workspace_id=str(workspace_id or "default").strip() or "default",
+            workspace_id=_ws.resolve_workspace(
+                workspace_id, site="agent_turn:resolve_master_thread"
+            ),
             owner_user_id=owner_user_id,
         )
     return str(fallback_thread_id or "direct-chat").strip() or "direct-chat"

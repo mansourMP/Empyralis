@@ -110,7 +110,10 @@ def _local_worker_fallback_enabled() -> bool:
 
 
 def _workspace_local_worker_online_exact(workspace_id: str) -> bool:
-    normalized_workspace_id = str(workspace_id or "default").strip() or "default"
+    from server_modules import workspace_scope as _ws
+    normalized_workspace_id = _ws.resolve_workspace(
+        workspace_id, site="direct_chat_provider:local_worker_online"
+    )
     try:
         from server_modules import local_queue
 

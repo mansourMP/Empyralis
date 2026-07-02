@@ -2186,7 +2186,10 @@ def _resolve_direct_tool_gateway_id(
             continue
         if gateway_protocol_service.gateway_connection_is_live(gateway_id):
             return gateway_id
-    normalized_workspace_id = str(workspace_id or "default").strip() or "default"
+    from server_modules import workspace_scope as _ws
+    normalized_workspace_id = _ws.resolve_workspace(
+        workspace_id, site="skills_service:resolve_gateway_for_workspace"
+    )
     resolved_gateway_id = _resolve_live_gateway_from_workspace(
         normalized_workspace_id,
         gateway_state_repository=gateway_state_repository,

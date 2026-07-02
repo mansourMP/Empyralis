@@ -587,7 +587,10 @@ async def ensure_workspace_agent_registry_seeded(
     if pool is None:
         return
     tenant_token = str(tenant_id or "").strip() or "default"
-    workspace_token = str(workspace_id or "").strip() or "default"
+    from server_modules import workspace_scope as _ws
+    workspace_token = _ws.resolve_workspace(
+        workspace_id, site="agent_registry_repository:seed_workspace"
+    )
     workspace_slug = _slugify(workspace_token, fallback="workspace")
 
     async with pool.acquire() as connection:

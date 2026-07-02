@@ -1341,8 +1341,12 @@ async def _handle_telegram_gateway_channel_inbound(
         return {"duplicate": not created, "inbound": inbound, "outbound": outbound}
 
     if outbound is None:
+        from server_modules import workspace_scope as _ws
         reply = personal_channel_sage_bridge_service.build_telegram_personal_reply(
-            workspace_id=str(registration.get("workspace_id") or "").strip(),
+            workspace_id=_ws.resolve_workspace(
+                registration.get("workspace_id"), registration,
+                site="agent_channel_router:telegram_personal_reply",
+            ),
             gateway_id=str(gateway_id or "").strip(),
             remote_jid=remote_jid,
             text=text,
