@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List
 
-from server_modules import unified_memory_service
+from server_modules.memory_contracts import MEMORY_LAYER_SPECS
 
 
 SYNC_CLASSES = ("local_only", "sync_allowed", "summary_bridge_only", "explicit_opt_in")
@@ -283,7 +283,7 @@ def build_summary_bridge_payload_record(
         )
     resolved_memory_layer = str(memory_layer or "").strip()
     if resolved_memory_layer:
-        if resolved_memory_layer not in unified_memory_service.MEMORY_LAYER_SPECS:
+        if resolved_memory_layer not in MEMORY_LAYER_SPECS:
             raise HybridPolicyError(
                 reason="summary_bridge_payload_invalid",
                 message=f"Unknown summary bridge memory layer: {resolved_memory_layer}.",
@@ -410,7 +410,7 @@ def _requested_memory_layers(policy: Dict[str, Any]) -> List[str]:
     unknown = [
         token
         for token in layers
-        if token not in unified_memory_service.MEMORY_LAYER_SPECS or token not in MEMORY_LAYER_SYNC_RULES
+        if token not in MEMORY_LAYER_SPECS or token not in MEMORY_LAYER_SYNC_RULES
     ]
     if unknown:
         raise HybridPolicyError(

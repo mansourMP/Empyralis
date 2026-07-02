@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 
 from server_modules import control_plane_repository
 from server_modules import entitlements_service
-from server_modules import rust_runtime_kernel_client
 from server_modules import secret_redaction_service
 
 
@@ -24,53 +23,16 @@ EVENT_CLASSES = {
     "memory_update",
     "run_status",
     "system_activity",
+    "gateway_channel",
+    "gateway_hardware",
+    "fleet_control",
+    "platform_integrity",
 }
 
 
-def _enforce_activity_ledger_state_decision(
-    *,
-    tenant_id: str,
-    workspace_id: str,
-    actor_id: str,
-    status: str,
-    record: Dict[str, Any],
-) -> Dict[str, Any]:
-    try:
-        payload_bytes = len(str(record).encode("utf-8"))
-    except Exception:
-        payload_bytes = 0
-    try:
-        decision = rust_runtime_kernel_client.run_runtime_kernel_enforced(
-            "runtime-state-store-decision",
-            {
-                "operation": "append_activity_ledger_event",
-                "state_class": "activity_ledger",
-                "storage_engine": "durable_postgres",
-                "tenant_id": str(tenant_id or "").strip() or str(workspace_id or "default").strip() or "default",
-                "workspace_id": str(workspace_id or "default").strip() or "default",
-                "actor_id": str(actor_id or "").strip() or "activity-ledger",
-                "status": str(status or "logged").strip().lower() or "logged",
-                "payload": record,
-                "payload_bytes": payload_bytes,
-                "workspace_access": True,
-                "owner_access": True,
-                "destructive_approval": True,
-            },
-        )
-    except rust_runtime_kernel_client.RustKernelDecisionError as exc:
-        result = getattr(exc, "result", None)
-        if not isinstance(result, dict):
-            result = {}
-        raise RuntimeError(
-            result.get("reason")
-            or "Rust runtime state store denied activity ledger append."
-        ) from exc
-    next_action = str(decision.get("next_action") or "").strip()
-    if next_action != "append_activity_ledger_event":
-        raise RuntimeError(
-            f"Rust runtime state store returned unexpected next_action for activity ledger append: {next_action or 'missing'}"
-        )
-    return decision
+# Rust kernel gate removed — the kernel is never compiled/running.
+# Activity ledger writes directly; structural safety is enforced via
+# secret redaction and payload validation in append_activity_event.
 
 _PUBLIC_TIMELINE_FORBIDDEN_KEYS = frozenset(
     {
@@ -187,6 +149,10 @@ def _iso_ts(value: Any) -> Optional[str]:
 
 def _utc_now_ts() -> float:
     return datetime.now(timezone.utc).timestamp()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _payload_timestamp_seconds(payload: Dict[str, Any], *keys: str) -> Optional[float]:
@@ -493,23 +459,6 @@ async def append_activity_event(
     }
     secret_redaction_service.assert_secrets_free(sanitized_record, context="activity_ledger_event")
     normalized_actor_id = str(actor_id or "").strip() or str(actor_type or "system").strip().lower() or "system"
-    _enforce_activity_ledger_state_decision(
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        actor_id=normalized_actor_id,
-        status=status,
-        record={
-            **sanitized_record,
-            "actor_type": str(actor_type or "").strip().lower() or "system",
-            "actor_id": normalized_actor_id,
-            "event_class": _normalize_event_class(event_class),
-            "detail_level": _normalize_detail_level(detail_level),
-            "action": str(action or "").strip().lower() or None,
-            "run_id": str(run_id or "").strip() or None,
-            "thread_id": str(thread_id or "").strip() or None,
-            "trace_id": str(trace_id or "").strip() or None,
-        },
-    )
     return await control_plane_repository.append_activity_ledger_event(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
@@ -534,6 +483,52 @@ async def append_activity_event(
         payload=sanitized_payload,
         metadata=sanitized_metadata,
         event_id=event_id,
+    )
+
+
+async def append_execution_activity(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    tool: str,
+    args_summary: Any,
+    result_status: str,
+    execution_tier: str,
+    run_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    channel: Optional[str] = None,
+    direction: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    payload = {
+        "agent_id": str(agent_id or "").strip() or "agent",
+        "tool": str(tool or "").strip() or "unknown",
+        "args_summary": args_summary,
+        "result_status": str(result_status or "").strip().lower() or "logged",
+        "ts": _utc_now_iso(),
+        "execution_tier": str(execution_tier or "").strip().lower() or "unknown",
+    }
+    return await append_activity_event(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        actor_type="agent",
+        actor_id=payload["agent_id"],
+        event_class="sage_activity",
+        detail_level="timeline_detail",
+        run_id=run_id,
+        thread_id=thread_id,
+        trace_id=trace_id,
+        channel=channel,
+        direction=direction,
+        action="tool_execution",
+        title=f"{payload['tool']} {payload['result_status']}",
+        summary=f"{payload['tool']} {payload['result_status']} on {payload['execution_tier']}",
+        status=payload["result_status"],
+        review_required=False,
+        payload=payload,
+        metadata=metadata,
     )
 
 

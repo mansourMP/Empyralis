@@ -2186,7 +2186,10 @@ def _resolve_direct_tool_gateway_id(
             continue
         if gateway_protocol_service.gateway_connection_is_live(gateway_id):
             return gateway_id
-    normalized_workspace_id = str(workspace_id or "default").strip() or "default"
+    from server_modules import workspace_scope as _ws
+    normalized_workspace_id = _ws.resolve_workspace(
+        workspace_id, site="skills_service:resolve_gateway_for_workspace"
+    )
     resolved_gateway_id = _resolve_live_gateway_from_workspace(
         normalized_workspace_id,
         gateway_state_repository=gateway_state_repository,
@@ -3166,6 +3169,22 @@ async def execute_single_direct_tool_call_async(
 
     argument_payload = callbacks.tool_arguments_payload(tool_call.get("arguments"))
     session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
+    try:
+        from server_modules import activity_ledger_service
+
+        await activity_ledger_service.append_execution_activity(
+            tenant_id=_tenant_id_from_direct_tool_context(session_ctx),
+            workspace_id=str(workspace_id or "default").strip() or "default",
+            agent_id=str(session_metadata.get("agent_id") or session_metadata.get("user_id") or "sage").strip() or "sage",
+            tool=f"{connector_id}.{action_id}".strip("."),
+            args_summary=argument_payload if isinstance(argument_payload, dict) else {},
+            result_status="started",
+            execution_tier=str(session_metadata.get("execution_tier") or session_metadata.get("runtime_target") or "direct").strip() or "direct",
+            thread_id=str(thread_id or "").strip() or None,
+            metadata={"source": "execute_single_direct_tool_call_async"},
+        )
+    except Exception:
+        pass
 
     if connector_id == "hardware" and action_id == "action":
         try:
@@ -3545,6 +3564,24 @@ def execute_single_direct_tool_call(
     ).strip() or "default"
     if connector_id == "http" and action_id == "request":
         _raise_direct_chat_tool_execution_blocked()
+    try:
+        from server_modules import activity_ledger_service
+
+        callbacks.run_async_tool_call(
+            activity_ledger_service.append_execution_activity(
+                tenant_id=tenant_id,
+                workspace_id=str(workspace_id or "default").strip() or "default",
+                agent_id=str(session_metadata.get("agent_id") or session_metadata.get("user_id") or "sage").strip() or "sage",
+                tool=f"{connector_id}.{action_id}".strip("."),
+                args_summary=argument_payload if isinstance(argument_payload, dict) else {},
+                result_status="started",
+                execution_tier=str(session_metadata.get("execution_tier") or session_metadata.get("runtime_target") or "direct").strip() or "direct",
+                thread_id=str(thread_id or "").strip() or None,
+                metadata={"source": "execute_single_direct_tool_call"},
+            )
+        )
+    except Exception:
+        pass
     if connector_id == "image" and action_id == "generate":
         saved_images = run_generate_image(
             prompt=argument_payload.get("prompt") or "",

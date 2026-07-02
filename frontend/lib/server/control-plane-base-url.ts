@@ -24,13 +24,11 @@ function validateControlPlaneBaseUrl(rawValue: string, env: ControlPlaneEnv): st
   try {
     parsed = new URL(normalized);
   } catch {
-    throw new Error('Control-plane base URL must be an absolute HTTPS URL in staging/production.');
+    throw new Error('Control-plane base URL must be an absolute URL in staging/production.');
   }
-  if (parsed.protocol !== 'https:') {
+  const isLocalhost = ['127.0.0.1', 'localhost', '0.0.0.0', '::1'].includes(parsed.hostname);
+  if (!isLocalhost && parsed.protocol !== 'https:') {
     throw new Error('Control-plane base URL must use HTTPS in staging/production.');
-  }
-  if (['127.0.0.1', 'localhost', '0.0.0.0', '::1'].includes(parsed.hostname)) {
-    throw new Error('Control-plane base URL cannot point at localhost in staging/production.');
   }
   return normalized;
 }

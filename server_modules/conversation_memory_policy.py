@@ -277,6 +277,12 @@ def build_external_channel_memory_profile(
 
 
 def _resolve_durable_run_profile() -> MemoryPolicyProfile:
+    from server_modules.memory_contracts import (
+        ORION_MEMORY_READ_K_DEFAULT,
+        ORION_MEMORY_RETENTION_DAYS_DEFAULT,
+        ORION_MEMORY_MAX_TEXT_CHARS_DEFAULT,
+    )
+
     try:
         from server_modules import memory_service
 

@@ -257,29 +257,30 @@ def build_root_memory_brief_sections(context_files: Mapping[str, Any] | None) ->
     total_brief_chars = 0
     truncated = False
 
-    for filename in ROOT_MEMORY_BRIEF_PRIORITY:
-        content = _meaningful_context_file_content(filename, payload.get(filename))
-        if not content:
-            continue
-        consumed_paths.add(filename)
-        total_source_chars += len(content)
-        if total_brief_chars >= ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT:
-            truncated = True
-            continue
+    # ── Phase N (Stage 5): inject ONLY MEMORY.md content ──────────────
+    # Every other file is available on-demand via memory_read.
+    # MEMORY.md is the index the agent maintains.
+    mem_content = _meaningful_context_file_content("MEMORY.md", payload.get("MEMORY.md"))
+    if mem_content:
+        consumed_paths.add("MEMORY.md")
+        total_source_chars += len(mem_content)
         remaining = ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT - total_brief_chars
         clipped, was_truncated = _clip_text(
-            content,
+            mem_content,
             min(ROOT_MEMORY_BRIEF_SECTION_CHAR_LIMIT, remaining),
             "content truncated due to length limit",
         )
         sanitized = workspace_context_memory_adapter.strip_red_facts_from_external_context(clipped)
-        if not sanitized:
-            truncated = True
-            continue
-        sections.append(f"### {filename}\n{sanitized}")
-        included_official.append(filename)
-        total_brief_chars += len(sanitized)
-        truncated = truncated or was_truncated
+        if sanitized:
+            sections.append(f"### MEMORY.md (Agent Memory Index)\n{sanitized}")
+            included_official.append("MEMORY.md")
+            total_brief_chars += len(sanitized)
+            truncated = truncated or was_truncated
+
+    # Track which official files exist on disk (but don't inject them)
+    for filename in OFFICIAL_ROOT_MEMORY_FILES:
+        if _meaningful_context_file_content(filename, payload.get(filename)):
+            consumed_paths.add(filename)
 
     for filename in LEGACY_ROOT_MEMORY_FILES:
         if _meaningful_context_file_content(filename, payload.get(filename)):

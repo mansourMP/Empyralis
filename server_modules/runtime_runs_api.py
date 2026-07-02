@@ -438,7 +438,11 @@ def _history_filtered_thread_record(
     cache: dict[str, dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     payload = normalize_thread_record(record)
-    workspace_id = str(payload.get("workspace_id") or "default").strip() or "default"
+    from server_modules import workspace_scope as _ws
+    workspace_id = _ws.resolve_workspace(
+        payload.get("workspace_id"), payload,
+        site="runtime_runs_api:cache_thread_record",
+    )
     history_window_days = _workspace_history_window_days(cache, workspace_id)
     decision = thread_service._enforce_thread_record_decision(
         operation="history_filter",

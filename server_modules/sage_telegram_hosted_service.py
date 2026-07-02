@@ -1139,7 +1139,7 @@ async def _run_agent_machine_shortcut(
             continue
 
         # No content and no tool calls — shouldn't happen, but handle it
-        return await _save_turn_and_return(msg.content or "I processed that but have nothing to add.")
+        return await _save_turn_and_return(msg.content or "The request was processed.")
 
     # Max turns exceeded — get final response
     for sp in screenshot_paths:
@@ -1155,7 +1155,7 @@ async def _run_agent_machine_shortcut(
         )
         return await _save_turn_and_return(response.choices[0].message.content or "Done.")
     except Exception:
-        return await _save_turn_and_return("I ran several tools. Let me know if you need anything else.")
+        return await _save_turn_and_return("Several tools were executed. Additional instructions can be provided if needed.")
 
 async def _process_update(update: dict) -> bool:
     """Process a single Telegram update. Returns True if a Sage reply was sent.

@@ -483,24 +483,7 @@ export function useWorkstationTimelineProjection(options: TimelineProjectionOpti
 
   const pinnedTimelineCells: CodexTranscriptCell[] = [];
 
-  const pendingApprovalCells = useMemo<CodexTranscriptCell[]>(() => (
-    options.approvals.map((approval, index) => {
-      const approvalId = options.readString(approval.approval_id || approval.id) || `approval-${index}`;
-      const approvalRecord = approval as Record<string, unknown>;
-      return {
-        id: approvalId,
-        kind: 'approval_request',
-        prompt: options.readString(approval.prompt) || `Approval ${index + 1}`,
-        actions: ['allow_once', 'allow_session', 'deny'],
-        status: 'waiting',
-        createdAt: options.readString(approvalRecord.created_at) || null,
-        metadata: {
-          ...approval,
-          approval_id: approvalId,
-        },
-      };
-    })
-  ), [options]);
+  const pendingApprovalCells: CodexTranscriptCell[] = [];
 
   const visibleTranscriptCells = useMemo(() => {
     const canonicalMessages = options.threadMessages.filter((message) => !options.isSyntheticTranscriptMessage(message));

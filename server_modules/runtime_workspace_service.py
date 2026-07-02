@@ -46,7 +46,10 @@ def _enforce_runtime_workspace_state_decision(**payload: Any) -> dict[str, Any]:
 
 
 def list_workspace_memory_payload(workspace_id: str, *, workspace_memory_snapshot: Callable[[str], Any]) -> dict[str, Any]:
-    normalized_workspace_id = str(workspace_id or "default").strip() or "default"
+    from server_modules import workspace_scope as _ws
+    normalized_workspace_id = _ws.resolve_workspace(
+        workspace_id, site="runtime_workspace_service:list_memory_payload"
+    )
     return workspace_memory_snapshot(normalized_workspace_id).as_payload()
 
 

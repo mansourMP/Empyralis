@@ -44,6 +44,17 @@ export class SessionPool {
    * @returns {Promise<string>} sessionId
    */
   async createSession(sessionString, opts = {}) {
+    // ── Phase M: single-path gating ────────────────────────────────────
+    // EMPYRALIS_TELEGRAM_PATH: "gateway" (default) | "csm" | "both"
+    // When "gateway", the Gateway GramJS handles Telegram; CSM skips.
+    const telegramPath = (process.env.EMPYRALIS_TELEGRAM_PATH || "gateway").trim().toLowerCase();
+    if (telegramPath === "gateway") {
+      this.logger?.info?.("telegram path=gateway — CSM GramJS listener disabled");
+      throw new Error("telegram_path_gateway: CSM listener disabled by EMPYRALIS_TELEGRAM_PATH=gateway. Use 'csm' or 'both' to enable CSM path.");
+    }
+    // "csm" or "both" — proceed normally
+    this.logger?.info?.({ telegramPath }, "CSM Telegram session starting");
+
     if (this.sessions.size >= CONFIG.maxSessions) {
       throw new Error(`max_sessions_reached: ${this.sessions.size}/${CONFIG.maxSessions}`);
     }
@@ -448,6 +459,13 @@ export class SessionPool {
    * @returns {Promise<{restored: number, failed: number, failures: Array<{sessionId, workspaceId, error}>}>}
    */
   async restoreSessions() {
+    // ── Phase M: single-path gating ────────────────────────────────────
+    const telegramPath = (process.env.EMPYRALIS_TELEGRAM_PATH || "gateway").trim().toLowerCase();
+    if (telegramPath === "gateway") {
+      this.logger?.info?.("telegram path=gateway — skipping CSM session restore");
+      return { restored: 0, failed: 0, failures: [], skipped: true, reason: "telegram_path_gateway" };
+    }
+
     const summary = { restored: 0, failed: 0, failures: [] };
     let storedSessions = [];
     try {

@@ -245,11 +245,9 @@ from server_modules.routes_builder import router as builder_router
 from server_modules.routes_connections import router as connections_router
 from server_modules.routes_connectors import router as connectors_router
 from server_modules.routes_deployed_agents import router as deployed_agents_router
-from server_modules.routes_discovery import router as discovery_router
 from server_modules.routes_gateway import router as gateway_router
 from server_modules.routes_health import router as health_router
 from server_modules.routes_marketplace import router as marketplace_router
-from server_modules.routes_mini_apps import router as mini_apps_router
 from server_modules.routes_personal_channels import router as personal_channels_router
 from server_modules.routes_pilot import router as pilot_router
 from server_modules.routes_platform_analytics import router as platform_analytics_router
@@ -259,9 +257,6 @@ from server_modules.routes_workspaces import router as workspaces_router
 from server_modules.routes_workflows import router as workflows_router
 from server_modules.routes_doctor import router as doctor_router
 from server_modules.routes_sage_telegram_hosted import router as sage_telegram_hosted_router
-from server_modules.routes_signal import router as signal_router
-from server_modules.routes_wechat import router as wechat_router
-from server_modules.routes_imessage import router as imessage_router
 from server_modules.connectors.discord_bot_runtime_service import DiscordBotRuntimeService
 
 
@@ -393,12 +388,10 @@ from server_modules.routes_gateway import register_gateway as _register_gateway_
 app.post("/gateway/registrations")(_register_gateway_fallback)
 app.include_router(personal_channels_router, prefix="/api")
 app.include_router(workspaces_router, prefix="/api")
-app.include_router(mini_apps_router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
 app.include_router(deployed_agents_router, prefix="/api")
 app.include_router(agent_traces_router, prefix="/api")
 app.include_router(platform_analytics_router, prefix="/api")
-app.include_router(discovery_router, prefix="/api")
 app.include_router(marketplace_router, prefix="/api")
 app.include_router(pilot_router, prefix="/api")
 app.include_router(studio_router, prefix="/api")
@@ -406,9 +399,6 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api")
 app.include_router(doctor_router)
 app.include_router(sage_telegram_hosted_router, prefix="/api")
-app.include_router(signal_router, prefix="/api")
-app.include_router(wechat_router, prefix="/api")
-app.include_router(imessage_router, prefix="/api")
 
 
 def _runtime_cli_args() -> argparse.Namespace:

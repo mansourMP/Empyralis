@@ -258,6 +258,7 @@ async def execute_customer_turn(
     runtime_profile: dict[str, Any] | None = None,
     privileged_runtime_approved: bool = False,
     active_agent_install_id: str | None = None,
+    active_agent_id: str = "",
 ) -> dict[str, Any]:
     normalized_runtime_mode = str(runtime_mode or "").strip().lower() or "hosted_secure"
     machine_policy = safe_mode_service.resolve_machine_policy_status(
@@ -398,6 +399,7 @@ async def execute_customer_turn_in_process(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         agent_install_id=active_agent_install_id,
+        agent_id=str(active_agent_id or "").strip(),
         runtime_mode=normalized_runtime_mode,
         runtime_scope=resolved_runtime_scope,
         privileged_runtime_approved=privileged_runtime_approved,
@@ -448,6 +450,8 @@ async def execute_customer_turn_in_process(
                     agent_label=manifest.identity.name,
                     hard_context=manifest.bible.hard_context,
                     operational_policy=manifest.bible.operational_policy,
+                    agent_id=str(manifest.manifest_id or "").strip(),
+                    agent_install_id=str(active_agent_install_id or "").strip(),
                 )
                 tool_status = str(skill_result.get("status") or "").strip() or None
                 draft_reply = str(skill_result.get("reply") or "").strip() or _direct_reply(manifest, goal)

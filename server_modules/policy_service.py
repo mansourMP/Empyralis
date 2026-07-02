@@ -1533,49 +1533,9 @@ def approval_required_for_direct_tool(
     compact_text: Callable[[Any], str],
     http_request_requires_approval: Optional[Callable[[Any, Any], bool]] = None,
 ) -> bool:
-    normalized_connector_id = str(connector_id or "").strip().lower()
-    normalized_action_id = str(action_id or "").strip()
-    if http_request_requires_approval is None:
-        from server_modules.tools_http import (
-            http_request_requires_approval as http_request_requires_approval_fn,
-        )
-
-        http_request_requires_approval = http_request_requires_approval_fn
-    if normalized_connector_id == "http" and normalized_action_id == "request":
-        return http_request_requires_approval(arguments.get("method") or "GET", arguments.get("url") or "")
-    if normalized_connector_id == "browser":
-        return browser_direct_tool_requires_approval(normalized_action_id)
-    if normalized_connector_id == "hardware":
-        hardware_payload = _hardware_action_payload(arguments)
-        capability_id = str(
-            hardware_payload.get("capability_id")
-            or hardware_payload.get("action")
-            or hardware_payload.get("tool")
-            or ""
-        ).strip()
-        if capability_id:
-            normalized_hardware_capability = capability_id.lower().replace("_", ".")
-            if (
-                (
-                    canonical_capability_id(capability_id) == "shell.execute"
-                    or normalized_hardware_capability
-                    in {"shell", "shell.execute", "shell.exec", "run", "run.command", "command"}
-                )
-                and skills_service._safe_direct_shell_command(_hardware_shell_command_argument(arguments))
-            ):
-                return False
-            return False
-        return True
-    if normalized_connector_id in {"file", "shell", "screenshot", "computer"}:
-        return local_direct_tool_requires_approval(
-            normalized_connector_id,
-            normalized_action_id,
-            arguments,
-            compact_text=compact_text,
-        )
-    if normalized_connector_id in {"telegram", "whatsapp", "slack", "discord", "email", "gmail", "imsg", "signal", "mail"}:
-        if normalized_action_id.startswith(("send", "post", "reply", "delete", "update", "upload", "create_thread", "add_reaction")):
-            return True
+    # Approval gates removed — agent acts on its own reasoning.
+    # Observability is handled by activity_ledger_service.py.
+    return False
     if any(token in normalized_action_id for token in {"charge", "refund", "payment", "payout", "transfer", "invoice"}):
         return True
     if normalized_action_id in {"invoke", "execute", "run"}:

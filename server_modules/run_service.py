@@ -2030,7 +2030,12 @@ def _publish_local_completion_summary_bridge(run_id: str, run: Dict[str, Any]) -
     if not allowed_payload_classes:
         return None
 
-    workspace_id = str(context.get("workspace_id") or metadata.get("workspace_id") or "default").strip() or "default"
+    from server_modules import workspace_scope as _ws
+
+    workspace_id = _ws.resolve_workspace(
+        None, context, metadata,
+        site="run_service:build_step_summary_bridge",
+    )
     summary_text = ""
     try:
         from server_modules import memory_service

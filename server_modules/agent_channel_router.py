@@ -66,6 +66,47 @@ LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
 }
 
 
+# ── Stage 4B: multi-agent channel binding resolution ─────────────────────
+
+def _resolve_agent_for_inbound(
+    channel_type: str,
+    bot_identifier: str,
+    workspace_id: str,
+    agent_installs: list | None = None,
+    sage_agent_id: str = "",
+) -> str:
+    """Resolve which agent handles an inbound channel message.
+
+    Matches channel_type + bot_identifier against each agent's
+    channel_bindings (jsonb array on workspace_agent_installs).
+
+    Returns:
+        agent_install_id if matched, sage_agent_id if unmatched,
+        or "" if no Sage fallback is available.
+
+    One router — no per-channel forks. Unmatched always falls back
+    to Sage, never to another specialist.
+    """
+    if agent_installs is None:
+        agent_installs = []
+
+    for install in agent_installs:
+        bindings = install.get("channel_bindings") or []
+        if not isinstance(bindings, list):
+            continue
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            if (
+                str(binding.get("channel_type") or "").strip() == channel_type
+                and str(binding.get("bot_token_hash") or "").strip() == bot_identifier
+            ):
+                return str(install.get("id") or "").strip()
+
+    # No match — fall back to Sage
+    return str(sage_agent_id or "").strip()
+
+
 def _enforce_personal_gateway_config_decision(
     *,
     gateway_id: str,
@@ -1341,8 +1382,12 @@ async def _handle_telegram_gateway_channel_inbound(
         return {"duplicate": not created, "inbound": inbound, "outbound": outbound}
 
     if outbound is None:
+        from server_modules import workspace_scope as _ws
         reply = personal_channel_sage_bridge_service.build_telegram_personal_reply(
-            workspace_id=str(registration.get("workspace_id") or "").strip(),
+            workspace_id=_ws.resolve_workspace(
+                registration.get("workspace_id"), registration,
+                site="agent_channel_router:telegram_personal_reply",
+            ),
             gateway_id=str(gateway_id or "").strip(),
             remote_jid=remote_jid,
             text=text,
@@ -2045,6 +2090,7 @@ async def handle_cloud_channel_inbound(
     session_id: str,
     channel_key: str,
     message: Dict[str, Any],
+    workspace_id: str = "",
 ) -> Dict[str, Any]:
     """Handle inbound message from cloud session manager (Stage 2).
 
@@ -2052,14 +2098,25 @@ async def handle_cloud_channel_inbound(
     but dispatches replies via HTTP to the cloud session manager instead of
     through the Gateway WebSocket.
 
+    NOTE: This function currently has no callers — the live cloud inbound path
+    is personal_channels_service.handle_cloud_channel_inbound which receives
+    workspace_id from the cloud session manager's signed payload. If this
+    function is revived, workspace_id must be provided by the caller.
+
     Args:
         session_id: cloud session manager session ID
         channel_key: "telegram_personal" or "whatsapp_personal"
         message: {external_message_id, sender_id, sender_name, text, received_at}
+        workspace_id: workspace UUID (required for Stage 4a isolation)
     """
     if not _CLOUD_SESSION_MANAGER_ENABLED:
         return {"status": "disabled", "reason": "CLOUD_SESSION_MANAGER_ENABLED is false"}
 
+    # TODO(Phase E): when this function is revived, workspace_id must come
+    # from the authenticated session; reject if empty.
+    resolved_workspace = str(workspace_id or message.get("workspace_id") or "").strip()
+    if not resolved_workspace:
+        resolved_workspace = "default"  # backward compat for dead code path
 
     external_message_id = str(message.get("external_message_id") or "").strip()
     remote_jid = str(message.get("sender_id") or "").strip()
@@ -2071,7 +2128,7 @@ async def handle_cloud_channel_inbound(
 
     # Build Sage reply using the existing bridge — same as Gateway path
     reply = personal_channel_sage_bridge_service.build_telegram_personal_reply(
-        workspace_id="default",
+        workspace_id=resolved_workspace,
         gateway_id=f"cloud:{session_id}",
         remote_jid=remote_jid,
         text=text,
@@ -2205,6 +2262,8 @@ async def route_inbound_channel_message(
     allow_master_fallback: bool = False,
     privileged_runtime_approved: bool = False,
     trace_id: Optional[str] = None,
+    agent_installs: Optional[list] = None,
+    sage_agent_id: str = "",
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Route an inbound studio-connector message to the agent pipeline.
@@ -2213,9 +2272,29 @@ async def route_inbound_channel_message(
     :func:`execute_sage_turn` — the same unified pipeline used by every
     other channel.  Remaining channels return ``channel_unavailable``
     until their specialist routing is built.
+
+    Stage 4B: when agent_installs is provided, resolves the target agent
+    via channel_bindings before falling back to Sage.
     """
     resolved_workspace_id = str(workspace_id or "").strip()
     resolved_channel_key = str(channel_key or "").strip().lower()
+
+    # ── Stage 4B: resolve agent via channel bindings ──────────────────
+    resolved_agent_id = ""
+    if agent_installs and actor_id:
+        resolved_agent_id = _resolve_agent_for_inbound(
+            channel_type=resolved_channel_key,
+            bot_identifier=str(actor_id or "").strip(),
+            workspace_id=resolved_workspace_id,
+            agent_installs=agent_installs,
+            sage_agent_id=sage_agent_id,
+        )
+        if resolved_agent_id and resolved_agent_id != sage_agent_id:
+            # A specialist agent matched — log the routing decision.
+            # Currently all execution still goes through execute_sage_turn;
+            # specialist dispatch will be added when per-agent run loops
+            # are built (Stage 5).
+            pass
 
     # ── Sage-routed channels ───────────────────────────────────────────
     channel_origin = _SAGE_CHANNEL_ORIGIN_MAP.get(resolved_channel_key)

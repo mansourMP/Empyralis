@@ -641,7 +641,11 @@ def _append_hosted_provider_secret_audit(
     resolved_tenant_id = str(tenant_id or "default").strip() or "default"
     resolved_workspace_id = normalize_workspace_id(workspace_id)
     if not resolved_workspace_id:
-        resolved_workspace_id = "default"
+        from server_modules import workspace_scope as _ws
+
+        resolved_workspace_id = _ws.resolve_workspace(
+            workspace_id, site="secrets_broker:hosted_secret_audit"
+        )
     try:
         _run_coro_sync(
             control_plane_repository.append_agent_secret_access_event(

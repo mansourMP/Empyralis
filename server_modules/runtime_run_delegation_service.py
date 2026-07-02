@@ -434,6 +434,35 @@ def delegate_run_children(
         normalize_agent_role=normalize_agent_role,
         invalid_detail="Delegation is only available from orchestrator-owned runs.",
     )
+    # ── Phase L: sub-agent gate ───────────────────────────────────────
+    if parent_metadata.get("subagents_enabled") is False:
+        from server_modules import activity_ledger_service as _als_sag
+        import asyncio as _aio_sag
+        async def _deny_ledger():
+            await _als_sag.append_activity_event(
+                tenant_id="system",
+                workspace_id=str(parent_metadata.get("workspace_id") or "").strip() or "unknown",
+                actor_type="agent",
+                actor_id=str(parent_metadata.get("agent_id") or parent_run_id or "").strip(),
+                event_class="fleet_control",
+                detail_level="audit_reference",
+                action="subagents_disabled_denial",
+                title="Sub-agent delegation blocked",
+                summary=(
+                    f"Agent {parent_metadata.get('agent_id') or parent_run_id} "
+                    f"attempted to delegate children but subagents_enabled=False."
+                ),
+                status="blocked",
+            )
+        try:
+            _aio_sag.get_running_loop()
+            _aio_sag.create_task(_deny_ledger())
+        except RuntimeError:
+            _aio_sag.run(_deny_ledger())
+        raise HTTPException(
+            status_code=403,
+            detail="Sub-agent delegation is disabled for this agent. An operator can enable it via fleet_configure_agent.",
+        )
     note = str(body.note or "").strip() or None
     created = []
     trace_context = _resume_parent_trace_context(parent_snapshot)
@@ -532,6 +561,35 @@ def auto_delegate_run_children(
         normalize_agent_role=normalize_agent_role,
         invalid_detail="Auto-delegation is only available from orchestrator-owned runs.",
     )
+    # ── Phase L: sub-agent gate ───────────────────────────────────────
+    if parent_metadata.get("subagents_enabled") is False:
+        from server_modules import activity_ledger_service as _als_sag2
+        import asyncio as _aio_sag2
+        async def _deny_ledger2():
+            await _als_sag2.append_activity_event(
+                tenant_id="system",
+                workspace_id=str(parent_metadata.get("workspace_id") or "").strip() or "unknown",
+                actor_type="agent",
+                actor_id=str(parent_metadata.get("agent_id") or parent_run_id or "").strip(),
+                event_class="fleet_control",
+                detail_level="audit_reference",
+                action="subagents_disabled_denial",
+                title="Auto-delegation blocked: subagents disabled",
+                summary=(
+                    f"Agent {parent_metadata.get('agent_id') or parent_run_id} "
+                    f"attempted auto-delegation but subagents_enabled=False."
+                ),
+                status="blocked",
+            )
+        try:
+            _aio_sag2.get_running_loop()
+            _aio_sag2.create_task(_deny_ledger2())
+        except RuntimeError:
+            _aio_sag2.run(_deny_ledger2())
+        raise HTTPException(
+            status_code=403,
+            detail="Sub-agent delegation is disabled for this agent. An operator can enable it via fleet_configure_agent.",
+        )
     plan = build_auto_delegation_plan(parent_snapshot, max_children=int(request_payload.max_children or 3))
     if not plan:
         raise HTTPException(status_code=400, detail="No specialist delegation rules matched this run.")

@@ -880,10 +880,14 @@ def _emit_machine_outbox_event(action: str, record: Dict[str, Any], *, error: Op
     payload.pop("enrollment_token_hash", None)
     payload.pop("session_token", None)
     try:
+        from server_modules import workspace_scope as _ws
         outbox_service.emit_machine_event(
             machine_id=machine_id,
             tenant_id=str(record.get("tenant_id") or "default").strip() or "default",
-            workspace_id=str(record.get("workspace_id") or "default").strip() or "default",
+            workspace_id=_ws.resolve_workspace(
+                record.get("workspace_id"), record,
+                site="local_queue:emit_machine_event",
+            ),
             action=action,
             machine_payload=payload,
             trace_id=str(record.get("trace_id") or record.get("session_token") or machine_id).strip(),

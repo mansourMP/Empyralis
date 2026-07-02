@@ -34,6 +34,32 @@ _INSECURE_BROKER_SECRETS = {
     "empyralis-dev-secrets-broker-secret",
 }
 
+# ── Stage 4B: missing-agent-id instrumentation ──────────────────────────
+_MISSING_AGENT_ID_COUNT = 0
+# Phase K: legacy tokens without agent_id claim
+_LEGACY_TOKEN_AGENT_ID_COUNT = 0
+
+
+def _require_agent_id_flag() -> bool:
+    """Read EMPYRALIS_REQUIRE_AGENT_ID from env.
+
+    Default: false. When true, execute_skill raises if agent_id is missing.
+    Do NOT flip until all callers thread agent_id.
+    """
+    return os.getenv("EMPYRALIS_REQUIRE_AGENT_ID", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def missing_agent_id_count() -> int:
+    """Return total count of execute_skill calls missing agent_id."""
+    return _MISSING_AGENT_ID_COUNT
+
+
+def legacy_token_agent_id_count() -> int:
+    """Return count of capability tokens validated without agent_id claim."""
+    return _LEGACY_TOKEN_AGENT_ID_COUNT
+
 
 @dataclass(frozen=True)
 class CapabilityGrant:
@@ -159,6 +185,7 @@ def issue_capability_token(
     tenant_id: str,
     workspace_id: str,
     agent_install_id: str | None = None,
+    agent_id: str = "",
     runtime_mode: str,
     runtime_scope: Dict[str, Any] | None = None,
     privileged_runtime_approved: bool = False,
@@ -181,6 +208,7 @@ def issue_capability_token(
         "agent_name": manifest.identity.name,
         "agent_scope": manifest.scope,
         "agent_install_id": str(agent_install_id or "").strip() or None,
+        "agent_id": str(agent_id or "").strip() or None,
         "runtime_mode": normalized_runtime_mode,
         "runtime_constraints": {
             "mode": normalized_runtime_mode,
@@ -372,6 +400,300 @@ def _require_broker_guard(
         raise ToolExecutionDeniedError(decision.code, decision.detail)
 
 
+# ── Stage 4B: per-agent tool/connector enforcement ──────────────────────
+
+async def _enforce_agent_tool_policy(
+    agent_install_id: str,
+    workspace_id: str,
+    tool_name: str,
+    connector_scopes: list,
+) -> None:
+    """Deny if the agent's install does not permit this tool or connector.
+
+    Writes a platform-voice denial to the ledger. Does NOT bypass via env var.
+    Existing agents default to ALL (no-op), so this is safe to enable now.
+    """
+    try:
+        from server_modules import agent_registry_repository as _reg
+        install = await _reg.get_workspace_agent_install_bundle(
+            agent_install_id, tenant_id=None, workspace_id=workspace_id
+        )
+    except Exception:
+        return  # can't load install — allow through (fail-open for now)
+
+    if not install or not isinstance(install, dict):
+        return
+
+    enabled_tools = install.get("enabled_tools")
+    enabled_connectors = install.get("enabled_connectors")
+
+    denial_reasons: list[str] = []
+
+    # Check tool
+    if enabled_tools is not None and isinstance(enabled_tools, list) and len(enabled_tools) > 0:
+        if tool_name not in enabled_tools:
+            denial_reasons.append(f"tool_not_enabled:{tool_name}")
+
+    # Check connectors
+    if (
+        enabled_connectors is not None
+        and isinstance(enabled_connectors, list)
+        and len(enabled_connectors) > 0
+        and connector_scopes
+    ):
+        for scope in connector_scopes:
+            if scope and scope not in enabled_connectors:
+                denial_reasons.append(f"connector_not_enabled:{scope}")
+
+    if denial_reasons:
+        detail = "; ".join(denial_reasons)
+        # Write ledger denial record
+        try:
+            from server_modules import activity_ledger_service
+
+            await activity_ledger_service.append_activity_event(
+                tenant_id="system",
+                workspace_id=workspace_id,
+                actor_type="agent",
+                actor_id=agent_install_id,
+                event_class="policy_denial",
+                detail_level="audit_reference",
+                action="tool_not_enabled",
+                title=f"Tool denied: {tool_name}",
+                summary=(
+                    f"Agent {agent_install_id} attempted {tool_name} "
+                    f"but is not authorized. {detail}"
+                ),
+                status="blocked",
+                metadata={
+                    "agent_install_id": agent_install_id,
+                    "tool": tool_name,
+                    "connector_scopes": connector_scopes,
+                    "denial_reasons": denial_reasons,
+                },
+            )
+        except Exception:
+            pass
+
+        raise ToolExecutionDeniedError(
+            "agent_tool_not_enabled",
+            f"Access not enabled for this agent. {detail}",
+        )
+
+
+# ── Phase N: memory tool dispatch ───────────────────────────────────────────
+
+_MEMORY_SKILL_IDS = frozenset({"memory-read", "memory-write", "memory-list"})
+
+
+async def _dispatch_memory_tool(
+    *,
+    skill_id: str,
+    agent_install_id: str,
+    agent_id: str,
+    workspace_id: str,
+    goal: str,
+) -> Dict[str, Any]:
+    """Dispatch a memory tool to agent_memory_tools.
+
+    Parses the `goal` field for tool arguments.
+    For memory_read: extracts a path from the goal
+    For memory_write: extracts path and content from the goal
+    For memory_list: no arguments needed
+    """
+    from server_modules import agent_memory_tools as _mem
+
+    if skill_id == "memory-list":
+        return await _mem.memory_list(
+            workspace_id=workspace_id,
+            agent_install_id=agent_install_id,
+            agent_id=agent_id,
+        )
+
+    if skill_id == "memory-read":
+        # Extract path from goal — look for a filename or path mention
+        path = _extract_memory_path(goal)
+        if not path:
+            return {"ok": False, "error": "No path specified. Usage: memory_read with a filename like SOUL.md or memory/notes.md"}
+        return await _mem.memory_read(
+            workspace_id=workspace_id,
+            agent_install_id=agent_install_id,
+            agent_id=agent_id,
+            path=path,
+        )
+
+    if skill_id == "memory-write":
+        path = _extract_memory_path(goal)
+        content = _extract_memory_content(goal)
+        if not path:
+            return {"ok": False, "error": "No path specified. Usage: memory_write with a filename and content."}
+        if not content:
+            return {"ok": False, "error": "No content to write."}
+        return await _mem.memory_write(
+            workspace_id=workspace_id,
+            agent_install_id=agent_install_id,
+            agent_id=agent_id,
+            path=path,
+            content=content,
+        )
+
+    return {"ok": False, "error": f"Unknown memory tool: {skill_id}"}
+
+
+def _extract_memory_path(goal: str) -> str:
+    """Extract a file path from a goal string.
+
+    Looks for quoted strings, bare .md filenames, or path-like patterns.
+    """
+    import re
+    text = str(goal or "")
+
+    # Quoted path: "SOUL.md" or 'memory/notes.md'
+    m = re.search(r"""["']([^"']+\.[a-z]{1,10})["']""", text)
+    if m:
+        return m.group(1).strip()
+
+    # Bare .md filename: SOUL.md, memory/notes.md
+    m = re.search(r"(\S+\.md)\b", text)
+    if m:
+        return m.group(1).strip()
+
+    # Look for "path:", "file:", "read:" prefixes
+    for prefix in ("path:", "file:", "read:", "write to ", "write ", "read "):
+        if prefix in text.lower():
+            after = text.lower().split(prefix, 1)[-1].strip()
+            # Take first word or quoted string
+            qm = re.search(r"""["']([^"']+)["']""", after)
+            if qm:
+                return qm.group(1).strip()
+            word = after.split()[0] if after.split() else ""
+            return word.strip().rstrip(",.;:")
+
+    return ""
+
+
+def _extract_memory_content(goal: str) -> str:
+    """Extract write content from a goal string.
+
+    Takes everything after the path/file reference as content.
+    Also handles content after colons, quotes, or newline markers.
+    """
+    import re
+    text = str(goal or "")
+
+    # Remove leading "memory_write" or tool mention
+    text = re.sub(r"(?i)memory[_ ]?write\b[:\s]*", "", text)
+
+    # Try to find content after the path
+    # Pattern: "path" followed by content
+    m = re.search(r"""["']([^"']+\.[a-z]{1,10})["']\s*[:：]\s*(.+)""", text, re.DOTALL)
+    if m:
+        return m.group(2).strip()
+
+    # Pattern: path.md followed by content
+    m = re.search(r"(\S+\.md)\s*[:：]\s*(.+)", text, re.DOTALL)
+    if m:
+        return m.group(2).strip()
+
+    # If there's a clear colon separator, take content after it
+    if ": " in text:
+        parts = text.split(": ", 1)
+        # Skip the part that looks like a path
+        if ".md" in parts[0] or len(parts[0].split()) <= 2:
+            return parts[-1].strip()
+
+    # Fallback: everything after first sentence that mentions a path
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    if len(sentences) > 1:
+        return " ".join(sentences[1:]).strip()
+
+    return text.strip()
+
+
+# ── Phase L: fleet tool role enforcement ────────────────────────────────────
+
+_FLEET_SKILL_IDS = frozenset({
+    "fleet-create-agent",
+    "fleet-list-agents",
+    "fleet-get-agent-activity",
+    "fleet-configure-agent",
+    "fleet-message-agent",
+})
+
+
+def _is_fleet_tool(skill_id: str) -> bool:
+    """Check if a skill is a fleet management tool."""
+    return str(skill_id or "").strip() in _FLEET_SKILL_IDS
+
+
+async def _enforce_fleet_tool_role(
+    agent_install_id: str,
+    workspace_id: str,
+    skill_id: str,
+) -> None:
+    """Deny if the agent is not an operator invoking a fleet tool.
+
+    Writes a policy_denial ledger event. Only operators can use fleet tools.
+    Does NOT bypass via env var.
+    """
+    if not _is_fleet_tool(skill_id):
+        return
+
+    try:
+        from server_modules import agent_registry_repository as _reg
+        from server_modules.fleet_tools import resolve_agent_role, OPERATOR_ROLE
+
+        install = await _reg.get_workspace_agent_install_bundle(
+            agent_install_id, tenant_id=None, workspace_id=workspace_id
+        )
+        role = resolve_agent_role(install)
+        if role == OPERATOR_ROLE:
+            return  # operator — allowed
+
+        # Specialist or unrecognized — denied
+        try:
+            from server_modules import activity_ledger_service
+
+            await activity_ledger_service.append_activity_event(
+                tenant_id="system",
+                workspace_id=workspace_id,
+                actor_type="agent",
+                actor_id=agent_install_id,
+                event_class="fleet_control",
+                detail_level="audit_reference",
+                action="policy_denial",
+                title=f"Fleet tool denied: {skill_id}",
+                summary=(
+                    f"Agent {agent_install_id} (role={role}) attempted fleet tool "
+                    f"'{skill_id}'. Only operators may manage the fleet."
+                ),
+                status="blocked",
+                metadata={
+                    "agent_install_id": agent_install_id,
+                    "agent_role": role,
+                    "skill_id": skill_id,
+                    "required_role": OPERATOR_ROLE,
+                },
+            )
+        except Exception:
+            pass
+
+        raise ToolExecutionDeniedError(
+            "fleet_tool_requires_operator",
+            f"The {skill_id} tool is restricted to operator agents. "
+            f"Current role: {role}. Required role: {OPERATOR_ROLE}.",
+        )
+    except ToolExecutionDeniedError:
+        raise
+    except Exception:
+        # Can't resolve role — fail closed for fleet tools
+        raise ToolExecutionDeniedError(
+            "fleet_tool_role_unresolvable",
+            f"Cannot resolve agent role for fleet tool '{skill_id}'. "
+            f"Fleet tools require a confirmed operator role.",
+        )
+
+
 async def execute_skill(
     *,
     capability_token: str,
@@ -384,7 +706,52 @@ async def execute_skill(
     agent_label: str,
     hard_context: str,
     operational_policy: str,
+    agent_id: str = "",
+    agent_install_id: str = "",
 ) -> Dict[str, Any]:
+    # ── Stage 4B: missing-agent-id instrumentation ────────────────────
+    resolved_agent_id = str(agent_id or agent_install_id or "").strip()
+    if not resolved_agent_id:
+        _MISSING_AGENT_ID_COUNT += 1
+        try:
+            from server_modules import activity_ledger_service as _als
+            import asyncio as _aio
+            async def _emit():
+                await _als.append_activity_event(
+                    tenant_id="system",
+                    workspace_id=workspace_id,
+                    actor_type="platform",
+                    actor_id="tool_broker",
+                    event_class="platform_integrity",
+                    detail_level="audit_reference",
+                    action="tool_dispatch_missing_agent_id",
+                    title="Tool dispatch without agent_id",
+                    summary=(
+                        f"execute_skill called for '{skill_id}' without agent_id. "
+                        f"manifest_id={manifest_id}, caller requires agent_id "
+                        f"threading for Stage 4B enforcement."
+                    ),
+                    status="logged",
+                    metadata={
+                        "skill_id": skill_id,
+                        "manifest_id": manifest_id,
+                        "require_agent_id_flag": _require_agent_id_flag(),
+                    },
+                )
+            try:
+                _aio.get_running_loop()
+                _aio.create_task(_emit())
+            except RuntimeError:
+                _aio.run(_emit())
+        except Exception:
+            pass
+        if _require_agent_id_flag():
+            raise ToolExecutionDeniedError(
+                "missing_agent_id",
+                "agent_id is required for tool dispatch "
+                "(EMPYRALIS_REQUIRE_AGENT_ID is set).",
+            )
+
     source_event_id = agent_action_metering_service.build_source_event_id(
         source_surface="tool_broker_skill",
         run_id=manifest_id,
@@ -465,6 +832,78 @@ async def execute_skill(
             connector_scope=",".join(definition.connector_scopes),
             surface="skill",
         )
+
+        # ── Stage 4B + Phase K: per-agent tool/connector enforcement ──
+        # Prefer agent_id claim (Phase K) over agent_install_id (legacy)
+        claim_agent_id = str(claims.get("agent_id") or "").strip()
+        claim_install_id = str(claims.get("agent_install_id") or "").strip()
+        resolved_agent_id = str(agent_id or claim_agent_id or claim_install_id or "").strip()
+
+        # Phase K: instrument legacy tokens without agent_id claim
+        if claim_install_id and not claim_agent_id:
+            _LEGACY_TOKEN_AGENT_ID_COUNT += 1
+            # Ledger: actor_id as "unattributed_legacy_token"
+            try:
+                from server_modules import activity_ledger_service as _als2
+                import asyncio as _aio2
+                async def _legacy_ledger():
+                    await _als2.append_activity_event(
+                        tenant_id="system",
+                        workspace_id=workspace_id,
+                        actor_type="platform",
+                        actor_id="unattributed_legacy_token",
+                        event_class="platform_integrity",
+                        detail_level="audit_reference",
+                        action="legacy_token_no_agent_id",
+                        title="Capability token without agent_id claim",
+                        summary=(
+                            f"Token validated for '{skill_id}' carries agent_install_id "
+                            f"but no agent_id claim. Legacy token — instrumenting."
+                        ),
+                        status="logged",
+                        metadata={
+                            "skill_id": skill_id,
+                            "manifest_id": manifest_id,
+                            "agent_install_id_hash": (
+                                hashlib.sha256(claim_install_id.encode()).hexdigest()[:16]
+                                if claim_install_id else "none"
+                            ),
+                        },
+                    )
+                try:
+                    _aio2.get_running_loop()
+                    _aio2.create_task(_legacy_ledger())
+                except RuntimeError:
+                    _aio2.run(_legacy_ledger())
+            except Exception:
+                pass
+
+        if resolved_agent_id:
+            _enforce_agent_tool_policy(
+                resolved_agent_id,
+                workspace_id,
+                skill_id,
+                definition.connector_scopes,
+            )
+
+        # ── Phase L: fleet tool role gate ──────────────────────────
+        if resolved_agent_id:
+            await _enforce_fleet_tool_role(
+                resolved_agent_id,
+                workspace_id,
+                skill_id,
+            )
+
+        # ── Phase N: memory tool dispatch ──────────────────────────
+        if skill_id in ("memory-read", "memory-write", "memory-list"):
+            return await _dispatch_memory_tool(
+                skill_id=skill_id,
+                agent_install_id=resolved_agent_id,
+                agent_id=str(agent_id or claim_agent_id or "").strip(),
+                workspace_id=workspace_id,
+                goal=goal,
+            )
+
         if definition.executor is not None:
             _require_runtime_allowed(definition, runtime_mode)
             _require_approval_if_needed(claims, definition)

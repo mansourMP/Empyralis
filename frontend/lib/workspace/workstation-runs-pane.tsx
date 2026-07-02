@@ -7,7 +7,6 @@ import { CommandSheet } from '@/lib/ui/command-sheet';
 import { DataPaneError } from '@/lib/workspace/data-pane-error';
 import { EmptyPanel } from '@/lib/ui/empty-panel';
 import { SkeletonBlock } from '@/lib/ui/skeleton-block';
-import { subscribeWorkstationApprovalResolved } from '@/lib/workspace/workstation-approval-events';
 import { useWorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
 import { useWorkspaceServices, useWorkstationActivityVersion } from '@/lib/workspace/workspace-services';
 import {
@@ -692,17 +691,8 @@ export function WorkstationRunsPane() {
         setIsLoading(false);
       }
     });
-    const unsubscribe = subscribeWorkstationApprovalResolved(() => {
-      void refresh(false).catch((loadError) => {
-        if (!cancelled) {
-          setError(loadError);
-          setIsLoading(false);
-        }
-      });
-    });
     return () => {
       cancelled = true;
-      unsubscribe();
     };
   }, [hadInitialCache, services.client, workspaceId]);
 

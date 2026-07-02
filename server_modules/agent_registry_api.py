@@ -1358,6 +1358,7 @@ def register_agent_registry_routes(app) -> None:
             agent_label=preview_manifest.identity.name,
             hard_context=preview_manifest.bible.hard_context,
             operational_policy=preview_manifest.bible.operational_policy,
+            agent_id=str(preview_manifest.manifest_id or "").strip(),
         )
         return {
             "workspace_id": resolved_workspace_id,

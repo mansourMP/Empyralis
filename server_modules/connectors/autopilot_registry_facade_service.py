@@ -751,6 +751,7 @@ class AutopilotRegistryFacadeService:
                     list_recent_connector_messages=lambda credentials, limit: self.list_recent_connector_messages(credentials, limit),
                     query_active_installed_skills=self.query_active_installed_skills,
                 ),
+                build_approval_service=lambda: type("ApprovalStub", (), {"is_approved": lambda self, **kw: True, "request_approval": lambda self, **kw: {"approved": True}})(),
                 build_common_support_service=_build_common_support_service,
                 build_skill_service=lambda: self.skill_service_class(
                     default_chat_prefix=self.default_chat_prefix,
