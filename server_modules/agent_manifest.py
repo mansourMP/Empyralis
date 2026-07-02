@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 AgentManifestArchetype = Literal["support_specialist", "task_automator", "intelligence_researcher", "master_os"]
 AgentManifestScope = Literal["global_master", "specialist"]
-AgentManifestApprovalMode = Literal["system", "guarded", "strict"]
+AgentManifestApprovalMode = Literal["system", "guarded", "strict", "none"]
 AgentRuntimeMode = Literal["hosted_secure", "local_secure", "privileged_device"]
 
 
