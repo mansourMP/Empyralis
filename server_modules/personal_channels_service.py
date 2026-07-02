@@ -8,7 +8,6 @@ from server_modules import (
     channel_blocking_policy_service,
     channel_lane_contract_service,
     gateway_state_repository,
-    gateway_execution_service,
     kill_switch_gate,
     personal_channel_sage_bridge_service,
     personal_channels_repository,
@@ -26,6 +25,16 @@ class _LazyGatewayProtocolService:
 
 
 gateway_protocol_service = _LazyGatewayProtocolService()
+
+
+class _LazyGatewayExecutionService:
+    def __getattr__(self, name: str) -> Any:
+        from server_modules import gateway_execution_service as module
+
+        return getattr(module, name)
+
+
+gateway_execution_service = _LazyGatewayExecutionService()
 
 
 WHATSAPP_PERSONAL_CHANNEL_KEY = "whatsapp_personal"

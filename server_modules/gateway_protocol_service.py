@@ -15,7 +15,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 PROTOCOL_VERSION = "v1alpha2"
 SUPPORTED_PROTOCOL_VERSIONS = {"v1alpha2"}
-DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS = 120
+from server_modules.gateway_contracts import DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS
 MAX_GATEWAY_FRAME_BYTES = 16 * 1024 * 1024
 MAX_GATEWAY_JSON_DEPTH = 32
 

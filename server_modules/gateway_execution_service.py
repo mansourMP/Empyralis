@@ -21,6 +21,7 @@ from server_modules import (
     secret_redaction_service,
 )
 from server_modules import execution_mode_policy
+from server_modules.gateway_contracts import DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS
 
 
 SCREEN_REQUIRED_CAPABILITIES = {
@@ -473,7 +474,7 @@ async def execute_tool_via_gateway(
     run_id: str,
     trace_id: str,
     workspace_id: str,
-    timeout_seconds: int = gateway_protocol_service.DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS,
+    timeout_seconds: int = DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS,
     request_id: Optional[str] = None,
     runtime_access_mode: Optional[str] = None,
     empyralis_approved: bool = False,
@@ -674,7 +675,7 @@ async def interrupt_tool_via_gateway(
     workspace_id: str,
     target_request_id: Optional[str] = None,
     reason: Optional[str] = None,
-    timeout_seconds: int = gateway_protocol_service.DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS,
+    timeout_seconds: int = DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS,
     request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     registration = _require_active_gateway_registration(gateway_id, workspace_id=workspace_id)
