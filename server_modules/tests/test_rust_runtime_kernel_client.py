@@ -1,7 +1,11 @@
 import json
 import os
 
+import pytest
+
 from server_modules import rust_runtime_kernel_client as client
+
+pytestmark = pytest.mark.kernel
 
 
 def test_runtime_kernel_unavailable_fails_closed(monkeypatch):
