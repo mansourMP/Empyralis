@@ -775,6 +775,7 @@ async def dispatch_tool_invoke(
     empyralis_approved: bool = False,
     agent_scope: Optional[str] = None,
     policy: Optional[Dict[str, Any]] = None,
+    actor_id: str = "",
 ) -> Dict[str, Any]:
     assert_not_killed(gateway_id=gateway_id, trace_id=trace_id)
     connection = await _fresh_live_connection(gateway_id, require_recent_inbound=True)
@@ -831,6 +832,28 @@ async def dispatch_tool_invoke(
     if not bool(response.get("ok")):
         error = dict(response.get("error") or {})
         raise ValueError(str(error.get("message") or "Gateway tool invocation failed.").strip() or "Gateway tool invocation failed.")
+    # ── Phase K: gateway hardware ledger (redacted, best-effort) ─────
+    _resolved_actor = str(actor_id or "").strip() or "sage"
+    try:
+        from server_modules import ledger_audit as _la
+        import asyncio as _aio
+        async def _ledger():
+            await _la.record_gateway_hardware_invoke(
+                workspace_id=str(workspace_id or "").strip(),
+                actor_id=_resolved_actor,
+                capability_id=str(capability_id or "").strip(),
+                arguments=dict(arguments or {}),
+                status="executed",
+                trace_id=str(trace_id or "").strip() or None,
+                run_id=str(run_id or "").strip() or None,
+            )
+        try:
+            _aio.get_running_loop()
+            _aio.create_task(_ledger())
+        except RuntimeError:
+            _aio.run(_ledger())
+    except Exception:
+        pass  # ledger is best-effort, never blocks execution
     return dict(response.get("payload") or {})
 
 
@@ -1208,6 +1231,7 @@ async def dispatch_channel_outbound(
     reply_to_external_message_id: Optional[str] = None,
     timeout_seconds: int = DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS,
     request_id: Optional[str] = None,
+    actor_id: str = "",
 ) -> Dict[str, Any]:
     assert_not_killed(gateway_id=gateway_id)
     quota_decision = evaluate_gateway_quota(profile=GATEWAY_CHANNEL_OUTBOUND, gateway_id=gateway_id)
@@ -1265,6 +1289,29 @@ async def dispatch_channel_outbound(
     if not bool(response.get("ok")):
         error = dict(response.get("error") or {})
         raise ValueError(str(error.get("message") or "Gateway channel outbound failed.").strip() or "Gateway channel outbound failed.")
+    # ── Phase K: gateway outbound ledger (redacted, best-effort) ──────
+    _resolved_ws = str(registration.get("workspace_id") or connection.scope.get("workspace_id") or "").strip()
+    _resolved_actor = str(actor_id or "").strip() or "sage"
+    try:
+        from server_modules import ledger_audit as _la
+        import asyncio as _aio
+        async def _ledger():
+            await _la.record_gateway_channel_send(
+                workspace_id=_resolved_ws,
+                actor_id=_resolved_actor,
+                channel_key=str(channel_key or "").strip(),
+                remote_jid=str(remote_jid or "").strip(),
+                text=str(text or "").strip(),
+                status="sent",
+                trace_id=str(request_id or idempotency_key or "").strip() or None,
+            )
+        try:
+            _aio.get_running_loop()
+            _aio.create_task(_ledger())
+        except RuntimeError:
+            _aio.run(_ledger())
+    except Exception:
+        pass  # ledger is best-effort, never blocks send
     return dict(response.get("payload") or {})
 
 

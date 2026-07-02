@@ -23,6 +23,10 @@ EVENT_CLASSES = {
     "memory_update",
     "run_status",
     "system_activity",
+    "gateway_channel",
+    "gateway_hardware",
+    "fleet_control",
+    "platform_integrity",
 }
 
 

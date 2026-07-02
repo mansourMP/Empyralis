@@ -461,7 +461,33 @@ def _row_to_install_summary(row: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-DEFAULT_AGENT_DEFINITIONS: List[Dict[str, Any]] = []
+DEFAULT_AGENT_DEFINITIONS: List[Dict[str, Any]] = [
+    # ── Phase M: fleet-specialist — target for fleet_create_agent ────────
+    {
+        "slug": "fleet-specialist",
+        "name": "Fleet Specialist",
+        "description": "A specialist agent created via the fleet management tools. Configurable by operators.",
+        "category": "System",
+        "icon": "bot",
+        "agent_kind": "specialist",
+        "visibility": "private",
+        "manifest": {
+            "template_kind": "specialist",
+            "default_prompt": "You are a specialist agent managed by the workspace operator. Follow your instructions and stay within policy.",
+        },
+        "capability_manifest": {
+            "summary": ["general_purpose"],
+            "toggles": [
+                {"id": "web_search", "label": "Web Search", "description": "Search the web for information.", "default_enabled": True},
+                {"id": "http_request", "label": "HTTP Requests", "description": "Make HTTP requests to APIs.", "default_enabled": True},
+                {"id": "memory_read", "label": "Memory Read", "description": "Read from agent memory.", "default_enabled": True},
+                {"id": "memory_write", "label": "Memory Write", "description": "Write to agent memory.", "default_enabled": True},
+            ],
+        },
+        "policy_manifest": {"trust_mode": "guarded", "interactive_approvals": True, "session_mode": "copilot"},
+        "placement_manifest": {"preferred_runtime_slug": "empyralis-cloud", "allowed_runtime_classes": ["cloud_worker"]},
+    },
+]
 DEFAULT_MASTER_AGENT_DEFINITION: Dict[str, Any] = {
     "slug": "sage",
     "name": "Sage",

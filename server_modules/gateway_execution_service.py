@@ -591,6 +591,7 @@ async def execute_tool_via_gateway(
             empyralis_approved=empyralis_approved,
             agent_scope=resolved_agent_scope,
             policy=policy_payload,
+            actor_id=_text(actor_id),
         )
         result = _materialize_gateway_artifacts(
             capability_id=_cap,

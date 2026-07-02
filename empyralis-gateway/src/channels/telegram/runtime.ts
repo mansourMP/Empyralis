@@ -323,6 +323,24 @@ export class TelegramPersonalRuntime {
   }
 
   private async connectClientInternal(): Promise<void> {
+    // ── Phase M: single-path gating ────────────────────────────────────
+    // EMPYRALIS_TELEGRAM_PATH: "gateway" (default) | "csm" | "both"
+    // When "csm", the Cloud Session Manager handles Telegram; Gateway skips.
+    const telegramPath = (process.env.EMPYRALIS_TELEGRAM_PATH || "gateway").trim().toLowerCase();
+    if (telegramPath === "csm") {
+      this.logger?.info?.("telegram path=csm — Gateway GramJS listener disabled");
+      await this.sessionStore.save({
+        status: "disabled",
+        loginHint: "telegram_path_csm",
+        retryable: false,
+        lastDisconnectReason: "Telegram path set to CSM; Gateway listener disabled by EMPYRALIS_TELEGRAM_PATH=csm",
+      });
+      await this.flushState();
+      return;
+    }
+    // "gateway" or "both" — proceed normally
+    this.logger?.info?.({ telegramPath }, "telegram Gateway listener starting");
+
     await this.sessionStore.ensureRuntimeDir();
     const loginConfig = loadTelegramLoginConfig();
     const persistedConfig = await this.configStore.loadTelegramConfig();

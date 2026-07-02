@@ -229,3 +229,116 @@ async def record_shell_exec(
         )
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Phase K: Gateway audit trail — outbound + hardware choke points
+# ---------------------------------------------------------------------------
+
+
+async def record_gateway_channel_send(
+    *,
+    workspace_id: str,
+    actor_id: str = "sage",
+    channel_key: str = "",
+    remote_jid: str = "",
+    text: str = "",
+    status: str = "sent",
+    trace_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Ledger a gateway-dispatched channel outbound send with hard redaction.
+
+    Called from dispatch_channel_outbound — the gateway outbound choke point.
+    NEVER stores message bodies, phone numbers, or usernames in the clear.
+    """
+    try:
+        from server_modules import activity_ledger_service
+
+        byte_count = len(str(text or "").encode("utf-8"))
+        redacted = _redact_channel_args(
+            channel_key=channel_key,
+            remote_jid=remote_jid,
+            byte_count=byte_count,
+        )
+        return await activity_ledger_service.append_activity_event(
+            tenant_id="system",
+            workspace_id=workspace_id,
+            actor_type="agent",
+            actor_id=str(actor_id or "sage").strip() or "sage",
+            event_class="gateway_channel",
+            detail_level="audit_reference",
+            action="channel_send",
+            title=f"Gateway send: {redacted['channel_type']} ({redacted['byte_count']}B)",
+            summary=(
+                f"Gateway outbound {redacted['channel_type']} message "
+                f"({redacted['byte_count']} bytes, "
+                f"recipient={redacted['recipient_hash']}). "
+                f"Raw content redacted per audit policy."
+            ),
+            status=status,
+            trace_id=str(trace_id or "").strip() or None,
+            channel=str(channel_key or "").strip().lower() or None,
+            metadata={"redacted_args": redacted},
+        )
+    except Exception:
+        return None
+
+
+async def record_gateway_hardware_invoke(
+    *,
+    workspace_id: str,
+    actor_id: str = "sage",
+    capability_id: str = "",
+    arguments: Optional[Dict[str, Any]] = None,
+    status: str = "executed",
+    trace_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Ledger a gateway-dispatched hardware/tool invocation with hard redaction.
+
+    Called from dispatch_tool_invoke — the gateway hardware choke point.
+    NEVER stores command arguments, file contents, or secrets.
+    Only capability_id and arg key names.
+    """
+    try:
+        from server_modules import activity_ledger_service
+
+        args = dict(arguments or {})
+        cap = str(capability_id or "").strip().lower()
+        if "shell" in cap:
+            action = "shell_execute"
+        elif "file" in cap or "filesystem" in cap:
+            action = "file_write"
+        elif "screenshot" in cap:
+            action = "screenshot"
+        else:
+            action = "other"
+
+        args_summary: Dict[str, Any] = {
+            "capability_id": cap,
+            "arg_keys": sorted(args.keys()) if args else [],
+        }
+
+        return await activity_ledger_service.append_activity_event(
+            tenant_id="system",
+            workspace_id=workspace_id,
+            actor_type="agent",
+            actor_id=str(actor_id or "sage").strip() or "sage",
+            event_class="gateway_hardware",
+            detail_level="audit_reference",
+            action=action,
+            title=f"Gateway hardware: {action} ({cap})",
+            summary=(
+                f"Gateway {action} via {cap}. "
+                f"Args redacted per audit policy."
+            ),
+            status=status,
+            trace_id=str(trace_id or "").strip() or None,
+            run_id=str(run_id or "").strip() or None,
+            metadata={
+                "execution_tier": "gateway",
+                "redacted_args": args_summary,
+            },
+        )
+    except Exception:
+        return None

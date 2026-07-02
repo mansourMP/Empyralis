@@ -375,6 +375,154 @@ async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
     raise RuntimeError("No cloud provider is configured for Sage.")
 
 
+# ── Phase L: Per-agent AI provider binding ──────────────────────────────────
+
+async def _resolve_agent_cloud_provider(
+    workspace_id: str,
+    agent_model_config: Optional[Dict[str, Any]] = None,
+    agent_id: str = "",
+) -> tuple[str, dict, str]:
+    """Resolve the AI provider for a specific agent, respecting its model_config.
+
+    Returns (provider, credentials, billing_mode) where billing_mode is one of:
+      - "platform_credits" — decrement workspace credits
+      - "byok_api" — agent brings own key, NO credit decrement
+      - "cli_subscription" — agent uses CLI subscription
+      - "local" — agent uses local model
+
+    HARD RULE — no silent fallback:
+      If the bound mode/provider is unavailable (missing key, local model down,
+      subscription expired), the turn fails with a platform-voice error +
+      ledger event {action:"provider_unavailable", agent_id, mode, provider}.
+
+      NEVER auto-switch to another provider.
+      NEVER bill platform credits for a BYOK-bound agent.
+    """
+    mc = dict(agent_model_config or {})
+    mode = str(mc.get("mode") or "platform_credits").strip().lower()
+    provider = str(mc.get("provider") or "").strip().lower()
+
+    # ── platform_credits: use default workspace resolution ──────────
+    if mode == "platform_credits":
+        prov, creds = await _resolve_cloud_provider(workspace_id)
+        return prov, creds, "platform_credits"
+
+    # ── byok_api: agent's own key ──────────────────────────────────
+    if mode == "byok_api":
+        if not provider:
+            await _ledger_provider_unavailable(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                mode=mode,
+                provider=provider,
+                reason="No provider specified in model_config for BYOK mode.",
+            )
+            raise RuntimeError(
+                "This agent is configured to use its own API key (BYOK), "
+                "but no provider was specified in its model_config. "
+                "An operator must configure the provider via fleet_configure_agent."
+            )
+
+        from server_modules.direct_chat_provider_service import (
+            direct_chat_credentials,
+            supports_direct_message_native_chat,
+        )
+        credentials = direct_chat_credentials(workspace_id, provider)
+        if not supports_direct_message_native_chat(provider, credentials):
+            await _ledger_provider_unavailable(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                mode=mode,
+                provider=provider,
+                reason=f"BYOK provider '{provider}' is unavailable or missing credentials.",
+            )
+            raise RuntimeError(
+                f"This agent is bound to the {provider} provider (BYOK), "
+                f"but the required API key is not configured. "
+                f"Add the key to your vault or switch this agent to platform_credits."
+            )
+
+        return provider, credentials, "byok_api"
+
+    # ── cli_subscription: not yet available on this deployment ─────
+    if mode == "cli_subscription":
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            mode=mode,
+            provider=provider,
+            reason="cli_subscription mode is not yet available on this deployment.",
+        )
+        raise RuntimeError(
+            "CLI subscription mode is not yet available on this deployment. "
+            "Switch this agent to platform_credits or byok_api."
+        )
+
+    # ── local: not yet available on this deployment ────────────────
+    if mode == "local":
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            mode=mode,
+            provider=provider,
+            reason="local mode is not yet available on this deployment.",
+        )
+        raise RuntimeError(
+            "Local model mode is not yet available on this deployment. "
+            "Switch this agent to platform_credits or byok_api."
+        )
+
+    # Unknown mode
+    await _ledger_provider_unavailable(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        mode=mode,
+        provider=provider,
+        reason=f"Unknown model_config mode: {mode}",
+    )
+    raise RuntimeError(
+        f"Unknown model_config mode: {mode}. "
+        f"Valid modes: platform_credits, byok_api, cli_subscription, local."
+    )
+
+
+async def _ledger_provider_unavailable(
+    *,
+    workspace_id: str,
+    agent_id: str,
+    mode: str,
+    provider: str,
+    reason: str,
+) -> None:
+    """Ledger a provider_unavailable event — best effort, never raises."""
+    try:
+        from server_modules import activity_ledger_service
+        await activity_ledger_service.append_activity_event(
+            tenant_id="system",
+            workspace_id=workspace_id,
+            actor_type="agent",
+            actor_id=str(agent_id or "").strip() or "unknown",
+            event_class="system_activity",
+            detail_level="audit_reference",
+            action="provider_unavailable",
+            title=f"Provider unavailable: {mode}/{provider or 'unspecified'}",
+            summary=(
+                f"Agent {agent_id} requested {mode}/{provider or 'unspecified'} "
+                f"but it is unavailable. Reason: {reason}. "
+                f"No fallback — turn denied per Phase L hard rule."
+            ),
+            status="blocked",
+            metadata={
+                "agent_id": agent_id,
+                "mode": mode,
+                "provider": provider,
+                "reason": reason,
+            },
+        )
+    except Exception:
+        pass
+
+
 async def get_persisted_model_preference(workspace_id: str) -> str:
     """Read the workspace-persisted model preference (survives restart)."""
     from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
