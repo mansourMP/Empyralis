@@ -176,6 +176,91 @@ def resolve_default_vault_credential(
     return resolve_vault_credential(load_vault_fn, decrypt_fn, credential_id, requested_ws)
 
 
+# ---------------------------------------------------------------------------
+# Stage 4B: agent-aware credential resolution
+# ---------------------------------------------------------------------------
+
+def resolve_agent_credential(
+    load_vault_fn: LoadVaultFn,
+    decrypt_fn: DecryptFn,
+    provider: str,
+    workspace_id: str,
+    agent_id: str,
+    *,
+    account_label: str = "default",
+) -> Dict[str, Any]:
+    """Resolve a credential scoped to a specific (workspace, agent, provider).
+
+    Resolution order:
+      1. Exact:  (workspace_id, agent_id, provider, account_label)
+      2. Agent default label: (workspace_id, agent_id, provider, "default")
+      3. Workspace default: (workspace_id, None/empty agent_id, provider, "default")
+      4. None found → raises RuntimeError (no silent fallback to another agent)
+
+    This is the Stage 4B entry point — tool_broker and secrets_broker
+    should call this with the CALLING agent's identity.
+    """
+    provider_id = str(provider or "").strip().lower()
+    if not provider_id:
+        raise RuntimeError("Provider is required.")
+    if not str(workspace_id or "").strip():
+        raise RuntimeError("workspace_id is required for agent-scoped credential resolution.")
+    if not str(agent_id or "").strip():
+        raise RuntimeError("agent_id is required for agent-scoped credential resolution.")
+
+    ws = normalize_workspace_id(workspace_id)
+    agent = str(agent_id).strip()
+    label = str(account_label or "default").strip()
+
+    # Candidate scoring: higher = better match
+    candidates: List[Tuple[int, Dict[str, Any]]] = []
+    for entry in load_vault_fn().get("credentials", []):
+        if str(entry.get("provider") or "").strip().lower() != provider_id:
+            continue
+
+        entry_ws = normalize_workspace_id(entry.get("workspace_id"))
+        entry_agent = str(entry.get("agent_id") or "").strip()
+        entry_label = str(entry.get("account_label") or "default").strip()
+
+        score = 0
+        if entry_ws == ws:
+            score += 100
+        elif entry_ws is None:
+            pass  # global entry — lowest priority
+        else:
+            continue  # wrong workspace
+
+        if entry_agent == agent:
+            score += 10
+        elif not entry_agent:
+            pass  # workspace-default (no agent_id set)
+        else:
+            continue  # wrong agent
+
+        if entry_label == label:
+            score += 1
+
+        candidates.append((score, entry))
+
+    if not candidates:
+        raise RuntimeError(
+            f"No credential for provider '{provider_id}', "
+            f"agent '{agent}', workspace '{ws}'. "
+            f"Each agent must have its own credential — no silent fallback."
+        )
+
+    candidates.sort(key=lambda item: (
+        -item[0],
+        str(item[1].get("updated_at") or item[1].get("created_at") or ""),
+    ))
+
+    best = candidates[0][1]
+    credential_id = str(best.get("id") or "").strip()
+    if not credential_id:
+        raise RuntimeError(f"Credential entry for provider '{provider_id}' is missing an id.")
+    return resolve_vault_credential(load_vault_fn, decrypt_fn, credential_id, ws)
+
+
 def credential_identity(provider: str, label: str, workspace_id: Optional[str]) -> str:
     ws = normalize_workspace_id(workspace_id) or "__global__"
     return f"{provider.strip().lower()}::{label.strip().lower()}::{ws}"
