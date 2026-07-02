@@ -2045,6 +2045,7 @@ async def handle_cloud_channel_inbound(
     session_id: str,
     channel_key: str,
     message: Dict[str, Any],
+    workspace_id: str = "",
 ) -> Dict[str, Any]:
     """Handle inbound message from cloud session manager (Stage 2).
 
@@ -2052,14 +2053,25 @@ async def handle_cloud_channel_inbound(
     but dispatches replies via HTTP to the cloud session manager instead of
     through the Gateway WebSocket.
 
+    NOTE: This function currently has no callers — the live cloud inbound path
+    is personal_channels_service.handle_cloud_channel_inbound which receives
+    workspace_id from the cloud session manager's signed payload. If this
+    function is revived, workspace_id must be provided by the caller.
+
     Args:
         session_id: cloud session manager session ID
         channel_key: "telegram_personal" or "whatsapp_personal"
         message: {external_message_id, sender_id, sender_name, text, received_at}
+        workspace_id: workspace UUID (required for Stage 4a isolation)
     """
     if not _CLOUD_SESSION_MANAGER_ENABLED:
         return {"status": "disabled", "reason": "CLOUD_SESSION_MANAGER_ENABLED is false"}
 
+    # TODO(Phase E): when this function is revived, workspace_id must come
+    # from the authenticated session; reject if empty.
+    resolved_workspace = str(workspace_id or message.get("workspace_id") or "").strip()
+    if not resolved_workspace:
+        resolved_workspace = "default"  # backward compat for dead code path
 
     external_message_id = str(message.get("external_message_id") or "").strip()
     remote_jid = str(message.get("sender_id") or "").strip()
@@ -2071,7 +2083,7 @@ async def handle_cloud_channel_inbound(
 
     # Build Sage reply using the existing bridge — same as Gateway path
     reply = personal_channel_sage_bridge_service.build_telegram_personal_reply(
-        workspace_id="default",
+        workspace_id=resolved_workspace,
         gateway_id=f"cloud:{session_id}",
         remote_jid=remote_jid,
         text=text,
