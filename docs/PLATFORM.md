@@ -259,7 +259,7 @@ graph TD
 |------|---------|
 | `server.py` | ⚠️ Composition root — FastAPI app, middleware, router mounting |
 | `main.py` | Standalone entry (rarely used) |
-| `mcp_server.py` | MCP server — vision tools + Phase U2 Empyralis-as-MCP tools (fleet, memory, chat) |
+| `mcp_server.py` | MCP server — exposes Empyralis AS an MCP server for external AI clients (9 tools: fleet, memory, chat) |
 | `mcp_server_auth.py` | Phase U2 — per-workspace MCP API key creation, hashing, revocation, resolution |
 | `preflight.py` | Phase T — startup preflight (kernel, Postgres, Redis), fails loud if missing |
 | `fleet_tools.py` | Phase L+V — operator fleet tools + schedule_task proactive agent tool |
