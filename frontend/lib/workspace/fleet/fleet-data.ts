@@ -11,8 +11,9 @@ export type FleetAgent = {
   runtime_target: string;
   hardware_status: "online" | "offline" | "unknown";
   last_heartbeat: string | null;
-  last_activity?: string;
+  last_activity?: string | null;
   activity_preview?: string;
+  model_config?: Record<string, any>;
 };
 
 export type FleetAgentActivity = {

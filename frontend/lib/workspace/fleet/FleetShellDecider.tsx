@@ -17,8 +17,10 @@ export function FleetShellDecider({
 }) {
   const segment = useSelectedLayoutSegment();
 
-  // Fleet routes get their own layout — no workstation shell chrome
-  if (segment === "fleet") {
+  // Fleet routes AND the workspace landing (null segment) render
+  // without the workstation shell chrome — they get the fleet layout
+  // (rail + content area). All other sub-routes use the workstation shell.
+  if (segment === "fleet" || segment === null) {
     return <>{children}</>;
   }
 

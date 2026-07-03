@@ -91,11 +91,11 @@ export default async function WorkspaceRouteLayout({
     </>
   );
 
-  // Phase UX-C: Primary rail persists across all workspace sub-routes.
+  // Phase UX-C / U4: Primary rail persists across all workspace sub-routes.
   // FleetShellDecider picks the content area: fleet children (no shell chrome)
-  // or the normal workstation shell.
+  // or the normal workstation shell. Landing page (null segment) = fleet.
   return (
-    <div className="fleet-layout">
+    <div style={{ display: "flex", height: "100vh", background: "#0d0d0f", overflow: "hidden" }}>
       <PrimaryRail workspaceId={resolvedWorkspaceId} />
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
         <FleetShellDecider shellSlot={shellFragment}>

@@ -1795,6 +1795,62 @@ async def get_agent_definition(
     return _row_to_agent_definition(row)
 
 
+def _list_workspace_agent_installs_local(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    include_master: bool = False,
+) -> List[Dict[str, Any]]:
+    """SQLite fallback for list_workspace_agent_installs when Postgres is unavailable."""
+    from server_modules.control_plane_repository import _connect_local_control_plane_db
+    try:
+        with _connect_local_control_plane_db() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    wai.*,
+                    ad.slug AS agent_definition_slug,
+                    ad.name AS agent_definition_name,
+                    ad.description AS agent_definition_description,
+                    ad.category AS agent_definition_category,
+                    ad.icon AS agent_definition_icon,
+                    ad.agent_kind,
+                    adv.version_number AS definition_version_number,
+                    adv.manifest,
+                    adv.capability_manifest,
+                    adv.policy_manifest,
+                    adv.placement_manifest,
+                    rp.slug AS runtime_profile_slug,
+                    rp.label AS runtime_profile_label,
+                    rp.runtime_class,
+                    rp.placement_mode,
+                    rp.runtime_id,
+                    rp.machine_id,
+                    rp.default_execution_target,
+                    rp.status AS runtime_profile_status
+                FROM workspace_agent_installs wai
+                INNER JOIN agent_definitions ad
+                    ON ad.id = wai.agent_definition_id
+                INNER JOIN agent_definition_versions adv
+                    ON adv.id = wai.agent_definition_version_id
+                LEFT JOIN runtime_profiles rp
+                    ON rp.id = wai.runtime_profile_id
+                WHERE wai.tenant_id = ?
+                  AND wai.workspace_id = ?
+                  AND (? OR COALESCE(ad.agent_kind, 'specialist') <> 'master')
+                ORDER BY wai.updated_at DESC, wai.created_at DESC
+                """,
+                (
+                    str(tenant_id or "").strip(),
+                    str(workspace_id or "").strip(),
+                    1 if include_master else 0,
+                ),
+            ).fetchall()
+            return [item for item in (_row_to_install_summary(dict(r)) for r in rows) if item]
+    except Exception:
+        return []
+
+
 async def list_workspace_agent_installs(
     *,
     tenant_id: str,
@@ -1804,7 +1860,13 @@ async def list_workspace_agent_installs(
     await ensure_workspace_agent_registry_seeded(tenant_id=tenant_id, workspace_id=workspace_id)
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
-        return []
+        # Phase U4: SQLite fallback — query local control-plane DB when
+        # Postgres is unavailable, so the fleet UI renders real agent cards.
+        return _list_workspace_agent_installs_local(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            include_master=include_master,
+        )
     rows = await pool.fetch(
         """
         SELECT

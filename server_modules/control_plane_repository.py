@@ -1877,6 +1877,102 @@ def _connect_local_control_plane_db() -> sqlite3.Connection:
     schema_key = str(LOCAL_CONTROL_PLANE_DB_FILE)
     if schema_key in LOCAL_CONTROL_PLANE_SCHEMA_READY_PATHS:
         return connection
+
+    # ── Agent registry tables (Phase U4: fleet UI needs these) ──
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_definitions (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            agent_kind TEXT NOT NULL DEFAULT 'specialist',
+            visibility TEXT DEFAULT 'workspace',
+            status TEXT NOT NULL DEFAULT 'active',
+            category TEXT,
+            icon TEXT,
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_definition_versions (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            agent_definition_id TEXT NOT NULL,
+            version_number INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'active',
+            manifest TEXT DEFAULT '{}',
+            capability_manifest TEXT DEFAULT '{}',
+            policy_manifest TEXT DEFAULT '{}',
+            placement_manifest TEXT DEFAULT '{}',
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workspace_agent_installs (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            agent_definition_id TEXT NOT NULL,
+            agent_definition_version_id TEXT NOT NULL,
+            installed_by_user_id TEXT,
+            install_scope TEXT NOT NULL DEFAULT 'workspace',
+            owner_user_id TEXT,
+            thread_id TEXT,
+            label TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            runtime_profile_id TEXT,
+            compiled_workflow_version_id TEXT,
+            root_folder_uri TEXT,
+            tool_toggles TEXT NOT NULL DEFAULT '{}',
+            folder_grants TEXT NOT NULL DEFAULT '[]',
+            connector_bindings TEXT NOT NULL DEFAULT '{}',
+            memory_scope_overrides TEXT NOT NULL DEFAULT '{}',
+            policy_context_overrides TEXT NOT NULL DEFAULT '{}',
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            enabled_tools TEXT,
+            enabled_connectors TEXT,
+            channel_bindings TEXT DEFAULT '[]',
+            subagents_enabled INTEGER DEFAULT 0,
+            hardware_access TEXT DEFAULT 'none'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_profiles (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            slug TEXT,
+            label TEXT,
+            runtime_class TEXT DEFAULT 'cloud',
+            placement_mode TEXT DEFAULT 'auto',
+            runtime_id TEXT,
+            machine_id TEXT,
+            default_execution_target TEXT,
+            status TEXT DEFAULT 'active',
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS deployed_agents (

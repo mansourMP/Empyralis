@@ -1,126 +1,178 @@
 "use client";
 
-import "./fleet.css";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  Bot,
-  MessageSquare,
-  Clock,
-  AlertCircle,
-  ChevronRight,
-  Activity,
-  WifiOff,
-  Cloud,
-  Server,
-  Radio,
-} from "lucide-react";
-import { useFleetAgents } from "./fleet-data";
+import { useFleetAgents, type FleetAgent } from "./fleet-data";
 import { FleetAgentDetail } from "./FleetAgentDetail";
 
-const STATUS_DOT: Record<string, { color: string; label: string }> = {
-  online: { color: "#22c55e", label: "Online" },
-  offline: { color: "#ef4444", label: "Offline" },
-  unknown: { color: "#94a3b8", label: "Unknown" },
+// ── Design tokens (matching FleetHome.reference.tsx) ──
+const C = {
+  pageBg: "#0d0d0f",
+  cardBg: "#1c1c1f",
+  cardBorder: "rgba(255,255,255,0.08)",
+  textPrimary: "#f4f4f5",
+  textSecondary: "#a1a1aa",
+  textMuted: "#71717a",
+  accent: "#7c3aed",
+  online: "#1D9E75",
+  onlineText: "#5DCAA5",
+  offline: "#E24B4A",
+  offlineText: "#F09595",
 };
 
-const RUNTIME_ICON: Record<string, React.ReactNode> = {
-  cloud: <Cloud size={12} />,
-  gateway: <Radio size={12} />,
-  vps: <Server size={12} />,
+const TINTS: Record<string, { bg: string; fg: string }> = {
+  blue: { bg: "#0C447C22", fg: "#85B7EB" },
+  purple: { bg: "#3C348922", fg: "#AFA9EC" },
+  amber: { bg: "#854F0B22", fg: "#EF9F27" },
+  teal: { bg: "#0F6E5622", fg: "#5DCAA5" },
+  coral: { bg: "#993C1D22", fg: "#F0997B" },
 };
 
-function runtimeIcon(target: string) {
-  if (target.startsWith("gateway")) return RUNTIME_ICON.gateway;
-  if (target.startsWith("vps")) return RUNTIME_ICON.vps;
-  return RUNTIME_ICON.cloud;
+// Map agent role → tint color
+function tintForRole(role: string) {
+  const r = (role || "").toLowerCase();
+  if (r === "sage" || r === "operator") return "purple";
+  if (r === "specialist") return "blue";
+  if (r === "customer_facing") return "teal";
+  return "blue";
 }
+
+// Map agent role → canonical preset
+function presetForRole(role: string): "customer_facing" | "internal_assistant" | "operator" {
+  const r = (role || "").toLowerCase();
+  if (r === "sage" || r === "operator") return "operator";
+  if (r === "customer_facing") return "customer_facing";
+  return "internal_assistant";
+}
+
+// Map API agent → AgentSummary
+function toAgentSummary(a: FleetAgent) {
+  return {
+    id: a.agent_id,
+    name: a.label || "Unnamed Agent",
+    preset: presetForRole(a.role),
+    runtime_target: a.runtime_target || "unknown",
+    hardware_status: a.hardware_status || "unknown",
+    last_activity: a.last_activity || null,
+    tint: tintForRole(a.role),
+    role: a.role,
+  };
+}
+
+// ── Fleet Home (landing page) ──────────────────────────────────────────────
 
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
   const { agents, loading, error } = useFleetAgents(workspaceId);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const router = useRouter();
 
-  const sageAgent = agents.find((a) => a.role === "sage" || a.label?.toLowerCase().includes("sage"));
-  const otherAgents = agents.filter((a) => a !== sageAgent);
+  const mapped = agents.map(toAgentSummary);
+  const sageAgent = mapped.find((a) => a.role === "sage" || a.role === "operator" || a.name.toLowerCase().includes("sage"));
+  const otherAgents = mapped.filter((a) => a !== sageAgent);
+  const onlineCount = mapped.filter((a) => a.hardware_status === "online").length;
 
-  // ── Empty State ──
-  if (!loading && agents.length === 0 && !error) {
+  // ── Loading ──
+  if (loading && agents.length === 0) {
     return (
-      <div className="fleet-content fleet-empty">
-        <div className="fleet-empty-state">
-          <Bot size={48} strokeWidth={1} />
-          <h2>No agents yet</h2>
-          <p>Ask Sage to create your first one</p>
-          <button
-            className="fleet-btn fleet-btn-primary"
-            onClick={() => router.push(`/w/${workspaceId}/chat`)}
-          >
-            <MessageSquare size={16} />
-            Open Sage Chat
-          </button>
-        </div>
-      </div>
+      <main style={{ flex: 1, padding: "4rem 2rem", minWidth: 0, background: C.pageBg, color: C.textMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-dm-sans, system-ui)" }}>
+        Loading fleet…
+      </main>
     );
   }
 
-  // ── Error State ──
+  // ── Error ──
   if (error && agents.length === 0) {
     return (
-      <div className="fleet-content fleet-empty">
-        <div className="fleet-empty-state">
-          <AlertCircle size={48} strokeWidth={1} />
-          <h2>Could not load agents</h2>
-          <p>{error}</p>
-        </div>
-      </div>
+      <main style={{ flex: 1, padding: "4rem 2rem", minWidth: 0, background: C.pageBg, color: C.offlineText, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, fontFamily: "var(--font-dm-sans, system-ui)" }}>
+        <div style={{ fontSize: 17, fontWeight: 500, color: C.textPrimary }}>Could not load agents</div>
+        <div style={{ fontSize: 14 }}>{error}</div>
+      </main>
     );
   }
 
   return (
     <>
-      {/* ── Content: Agent Cards ── */}
-      <div className="fleet-content">
-        <div className="fleet-header">
-          <h1 className="fleet-title">Fleet</h1>
-          <span className="fleet-count">{agents.length} agent{agents.length !== 1 ? "s" : ""}</span>
+      {/* ── Main content ── */}
+      <main
+        style={{
+          flex: 1,
+          padding: "1.75rem 2rem",
+          minWidth: 0,
+          background: C.pageBg,
+          overflowY: "auto",
+          fontFamily: "var(--font-dm-sans, system-ui)",
+        }}
+      >
+        {/* Header row */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            justifyContent: "space-between",
+            marginBottom: "1.5rem",
+          }}
+        >
+          <div>
+            <h1 style={{ fontSize: 23, fontWeight: 500, margin: 0, color: C.textPrimary }}>
+              Your fleet
+            </h1>
+            <p style={{ fontSize: 13, color: C.textMuted, margin: "5px 0 0" }}>
+              {mapped.length} {mapped.length === 1 ? "agent" : "agents"} · {onlineCount} online
+            </p>
+          </div>
+          <button
+            onClick={() => router.push(`/w/${workspaceId}/chat`)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 7,
+              fontSize: 13.5,
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: `0.5px solid ${C.cardBorder}`,
+              background: "transparent",
+              color: C.textPrimary,
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
+            New agent
+          </button>
         </div>
 
-        <div className="fleet-grid">
-          {/* Sage pinned on top */}
-          {sageAgent && (
-            <div className="fleet-sage-section">
-              <div className="fleet-section-label">Operator</div>
+        {/* Sage operator row */}
+        {sageAgent && (
+          <SageRow
+            agent={sageAgent}
+            onChat={() => router.push(`/w/${workspaceId}/chat`)}
+          />
+        )}
+
+        {/* Agent cards grid or empty state */}
+        {mapped.length === 0 && !loading ? (
+          <EmptyFleet onChat={() => router.push(`/w/${workspaceId}/chat`)} />
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
+              gap: 12,
+            }}
+          >
+            {/* Non-Sage agents */}
+            {otherAgents.map((a) => (
               <AgentCard
-                agent={sageAgent}
-                isSage
-                onClick={() => setSelectedAgentId(sageAgent.agent_id)}
-                onChat={() => router.push(`/w/${workspaceId}/chat`)}
+                key={a.id}
+                agent={a}
+                onSelect={(id) => setSelectedAgentId(id)}
               />
-            </div>
-          )}
+            ))}
+          </div>
+        )}
+      </main>
 
-          {/* Other agents */}
-          {otherAgents.length > 0 && (
-            <div className="fleet-agents-section">
-              <div className="fleet-section-label">
-                {sageAgent ? "Agents" : "All Agents"}
-              </div>
-              <div className="fleet-grid-cards">
-                {otherAgents.map((agent) => (
-                  <AgentCard
-                    key={agent.agent_id}
-                    agent={agent}
-                    onClick={() => setSelectedAgentId(agent.agent_id)}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── Detail Panel ── */}
+      {/* ── Detail panel ── */}
       {selectedAgentId && (
         <FleetAgentDetail
           workspaceId={workspaceId}
@@ -133,81 +185,258 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-function AgentCard({
+// ── Sage operator row ─────────────────────────────────────────────────────
+
+function SageRow({
   agent,
-  isSage,
-  onClick,
   onChat,
 }: {
-  agent: any;
-  isSage?: boolean;
-  onClick: () => void;
+  agent: ReturnType<typeof toAgentSummary>;
   onChat?: () => void;
 }) {
-  const dot = STATUS_DOT[agent.hardware_status] || STATUS_DOT.unknown;
-  const isOffline = agent.hardware_status === "offline";
-
   return (
     <div
-      className={`fleet-card ${isSage ? "fleet-card--sage" : ""} ${isOffline ? "fleet-card--offline" : ""}`}
-      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 14,
+        background: C.cardBg,
+        border: `0.5px solid ${C.cardBorder}`,
+        borderRadius: 12,
+        padding: "1rem 1.25rem",
+        marginBottom: "1.25rem",
+      }}
     >
-      <div className="fleet-card-top">
-        <div className="fleet-card-avatar">
-          <Bot size={20} />
-          <span
-            className="fleet-card-dot"
-            style={{ background: dot.color }}
-            title={dot.label}
-          />
-        </div>
-        <div className="fleet-card-info">
-          <div className="fleet-card-name">
-            {agent.label || "Unnamed Agent"}
-            {isSage && <span className="fleet-card-badge">Sage</span>}
-          </div>
-          <div className="fleet-card-meta">
-            <span className="fleet-card-target">
-              {runtimeIcon(agent.runtime_target)}
-              <span>{agent.runtime_target || "unknown"}</span>
-            </span>
-            {agent.last_heartbeat && (
-              <span className="fleet-card-heartbeat">
-                <Clock size={10} />
-                <span>{new Date(agent.last_heartbeat).toLocaleTimeString()}</span>
-              </span>
-            )}
-          </div>
-        </div>
-        <ChevronRight size={16} className="fleet-card-chevron" />
+      <div
+        style={{
+          width: 42,
+          height: 42,
+          borderRadius: 11,
+          background: C.accent,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          fontSize: 20,
+          color: "#fff",
+        }}
+      >
+        ✦
       </div>
-
-      {agent.last_activity && (
-        <div className="fleet-card-activity">
-          <Activity size={12} />
-          <span>{agent.last_activity}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+          <span style={{ fontSize: 15, fontWeight: 500, color: C.textPrimary }}>
+            Sage
+          </span>
+          <span
+            style={{
+              fontSize: 11.5,
+              color: C.textSecondary,
+              background: "rgba(255,255,255,0.05)",
+              border: `0.5px solid ${C.cardBorder}`,
+              borderRadius: 20,
+              padding: "2px 10px",
+            }}
+          >
+            Operator
+          </span>
         </div>
-      )}
-
-      {isOffline && (
-        <div className="fleet-card-offline-banner">
-          <WifiOff size={12} />
-          <span>Offline — last seen {agent.last_heartbeat ? new Date(agent.last_heartbeat).toLocaleString() : "unknown"}</span>
+        <div style={{ fontSize: 13, color: C.textMuted, marginTop: 3 }}>
+          Ask me to create or configure any agent for you.
         </div>
-      )}
+      </div>
+      <button
+        onClick={onChat}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          fontSize: 13.5,
+          flexShrink: 0,
+          padding: "8px 14px",
+          borderRadius: 8,
+          border: `0.5px solid ${C.cardBorder}`,
+          background: "transparent",
+          color: C.textPrimary,
+          cursor: "pointer",
+          fontFamily: "inherit",
+        }}
+      >
+        Chat with Sage
+      </button>
+    </div>
+  );
+}
 
-      {isSage && onChat && (
-        <button
-          className="fleet-card-chat-btn"
-          onClick={(e) => {
-            e.stopPropagation();
-            onChat();
+// ── Agent card ────────────────────────────────────────────────────────────
+
+function AgentCard({
+  agent,
+  onSelect,
+}: {
+  agent: ReturnType<typeof toAgentSummary>;
+  onSelect?: (id: string) => void;
+}) {
+  const online = agent.hardware_status === "online";
+  const offline = agent.hardware_status === "offline";
+  const tint = TINTS[agent.tint] || TINTS.blue;
+
+  const placementLabel = agent.runtime_target === "cloud"
+    ? `cloud · ${agent.preset === "customer_facing" ? "customer-facing" : "internal"}`
+    : agent.runtime_target.replace(":", " · ");
+
+  return (
+    <button
+      onClick={() => onSelect?.(agent.id)}
+      style={{
+        textAlign: "left" as const,
+        background: C.cardBg,
+        border: `0.5px solid ${C.cardBorder}`,
+        borderRadius: 12,
+        padding: "1rem 1.15rem",
+        cursor: "pointer",
+        width: "100%",
+        display: "flex",
+        flexDirection: "column",
+        fontFamily: "inherit",
+        color: C.textPrimary,
+      }}
+    >
+      {/* Top row: icon + name + status dot */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 12,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 8,
+              background: tint.bg,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 17,
+              color: tint.fg,
+              flexShrink: 0,
+            }}
+          >
+            {agent.name.charAt(0).toUpperCase()}
+          </div>
+          <span style={{ fontSize: 14.5, fontWeight: 500, color: C.textPrimary }}>
+            {agent.name}
+          </span>
+        </div>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            fontSize: 11.5,
+            color: online
+              ? C.onlineText
+              : offline
+                ? C.offlineText
+                : C.textMuted,
           }}
         >
-          <MessageSquare size={14} />
-          Chat with Sage
-        </button>
-      )}
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: online
+                ? C.online
+                : offline
+                  ? C.offline
+                  : C.textMuted,
+              flexShrink: 0,
+            }}
+          />
+          {agent.hardware_status}
+        </span>
+      </div>
+
+      {/* Hardware placement */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          fontSize: 12.5,
+          color: C.textSecondary,
+          marginBottom: 8,
+        }}
+      >
+        {placementLabel}
+      </div>
+
+      {/* Last activity footer */}
+      <div
+        style={{
+          fontSize: 12.5,
+          color: offline ? C.offlineText : C.textMuted,
+          borderTop: `0.5px solid ${C.cardBorder}`,
+          paddingTop: 9,
+          marginTop: 4,
+        }}
+      >
+        {offline
+          ? "Not reachable · check the connection"
+          : agent.last_activity ?? "No activity yet"}
+      </div>
+    </button>
+  );
+}
+
+// ── Empty state ───────────────────────────────────────────────────────────
+
+function EmptyFleet({ onChat }: { onChat?: () => void }) {
+  return (
+    <div
+      style={{
+        textAlign: "center",
+        padding: "4rem 1rem",
+        color: C.textSecondary,
+        fontFamily: "var(--font-dm-sans, system-ui)",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 17,
+          fontWeight: 500,
+          color: C.textPrimary,
+          marginBottom: 8,
+        }}
+      >
+        Start your first agent
+      </div>
+      <div style={{ fontSize: 14, color: C.textMuted, marginBottom: 20 }}>
+        Tell Sage what you need and it&apos;ll set one up for you.
+      </div>
+      <button
+        onClick={onChat}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          fontSize: 14,
+          padding: "9px 16px",
+          borderRadius: 8,
+          border: "none",
+          background: C.accent,
+          color: "#fff",
+          cursor: "pointer",
+          fontFamily: "inherit",
+        }}
+      >
+        Chat with Sage
+      </button>
     </div>
   );
 }
