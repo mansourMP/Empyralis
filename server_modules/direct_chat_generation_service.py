@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import contextvars
+import json
 import re
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional
@@ -344,6 +345,35 @@ def _extract_assistant_shell_command_blocks(text: str) -> List[str]:
     return command_blocks
 
 
+def _normalize_tool_format(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert OpenAI function-calling format to flat format expected by the
+    legacy LLM pipeline (orion_local_worker_llm.py).
+
+    OpenAI format:  {type: "function", function: {name, description, parameters}}
+    Flat format:    {name, description, parameters}
+    """
+    normalized: List[Dict[str, Any]] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        # Already flat format?
+        name = str(item.get("name") or "").strip()
+        if name:
+            normalized.append(item)
+            continue
+        # Convert from OpenAI format
+        func = item.get("function")
+        if isinstance(func, dict):
+            func_name = str(func.get("name") or "").strip()
+            if func_name:
+                normalized.append({
+                    "name": func_name,
+                    "description": str(func.get("description") or "").strip(),
+                    "parameters": func.get("parameters") if isinstance(func.get("parameters"), dict) else {},
+                })
+    return normalized
+
+
 def _extract_assistant_shell_plan_tool_call(
     reply: Any,
     tools: List[Dict[str, Any]],
@@ -354,6 +384,189 @@ def _extract_assistant_shell_plan_tool_call(
     # markup and conversational consent such as "go ahead" to become executable.
     text = str(reply or "").strip()
     return text, []
+
+
+# ── Memory intent detection (PR1 fix) ────────────────────────────────────────
+# DeepSeek-chat often emits conversational intent ("let me check memory...")
+# instead of native tool_calls.  We detect this pattern and create the
+# appropriate tool call so the turn completes in ONE step instead of stalling.
+# Memory tools are read-only — safe to auto-invoke from natural language.
+
+_MEMORY_INTENT_PATTERNS = [
+    # "let me check our memory / my memory / in memory / the memory"
+    re.compile(
+        r"(?:let\s+me|i['’]ll|i\s+will|let\s+us)\s+(?:check|look(?:\s+up)?|search|find|read|recall|retrieve|get|pull(?:\s+up)?|see\s+what(?:'s|is)?\s+in)\s+(?:in\s+|our\s+|my\s+|the\s+)?(?:memory|memories|notes|stored\s+(?:info|facts|data))",
+        re.I,
+    ),
+    # "I should / need to check memory"
+    re.compile(
+        r"(?:i|we)\s+(?:should|need\s+to|have\s+to|must|ought\s+to)\s+(?:check|look|search|find|read|recall)\s+(?:in\s+|our\s+|my\s+|the\s+)?(?:memory|memories)",
+        re.I,
+    ),
+    # "checking memory / looking in memory / searching memory"
+    re.compile(
+        r"(?:checking|looking|searching|reading)\s+(?:in\s+|our\s+|my\s+|the\s+)?(?:memory|memories)",
+        re.I,
+    ),
+    # "what was stored" / "what's in memory"
+    re.compile(
+        r"(?:what|whatever)(?:'s|'ve|\s+is|\s+has|\s+was)\s+(?:been\s+)?(?:stored|saved|recorded|kept)\s+(?:in\s+(?:my\s+|our\s+|the\s+)?(?:memory|notes))?",
+        re.I,
+    ),
+]
+
+# ── Text-based tool call notation (DeepSeek often emits [tool: params] in text) ──
+_TOOL_CALL_NOTATION_RE = re.compile(
+    r"\[(memory_search|memory_read|memory_write|memory_get|find_workspace_memory_entry)\s*[:|]\s*(.+?)\]",
+    re.I,
+)
+
+_MEMORY_TOOL_NAMES = {"memory_read", "memory_search", "memory_get", "find_workspace_memory_entry"}
+
+
+def _detect_memory_intent(reply: str, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """If the reply expresses intent to check memory but no tool was called,
+    create the appropriate memory tool call so the loop doesn't stall."""
+    text = str(reply or "").strip()
+    if not text:
+        return []
+
+    # Check if any memory tool is in the available tool list
+    available_memory_tools: Dict[str, Dict[str, Any]] = {}
+    for tool in tools:
+        name = ""
+        if isinstance(tool, dict):
+            func = tool.get("function")
+            if isinstance(func, dict):
+                name = str(func.get("name") or "").strip()
+        if name in _MEMORY_TOOL_NAMES:
+            available_memory_tools[name] = tool
+
+    if not available_memory_tools:
+        return []
+
+    # ── Priority 1: text-based [tool: params] notation (DeepSeek's native style) ──
+    tool_notation_match = _TOOL_CALL_NOTATION_RE.search(text)
+    if tool_notation_match:
+        tool_name = tool_notation_match.group(1).strip()
+        raw_params = tool_notation_match.group(2).strip()
+        if tool_name in available_memory_tools:
+            arguments = _parse_tool_notation_params(raw_params, tool_name)
+            print(f"[DG_MEMORY_NOTATION] extracted tool={tool_name} params={arguments} from reply text", flush=True)
+            return [{
+                "id": f"call_{uuid.uuid4().hex[:12]}",
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(arguments),
+                },
+            }]
+
+    # ── Priority 2: natural-language intent patterns ──
+    is_memory_intent = any(p.search(text) for p in _MEMORY_INTENT_PATTERNS)
+    if not is_memory_intent:
+        return []
+
+    # If the reply already contains a substantive answer (not just an
+    # announcement), don't inject a tool call — the model answered from
+    # context. Only inject when the reply is PURELY an intent announcement
+    # without answering the user's question.
+    if _reply_answers_question(text):
+        return []
+
+    # Prefer memory_search for queries with actual search terms;
+    # fall back to memory_read for general recall.
+    if "memory_search" in available_memory_tools:
+        query = _extract_memory_search_terms(text)
+        return [{
+            "id": f"call_{uuid.uuid4().hex[:12]}",
+            "type": "function",
+            "function": {
+                "name": "memory_search",
+                "arguments": json.dumps({"query": query}),
+            },
+        }]
+    elif "memory_read" in available_memory_tools:
+        return [{
+            "id": f"call_{uuid.uuid4().hex[:12]}",
+            "type": "function",
+            "function": {
+                "name": "memory_read",
+                "arguments": json.dumps({"path": "MEMORY.md"}),
+            },
+        }]
+
+    return []
+
+
+def _reply_answers_question(text: str) -> bool:
+    """Heuristic: does the reply contain a substantive answer, not just an
+    announcement of intent? If so, the model probably answered from context
+    and we should not inject a tool call."""
+    t = text.strip()
+    # If it's short and purely an announcement, it's not an answer
+    if len(t) < 150:
+        return False
+    # If it starts with an intent phrase and has little substance after,
+    # it's probably not an answer
+    intent_starts = ("let me ", "i'll ", "i will ", "let us ", "i should ", "i need to ")
+    lower = t.lower()
+    for prefix in intent_starts:
+        if lower.startswith(prefix):
+            # Announcement prefix — check if there's substance after
+            # by looking for concrete answer indicators
+            rest = t[len(prefix):]
+            if len(rest) < 120:
+                return False
+            break
+    return True
+
+
+def _parse_tool_notation_params(raw: str, tool_name: str) -> Dict[str, Any]:
+    """Parse [tool_name: key=value, key2=value2] or [tool_name: value] notation."""
+    raw = raw.strip().rstrip("]").strip()
+    # Try key=value format
+    if "=" in raw:
+        params = {}
+        for part in raw.split(","):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                params[k] = v
+        if params:
+            return params
+    # Fallback: treat entire string as query value
+    if tool_name == "memory_search":
+        return {"query": raw.strip("'\"")}
+    elif tool_name == "memory_read" or tool_name == "memory_get":
+        return {"path": raw.strip("'\"")}
+    return {"query": raw.strip("'\"")}
+
+
+def _extract_memory_search_terms(text: str) -> str:
+    """Extract what the model wants to find from memory intent text."""
+    # Try to extract the topic after the intent phrase
+    patterns = [
+        r"(?:memory|memories)\s+(?:for|about|regarding)\s+(.+?)(?:\.|$|\n|to\s+see)",
+        r"(?:check|look|search|find|recall)\s+(?:our\s+|my\s+|the\s+)?(?:memory|memories)\s+(?:for|about)\s+(.+?)(?:\.|$|\n)",
+        r"(?:see\s+)?what\s+(?:we|i|you)\s+(?:were|was|are|have\s+been)\s+(?:talking|discussing|saying)\s+about\s*(.+?)?(?:\.|$|\n)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            terms = m.group(1).strip() if m.lastindex and m.group(1) else ""
+            if terms:
+                return terms.strip(" \"'.,;")
+    # Fallback: just use the first sentence as query
+    first_sentence = text.split(".")[0].strip()
+    # Remove common intent prefixes
+    for prefix in ("let me ", "i'll ", "i will ", "let us "):
+        if first_sentence.lower().startswith(prefix):
+            first_sentence = first_sentence[len(prefix):]
+            break
+    return first_sentence.strip(" \"'.,;")[:200]
 
 
 def _trace_raw_event(envelope: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -626,7 +839,21 @@ def stream_provider_backed_direct_chat(
     assistant_plan_tools: Optional[List[Dict[str, Any]]] = None,
     tool_registry: Optional[List[Any]] = None,
 ) -> Iterator[Dict[str, Any]]:
-    print(f"[DG_ENTRY] provider={metadata.get('provider')!r} model={metadata.get('model')!r} message_len={len(normalized_message)} tools_count={len(tools)} max_iter={resolved_chat_max_iterations} registry_entries={len(tool_registry) if tool_registry else 0}", flush=True)
+    # ── Normalize tool format: the always-on tools arrive as OpenAI function-calling
+    # format {type: "function", function: {name, description, parameters}} but the
+    # legacy LLM pipeline expects flat format {name, description, parameters}.
+    # Without this normalization, all tools are silently dropped (tools_count=0).
+    orig_tools_count = len(tools)
+    tools = _normalize_tool_format(tools)
+    if isinstance(metadata.get("tools"), list):
+        metadata["tools"] = _normalize_tool_format(metadata["tools"])
+    if isinstance(context.get("tools"), list):
+        context["tools"] = _normalize_tool_format(context["tools"])
+    if assistant_plan_tools:
+        assistant_plan_tools = _normalize_tool_format(assistant_plan_tools)
+    effective_assistant_plan_tools = assistant_plan_tools if assistant_plan_tools is not None else tools
+
+    print(f"[DG_ENTRY] provider={metadata.get('provider')!r} model={metadata.get('model')!r} message_len={len(normalized_message)} tools_count_in={orig_tools_count} tools_count_out={len(tools)} max_iter={resolved_chat_max_iterations} registry_entries={len(tool_registry) if tool_registry else 0}", flush=True)
     # ── DeepSeek tool count guard: trim to 20 tools max ──
     provider_id = str(metadata.get("provider") or "").strip().lower()
     if provider_id == "deepseek" and len(tools) > 20:
@@ -746,7 +973,6 @@ def stream_provider_backed_direct_chat(
     planning_item_id = uuid.uuid4().hex
     assistant_message_id = uuid.uuid4().hex
     health_safety_context = healthguide_safety_service.resolve_health_safety_context(session_ctx=session_ctx)
-    effective_assistant_plan_tools = assistant_plan_tools if assistant_plan_tools is not None else tools
     buffer_assistant_tool_plans = _has_shell_exec_tool(effective_assistant_plan_tools)
     trace_started_raw = _emit_trace_event(
         trace_context,
@@ -956,6 +1182,14 @@ def stream_provider_backed_direct_chat(
                     )
                     if assistant_shell_plan_tool_calls:
                         iteration_tool_calls = assistant_shell_plan_tool_calls
+                # PR1: Detect memory intent — when DeepSeek says "let me check
+                # memory" but doesn't natively call the tool, auto-create the
+                # tool call so the turn completes in one step.
+                if not iteration_tool_calls:
+                    memory_intent_calls = _detect_memory_intent(final_reply, effective_assistant_plan_tools)
+                    if memory_intent_calls:
+                        iteration_tool_calls = memory_intent_calls
+                        print(f"[DG_MEMORY_INTENT] auto-created {len(memory_intent_calls)} memory tool call(s) from intent: {final_reply[:120]!r}", flush=True)
                 yield services.thinking_step_payload(
                     thinking_iteration,
                     "done",

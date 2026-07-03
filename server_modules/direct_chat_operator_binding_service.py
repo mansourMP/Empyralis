@@ -242,6 +242,10 @@ def parse_tool_name(tool_name: str) -> tuple[str, str]:
         return "image", "generate"
     if token == "memory_search":
         return "memory", "search"
+    if token == "memory_read":
+        return "memory", "read"
+    if token == "memory_write":
+        return "memory", "write"
     if token == "memory_get":
         return "memory", "get"
     if token == "memory_update":

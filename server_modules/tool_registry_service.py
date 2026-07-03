@@ -335,9 +335,13 @@ def _connector_label(connector_id: str, availability_payload: Dict[str, Any]) ->
 # ── Always-on tool definitions ─────────────────────────────────────────────────
 
 def build_always_on_tool_definitions() -> List[Dict[str, Any]]:
-    """Return the always-on tool definitions as OpenAI function-calling schemas.
+    """Return the always-on tool definitions in flat format.
 
-    These 8 tools are injected into every inference request (~800 tokens).
+    These ~11 tools are injected into every inference request (~800 tokens).
+    The OpenAI {type: "function", function: {...}} wrapper is applied at the
+    API call site (iter_openai_compatible_chat_events), not here. This keeps
+    the format consistent for internal consumers (_dedupe_tools,
+    _available_tool_names, etc.) that read tool.get("name") directly.
     """
     tools: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -347,16 +351,16 @@ def build_always_on_tool_definitions() -> List[Dict[str, Any]]:
             seen.add(descriptor.tool_name)
             payload = skills_service._tool_payload_from_descriptor(descriptor)
             params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
-            func_def: Dict[str, Any] = {
+            tool_def: Dict[str, Any] = {
                 "name": payload["name"],
                 "description": payload["description"],
             }
             if params:
-                func_def["parameters"] = params
-            tools.append({
-                "type": "function",
-                "function": func_def,
-            })
+                tool_def["parameters"] = params
+            # Include connector_id for routing
+            if payload.get("connector_id"):
+                tool_def["connector_id"] = payload["connector_id"]
+            tools.append(tool_def)
 
     return tools
 
