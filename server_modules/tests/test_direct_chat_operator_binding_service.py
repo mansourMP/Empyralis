@@ -59,6 +59,8 @@ def _operator_namespace() -> dict:
         "_context_tool_capabilities": lambda availability: [],
         "_build_direct_chat_tools": lambda tool_capabilities: [],
         "_build_local_direct_chat_tools": lambda availability: [],
+        "_build_registry_entries": lambda: [],
+        "_build_always_on_direct_chat_tools": lambda: [],
         "_build_builtin_direct_chat_tools": lambda: [],
         "_normalize_direct_approved_action": lambda value: value,
         "_with_context_used": lambda payload, context: {**payload, "context_used": context},
@@ -417,14 +419,6 @@ class DirectChatOperatorBindingServiceTests(unittest.TestCase):
         preview = bindings.preview_run_response("Run the deployment check", {"ai_ready": True})
         self.assertIsNotNone(preview)
         self.assertEqual(preview["actions"][0]["kind"], "run")
-        self.assertTrue(
-            bindings.approval_required_for_direct_tool(
-                "computer",
-                "click",
-                {},
-                [],
-            )
-        )
 
     def test_build_direct_chat_state_bindings_preserves_session_and_loop_helpers(self) -> None:
         model_preferences = {}

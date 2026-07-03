@@ -1,9 +1,78 @@
 # Empyralis Build State
 
 **Last updated:** 2026-07-03
-**Current phase:** Q (live verification — complete)
+**Current phase:** T (boot reliability — in progress)
 **Branch:** main
-**Known-good commit:** `6b66aac28` (Phase P: triage layers)
+**Known-good commit:** `c499c6d60` (Phase S: real turn completes)
+
+## Boot Requirements (Phase T)
+
+The server runs a startup preflight at `server_modules/preflight.py` before serving.
+Any missing dependency raises `PreflightError` — the server refuses to boot
+half-alive.
+
+### Required
+
+| Dependency | Env Var | Check |
+|-----------|---------|-------|
+| Rust runtime kernel | `EMPYRALIS_RUNTIME_KERNEL_BIN` | Binary must exist at path |
+| PostgreSQL | `DATABASE_URL` | asyncpg connection + `workspace_agent_installs` has stage_4b columns |
+| Redis | `REDIS_URL` (default `redis://localhost:6379`) | PING — skip with `EMPYRALIS_SKIP_REDIS_CHECK=true` |
+
+### Exact boot steps
+
+```sh
+# 1. Kernel (one-time build or after Rust changes)
+cd /path/to/empyralis
+cargo build --manifest-path empyralis-runtime-kernel/Cargo.toml
+export EMPYRALIS_RUNTIME_KERNEL_BIN="$(pwd)/empyralis-runtime-kernel/target/debug/empyralis-runtime-kernel"
+
+# 2. Database
+export DATABASE_URL="postgresql://localhost:5432/empyralis_dev"
+# Ensure migrations are applied (preflight checks stage_4b columns):
+#   psql $DATABASE_URL -f migrations/stage_4b_agent_isolation.sql
+
+# 3. Redis (optional — skip if not installed)
+export REDIS_URL="redis://localhost:6379"
+# or: export EMPYRALIS_SKIP_REDIS_CHECK=true
+
+# 4. AI provider keys (at least one required for chat)
+export DEEPSEEK_API_KEY="sk-..."
+
+# 5. Start
+python server.py
+# → preflight runs → /health ok → real turn works
+```
+
+### Verify boot
+
+```sh
+curl http://127.0.0.1:8001/health
+# {"ok":true}
+```
+
+## Phase T — Boot Reliability Results
+
+### Startup preflight ✅
+- Module: `server_modules/preflight.py` (106 lines)
+- Checks: kernel binary, PostgreSQL + stage_4b columns, Redis
+- Wired into `server.py` lifespan — runs before first request
+- Fails loudly with `PreflightError` naming each gap
+
+### Test fixes ✅
+- 3 pre-existing failures in `test_direct_chat_operator_binding_service.py` resolved
+- Root cause: `_operator_namespace()` helper missing `_build_always_on_direct_chat_tools` and `_build_registry_entries`; `DirectChatOperatorToolRoutingBindings` no longer has `approval_required_for_direct_tool` (approval-era vestige)
+- 20/20 binding tests pass; 10/10 preflight tests pass
+
+### Test baseline updated
+| Suite | Tests | Status |
+|-------|-------|--------|
+| `test_direct_chat_operator_binding_service.py` | 20 | ✅ All pass |
+| `test_preflight.py` | 10 | ✅ All pass |
+| `test_ledger_audit.py` | 13 | ✅ All pass |
+| `test_hierarchy.py` | 33 | ✅ All pass |
+| `test_triage.py` | 15 | ✅ All pass |
+| **Total** | **91** | **0 failures** |
 
 ## Phase Q — Live Verification Results
 

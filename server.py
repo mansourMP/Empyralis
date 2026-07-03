@@ -74,6 +74,7 @@ from server_modules import connectors_actions as connectors_actions
 from server_modules import error_response_service as error_response_service
 from server_modules.cloud_cutover_config import assert_cloud_cutover_config
 from server_modules.direct_chat_tool_catalog_service import registered_direct_chat_tool_names_for_logging
+from server_modules.preflight import preflight_or_raise
 
 
 LOGGER = logging.getLogger(__name__)
@@ -283,6 +284,7 @@ def _launch_discord_bot_runtime() -> None:
 
 @asynccontextmanager
 async def runtime_app_lifespan(app_instance: FastAPI):
+    await preflight_or_raise()
     await control_plane_repository.ensure_control_plane_schema()
     runs_core.initialize_runtime_services()
     # ── Discord chatbot v1: persistent gateway listener for DM→Sage ──
