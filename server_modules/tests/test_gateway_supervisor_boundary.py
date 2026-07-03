@@ -5,10 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVER_MODULES_DIR = ROOT / "server_modules"
-ALLOWED_DIRECT_FILES = {
-    SERVER_MODULES_DIR / "computer_control.py",
-    SERVER_MODULES_DIR / "supervisor_client.py",
-}
+# ARCHIVED (Phase U1): supervisor_client.py and computer_control.py moved to _archive/.
+# No production code should import supervisor_client — the Rust empyralis-supervisor
+# daemon is no longer part of the Empyralis product.
 DISALLOWED_IMPORT_SNIPPETS = (
     "from . import supervisor_client",
     "import supervisor_client",
@@ -24,9 +23,11 @@ def test_server_modules_production_code_does_not_import_direct_supervisor_loopba
     for path in SERVER_MODULES_DIR.rglob("*.py"):
         if "/tests/" in path.as_posix():
             continue
-        if path in ALLOWED_DIRECT_FILES:
-            continue
         text = path.read_text(encoding="utf-8")
         if any(snippet in text for snippet in DISALLOWED_IMPORT_SNIPPETS):
             offenders.append(str(path.relative_to(ROOT)))
-    assert offenders == []
+    assert offenders == [], (
+        f"Phase U1 violation: {len(offenders)} file(s) still import supervisor_client "
+        f"or computer_control. These modules are archived and desktop control is OUT of scope.\n"
+        + "\n".join(offenders)
+    )

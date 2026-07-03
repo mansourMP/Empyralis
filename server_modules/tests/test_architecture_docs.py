@@ -159,7 +159,8 @@ def test_project_map_tracks_active_platform_roots_and_ci_truth() -> None:
     assert "/Users/mansur/Multi_Agent_Orchestrator_Project/frontend" in text
     assert "/Users/mansur/Multi_Agent_Orchestrator_Project/mobile" in text
     assert "/Users/mansur/Multi_Agent_Orchestrator_Project/src-tauri" in text
-    assert "/Users/mansur/Multi_Agent_Orchestrator_Project/empyralis-supervisor" in text
+    # ARCHIVED (Phase U1): supervisor dir moved to _archive/. Docs reference the archived state.
+    assert "empyralis-supervisor" in text
     assert "Shell classes are frozen as:" in text
     assert "- `full_shell`" in text
     assert "- `channel_shell`" in text
@@ -248,10 +249,9 @@ def test_gateway_architecture_doc_freezes_local_gateway_boundary() -> None:
 
     assert "# Gateway Architecture" in text
     assert "`empyralis-gateway`" in text
-    assert "`empyralis-supervisor`" in text
+    # ARCHIVED (Phase U1): supervisor references in docs are now historical.
     assert "cloud control plane" in text.lower()
     assert "Legacy Socket.IO Bridge Is Removed" in text
-    assert "canonical gateway plus supervisor boundary" in text
     assert "No Second Auth Plane" in text
     assert "local_companion" in text
     assert "Phase 0 does **not** do any of the following:" in text
@@ -322,7 +322,7 @@ def test_workflow_baseline_covers_backend_typecheck_and_supply_chain() -> None:
     assert "Run demo-critical server test suite" in ci
     assert "python -m pytest \\" in ci
     assert "./node_modules/.bin/tsc --noEmit" in ci
-    assert "cargo build --manifest-path empyralis-supervisor/Cargo.toml" in ci
+    # ARCHIVED (Phase U1): supervisor build removed from CI.
     assert "actions/dependency-review-action@v4" in security
     assert "gitleaks/gitleaks-action@v2" in security
     assert "pip-audit -r requirements.txt -r requirements-worker.txt" in security
@@ -446,7 +446,7 @@ def test_activity_local_cluster_and_hybrid_maps_preserve_safe_summary_boundaries
     assert local_runtime_cluster["cluster_model"]["required_parts"] == [
         "local_sage_runtime",
         "local_specialist_runtimes",
-        "local_runtime_supervisor",
+        "_archived_local_runtime_supervisor",
         "local_memory_stores",
         "local_artifact_bridge",
     ]

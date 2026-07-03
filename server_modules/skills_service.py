@@ -1336,23 +1336,9 @@ def build_direct_chat_tools(tool_capabilities: List[Dict[str, Any]]) -> List[Dic
 
 def build_builtin_direct_chat_tools() -> List[Dict[str, Any]]:
     tools = [_tool_payload_from_descriptor(item) for item in _builtin_tool_descriptors()]
-    # AGENT MACHINE MODE: inject local hardware tools into manifest so LLM knows they exist.
-    # Prepend them so they appear within the capability manifest's 16-item cap.
-    from server_modules import runtime_config as _rc
-    if _rc.AGENT_MACHINE_MODE == "agent":
-        try:
-            from server_modules.supervisor_client import _assert_direct_supervisor_allowed
-            _assert_direct_supervisor_allowed()
-            existing_names = {t.get("name") for t in tools if isinstance(t, dict)}
-            local_payloads = []
-            for item in _local_tool_descriptors():
-                payload = _tool_payload_from_descriptor(item)
-                if payload.get("name") not in existing_names:
-                    local_payloads.append(payload)
-            # Prepend local tools so they're visible within the manifest cap
-            tools = local_payloads + tools
-        except Exception:
-            pass
+    # ARCHIVED (Phase U1): agent machine mode supervisor tool injection removed.
+    # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+    # Local hardware tools (desktop control) are OUT of scope.
     return tools
 
 
@@ -3272,32 +3258,9 @@ async def execute_single_direct_tool_call_async(
         elif normalized_connector not in {"file", "screenshot", "computer"}:
             _raise_direct_chat_tool_execution_blocked()
 
-        # Local-dev shortcut: when the supervisor is reachable directly
-        # (localhost:7788), skip the gateway -> cloud -> supervisor
-        # round-trip.  This also avoids the Rust safe_shell_command
-        # allowlist that blocks common read-only commands (whoami,
-        # uname, df, ps, ...) - exactly the same bypass that
-        # screenshot.capture already enjoys through the direct path.
-        _supervisor_available = False
-        try:
-            from server_modules.supervisor_client import _assert_direct_supervisor_allowed
-            _assert_direct_supervisor_allowed()
-            _supervisor_available = True
-        except Exception:
-            pass
-        if _supervisor_available and local_tool_executor.is_local_dev():
-            return execute_single_direct_tool_call(
-                tool_call=tool_call,
-                workspace_id=workspace_id,
-                thread_id=thread_id,
-                index=index,
-                provider=provider,
-                model=model,
-                credentials=credentials,
-                reasoning_effort=reasoning_effort,
-                session_ctx=session_ctx,
-                callbacks=callbacks,
-            )
+        # ARCHIVED (Phase U1): supervisor local-dev shortcut removed.
+        # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+        # All tool execution routes through the gateway WebSocket path.
 
         gateway_capability_id = _gateway_capability_for_direct_local_tool(
             normalized_connector,
@@ -3390,15 +3353,8 @@ async def execute_single_direct_tool_call_async(
     elif normalized_connector not in {"file", "screenshot", "computer"}:
         _raise_direct_chat_tool_execution_blocked()
 
-    # Local-dev shortcut: same bypass as the async path.
-    _supervisor_available = False
-    try:
-        from server_modules.supervisor_client import _assert_direct_supervisor_allowed
-        _assert_direct_supervisor_allowed()
-        _supervisor_available = True
-    except Exception:
-        pass
-    _gateway_skip = _supervisor_available and local_tool_executor.is_local_dev()
+    # ARCHIVED (Phase U1): supervisor local-dev shortcut removed.
+    # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
 
     gateway_capability_id = _gateway_capability_for_direct_local_tool(
         normalized_connector,
@@ -3459,79 +3415,10 @@ async def execute_single_direct_tool_call_async(
             callbacks=callbacks,
         )
 
-    # When Gateway is unavailable, try Supervisor directly for local tools.
-    if _gateway_skip or not (gateway_capability_id and gateway_id):
-        supervisor_available = False
-        try:
-            from server_modules.supervisor_client import _assert_direct_supervisor_allowed
-            _assert_direct_supervisor_allowed()
-            supervisor_available = True
-        except Exception:
-            pass
-        if supervisor_available:
-            from server_modules import supervisor_client
-            try:
-                if normalized_connector == "screenshot" and normalized_action == "capture":
-                    result = supervisor_client.capture_screenshot()
-                    return callbacks.format_direct_local_tool_result(result)
-                if normalized_connector == "shell" and normalized_action == "exec":
-                    command = str(argument_payload.get("command") or "").strip()
-                    if not command:
-                        raise RuntimeError("shell__exec requires a command")
-                    import subprocess as _sp, shlex as _sh
-                    try:
-                        completed = _sp.run(command, shell=True, capture_output=True, text=True, timeout=30)
-                        output = (completed.stdout or "") + (completed.stderr or "")
-                        if completed.returncode != 0:
-                            output = f"[exit {completed.returncode}]\n{output}"
-                        return output.strip() or "(no output)"
-                    except _sp.TimeoutExpired:
-                        return "Command timed out after 30 seconds."
-                if normalized_connector == "computer":
-                    if normalized_action == "click":
-                        result = supervisor_client.click(
-                            x=argument_payload.get("x"),
-                            y=argument_payload.get("y"),
-                            text=argument_payload.get("text"),
-                        )
-                        return callbacks.format_direct_local_tool_result(result)
-                    if normalized_action == "type":
-                        result = supervisor_client.type_text(str(argument_payload.get("text") or ""))
-                        return callbacks.format_direct_local_tool_result(result)
-                    if normalized_action == "clipboard_read":
-                        result = supervisor_client.clipboard_read()
-                        return callbacks.format_direct_local_tool_result(result)
-                    if normalized_action == "clipboard_write":
-                        result = supervisor_client.clipboard_write(str(argument_payload.get("text") or ""))
-                        return callbacks.format_direct_local_tool_result(result)
-                    if normalized_action == "applescript":
-                        result = supervisor_client._execute(
-                            "computer_control.applescript",
-                            {"script": str(argument_payload.get("script") or "")},
-                        )
-                        return callbacks.format_direct_local_tool_result(result)
-                if normalized_connector == "file" and normalized_action == "read":
-                    path = str(argument_payload.get("path") or "").strip()
-                    if not path:
-                        raise RuntimeError("file__read requires a path")
-                    import pathlib as _pl
-                    p = _pl.Path(path).expanduser().resolve()
-                    if not p.exists():
-                        return f"File not found: {path}"
-                    content = p.read_text()[:10000]
-                    return content
-                if normalized_connector == "file" and normalized_action == "write":
-                    path = str(argument_payload.get("path") or "").strip()
-                    content = str(argument_payload.get("content") or "")
-                    if not path:
-                        raise RuntimeError("file__write requires a path")
-                    import pathlib as _pl2
-                    p = _pl2.Path(path).expanduser().resolve()
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text(content)
-                    return f"Written {len(content)} bytes to {path}"
-            except Exception as exc:
-                return f"Supervisor tool failed: {exc}"
+    # ARCHIVED (Phase U1): supervisor direct tool execution path removed.
+    # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+    # Desktop control tools (computer/screenshot/clipboard/applescript) are OUT of scope.
+    # Local file read/write and shell exec now go through the standard fallback path below.
     variant, config = callbacks.build_direct_local_tool_config(
         normalized_connector,
         normalized_action,

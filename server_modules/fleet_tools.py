@@ -124,6 +124,120 @@ async def _ledger_fleet_action(
         pass
 
 
+# ── Phase U3: runtime target + hardware status helpers ────────────────────────
+
+
+def _resolve_runtime_target(inst: Dict[str, Any]) -> str:
+    """Resolve human-readable runtime target for an agent install.
+
+    Returns one of:
+      - "cloud" — agent runs on Empyralis cloud infrastructure
+      - "gateway:<name>" — agent runs on user-owned gateway hardware
+      - "vps:<name>" — agent runs on user-provisioned VPS
+      - "unknown" — no runtime target information available
+    """
+    target = str(inst.get("default_execution_target") or "").strip().lower()
+    runtime_id = str(inst.get("runtime_id") or "").strip()
+    machine_id = str(inst.get("machine_id") or "").strip()
+    runtime_class = str(inst.get("runtime_class") or "").strip().lower()
+    placement = str(inst.get("placement_mode") or "").strip().lower()
+
+    if target in ("cloud", "empyralis-cloud"):
+        return "cloud"
+    if target in ("gateway", "local_gateway", "desktop_companion"):
+        label = str(inst.get("runtime_profile_label") or machine_id or runtime_id or "").strip()
+        return f"gateway:{label}" if label else "gateway"
+    if target in ("vps", "self_hosted", "self_hosted_business_node"):
+        label = str(inst.get("runtime_profile_label") or runtime_id or "").strip()
+        return f"vps:{label}" if label else "vps"
+    if target in ("local_companion", "local"):
+        return "local_companion"
+    if runtime_class and target == "auto":
+        if "gateway" in runtime_class:
+            return "gateway"
+        if "vps" in runtime_class or "self" in runtime_class:
+            return "vps"
+        return "cloud"
+
+    # Fallback: use runtime_id or placement to guess
+    if runtime_id:
+        return f"runtime:{runtime_id[:12]}"
+    if placement == "local":
+        return "local_companion"
+    return "unknown"
+
+
+def _resolve_hardware_status(
+    inst: Dict[str, Any],
+    heartbeats: Dict[str, dict],
+) -> tuple[str, Optional[str]]:
+    """Resolve hardware status and last heartbeat for an agent install.
+
+    Returns (status, last_heartbeat_iso):
+      - "online" — heartbeat received within lease window
+      - "offline" — no recent heartbeat, agent may be down
+      - "unknown" — no heartbeat tracking for this agent type
+    """
+    runtime_id = str(inst.get("runtime_id") or "").strip()
+    machine_id = str(inst.get("machine_id") or "").strip()
+    agent_id = str(inst.get("id") or "").strip()
+
+    # Check heartbeats by runtime_id first, then agent_id
+    hb = heartbeats.get(runtime_id) or heartbeats.get(agent_id) or heartbeats.get(machine_id)
+
+    if hb and isinstance(hb, dict):
+        status = "online" if bool(hb.get("online", False)) else "offline"
+        last_hb = str(hb.get("last_heartbeat_at") or hb.get("last_seen_at") or "").strip() or None
+        return status, last_hb
+
+    # Cloud agents are always "online" (platform manages them)
+    target = str(inst.get("default_execution_target") or "").strip().lower()
+    if target in ("cloud", "empyralis-cloud"):
+        return "online", None
+
+    # Agents without a runtime_id can't have heartbeat tracking yet
+    if not runtime_id and not machine_id:
+        return "unknown", None
+
+    return "offline", None
+
+
+async def _fetch_latest_heartbeats(workspace_id: str) -> Dict[str, dict]:
+    """Fetch latest heartbeat for each runtime in the workspace."""
+    try:
+        from server_modules import control_plane_repository as cpr
+
+        pool = await cpr.ensure_control_plane_schema()
+        if pool is None:
+            return {}
+
+        rows = await pool.fetch(
+            """
+            SELECT DISTINCT ON (runtime_profile_id)
+                runtime_profile_id,
+                online,
+                last_heartbeat_at,
+                last_seen_at
+            FROM runtime_heartbeats
+            WHERE workspace_id = $1
+            ORDER BY runtime_profile_id, last_heartbeat_at DESC
+            """,
+            str(workspace_id or "").strip(),
+        )
+        result: Dict[str, dict] = {}
+        for r in (rows or []):
+            rid = str(r["runtime_profile_id"] or "").strip()
+            if rid:
+                result[rid] = {
+                    "online": bool(r["online"]),
+                    "last_heartbeat_at": str(r["last_heartbeat_at"] or "").strip() or None,
+                    "last_seen_at": str(r["last_seen_at"] or "").strip() or None,
+                }
+        return result
+    except Exception:
+        return {}
+
+
 # ── Fleet tool implementations ──────────────────────────────────────────────
 
 
@@ -144,10 +258,24 @@ async def fleet_list_agents(
     except Exception as exc:
         return {"ok": False, "error": str(exc), "agents": []}
 
+    # ── Resolve runtime heartbeats for hardware status ──
+    _heartbeats: dict[str, dict] = {}
+    try:
+        _heartbeats = await _fetch_latest_heartbeats(workspace_id)
+    except Exception:
+        pass
+
     agents = []
     for inst in (installs or []):
         inst_dict = dict(inst) if isinstance(inst, dict) else {}
         role = resolve_agent_role(inst_dict)
+
+        # ── Phase U3: runtime target + hardware status ──
+        _runtime_target = _resolve_runtime_target(inst_dict)
+        _hardware_status, _last_heartbeat = _resolve_hardware_status(
+            inst_dict, _heartbeats
+        )
+
         agents.append({
             "agent_id": str(inst_dict.get("id") or "").strip(),
             "label": str(inst_dict.get("label") or "").strip(),
@@ -156,6 +284,10 @@ async def fleet_list_agents(
             "enabled": bool(inst_dict.get("enabled", True)),
             "subagents_enabled": resolve_subagents_enabled(inst_dict),
             "model_config": resolve_model_config(inst_dict),
+            # Phase U3: placement visibility
+            "runtime_target": _runtime_target,
+            "hardware_status": _hardware_status,
+            "last_heartbeat": _last_heartbeat,
         })
 
     await _ledger_fleet_action(

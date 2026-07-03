@@ -816,18 +816,9 @@ def resolve_direct_chat_availability(
     local_gateway_online = workspace_live_gateway_available_fn(normalized_workspace_id)
 
     local_worker_online = _workspace_local_worker_online(normalized_workspace_id)
-    # Agent machine mode: override ALL availability flags so the LLM knows
-    # local tools (shell, file, screenshot, computer) are usable.
-    if runtime_config.AGENT_MACHINE_MODE == "agent":
-        try:
-            from server_modules.supervisor_client import _assert_direct_supervisor_allowed
-            _assert_direct_supervisor_allowed()
-            local_gateway_online = True
-            local_worker_online = True
-            runtime_ok = True
-            ai_ready = True
-        except Exception:
-            pass
+    # ARCHIVED (Phase U1): agent machine mode supervisor override removed.
+    # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+    # Local desktop control tools (shell/file/screenshot/computer) are OUT of scope.
     if credential_plane == "local_runtime" and (runtime_state != "active" or not local_gateway_online) and runtime_config.AGENT_MACHINE_MODE != "agent":
         ai_ready = False
     connection_mode = ""

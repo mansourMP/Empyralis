@@ -1172,32 +1172,11 @@ def _sage_agent_computer_browser_status(availability_payload: dict[str, Any]) ->
     logic as direct_chat_runtime_service._agent_computer_browser_status."""
     availability = availability_payload if isinstance(availability_payload, dict) else {}
 
-    # Hard override: in agent machine mode with direct supervisor access,
-    # always report "online" regardless of gateway/worker status.
-    # This prevents the session-context wipe between messages where the
-    # agent forgets it has hardware access.
+    # ARCHIVED (Phase U1): agent machine supervisor override removed.
+    # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+    # Desktop control (mouse/keyboard/screen/fs) is OUT of scope.
     _diag_logger = logging.getLogger(__name__)
-    import os as _os
-    print(f"[BROWSER_STATUS_DEBUG] AGENT_MACHINE_MODE={_os.getenv('AGENT_MACHINE_MODE')!r} ALLOW_LOOPBACK={_os.getenv('EMPYRALIS_ALLOW_DIRECT_SUPERVISOR_LOOPBACK')!r}", flush=True)
-    open("/tmp/empyralis_debug.log", "a").write(f"[BROWSER_STATUS_DEBUG] AGENT_MACHINE_MODE={_os.getenv('AGENT_MACHINE_MODE')!r} ALLOW_LOOPBACK={_os.getenv('EMPYRALIS_ALLOW_DIRECT_SUPERVISOR_LOOPBACK')!r}\n")
-    try:
-        _diag_logger.info(
-            "BROWSER_STATUS agent_machine_mode=%s supervisor_allowed=%s",
-            runtime_config.AGENT_MACHINE_MODE,
-            True,
-        )
-        if runtime_config.AGENT_MACHINE_MODE == "agent":
-            from server_modules.supervisor_client import _assert_direct_supervisor_allowed
-            _assert_direct_supervisor_allowed()
-            _diag_logger.info("BROWSER_STATUS returning online (agent machine override)")
-            return "online"
-    except Exception as _exc:
-        print(f"[BROWSER_STATUS_DEBUG] OVERRIDE FAILED: {type(_exc).__name__}: {_exc}", flush=True)
-        open("/tmp/empyralis_debug.log", "a").write(f"[BROWSER_STATUS_DEBUG] OVERRIDE FAILED: {type(_exc).__name__}: {_exc}\n")
-        _diag_logger.warning(
-            "BROWSER_STATUS agent machine override FAILED: %s",
-            _exc,
-        )
+    _diag_logger.info("BROWSER_STATUS supervisor path removed (Phase U1)")
     capability_truth = availability.get("capability_truth") if isinstance(availability.get("capability_truth"), dict) else {}
     my_computer = capability_truth.get("my_computer") if isinstance(capability_truth.get("my_computer"), dict) else {}
     verified_gateway = availability.get("verified_user_device_gateway") if isinstance(availability.get("verified_user_device_gateway"), dict) else {}
@@ -1247,7 +1226,7 @@ def _sage_agent_computer_browser_status(availability_payload: dict[str, Any]) ->
     return "not_selected"
 
 
-def _direct_tool_bundle(*, workspace_id: str, provider: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str = "owner") -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     try:
         tool_capabilities = direct_chat_runtime_exports.resolve_workspace_tool_capabilities(workspace_id)
     except Exception:
@@ -1274,6 +1253,15 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str) -> tuple[list[dict[
         print(f"[TOOL_FILTER] tool_count_after={len(tools)} (agent computer tools stripped)", flush=True)
     else:
         print(f"[TOOL_FILTER] tool_count_after={len(tools)} (online — no stripping)", flush=True)
+
+    # ── Phase U2: audience tool filter ──
+    _sender_class = str(sender_class or "owner").strip().lower()
+    if _sender_class != "owner":
+        from server_modules.audience_tool_filter import filter_tools_for_audience
+        _before_audience = len(tools)
+        tools = filter_tools_for_audience(tools)
+        print(f"[TOOL_FILTER] audience_filter sender_class={_sender_class!r} before={_before_audience} after={len(tools)}", flush=True)
+
     return _dedupe_tools(tools), tool_capabilities, availability
 
 
@@ -1647,8 +1635,9 @@ async def _run_sage_action_loop_v3(
     channel_origin: str = "",
     attachments: list | None = None,
     sender_id: str | None = None,
+    sender_class: str = "owner",
 ) -> dict[str, Any] | None:
-    tools, tool_capabilities, availability = _direct_tool_bundle(workspace_id=workspace_id, provider=provider)
+    tools, tool_capabilities, availability = _direct_tool_bundle(workspace_id=workspace_id, provider=provider, sender_class=sender_class)
     from server_modules import runtime_config as _rc
     if _rc.AGENT_MACHINE_MODE == "agent":
         blocked = None  # agent machine mode: hardware tools always available
@@ -1887,9 +1876,9 @@ async def _run_sage_action_loop_v2(
     trace_id: str,
     actor_user_id: str,
     channel_origin: str = "",
-
+    sender_class: str = "owner",
 ) -> dict[str, Any] | None:
-    tools, tool_capabilities, availability = _direct_tool_bundle(workspace_id=workspace_id, provider=provider)
+    tools, tool_capabilities, availability = _direct_tool_bundle(workspace_id=workspace_id, provider=provider, sender_class=sender_class)
     route_decision = _build_sage_route_decision(
         message=message,
         tools=tools,
@@ -2469,6 +2458,33 @@ async def handle_sage_chat(
     if canonical_name:
         used_context.append("identity_link")
 
+    # ── Phase U2: resolve sender class (owner / audience / unknown) ──
+    _sender_class = "owner"  # default: web/API sessions are owner
+    if channel_origin and sender_id:
+        try:
+            from server_modules.triage_service import resolve_sender_identity
+            # Build channel bindings from identity links
+            _bindings: list[dict[str, Any]] = []
+            if identity_links:
+                for ch_type, ch_data in identity_links.items():
+                    if isinstance(ch_data, dict):
+                        _bindings.append({
+                            "channel_type": str(ch_type or "").strip().lower(),
+                            "linked_user_id": str(ch_data.get("user_id") or "").strip(),
+                            "owner_sender_hash": str(ch_data.get("sender_hash") or "").strip(),
+                        })
+            _sender_class = resolve_sender_identity(
+                sender_id=sender_id,
+                channel_origin=channel_origin,
+                channel_bindings=_bindings,
+                audience_enabled=True,  # Phase U2: channels are audience-facing by default
+            )
+            if _sender_class != "owner":
+                from server_modules.audience_tool_filter import audience_behavior_instructions
+                used_context.append("audience_session")
+        except Exception:
+            pass
+
     # --- Load context ---
     profile_context = _load_profile_context(workspace_id=normalized_workspace_id)
     if profile_context:
@@ -2719,10 +2735,16 @@ async def handle_sage_chat(
         "go as photos, videos as videos, audio as audio, everything else as documents.\n"
     )
 
+    # ── Phase U2: audience behavioral instructions ──
+    _audience_instructions = ""
+    if _sender_class != "owner":
+        from server_modules.audience_tool_filter import audience_behavior_instructions
+        _audience_instructions = audience_behavior_instructions()
+
     envelope = _build_prompt_envelope(
         workspace_id=normalized_workspace_id,
         message=normalized_message,
-        system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{sage_surface_guardrails}{attachment_context}{mcp_tool_inventory}",
+        system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{attachment_context}{mcp_tool_inventory}",
     )
 
     action_loop_message = _normalized_sage_action_loop_message(normalized_message, prior_messages)
@@ -2738,7 +2760,7 @@ async def handle_sage_chat(
         credentials=credentials,
         trace_id=trace_id,
         actor_user_id=actor_user_id,
-
+        sender_class=_sender_class,
         system_prompt=envelope["system_prompt"],
         channel_origin=channel_origin,
         attachments=attachments,

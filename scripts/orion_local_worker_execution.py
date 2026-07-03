@@ -70,41 +70,72 @@ try:
 except ImportError:
     from server_modules.artifact_service import store_artifact_bytes, store_artifact_file  # type: ignore[no-redef]
 
-try:
-    from computer_control import (
-        capture_screenshot,
-        click_element_by_text,
-        keyboard_type,
-        launch_app,
-        list_running_apps,
-        mouse_click,
-        read_clipboard,
-        run_applescript,
-        speak_text,
-        screen_ocr,
-        send_notification,
-        write_clipboard,
-    )
-except ImportError:
-    from server_modules.computer_control import (  # type: ignore[no-redef]
-        capture_screenshot,
-        click_element_by_text,
-        keyboard_type,
-        launch_app,
-        list_running_apps,
-        mouse_click,
-        read_clipboard,
-        run_applescript,
-        speak_text,
-        screen_ocr,
-        send_notification,
-        write_clipboard,
-    )
+# ARCHIVED (Phase U1): computer_control module archived.
+# Provide sentinel functions that raise clear errors if desktop control is attempted.
+def _archived_computer_control_error(name: str):
+    def _raise(*args, **kwargs):
+        raise RuntimeError(
+            f"computer_control.{name} is not available. "
+            f"Desktop control has been removed from the Empyralis product (Phase U1). "
+            f"The Rust empyralis-supervisor daemon is OUT of scope."
+        )
+    return _raise
 
-try:
-    import supervisor_client
-except ImportError:
-    from server_modules import supervisor_client  # type: ignore[no-redef]
+capture_screenshot = _archived_computer_control_error("capture_screenshot")
+click_element_by_text = _archived_computer_control_error("click_element_by_text")
+keyboard_type = _archived_computer_control_error("keyboard_type")
+launch_app = _archived_computer_control_error("launch_app")
+list_running_apps = _archived_computer_control_error("list_running_apps")
+mouse_click = _archived_computer_control_error("mouse_click")
+read_clipboard = _archived_computer_control_error("read_clipboard")
+run_applescript = _archived_computer_control_error("run_applescript")
+speak_text = _archived_computer_control_error("speak_text")
+screen_ocr = _archived_computer_control_error("screen_ocr")
+send_notification = _archived_computer_control_error("send_notification")
+write_clipboard = _archived_computer_control_error("write_clipboard")
+
+# ARCHIVED (Phase U1): supervisor_client import removed.
+# The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+# Provide sentinel types so existing code paths that reference SupervisorExecutionContext
+# or SupervisorInterruptedError don't crash at import time — they'll raise clear errors
+# if actually invoked.
+from dataclasses import dataclass
+from typing import Any as _Any, Optional as _Optional
+
+class _ArchivedSupervisorInterruptedError(RuntimeError):
+    pass
+
+@dataclass(frozen=True)
+class _ArchivedSupervisorExecutionContext:
+    run_id: str = ""
+    workspace_id: str = "default"
+    trace_id: str = ""
+    machine_id: _Optional[str] = None
+    interrupt_controller: _Any = None
+
+class _ArchivedSupervisorClient:
+    SupervisorInterruptedError = _ArchivedSupervisorInterruptedError
+    SupervisorExecutionContext = _ArchivedSupervisorExecutionContext
+    SUPERVISOR_UNREACHABLE_MESSAGE = "Supervisor has been removed from the Empyralis product (Phase U1)."
+    SUPERVISOR_INTERRUPTED_MESSAGE = "execution interrupted by operator"
+    DIRECT_SUPERVISOR_BLOCKED_MESSAGE = "Desktop control has been removed from the Empyralis product (Phase U1)."
+
+    @staticmethod
+    def bind_execution_context(context=None):
+        from contextlib import contextmanager
+        @contextmanager
+        def _noop():
+            yield None
+        return _noop()
+
+    def __getattr__(self, name: str):
+        raise RuntimeError(
+            f"supervisor_client.{name} is not available. "
+            f"The Rust empyralis-supervisor daemon has been removed from the Empyralis product (Phase U1). "
+            f"Desktop control (mouse/keyboard/screen/fs) is OUT of scope."
+        )
+
+supervisor_client = _ArchivedSupervisorClient()  # type: ignore[assignment]
 
 try:
     from scripts.platform_execution import (

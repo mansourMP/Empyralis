@@ -14,7 +14,7 @@
     "required_parts": [
       "local_sage_runtime",
       "local_specialist_runtimes",
-      "local_runtime_supervisor",
+      "_archived_local_runtime_supervisor",
       "local_memory_stores",
       "local_artifact_bridge"
     ],

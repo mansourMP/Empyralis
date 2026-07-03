@@ -51,7 +51,8 @@ type LocalTrayStatus = {
   heartbeat_fresh?: boolean;
   session_status?: string;
   state?: string;
-  supervisor_running?: boolean;
+  // ARCHIVED (Phase U1): supervisor_running removed.
+  // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
   gateway_running?: boolean;
   workspace_id?: string;
   error?: string | null;

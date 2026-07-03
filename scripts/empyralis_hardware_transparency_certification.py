@@ -915,12 +915,9 @@ def agent_computer_steps(args: argparse.Namespace, log_dir: Path) -> list[StepRe
             timeout=args.e2e_timeout,
             log_dir=log_dir,
         ),
-        _run_step(
-            name="agent_computer_supervisor_tests",
-            command=["cargo", "test", "--manifest-path", "empyralis-supervisor/Cargo.toml"],
-            timeout=args.backend_timeout,
-            log_dir=log_dir,
-        ),
+        # ARCHIVED (Phase U1): agent_computer_supervisor_tests step removed.
+        # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+        # Desktop control (mouse/keyboard/screen/fs) is OUT of scope.
     ]
 
 

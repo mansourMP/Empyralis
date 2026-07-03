@@ -1399,7 +1399,9 @@ test.describe('deployed agents surface', () => {
     await expect(surface).not.toContainText(/go live/i);
     await page.goto('/w/ws-1/studio?agentComputer=computer-macbook');
     await expect(surface).toContainText(/runtime resource/i);
-    await expect(surface).toContainText(/gateway \+ supervisor/i);
+    // ARCHIVED (Phase U1): "gateway + supervisor" text changed to "gateway".
+    // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+    await expect(surface).toContainText(/gateway/i);
     await expect(detailNav.getByRole('link', { name: /^chat$/i })).toHaveCount(0);
     await page.goto('/w/ws-1/studio?agent=dagent-seed');
     await detailNav.getByRole('link', { name: /^chat$/i }).click();

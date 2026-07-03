@@ -902,7 +902,8 @@ async def _run_agent_machine_shortcut(
         return None
 
     from server_modules.local_tool_executor import shell_execute, filesystem_read, filesystem_write
-    from server_modules.supervisor_client import capture_screenshot as _supervisor_screenshot
+    # ARCHIVED (Phase U1): supervisor_client capture_screenshot import removed.
+    # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
 
     client = AsyncOpenAI(
         api_key=_deepseek_key,
@@ -1107,25 +1108,9 @@ async def _run_agent_machine_shortcut(
                             str(args.get("content", ""))
                         )
                     elif tool_name == "screenshot":
-                        # Route through empyralis-supervisor on :7788
-                        ss_result = _supervisor_screenshot()
-                        if isinstance(ss_result, dict) and ss_result.get("images"):
-                            import base64 as _b64, tempfile as _tempfile
-                            for img in ss_result["images"]:
-                                b64_data = str(img.get("data_base64") or "")
-                                if b64_data:
-                                    img_bytes = _b64.b64decode(b64_data)
-                                    # Write to temp file so send_photo can read it
-                                    with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as _tf:
-                                        _tf.write(img_bytes)
-                                        tmp_path = _tf.name
-                                    screenshot_paths.append(tmp_path)
-                            if screenshot_paths:
-                                result = {"status": "captured", "note": "Screenshot will be sent to chat"}
-                            else:
-                                result = {"error": "screenshot produced no usable image data"}
-                        else:
-                            result = {"error": "screenshot failed", "detail": str(ss_result)}
+                        # ARCHIVED (Phase U1): supervisor screenshot capability removed.
+                        # Desktop control (screenshot/mouse/keyboard/screen) is OUT of scope.
+                        result = {"error": "Screenshot is not available. Desktop control has been removed from the Empyralis product (Phase U1)."}
                     else:
                         result = {"error": f"Unknown tool: {tool_name}"}
                 except Exception as exc:

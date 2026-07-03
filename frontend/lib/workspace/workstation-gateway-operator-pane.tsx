@@ -226,7 +226,9 @@ type ChannelKind = 'whatsapp' | 'telegram';
 type GatewayOperatorSection = 'all' | 'status' | 'channels' | 'approvals' | 'activity';
 type MyComputerStatusLabel = 'Not connected' | 'Pairing' | 'Online' | 'Reconnecting' | 'Needs approval' | 'Offline' | 'Revoked';
 type CapabilitySurfaceItem = {
-  id: 'gateway' | 'supervisor';
+  // ARCHIVED (Phase U1): 'supervisor' variant removed.
+  // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+  id: 'gateway';
   label: string;
   description: string;
   available: boolean;
@@ -801,19 +803,16 @@ function gatewayTrustSummary(selectedGateway: GatewayRegistrationRecord | null):
 function summarizeMyComputerCapabilities(
   selectedGatewayCapabilities: string[],
 ): CapabilitySurfaceItem[] {
-  const supervisorReady = selectedGatewayCapabilities.length > 0;
+  // ARCHIVED (Phase U1): supervisor capability item removed.
+  // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+  // Desktop control (mouse/keyboard/screen/fs) is OUT of scope.
+  const gatewayReady = selectedGatewayCapabilities.length > 0;
   return [
     {
       id: 'gateway',
       label: 'Gateway',
-      description: 'Keeps the selected computer connected to Empyralis.',
-      available: supervisorReady,
-    },
-    {
-      id: 'supervisor',
-      label: 'Local execution',
-      description: 'Executes governed hardware actions for the selected computer.',
-      available: supervisorReady,
+      description: 'Keeps the selected computer connected to Empyralis for personal channels.',
+      available: gatewayReady,
     },
   ];
 }

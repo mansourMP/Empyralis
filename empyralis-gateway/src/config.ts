@@ -9,9 +9,8 @@ export interface GatewayConfig {
   reconnectMinDelayMs: number;
   reconnectMaxDelayMs: number;
   personalChannelsEnabled: boolean;
-  supervisorUrl: string;
-  supervisorSecret?: string;
-  supervisorTimeoutMs: number;
+  // ARCHIVED (Phase U1): supervisorUrl, supervisorSecret, supervisorTimeoutMs removed.
+  // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
   pairingToken?: string;
   gatewayId?: string;
   deviceId?: string;
@@ -129,12 +128,8 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     reconnectMinDelayMs: normalizePositiveInt(env.EMPYRALIS_GATEWAY_RECONNECT_MIN_MS, 1_000),
     reconnectMaxDelayMs: normalizePositiveInt(env.EMPYRALIS_GATEWAY_RECONNECT_MAX_MS, 30_000),
     personalChannelsEnabled: normalizeBoolean(env.EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED, false),
-    supervisorUrl: assertCloudApiBaseUrl(
-      normalizeBaseUrl(env.EMPYRALIS_SUPERVISOR_URL, "http://127.0.0.1:7788"),
-      env,
-    ),
-    supervisorSecret: String(env.EMPYRALIS_SUPERVISOR_SECRET || "").trim() || undefined,
-    supervisorTimeoutMs: normalizePositiveInt(env.EMPYRALIS_SUPERVISOR_TIMEOUT_MS, 120_000),
+    // ARCHIVED (Phase U1): supervisor URL/secret/timeout config removed.
+    // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
     pairingToken: String(env.EMPYRALIS_GATEWAY_PAIRING_TOKEN || "").trim() || undefined,
     gatewayId: String(env.EMPYRALIS_GATEWAY_ID || "").trim() || undefined,
     deviceId: String(env.EMPYRALIS_GATEWAY_DEVICE_ID || "").trim() || undefined,

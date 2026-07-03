@@ -14,11 +14,13 @@ import {
   assertCapabilityPermissionReady,
   filterCapabilitiesByDesktopPermission,
 } from "../runtime/desktop-permissions";
-import { GatewaySupervisorClient } from "./client";
 
 const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "supervisor";
+// ARCHIVED: "supervisor" executor removed (Phase U1 — product refocus).
+// The Rust empyralis-supervisor daemon is no longer part of the product.
+// Desktop control (mouse/keyboard/screen/fs) is OUT of scope.
+type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel";
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -39,7 +41,6 @@ export class GatewayCapabilityRouter {
   private readonly runExecutorMap = new Map<string, { executor: ExecutorName; cleanup: NodeJS.Timeout }>();
 
   constructor(
-    private readonly supervisorClient: GatewaySupervisorClient,
     private readonly browserRuntime?: GatewayBrowserRuntime,
     private readonly personalChannelRuntimes = new PersonalChannelRuntimeRegistry(),
     private readonly externalAgentProxyRuntime = new ExternalAgentProxyRuntime(),
@@ -48,7 +49,6 @@ export class GatewayCapabilityRouter {
   supportedCapabilities(): string[] {
     const desktopBridgeReady = !agentComputerSystemServiceModeEnabled() || agentComputerUserSessionBridgeEnabled();
     return [
-      ...this.supervisorClient.supportedCapabilities(),
       ...(desktopBridgeReady
         ? filterCapabilitiesByDesktopPermission(this.browserRuntime?.requestedCapabilities() ?? [])
         : []),
@@ -117,27 +117,14 @@ export class GatewayCapabilityRouter {
         result,
       };
     }
-    this.trackExecutor(runId, "supervisor");
-    const result = await this.supervisorClient.execute({
-      requestId: requireToken(frame.id, "request_id"),
-      capabilityId,
-      runId,
-      traceId,
-      workspaceId,
-      arguments: argumentsPayload,
-      runtimeAccessMode: String(payload.runtime_access_mode ?? "").trim() || undefined,
-      empyralisApproved: Boolean(payload.empyralis_approved),
-      agentScope: String(payload.agent_scope ?? "").trim() || undefined,
-      policy: typeof payload.policy === "object" && payload.policy !== null
-        ? payload.policy as Record<string, unknown>
-        : null,
-    });
-    return {
-      request_id: frame.id,
-      capability_id: capabilityId,
-      run_id: runId,
-      result,
-    };
+    // ARCHIVED (Phase U1): supervisor executor removed.
+    // Capabilities that don't match browser, external-agent-proxy, or personal-channel
+    // are no longer supported. Desktop control (mouse/keyboard/screen/fs) is OUT.
+    throw new Error(
+      `No executor available for capability "${capabilityId}". ` +
+      `Supported executors: browser, external_agent_proxy, personal_channel. ` +
+      `Desktop control capabilities are no longer part of the Empyralis product.`,
+    );
   }
 
   async handleToolInterrupt(
@@ -181,31 +168,16 @@ export class GatewayCapabilityRouter {
       return interruptResult;
     }
 
-    if (executor === "supervisor") {
-      const interruptResult = await this.supervisorClient.interrupt({
-        requestId: requireToken(frame.id, "request_id"),
-        runId,
-        targetRequestId: String(payload.target_request_id ?? "").trim() || undefined,
-        traceId,
-        workspaceId,
-        reason: String(payload.reason ?? "").trim() || undefined,
-      });
-      return interruptResult;
-    }
-
-    // Personal channel interrupts fall through to supervisor for now
     if (executor === "personal_channel") {
-      const interruptResult = await this.supervisorClient.interrupt({
-        requestId: requireToken(frame.id, "request_id"),
-        runId,
-        targetRequestId: String(payload.target_request_id ?? "").trim() || undefined,
-        traceId,
-        workspaceId,
-        reason: String(payload.reason ?? "").trim() || undefined,
-      });
-      return interruptResult;
+      // Personal channel interrupts are routed through the channel's own runtime
+      return {
+        interrupted: false,
+        error: `Personal channel interrupt not yet implemented for run_id "${runId}".`,
+        run_id: runId,
+      };
     }
 
+    // ARCHIVED (Phase U1): supervisor executor removed.
     return {
       interrupted: false,
       error: `Unknown executor "${executor}" for run_id "${runId}".`,

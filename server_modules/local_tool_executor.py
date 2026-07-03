@@ -1,4 +1,6 @@
-"""Direct local tool executor — bypasses gateway, WebSocket, and Rust supervisor.
+"""Direct local tool executor — bypasses gateway and WebSocket.
+ARCHIVED (Phase U1): "and Rust supervisor" removed. The Rust empyralis-supervisor
+daemon is no longer part of the Empyralis product.
 
 Used when the backend runs on the same machine as the user (ENV=development).
 No approval gates. No session checks. Just execute and return.

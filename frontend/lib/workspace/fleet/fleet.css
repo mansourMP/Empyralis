@@ -1,0 +1,630 @@
+/* ── Phase U4: Fleet UI — Claude-style layout ── */
+
+:root {
+  --fleet-rail-width: 48px;
+  --fleet-detail-width: 380px;
+  --fleet-accent: #7c3aed;
+  --fleet-accent-soft: rgba(124, 58, 237, 0.08);
+  --fleet-surface: #ffffff;
+  --fleet-surface-hover: #f8f7ff;
+  --fleet-border: #e8e5f0;
+  --fleet-text: #1a1523;
+  --fleet-text-muted: #8b7f9e;
+  --fleet-online: #22c55e;
+  --fleet-offline: #ef4444;
+  --fleet-unknown: #94a3b8;
+  --fleet-radius: 8px;
+}
+
+[data-emp-theme="dark"] {
+  --fleet-surface: #141218;
+  --fleet-surface-hover: #1e1b2e;
+  --fleet-border: #2a2538;
+  --fleet-text: #ebe6f5;
+  --fleet-text-muted: #8b7f9e;
+}
+
+/* ── Layout ── */
+
+.fleet-layout {
+  display: flex;
+  height: 100vh;
+  background: var(--fleet-surface);
+  color: var(--fleet-text);
+  font-family: var(--font-dm-sans, system-ui, sans-serif);
+  overflow: hidden;
+}
+
+/* ── Primary Rail ── */
+
+.fleet-rail {
+  width: var(--fleet-rail-width);
+  min-width: var(--fleet-rail-width);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-right: 1px solid var(--fleet-border);
+  background: var(--fleet-surface);
+  padding: 12px 0;
+  gap: 4px;
+  z-index: 10;
+}
+
+.fleet-rail-brand {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--fleet-accent);
+  color: white;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.fleet-rail-items {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+}
+
+.fleet-rail-item {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--fleet-text-muted);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.fleet-rail-item:hover {
+  background: var(--fleet-surface-hover);
+  color: var(--fleet-text);
+}
+
+.fleet-rail-item--active {
+  background: var(--fleet-accent-soft);
+  color: var(--fleet-accent);
+}
+
+/* ── Content ── */
+
+.fleet-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px;
+  min-width: 0;
+}
+
+.fleet-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+.fleet-title {
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--fleet-text);
+}
+
+.fleet-count {
+  font-size: 14px;
+  color: var(--fleet-text-muted);
+}
+
+/* ── Empty State ── */
+
+.fleet-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fleet-empty-state {
+  text-align: center;
+  max-width: 320px;
+}
+
+.fleet-empty-state svg {
+  color: var(--fleet-text-muted);
+  margin-bottom: 16px;
+}
+
+.fleet-empty-state h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.fleet-empty-state p {
+  font-size: 14px;
+  color: var(--fleet-text-muted);
+  margin: 0 0 24px;
+}
+
+.fleet-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--fleet-radius);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.fleet-btn-primary {
+  background: var(--fleet-accent);
+  color: white;
+}
+
+.fleet-btn-primary:hover {
+  opacity: 0.9;
+}
+
+/* ── Grid ── */
+
+.fleet-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.fleet-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fleet-text-muted);
+  margin-bottom: 12px;
+}
+
+.fleet-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+/* ── Agent Card ── */
+
+.fleet-card {
+  background: var(--fleet-surface);
+  border: 1px solid var(--fleet-border);
+  border-radius: var(--fleet-radius);
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.fleet-card:hover {
+  border-color: var(--fleet-accent);
+  background: var(--fleet-surface-hover);
+}
+
+.fleet-card--sage {
+  border-color: var(--fleet-accent);
+  border-width: 2px;
+}
+
+.fleet-card--offline {
+  opacity: 0.7;
+}
+
+.fleet-card--offline:hover {
+  opacity: 0.9;
+}
+
+.fleet-card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fleet-card-avatar {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--fleet-accent-soft);
+  border-radius: 8px;
+  color: var(--fleet-accent);
+  flex-shrink: 0;
+}
+
+.fleet-card-dot {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--fleet-surface);
+}
+
+.fleet-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.fleet-card-name {
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.fleet-card-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: var(--fleet-accent-soft);
+  color: var(--fleet-accent);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.fleet-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--fleet-text-muted);
+}
+
+.fleet-card-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fleet-card-heartbeat {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.fleet-card-chevron {
+  color: var(--fleet-text-muted);
+  flex-shrink: 0;
+  margin-top: 2px;
+  opacity: 0.4;
+  transition: opacity 0.15s;
+}
+
+.fleet-card:hover .fleet-card-chevron {
+  opacity: 1;
+}
+
+.fleet-card-activity {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--fleet-border);
+  font-size: 12px;
+  color: var(--fleet-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fleet-card-offline-banner {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--fleet-offline);
+  border-radius: 6px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fleet-card-chat-btn {
+  margin-top: 12px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--fleet-accent);
+  background: var(--fleet-accent-soft);
+  color: var(--fleet-accent);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.15s;
+}
+
+.fleet-card-chat-btn:hover {
+  background: var(--fleet-accent);
+  color: white;
+}
+
+/* ── Detail Panel ── */
+
+.fleet-detail {
+  width: var(--fleet-detail-width);
+  min-width: var(--fleet-detail-width);
+  border-left: 1px solid var(--fleet-border);
+  background: var(--fleet-surface);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.fleet-detail-header {
+  padding: 20px;
+  border-bottom: 1px solid var(--fleet-border);
+}
+
+.fleet-detail-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fleet-detail-avatar {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+
+.fleet-detail-avatar-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--fleet-accent-soft);
+  color: var(--fleet-accent);
+  border-radius: 10px;
+}
+
+.fleet-detail-dot {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--fleet-surface);
+}
+
+.fleet-detail-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.fleet-detail-info h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.fleet-detail-meta {
+  font-size: 12px;
+  color: var(--fleet-text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fleet-detail-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fleet-detail-hb {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.fleet-detail-close {
+  background: none;
+  border: none;
+  color: var(--fleet-text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+}
+
+.fleet-detail-close:hover {
+  background: var(--fleet-surface-hover);
+  color: var(--fleet-text);
+}
+
+/* ── Detail Tabs ── */
+
+.fleet-detail-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--fleet-border);
+  padding: 0 12px;
+  gap: 2px;
+}
+
+.fleet-detail-tab {
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  color: var(--fleet-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+
+.fleet-detail-tab:hover {
+  color: var(--fleet-text);
+}
+
+.fleet-detail-tab--active {
+  color: var(--fleet-accent);
+  border-bottom-color: var(--fleet-accent);
+}
+
+/* ── Detail Body ── */
+
+.fleet-detail-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+/* ── Activity List ── */
+
+.fleet-activity-list {
+  padding: 8px 0;
+}
+
+.fleet-activity-item {
+  display: flex;
+  gap: 12px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--fleet-border);
+}
+
+.fleet-activity-item:last-child {
+  border-bottom: none;
+}
+
+.fleet-activity-marker {
+  padding-top: 4px;
+}
+
+.fleet-activity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.fleet-activity-dot--ok {
+  background: var(--fleet-online);
+}
+
+.fleet-activity-dot--warn {
+  background: var(--fleet-offline);
+}
+
+.fleet-activity-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.fleet-activity-title {
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.fleet-activity-meta {
+  font-size: 11px;
+  color: var(--fleet-text-muted);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.fleet-activity-time {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Tab States ── */
+
+.fleet-tab-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--fleet-text-muted);
+}
+
+.fleet-tab-empty svg {
+  margin-bottom: 12px;
+}
+
+.fleet-tab-empty p {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0 0 4px;
+  color: var(--fleet-text);
+}
+
+.fleet-tab-empty span {
+  font-size: 12px;
+}
+
+.fleet-tab-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  gap: 12px;
+  color: var(--fleet-text-muted);
+  font-size: 13px;
+}
+
+.fleet-spinner {
+  animation: fleet-spin 0.8s linear infinite;
+}
+
+@keyframes fleet-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Config Tab ── */
+
+.fleet-tab-config {
+  padding: 16px 20px;
+}
+
+.fleet-config-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--fleet-border);
+}
+
+.fleet-config-item:last-child {
+  border-bottom: none;
+}
+
+.fleet-config-label {
+  font-size: 13px;
+  color: var(--fleet-text-muted);
+}
+
+.fleet-config-value {
+  font-size: 13px;
+  font-weight: 500;
+}

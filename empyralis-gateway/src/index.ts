@@ -10,7 +10,8 @@ import { GatewayJournal } from "./state/journal";
 import { GatewayOutbox } from "./state/outbox";
 import { GatewayCheckpoints } from "./state/checkpoints";
 import { buildRuntimeMetadata } from "./runtime/runtime-metadata";
-import { GatewaySupervisorClient } from "./supervisor/client";
+// ARCHIVED (Phase U1): GatewaySupervisorClient removed.
+// The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
 import { GatewayCapabilityRouter } from "./supervisor/capability-router";
 import { WhatsAppPersonalRuntime } from "./channels/whatsapp/runtime";
 import { TelegramPersonalRuntime } from "./channels/telegram/runtime";
@@ -93,7 +94,7 @@ async function main(): Promise<void> {
   const outbox = new GatewayOutbox(db);
   const checkpoints = new GatewayCheckpoints(db);
   const tokenStore = new GatewayTokenStore(db);
-  const supervisorClient = new GatewaySupervisorClient(config);
+  // ARCHIVED (Phase U1): supervisorClient instantiation removed.
   const browserWorker = new GatewayBrowserWorker(config);
   const browserRuntime = new GatewayBrowserRuntime(db, browserWorker);
   const personalChannelRuntimes = new PersonalChannelRuntimeRegistry(
@@ -106,7 +107,6 @@ async function main(): Promise<void> {
       : [],
   );
   const capabilityRouter = new GatewayCapabilityRouter(
-    supervisorClient,
     browserRuntime,
     personalChannelRuntimes,
   );

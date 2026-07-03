@@ -402,20 +402,11 @@ export class GatewayWsClient {
     });
   }
 
+  // ARCHIVED (Phase U1): supervisor health check removed.
+  // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+  // Local runner health is always false — desktop control capabilities are OUT.
   private async checkLocalRunnerHealth(): Promise<boolean> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Math.min(this.config.supervisorTimeoutMs, 750));
-    try {
-      const response = await fetch(`${this.config.supervisorUrl}/health`, {
-        method: "GET",
-        signal: controller.signal,
-      });
-      return response.ok;
-    } catch {
-      return false;
-    } finally {
-      clearTimeout(timeout);
-    }
+    return false;
   }
 
   private async refreshPassiveInventorySnapshot(

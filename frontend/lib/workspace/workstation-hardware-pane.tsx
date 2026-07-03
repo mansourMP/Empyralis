@@ -73,7 +73,8 @@ type TrayLocalStatus = {
   heartbeat_fresh?: boolean;
   session_status?: string;
   state?: string;
-  supervisor_running?: boolean;
+  // ARCHIVED (Phase U1): supervisor_running removed.
+  // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
   gateway_running?: boolean;
   workspace_id?: string;
   error?: string | null;
@@ -464,9 +465,7 @@ function localTrayConnectionNote(status: TrayLocalStatus | null): string {
   if (status.desired_connected && !status.gateway_running) {
     return 'Local runner is ready; gateway is stopped. Connect again to create a fresh pairing.';
   }
-  if (status.supervisor_running && !status.gateway_running) {
-    return 'Local runner is ready; gateway is stopped.';
-  }
+  // ARCHIVED (Phase U1): supervisor_running check removed.
   return 'Connecting...';
 }
 
@@ -474,7 +473,7 @@ function trayProcessConnected(status: TrayLocalStatus | null): boolean {
   return Boolean(
     status?.connected ||
     status?.gateway_running ||
-    status?.supervisor_running ||
+    // ARCHIVED (Phase U1): supervisor_running check removed.
     status?.state === 'connected' ||
     status?.state === 'active',
   );

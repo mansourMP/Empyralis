@@ -83,35 +83,6 @@ jobs:
         run: ./node_modules/.bin/tsc --noEmit
         working-directory: mobile
 
-  supervisor-build:
-    name: Rust supervisor build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux system libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libx11-dev \
-            libxi-dev \
-            libxtst-dev \
-            libxrandr-dev \
-            libxcb1-dev \
-            libxcb-randr0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libpipewire-0.3-dev \
-            libegl1-mesa-dev \
-            libgbm-dev \
-            libxdo-dev
-
-      - name: Build empyralis-supervisor
-        run: cargo build --manifest-path empyralis-supervisor/Cargo.toml
+  # ARCHIVED (Phase U1): supervisor-build job removed.
+  # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+  # Desktop control (mouse/keyboard/screen/fs) is OUT of scope.

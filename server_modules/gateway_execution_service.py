@@ -54,7 +54,11 @@ def _text(value: Any, fallback: str = "") -> str:
     return token or fallback
 
 
-def _gateway_supervisor_capability(
+# ARCHIVED (Phase U1): _gateway_supervisor_capability renamed to _normalize_gateway_capability.
+# The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
+# Desktop control capabilities (shell, filesystem, clipboard, etc.) are not dispatched
+# through this path anymore — they have no executor on the gateway side.
+def _normalize_gateway_capability(
     capability_id: str,
     arguments: Optional[Dict[str, Any]],
 ) -> tuple[str, Dict[str, Any]]:
@@ -489,7 +493,7 @@ async def execute_tool_via_gateway(
     _ws = str(registration.get("workspace_id") or "").strip()
     _tid = str(trace_id or "").strip()
     _cap = str(capability_id or "").strip()
-    supervisor_capability_id, supervisor_arguments = _gateway_supervisor_capability(_cap, arguments)
+    normalized_capability_id, normalized_arguments = _normalize_gateway_capability(_cap, arguments)
     registration_metadata = dict(registration.get("metadata") or {})
     resolved_agent_scope = str(agent_scope or "").strip().lower() or "studio_agent"
     resolved_runtime_access_mode = _runtime_access_mode_for_dispatch(
@@ -580,8 +584,8 @@ async def execute_tool_via_gateway(
     try:
         response = await gateway_protocol_service.dispatch_tool_invoke(
             gateway_id=str(gateway_id or "").strip(),
-            capability_id=supervisor_capability_id,
-            arguments=supervisor_arguments,
+            capability_id=normalized_capability_id,
+            arguments=normalized_arguments,
             run_id=str(run_id or "").strip(),
             trace_id=str(trace_id or "").strip(),
             workspace_id=_ws,
@@ -627,7 +631,7 @@ async def execute_tool_via_gateway(
     activity_payload = {
         "request_id": str(response.get("request_id") or request_id or "").strip() or None,
         "capability_id": _cap,
-        "gateway_capability_id": str(response.get("capability_id") or supervisor_capability_id).strip(),
+        "gateway_capability_id": str(response.get("capability_id") or normalized_capability_id).strip(),
         "run_id": str(response.get("run_id") or run_id).strip(),
         "result": result,
     }
@@ -662,7 +666,7 @@ async def execute_tool_via_gateway(
         "workspace_id": _ws,
         "request_id": str(response.get("request_id") or request_id or "").strip(),
         "capability_id": _cap,
-        "gateway_capability_id": str(response.get("capability_id") or supervisor_capability_id).strip(),
+        "gateway_capability_id": str(response.get("capability_id") or normalized_capability_id).strip(),
         "run_id": str(response.get("run_id") or run_id).strip(),
         "result": result,
     }

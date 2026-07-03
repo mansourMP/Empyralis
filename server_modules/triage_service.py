@@ -47,7 +47,8 @@ def _default_triage_config() -> Dict[str, Any]:
         "out_of_scope_behavior": "polite_decline",
         "identity_rules": [
             {"match": "owner", "behavior": "full"},
-            {"match": "unknown", "behavior": "full"},
+            {"match": "audience", "behavior": "restricted"},
+            {"match": "unknown", "behavior": "restricted"},
         ],
         "uncertain_goes_to_full_loop": True,
     }
@@ -57,7 +58,8 @@ def _normalize_identity_rules(raw: Any) -> List[Dict[str, str]]:
     if not isinstance(raw, list):
         return [
             {"match": "owner", "behavior": "full"},
-            {"match": "unknown", "behavior": "full"},
+            {"match": "audience", "behavior": "restricted"},
+            {"match": "unknown", "behavior": "restricted"},
         ]
     rules: List[Dict[str, str]] = []
     for r in raw:
@@ -65,12 +67,13 @@ def _normalize_identity_rules(raw: Any) -> List[Dict[str, str]]:
             continue
         match = str(r.get("match") or "").strip().lower()
         behavior = str(r.get("behavior") or "full").strip().lower()
-        if match in ("owner", "unknown") and behavior in ("full", "restricted", "silent"):
+        if match in ("owner", "audience", "unknown") and behavior in ("full", "restricted", "silent"):
             rules.append({"match": match, "behavior": behavior})
     if not rules:
         return [
             {"match": "owner", "behavior": "full"},
-            {"match": "unknown", "behavior": "full"},
+            {"match": "audience", "behavior": "restricted"},
+            {"match": "unknown", "behavior": "restricted"},
         ]
     return rules
 
@@ -82,14 +85,21 @@ def resolve_sender_identity(
     sender_id: str,
     channel_origin: str,
     channel_bindings: Optional[List[Dict[str, Any]]] = None,
+    audience_sender_ids: Optional[List[str]] = None,
+    audience_enabled: bool = False,
 ) -> str:
-    """Resolve sender identity class: "owner" | "unknown".
+    """Resolve sender identity class: "owner" | "audience" | "unknown".
 
     "owner" = the sender matches the workspace owner's identity on this channel.
+    "audience" = the sender is a known customer/audience member the agent serves.
+        These senders can request service but NEVER command the agent.
     "unknown" = everyone else (no contact store exists as of Phase P).
 
     Channel bindings are a list of {channel_type, bot_token_hash, ...}.
     We compare the sender_id against the binding metadata to detect self-chat.
+
+    Phase U2: audience class added. Audience senders get serve-only tools,
+    no shell/hardware/fleet/memory_write/connector_write access.
     """
     if not sender_id or not str(sender_id).strip():
         return "unknown"
@@ -112,6 +122,17 @@ def resolve_sender_identity(
         owner_hash = str(binding.get("owner_sender_hash") or "").strip()
         if owner_hash and owner_hash == normalized_sender:
             return "owner"
+
+    # Check audience registry — known customer senders
+    if audience_enabled:
+        for audience_id in (audience_sender_ids or []):
+            if str(audience_id or "").strip() == normalized_sender:
+                return "audience"
+
+    # If channel has audience enabled but sender isn't in the registry,
+    # treat as audience anyway (stranger on an audience-facing channel)
+    if audience_enabled and normalized_channel:
+        return "audience"
 
     return "unknown"
 
@@ -354,6 +375,8 @@ async def execute_triage_gate(
     credentials: Optional[Dict[str, Any]] = None,
     model: str = "",
     channel_bindings: Optional[List[Dict[str, Any]]] = None,
+    audience_sender_ids: Optional[List[str]] = None,
+    audience_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Run the full triage gate before the main LLM loop.
 
@@ -425,6 +448,8 @@ async def execute_triage_gate(
             channel_bindings=channel_bindings,
             workspace_id=workspace_id,
             agent_install_id=agent_install_id,
+            audience_sender_ids=audience_sender_ids,
+            audience_enabled=audience_enabled,
         )
         return {
             "blocked": False,
@@ -476,12 +501,16 @@ async def _run_layer2_identity(
     channel_bindings: Optional[List[Dict[str, Any]]],
     workspace_id: str,
     agent_install_id: str,
+    audience_sender_ids: Optional[List[str]] = None,
+    audience_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Run Layer 2 identity check. Returns identity + behavior."""
     identity = resolve_sender_identity(
         sender_id=sender_id,
         channel_origin=channel_origin,
         channel_bindings=channel_bindings,
+        audience_sender_ids=audience_sender_ids,
+        audience_enabled=audience_enabled,
     )
 
     # Find matching identity rule
