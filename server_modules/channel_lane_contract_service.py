@@ -49,7 +49,7 @@ PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
     },
     "discord_personal": {
         "provider": "discord_bot",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
+        "runtime_lane": "cloud_connector",  # Uses bot token, not user-account session (Discord ToS prohibits self-bots)
         "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
         "stage": "live",
         "live_capable": "true",

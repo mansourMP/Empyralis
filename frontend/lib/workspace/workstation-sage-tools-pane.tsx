@@ -97,7 +97,7 @@ function normalizeSkill(item: unknown): SageSkillRecord | null {
     description: readString(record.description),
     whatItDoes: readString(record.what_it_does, readString(record.description)),
     status: readString(record.status, 'needs_setup'),
-    statusLabel: readString(record.status_label, 'Needs setup'),
+    statusLabel: readString(record.status_label) || (readString(record.status) === 'active' || readString(record.status) === 'connected' ? 'Active' : 'Needs setup'),
     reason: readString(record.reason) || null,
     setupRequirement: readString(record.setup_requirement) || null,
     source: readString(record.source) || null,

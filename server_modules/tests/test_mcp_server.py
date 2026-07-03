@@ -70,20 +70,48 @@ class MCPKeyLifecycleTests(unittest.TestCase):
             self.assertTrue(key.startswith("empyralis_mcp_"))
 
             # Resolve — bare key
-            ws = await resolve_workspace_from_api_key(key)
-            self.assertEqual(ws, "ws-test-1")
+            resolved = await resolve_workspace_from_api_key(key)
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved["workspace_id"], "ws-test-1")
+            self.assertFalse(resolved["writes_enabled"])  # default
 
             # Resolve — with Bearer prefix
-            ws2 = await resolve_workspace_from_api_key(f"Bearer {key}")
-            self.assertEqual(ws2, "ws-test-1")
+            resolved2 = await resolve_workspace_from_api_key(f"Bearer {key}")
+            self.assertIsNotNone(resolved2)
+            self.assertEqual(resolved2["workspace_id"], "ws-test-1")
 
             # Revoke
             revoke_result = await revoke_workspace_mcp_api_key(result["key_id"])
             self.assertTrue(revoke_result["ok"])
 
             # Resolve after revoke → None
-            ws3 = await resolve_workspace_from_api_key(key)
-            self.assertIsNone(ws3)
+            resolved3 = await resolve_workspace_from_api_key(key)
+            self.assertIsNone(resolved3)
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_create_key_with_writes_enabled(self):
+        """A key created with writes_enabled=True resolves with that flag set."""
+        async def _run():
+            from server_modules.mcp_server_auth import (
+                create_workspace_mcp_api_key,
+                resolve_workspace_from_api_key,
+                revoke_workspace_mcp_api_key,
+            )
+            r = await create_workspace_mcp_api_key(
+                workspace_id="ws-write-test", label="Write Key", writes_enabled=True,
+            )
+            self.assertTrue(r["ok"])
+            self.assertTrue(r["writes_enabled"])
+
+            resolved = await resolve_workspace_from_api_key(r["key"])
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved["workspace_id"], "ws-write-test")
+            self.assertTrue(resolved["writes_enabled"])
+
+            # cleanup
+            await revoke_workspace_mcp_api_key(r["key_id"])
 
         import asyncio
         asyncio.run(_run())
@@ -103,14 +131,32 @@ class MCPKeyLifecycleTests(unittest.TestCase):
 class MCPWriteGateTests(unittest.TestCase):
 
     def test_write_flag_defaults_false(self):
-        """EMPYRALIS_MCP_WRITE_ENABLED defaults to false when not set."""
-        # The flag is read at import time.  We test the default behavior.
-        # In CI/clean env, the flag is not set → False.
+        """writes_enabled defaults to False when not specified at key creation."""
+        async def _run():
+            from server_modules.mcp_server_auth import (
+                create_workspace_mcp_api_key,
+                resolve_workspace_from_api_key,
+                revoke_workspace_mcp_api_key,
+            )
+            r = await create_workspace_mcp_api_key(workspace_id="ws-gate", label="Gate Test")
+            self.assertTrue(r["ok"])
+            self.assertFalse(r["writes_enabled"])
+
+            resolved = await resolve_workspace_from_api_key(r["key"])
+            self.assertIsNotNone(resolved)
+            self.assertFalse(resolved["writes_enabled"])
+
+            await revoke_workspace_mcp_api_key(r["key_id"])
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_write_flag_defaults_false_no_env(self):
+        """Global off-switch defaults to false when EMPYRALIS_MCP_WRITE_ENABLED is not set."""
         flag = os.getenv("EMPYRALIS_MCP_WRITE_ENABLED")
         if flag and flag.strip().lower() in ("1", "true", "yes"):
             self.skipTest("EMPYRALIS_MCP_WRITE_ENABLED is set — skipping default test")
-        # The module-level _WRITE_ENABLED should be False
-        # (verified by the fact that write tools raise without the flag)
+        # Global off-switch should be False when env var is absent (verified by integration)
 
 
 # ── (d) Cross-workspace isolation ──────────────────────────────────────
@@ -127,9 +173,10 @@ class MCPCrossWorkspaceIsolationTests(unittest.TestCase):
             r = await create_workspace_mcp_api_key(workspace_id="ws-alpha", label="A")
             key = r["key"]
 
-            ws = await resolve_workspace_from_api_key(key)
-            self.assertEqual(ws, "ws-alpha")
-            self.assertNotEqual(ws, "ws-beta")
+            resolved = await resolve_workspace_from_api_key(key)
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved["workspace_id"], "ws-alpha")
+            self.assertNotEqual(resolved["workspace_id"], "ws-beta")
 
         import asyncio
         asyncio.run(_run())

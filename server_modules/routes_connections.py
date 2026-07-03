@@ -774,12 +774,15 @@ async def create_mcp_api_key(
         pass
     workspace_id = str(body.get("workspace_id") or "").strip()
     label = str(body.get("label") or "").strip()
+    writes_enabled = bool(body.get("writes_enabled", False))
     if not workspace_id:
         raise HTTPException(status_code=400, detail="workspace_id is required.")
     _workspace_scope(current_user, workspace_id, minimum_role="owner")
 
     from server_modules.mcp_server_auth import create_workspace_mcp_api_key
-    result = await create_workspace_mcp_api_key(workspace_id=workspace_id, label=label)
+    result = await create_workspace_mcp_api_key(
+        workspace_id=workspace_id, label=label, writes_enabled=writes_enabled,
+    )
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "Failed to create API key."))
     return result

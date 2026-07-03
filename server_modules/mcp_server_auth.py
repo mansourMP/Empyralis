@@ -88,12 +88,16 @@ async def create_workspace_mcp_api_key(
     *,
     workspace_id: str,
     label: str = "",
+    writes_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Generate a new MCP API key for *workspace_id*.
 
-    Returns ``{ok, key, key_id, workspace_id, label, created_at}``.
+    Returns ``{ok, key, key_id, workspace_id, label, writes_enabled, created_at}``.
     The ``key`` field contains the plaintext — it is NOT stored and
     cannot be retrieved later.
+
+    *writes_enabled* gates write tools (create_agent, configure_agent,
+    message_agent, memory_write) on a per-key basis.  Defaults to ``False``.
     """
     ws = str(workspace_id or "").strip()
     if not ws:
@@ -111,18 +115,23 @@ async def create_workspace_mcp_api_key(
         "workspace_id": ws,
         "label": str(label or "").strip() or key_id,
         "hash": _hash_key(plaintext),
+        "writes_enabled": bool(writes_enabled),
         "created_at": created_at,
         "revoked": False,
     }
     _save_keys(data)
 
-    LOGGER.info("MCP API key created: key_id=%s workspace=%s", key_id, ws)
+    LOGGER.info(
+        "MCP API key created: key_id=%s workspace=%s writes_enabled=%s",
+        key_id, ws, writes_enabled,
+    )
     return {
         "ok": True,
         "key": plaintext,
         "key_id": key_id,
         "workspace_id": ws,
         "label": keys[key_id]["label"],
+        "writes_enabled": writes_enabled,
         "created_at": created_at,
     }
 
@@ -150,14 +159,14 @@ async def list_workspace_mcp_api_keys(workspace_id: str) -> List[Dict[str, Any]]
     ws = str(workspace_id or "").strip()
     data = _load_keys()
     return [
-        {"key_id": k["key_id"], "label": k["label"], "created_at": k.get("created_at", "")}
+        {"key_id": k["key_id"], "label": k["label"], "writes_enabled": k.get("writes_enabled", False), "created_at": k.get("created_at", "")}
         for k in data.get("keys", {}).values()
         if k.get("workspace_id") == ws and not k.get("revoked")
     ]
 
 
-async def resolve_workspace_from_api_key(bearer_token: str) -> Optional[str]:
-    """Validate a bearer token and return the workspace_id, or None.
+async def resolve_workspace_from_api_key(bearer_token: str) -> Optional[Dict[str, Any]]:
+    """Validate a bearer token and return ``{workspace_id, writes_enabled}``, or None.
 
     The token may be the full ``empyralis_mcp_...`` key or a
     ``Bearer empyralis_mcp_...`` header value.
@@ -172,5 +181,11 @@ async def resolve_workspace_from_api_key(bearer_token: str) -> Optional[str]:
     data = _load_keys()
     for entry in data.get("keys", {}).values():
         if entry.get("hash") == key_hash and not entry.get("revoked"):
-            return str(entry.get("workspace_id") or "").strip() or None
+            ws = str(entry.get("workspace_id") or "").strip() or None
+            if ws is None:
+                return None
+            return {
+                "workspace_id": ws,
+                "writes_enabled": bool(entry.get("writes_enabled", False)),
+            }
     return None

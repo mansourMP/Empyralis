@@ -64,16 +64,16 @@ EMPYRALIST_MCP_TOOLS = [
     "empyralis_memory_write",
 ]
 
-_WRITE_ENABLED = os.getenv("EMPYRALIS_MCP_WRITE_ENABLED", "").strip().lower() in {
+_WRITE_ENABLED_GLOBAL = os.getenv("EMPYRALIS_MCP_WRITE_ENABLED", "").strip().lower() in {
     "1", "true", "yes",
-}
+}  # Global emergency off-switch — when false, ALL write tools are blocked regardless of per-key settings.
 
 
 # ── API key resolution ──────────────────────────────────────────────────
 
 
-async def _resolve_workspace(ctx: Any) -> str:
-    """Extract workspace_id from the MCP request's Authorization header."""
+async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
+    """Extract ``{workspace_id, writes_enabled}`` from the MCP request's Authorization header."""
     auth = ""
     try:
         headers = getattr(getattr(ctx, "request_context", None), "request", None)
@@ -94,12 +94,12 @@ async def _resolve_workspace(ctx: Any) -> str:
 
     from server_modules.mcp_server_auth import resolve_workspace_from_api_key
 
-    workspace_id = await resolve_workspace_from_api_key(auth)
-    if not workspace_id:
+    resolved = await resolve_workspace_from_api_key(auth)
+    if not resolved:
         raise RuntimeError(
             "Invalid or revoked MCP API key. Create a new key at POST /api/connections/mcp-keys."
         )
-    return workspace_id
+    return resolved
 
 
 async def _ledger_mcp_call(workspace_id: str, tool_name: str, ok: bool, **extra: Any) -> None:
@@ -133,12 +133,35 @@ empyralist_mcp = _build_mcp_server()
 
 if empyralist_mcp is not None:
 
+    # ── Helpers ──────────────────────────────────────────────────────
+
+    async def _resolve(ctx: Context) -> Dict[str, Any]:
+        """Resolve ``{workspace_id, writes_enabled}`` from the request."""
+        return await _resolve_workspace(ctx)
+
+    def _ws(resolved: Dict[str, Any]) -> str:
+        """Extract workspace_id from resolved auth data."""
+        return str(resolved["workspace_id"])
+
+    def _check_write(resolved: Dict[str, Any]) -> None:
+        """Raise if writes are not permitted for this key."""
+        if not _WRITE_ENABLED_GLOBAL:
+            raise RuntimeError(
+                "MCP write tools are globally disabled. "
+                "Set EMPYRALIS_MCP_WRITE_ENABLED=true on the server."
+            )
+        if not resolved.get("writes_enabled"):
+            raise RuntimeError(
+                "This API key does not have write access. "
+                "Create a new key with writes_enabled=true at POST /api/connections/mcp-keys."
+            )
+
     # ── Read + chat tools (always live) ──────────────────────────────
 
     @empyralist_mcp.tool()
     async def empyralis_list_agents(ctx: Context) -> Dict[str, Any]:
         """List all agents in your Empyralis workspace."""
-        ws = await _resolve_workspace(ctx)
+        r = await _resolve(ctx); ws = _ws(r)
         from server_modules.fleet_tools import fleet_list_agents
         result = await fleet_list_agents(workspace_id=ws, actor_id="external_mcp_client")
         await _ledger_mcp_call(ws, "empyralis_list_agents", True, agent_count=len(result.get("agents", [])))
@@ -149,7 +172,7 @@ if empyralist_mcp is not None:
         agent_id: str, limit: int = 20, ctx: Context = None,
     ) -> Dict[str, Any]:
         """Get recent ledger activity for a specific agent."""
-        ws = await _resolve_workspace(ctx)
+        r = await _resolve(ctx); ws = _ws(r)
         from server_modules.fleet_tools import fleet_get_agent_activity
         result = await fleet_get_agent_activity(
             workspace_id=ws, agent_id=agent_id, limit=limit, actor_id="external_mcp_client",
@@ -160,7 +183,7 @@ if empyralist_mcp is not None:
     @empyralist_mcp.tool()
     async def empyralis_memory_read(key: str, ctx: Context = None) -> Dict[str, Any]:
         """Read a memory entry by key from your workspace."""
-        ws = await _resolve_workspace(ctx)
+        r = await _resolve(ctx); ws = _ws(r)
         from server_modules.agent_memory_tools import memory_read
         result = await memory_read(workspace_id=ws, key=key)
         await _ledger_mcp_call(ws, "empyralis_memory_read", True, key=key)
@@ -169,7 +192,7 @@ if empyralist_mcp is not None:
     @empyralist_mcp.tool()
     async def empyralis_memory_list(ctx: Context = None) -> Dict[str, Any]:
         """List all memory entries in your workspace."""
-        ws = await _resolve_workspace(ctx)
+        r = await _resolve(ctx); ws = _ws(r)
         from server_modules.agent_memory_tools import memory_list
         entries = await memory_list(workspace_id=ws)
         await _ledger_mcp_call(ws, "empyralis_memory_list", True, entry_count=len(entries or []))
@@ -178,7 +201,7 @@ if empyralist_mcp is not None:
     @empyralist_mcp.tool()
     async def empyralis_chat(message: str, agent_id: str = "", ctx: Context = None) -> Dict[str, Any]:
         """Send a message through the full Empyralis turn (triage, ledger, AI)."""
-        ws = await _resolve_workspace(ctx)
+        r = await _resolve(ctx); ws = _ws(r)
         from server_modules.direct_chat_runtime_exports import build_operator_namespace
         from server_modules.direct_chat_operator_binding_service import build_direct_chat_module_export_map_from_namespace
 
@@ -193,14 +216,12 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_chat", True, message_len=len(message), reply_len=len(reply))
         return {"ok": True, "reply": reply, "agent_id": agent_id or "(sage)"}
 
-    # ── Write tools (gated) ──────────────────────────────────────────
+    # ── Write tools (gated per-key + global off-switch) ──────────────
 
     @empyralist_mcp.tool()
     async def empyralis_create_agent(name: str, ctx: Context = None) -> Dict[str, Any]:
-        """Create a new specialist agent. Requires EMPYRALIS_MCP_WRITE_ENABLED=true."""
-        if not _WRITE_ENABLED:
-            raise RuntimeError("MCP write tools are not enabled. Set EMPYRALIS_MCP_WRITE_ENABLED=true.")
-        ws = await _resolve_workspace(ctx)
+        """Create a new specialist agent. Requires writes_enabled on the API key."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
         from server_modules.fleet_tools import fleet_create_agent
         result = await fleet_create_agent(workspace_id=ws, agent_label=name, actor_id="external_mcp_client")
         await _ledger_mcp_call(ws, "empyralis_create_agent", result.get("ok", False), agent_label=name)
@@ -210,10 +231,8 @@ if empyralist_mcp is not None:
     async def empyralis_configure_agent(
         agent_id: str, patch: Dict[str, Any], ctx: Context = None,
     ) -> Dict[str, Any]:
-        """Configure agent settings. Requires EMPYRALIS_MCP_WRITE_ENABLED=true."""
-        if not _WRITE_ENABLED:
-            raise RuntimeError("MCP write tools are not enabled. Set EMPYRALIS_MCP_WRITE_ENABLED=true.")
-        ws = await _resolve_workspace(ctx)
+        """Configure agent settings. Requires writes_enabled on the API key."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
         from server_modules.fleet_tools import fleet_configure_agent
         result = await fleet_configure_agent(
             workspace_id=ws, agent_id=agent_id, patch_dict=patch, actor_id="external_mcp_client",
@@ -225,10 +244,8 @@ if empyralist_mcp is not None:
     async def empyralis_message_agent(
         agent_id: str, message: str, ctx: Context = None,
     ) -> Dict[str, Any]:
-        """Send message to agent's fleet inbox. Requires EMPYRALIS_MCP_WRITE_ENABLED=true."""
-        if not _WRITE_ENABLED:
-            raise RuntimeError("MCP write tools are not enabled. Set EMPYRALIS_MCP_WRITE_ENABLED=true.")
-        ws = await _resolve_workspace(ctx)
+        """Send message to agent's fleet inbox. Requires writes_enabled on the API key."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
         from server_modules.fleet_tools import fleet_message_agent
         result = await fleet_message_agent(
             workspace_id=ws, agent_id=agent_id, message=message, actor_id="external_mcp_client",
@@ -238,10 +255,8 @@ if empyralist_mcp is not None:
 
     @empyralist_mcp.tool()
     async def empyralis_memory_write(key: str, value: str, ctx: Context = None) -> Dict[str, Any]:
-        """Write a memory entry. Requires EMPYRALIS_MCP_WRITE_ENABLED=true."""
-        if not _WRITE_ENABLED:
-            raise RuntimeError("MCP write tools are not enabled. Set EMPYRALIS_MCP_WRITE_ENABLED=true.")
-        ws = await _resolve_workspace(ctx)
+        """Write a memory entry. Requires writes_enabled on the API key."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
         from server_modules.agent_memory_tools import memory_write
         result = await memory_write(workspace_id=ws, key=key, value=value)
         await _ledger_mcp_call(ws, "empyralis_memory_write", True, key=key)

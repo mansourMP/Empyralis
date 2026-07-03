@@ -2219,6 +2219,7 @@ _SAGE_CHANNEL_ORIGIN_MAP: dict[str, str] = {
     "slack": "slack_guild",
     "discord": "discord_guild",
     "github": "github",
+    "telegram": "telegram_hosted",
 }
 
 
@@ -2268,7 +2269,7 @@ async def route_inbound_channel_message(
 ) -> Dict[str, Any]:
     """Route an inbound studio-connector message to the agent pipeline.
 
-    Wired channels (Slack Guild, Discord Guild, GitHub) route through
+    Wired channels (Slack Guild, Discord Guild, GitHub, Telegram) route through
     :func:`execute_sage_turn` — the same unified pipeline used by every
     other channel.  Remaining channels return ``channel_unavailable``
     until their specialist routing is built.

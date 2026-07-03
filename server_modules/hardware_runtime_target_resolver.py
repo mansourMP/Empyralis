@@ -98,6 +98,8 @@ def execution_environment_for_runtime_target(canonical_runtime_target: Any = Non
         return "cloud_computer"
     if token == "cloud_browser":
         return "cloud_browser"
+    if token == "self_hosted_node":
+        return "self_hosted"
     return "cloud_provider"
 
 
@@ -138,6 +140,13 @@ def resolve_runtime_target(
         group_label = AGENT_COMPUTER_GROUP_LABEL
         source_label = agent_computer_source_label(resolved_canonical)
         pill_label = f"{group_label} · {source_label}"
+    execution_env = execution_environment_for_runtime_target(resolved_canonical)
+    # When the Gateway is offline, preserve the intended execution environment
+    # rather than resolving to cloud — the caller needs to know this was
+    # supposed to run on hardware.
+    if error and resolved_canonical == "cloud_default" and action_requires_local_hardware(action_type):
+        execution_env = "gateway_offline"
+
     return HardwareRuntimeTarget(
         runtime_target=resolved_legacy,
         canonical_runtime_target=resolved_canonical,
@@ -146,7 +155,7 @@ def resolve_runtime_target(
         group_label=group_label,
         source_label=source_label,
         pill_label=pill_label,
-        execution_environment=execution_environment_for_runtime_target(resolved_canonical),
+        execution_environment=execution_env,
         error=error,
     )
 

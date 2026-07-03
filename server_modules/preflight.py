@@ -81,24 +81,44 @@ def _check_kernel() -> Optional[str]:
 # ── PostgreSQL ────────────────────────────────────────────────────────
 
 async def _check_postgres() -> Optional[str]:
-    """Return ``None`` if Postgres is reachable and stage_4b columns exist."""
+    """Return ``None`` if Postgres is reachable and stage_4b columns exist.
+
+    When ``DATABASE_URL`` is not set and durable runtime is not required
+    (local dev), the check is skipped — SQLite fallback is fine.
+    """
+    from server_modules.db import durable_runtime_required as _durable_required  # noqa: PLC0415
+
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
-        return "DATABASE_URL is not set — Postgres is required."
+        if _durable_required():
+            return (
+                "DATABASE_URL is not set but durable runtime is required "
+                f"(env={os.getenv('EMPYRALIS_DEPLOY_ENV') or os.getenv('ORION_ENV') or 'unset'}). "
+                "Set DATABASE_URL or clear the production env flag for local dev."
+            )
+        return None  # local dev — SQLite fallback is fine
 
     try:
         import asyncpg  # noqa: PLC0415
     except ImportError:
-        return "asyncpg is not installed — cannot connect to Postgres."
+        if _durable_required():
+            return (
+                "asyncpg is not installed but Postgres is required for durable runtime. "
+                "Install: pip install asyncpg"
+            )
+        return None  # local dev — without asyncpg installed, skip the check
 
     conn = None
     try:
         conn = await asyncpg.connect(database_url, timeout=10)
     except Exception as exc:
-        return (
-            f"Postgres unreachable at {_redacted_dsn(database_url)}: {exc}\n"
-            f"  Verify DATABASE_URL is correct and the database is running."
-        )
+        if _durable_required():
+            return (
+                f"Postgres unreachable at {_redacted_dsn(database_url)}: {exc}\n"
+                f"  Verify DATABASE_URL is correct and the database is running."
+            )
+        LOGGER.warning("preflight: Postgres unreachable (%s) — continuing with SQLite fallback.", exc)
+        return None
 
     try:
         # Verify workspace_agent_installs has stage_4b columns

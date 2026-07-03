@@ -1,0 +1,1313 @@
+# Empyralis — Complete Platform Map
+
+**Generated:** 2026-07-03  
+**Commit:** `e03ce2a7d`  
+**Graph:** 28,619 nodes · 72,533 edges · 1,162 communities  
+**Test baseline:** 108 tests passing, 0 failures  
+**Code:** ~275,000 lines Python (server_modules/) + TypeScript (frontend/, gateway/) + Rust (supervisor/, kernel/)  
+**For:** Outside engineers and agents — read this cold, understand the entire platform.
+
+---
+
+## Part 1: Architecture Diagram
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    CONSUMER SURFACES (Channels = Pigeons)                 │
+│                                                                          │
+│  Web Chat │ Telegram │ Discord │ Slack │ WhatsApp │ Signal │ iMessage    │
+│  (Next.js)│ Bot API  │Interact │ Events│ Personal │ bridge │ BlueBubbles │
+│           │+ GramJS  │  Bot+DM │+OAuth │ (Baileys, gataway )│  CLI   │   API       │
+│                                                                          │
+│  Every channel normalizes into AgentTurnRequest. No channel holds        │
+│  routing logic, policy, or session state.                                │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │  Normalized AgentTurnRequest
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    CONTROL PLANE (Python/FastAPI :8001)                    │
+│                                                                          │
+│  server.py ── Composition root (21 routers mounted, 403 lines)           │
+│  │                                                                       │
+│  ├─ agent_turn.py ── Canonical turn entry (all channels converge here)   │
+│  │   └─ turn_runtime.py ── Execution switchboard                         │
+│  │       ├─ direct-chat path ── direct_chat_generation_service.py        │
+│  │       │   └─ LLM provider → response → tool_broker (if tool calls)    │
+│  │       └─ durable-run path ── runs_engine.py → run_service.py          │
+│  │                                                                       │
+│  ├─ Sage (operator agent) ── sage_agent_runtime_service.py               │
+│  ├─ Studio (specialist agents) ── agent_registry_repository.py           │
+│  ├─ Memory ── memory_service.py + unified_memory_service.py              │
+│  ├─ Governance ── unified_governance_gate.py + runtime_policy.py         │
+│  │                                                                       │
+│  ├─ Tool Broker ── tool_broker.py                                        │
+│  │   ├─ MCP path ── mcp_registry_service.py → external MCP servers       │
+│  │   ├─ Gateway path ── gateway_execution_service.py → Gateway WSS       │
+│  │   └─ VPS path ── local_queue.py → VPS worker (HTTP poll)              │
+│  │                                                                       │
+│  ├─ MCP Server (Empyralis AS MCP) ── mcp_server.py (9 tools at /mcp)     │
+│  ├─ MCP Auth ── mcp_server_auth.py (per-workspace API keys)             │
+│  ├─ OAuth Vault ── vault_store.py + connection_oauth_service.py          │
+│  └─ Preflight ── preflight.py (kernel, Postgres, Redis checks)           │
+└──────────┬──────────────────────┬──────────────────────┬─────────────────┘
+           │ Cloud                │ Gateway (WSS)         │ VPS (HTTP poll)
+           ▼                      ▼                       ▼
+┌──────────────┐  ┌──────────────────────┐  ┌──────────────────────────┐
+│  CLOUD TIER  │  │  AGENT COMPUTER      │  │  SELF-HOSTED NODE        │
+│  (no hw)     │  │  (user hardware)     │  │  (user VPS)              │
+│              │  │                      │  │                          │
+│ • Bot APIs   │  │ empyralis-gateway    │  │ • Command worker          │
+│ • Webhooks   │  │ (Node.js, WSS)       │  │ • HTTP poll → claim →    │
+│ • OAuth apps │  │   ├─ channels/       │  │   execute → heartbeat    │
+│ • Cloud      │  │   ├─ browser/        │  │ • Shell + File ONLY      │
+│   Computer   │  │   ├─ supervisor/     │  │                          │
+│   (droplet)  │  │   └─ bridges/        │  │                          │
+│              │  │                      │  │                          │
+│              │  │ empyralis-supervisor │  │                          │
+│              │  │ (Rust, :7788)        │  │                          │
+│              │  │ ⚠️ NEVER COMPILED    │  │                          │
+│              │  │   shell, fs, OCR,    │  │                          │
+│              │  │   screenshot, mouse, │  │                          │
+│              │  │   clipboard, etc.    │  │                          │
+└──────────────┘  └──────────────────────┘  └──────────────────────────┘
+
+              empyralis-runtime-kernel (Rust CLI)
+              Policy decision engine — 52 commands
+              Reads JSON from stdin → writes {ok, decision, reason} to stdout
+```
+
+### Data Flow (Mermaid)
+
+```mermaid
+graph TD
+    U[User Message] --> CH[Channel Adapter]
+    CH --> NR[Normalized AgentTurnRequest]
+    NR --> AT[agent_turn.py]
+    AT --> TR[turn_runtime.py]
+    TR -->|direct chat| DC[direct_chat_generation_service.py]
+    TR -->|durable run| RE[runs_engine.py]
+    DC --> LLM[LLM Provider]
+    RE --> LLM
+    LLM --> RES[Response]
+    RES -->|tool calls| TB[tool_broker.py]
+    TB -->|MCP| MCP[mcp_registry_service.py]
+    TB -->|gateway| GW[gateway_execution_service.py → Gateway WSS]
+    TB -->|VPS| VW[local_queue.py → VPS Worker]
+    RES -->|reply| CH
+    CH --> U
+```
+
+### Key Contracts
+
+1. **One turn engine** — all channels converge on `agent_turn.py`. No parallel turn contracts.
+2. **Channels = pigeons** — transport only. Channel logic must not bleed into agent brain or control plane.
+3. **Brokered everything** — tools → `tool_broker.py`, secrets → `secrets_broker.py`, runtime → policy-bound.
+4. **No fallback** — credits at zero = hard stop. No silent downgrade.
+5. **Internalized governance** — no approval UX. Agent internalizes rules. Kernel hard-blocks at execution.
+6. **Shell-first tools** — agent uses shell + browser. Minimal bespoke tools. Keep: memory, channel plumbing, OAuth.
+7. **WSS reverse tunnel** — Gateway opens outbound WSS to cloud. No inbound holes. Survives NAT/firewalls.
+8. **Platform voice ≠ Agent voice** — "Heads up:" prefix for platform. Never "I"/"my" from infrastructure.
+
+### Two MCP Surfaces
+
+Empyralis has a DUAL MCP role:
+
+**1. Empyralis AS MCP CLIENT** — connects TO 30+ SaaS apps (Gmail, GitHub, Slack, Notion, etc.)
+- Files: `mcp_registry_service.py`, `connection_oauth_service.py`, `skill_registry.py`
+- Flow: OAuth → credential vault → MCP server registration → tool discovery → approval → invocation
+- Transport: streamable_http only (no stdio, no SSE)
+
+**2. Empyralis AS MCP SERVER** — external AI clients connect TO Empyralis at `/mcp`
+- Files: `mcp_server.py` (9 tools), `mcp_server_auth.py` (per-workspace API keys)
+- Auth: Bearer token (`empyralis_mcp_...`) — SHA-256 hashed storage
+- 5 read tools (live): list_agents, get_agent_activity, memory_read, memory_list, chat
+- 4 write tools (gated behind `EMPYRALIS_MCP_WRITE_ENABLED=true`): create_agent, configure_agent, message_agent, memory_write
+
+---
+
+## Part 2: Complete File Map
+
+### 2.1 Backend — `server_modules/` (~275,000 lines Python, ~190 service files)
+
+This IS the production backend. Everything below lives at `server_modules/`.
+
+#### Composition Root & Core
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `server.py` | ~400 | FastAPI app, CORS, 21 router mounts, exception handlers, MCP mount, preflight |
+| `mcp_server.py` | 267 | Empyralis AS MCP server — 9 tools at `/mcp` for external AI clients |
+| `mcp_server_auth.py` | ~120 | Per-workspace MCP API key creation, SHA-256 hashing, revocation, resolution |
+| `preflight.py` | 223 | Startup checks: kernel binary, Postgres (+stage_4b columns), Redis |
+| `runtime_config.py` | — | Env, paths, provider resolution |
+| `runtime_common.py` | — | Shared utilities, auth middleware |
+| `state_paths.py` | — | Runtime state file path resolution |
+
+#### Turn Engine
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `agent_turn.py` | — | **Canonical turn entry** — all channels normalize into AgentTurnRequest → here |
+| `turn_runtime.py` | — | **Execution switchboard** — direct chat vs durable run dispatch |
+| `turn_ingress_service.py` | — | Turn ingress normalization |
+
+#### Sage / Operator Agent
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `sage_agent_runtime_service.py` | 3,417 | ⚠️ Sage agent loop — `_COMMUNICATION_SCOPES`, `_CONNECTOR_ROUTE_KEYWORDS`, `_GATEWAY_ROUTE_KEYWORDS` hardcode channel names |
+| `sage_command_dispatcher.py` | — | Command dispatcher + error messages (classify_error token leak fixed in T2) |
+| `sage_turn_adapter.py` | — | ✅ Unified sage turn execution for all channels |
+| `sage_reply_dispatcher.py` | — | ⚠️ Reply dispatch |
+| `sage_transparency_service.py` | — | Sage transparency events |
+| `sage_daily_operator_service.py` | — | Daily operator tasks |
+| `universal_operator.py` | — | Universal operator actions (14 strings fixed in T2) |
+| `channel_adapter.py` | — | ✅ Channel normalization — NormalizedSageTurn |
+| `error_response_service.py` | — | Error response normalization |
+
+#### Direct Chat Subsystem (~30 files)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `direct_chat_service.py` | — | Direct chat orchestration |
+| `direct_chat_generation_service.py` | 2,022 | LLM generation loop (provider-backed) |
+| `direct_chat_composition_service.py` | — | Chat composition |
+| `direct_chat_response_service.py` | — | Slash command dispatch |
+| `direct_chat_provider_service.py` | — | Provider selection/routing |
+| `direct_chat_provider_facade_service.py` | — | Provider facade |
+| `direct_chat_entry_service.py` | — | Chat entry |
+| `direct_chat_entry_policy_service.py` | — | Entry policy |
+| `direct_chat_runtime_service.py` | — | Chat runtime |
+| `direct_chat_runtime_facade_service.py` | — | Chat runtime facade |
+| `direct_chat_runtime_entry_facade_service.py` | — | Runtime entry facade |
+| `direct_chat_stream_runtime_service.py` | — | Stream runtime |
+| `direct_chat_stream_state_service.py` | — | Stream state |
+| `direct_chat_stream_transport_service.py` | — | Stream transport |
+| `direct_chat_stream_response_service.py` | — | Stream response |
+| `direct_chat_transport_service.py` | — | Chat transport |
+| `direct_chat_memory_facade_service.py` | — | Memory facade |
+| `direct_chat_handoff_service.py` | — | Handoff logic |
+| `direct_chat_handoff_facade_service.py` | — | Handoff facade |
+| `direct_chat_operator_binding_service.py` | 2,516 | Operator tool routing bindings |
+| `direct_chat_operator_support_service.py` | — | Operator support |
+| `direct_chat_callback_facade_service.py` | — | Callback facade |
+| `direct_chat_support_binding_service.py` | — | Support binding |
+| `direct_chat_metadata_service.py` | — | Metadata |
+| `direct_chat_prompt_service.py` | — | Prompt assembly |
+| `direct_chat_context_service.py` | — | Context building |
+| `direct_chat_intervention_service.py` | — | Intervention builder |
+| `direct_chat_availability_service.py` | — | Availability checks |
+| `direct_chat_routing_service.py` | — | Routing |
+| `direct_chat_hosted_usage_service.py` | — | Hosted usage tracking |
+| `direct_chat_tool_catalog_service.py` | — | Tool catalog |
+
+#### Channel System
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `agent_channel_router.py` | 2,375 | ⚠️ Channel routing — per-channel handler classes, LOCAL_BRIDGE_PERSONAL_CHANNELS hardcoded |
+| `channel_lane_contract_service.py` | — | Canonical channel lane definitions (discord_personal contradiction) |
+| `channel_types.py` | — | Channel type definitions |
+| `channel_platform_service.py` | — | Channel platform management |
+| `channel_execution_service.py` | — | ⚠️ Channel execution (hardcoded strings) |
+| `channel_blocking_policy_service.py` | — | Channel blocking/safe mode |
+| `personal_channel_sage_bridge_service.py` | — | ⚠️ 6 near-identical per-channel wrapper functions |
+| `personal_channels_service.py` | 2,270 | Personal channel management |
+| `personal_channel_handler_registry.py` | — | Personal channel handler registry |
+| `personal_channel_thread_command_service.py` | — | Personal channel thread commands |
+| `routes_sage_telegram_hosted.py` | — | ⚠️ Telegram hosted bot routes |
+| `routes_personal_channels.py` | — | Personal channel API routes |
+
+**Dead route files** (preserved, not mounted in server.py):
+`routes_signal.py`, `routes_imessage.py`, `routes_wechat.py`, `routes_slack.py`, `routes_discovery.py`, `routes_mini_apps.py`
+
+#### Connectors (`server_modules/connectors/`)
+
+| File | Purpose |
+|------|---------|
+| `slack_connector.py` | Slack — OAuth, webhooks, message handling |
+| `discord_connector.py` | ⚠️ Discord — bot REST + personal DM |
+| `discord_bot_runtime_service.py` | Discord bot runtime |
+| `telegram_ingress_service.py` | ⚠️ Telegram ingress |
+| `telegram_connector_services.py` | Telegram connector services |
+| `telegram_connector_context_service.py` | Telegram context |
+| `telegram_connector_poll_service.py` | Telegram polling |
+| `telegram_run_action_service.py` | Telegram run actions |
+| `telegram_run_dispatch_service.py` | Telegram run dispatch |
+| `telegram_inbound_context_service.py` | Telegram inbound context |
+| `whatsapp_ingress_service.py` | ⚠️ WhatsApp ingress |
+| `whatsapp_webhook_service.py` | WhatsApp webhook |
+| `whatsapp_webhook_bridge_service.py` | WhatsApp webhook bridge |
+| `whatsapp_transport_service.py` | WhatsApp transport |
+| `whatsapp_autopilot_state_service.py` | WhatsApp autopilot state |
+| `whatsapp_run_dispatch_service.py` | WhatsApp run dispatch |
+| `github_connector.py` | GitHub — webhooks, issues, PRs |
+| `linear_connector.py` | Linear API connector |
+| `notion_connector.py` | Notion API connector |
+| `dropbox_connector.py` | Dropbox API connector |
+| `s3_connector.py` | AWS S3 connector |
+| `smtp_connector.py` | SMTP/IMAP email connector |
+| `connector_runtime.py` | Connector runtime base |
+| `connector_webhook.py` | Connector webhook base |
+| `runtime_status_service.py` | Connector runtime status |
+
+#### Autopilot Subsystem (~18 files in `connectors/`)
+
+`autopilot_endpoint_service.py`, `autopilot_runtime_exports.py`, `autopilot_runtime_facade_service.py`, `autopilot_runtime_support_service.py` (⚠️ 7 "I" messages), `autopilot_runtime_service_registry.py`, `autopilot_registry_facade_service.py`, `autopilot_approval_service.py`, `autopilot_skill_service.py`, `autopilot_workflow_setup_service.py`, `autopilot_event_service.py`, `autopilot_event_bridge_service.py`, `autopilot_state_bridge_service.py`, `autopilot_bridge_registry_service.py`, `autopilot_bridge_facade_service.py`, `autopilot_connector_shell_service.py`, `autopilot_channel_support_service.py`, `autopilot_common_support_service.py`, `autopilot_terminal_bridge_service.py`, `autopilot_run_entry_service.py`, `channel_delivery_outbox_service.py`, `channel_workspace_scope_service.py`
+
+#### Gateway / Hardware
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `gateway_execution_service.py` | — | Gateway tool dispatch |
+| `gateway_protocol_service.py` | 2,254 | Gateway protocol handling (in 3-file import cycle with personal_channels_service) |
+| `gateway_health_service.py` | — | Gateway health monitoring |
+| `gateway_pairing_service.py` | — | Gateway pairing flow |
+| `gateway_approval_service.py` | — | Gateway approval flow |
+| `gateway_activity_service.py` | — | Gateway activity tracking |
+| `gateway_browser_service.py` | — | Gateway browser execution |
+| `gateway_inventory_service.py` | — | Gateway capability inventory |
+| `gateway_state_repository.py` | 2,516 | Gateway state persistence |
+| `routes_gateway.py` | 3,281 | Gateway REST + WSS routes |
+| `hardware_runtime_target_resolver.py` | — | ⚠️ Hardware target resolution (self_hosted_node label bug) |
+| `hardware_runtime_session_service.py` | — | Hardware runtime sessions |
+| `hardware_action_broker_service.py` | — | Hardware action brokering |
+| `hardware_access_policy_service.py` | — | Hardware access policy |
+| `hardware_runtime_adapters/cloud_computer_adapter.py` | — | Cloud computer adapter |
+| `hardware_runtime_adapters/gateway_adapter.py` | — | Gateway adapter |
+| `hardware_runtime_adapters/self_hosted_node_adapter.py` | — | Self-hosted VPS adapter |
+| `supervisor_client.py` | — | Supervisor HTTP client |
+
+#### Runtime / Sessions
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `runtime_runtime_api.py` | 2,046 | Runtime registration, sessions, claims |
+| `runtime_route_registry_service.py` | — | Runtime route registry |
+| `runtime_route_registration_service.py` | — | Runtime route registration |
+| `runtime_route_bootstrap_service.py` | — | Runtime route bootstrap |
+| `runtime_run_entry_service.py` | — | Run entry |
+| `runtime_run_query_service.py` | — | Run query |
+| `runtime_run_control_service.py` | — | Run control |
+| `runtime_run_approval_service.py` | — | Run approval |
+| `runtime_run_delegation_service.py` | — | Run delegation |
+| `runtime_run_detail_service.py` | — | Run detail |
+| `runtime_run_access_service.py` | — | Run access control |
+| `runtime_run_resume_service.py` | — | Run resume |
+| `runtime_heartbeat_service.py` | — | Runtime heartbeat |
+| `runtime_history_service.py` | — | Runtime history |
+| `runtime_usage_service.py` | — | Runtime usage tracking |
+| `runtime_workspace_service.py` | — | Runtime workspace service |
+| `runtime_attachment_service.py` | — | Runtime attachment |
+| `runtime_request_service.py` | — | Runtime request handling |
+| `runtime_webhook_trigger_service.py` | — | Runtime webhook triggers |
+| `runtime_local_execution_approval_service.py` | — | Local execution approval |
+| `runtime_policy.py` | 3,885 | Runtime policy enforcement |
+| `runtime_state_store.py` | 2,193 | Runtime state store |
+| `local_queue.py` | 4,189 | Local queue — claims, heartbeats, dead letters (in 3 import cycles) |
+| `machine_lease_service.py` | — | Machine lease management |
+| `session_service.py` | — | Session management |
+| `session_lifecycle_service.py` | — | Session lifecycle |
+| `session_manager/manager.py` | — | Session manager |
+| `session_manager/actor_queue.py` | — | Actor queue for sessions |
+| `session_manager/observability.py` | — | Session observability |
+| `session_manager/runtime_cache.py` | — | Session runtime cache |
+| `thread_service.py` | — | Thread management |
+| `setup_sessions.py` | — | Setup session management |
+
+#### Runs Engine
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `run_service.py` | 6,474 | Run orchestration service |
+| `runs_core.py` | — | Runs core |
+| `runs_engine.py` | — | Runs engine |
+| `runs_execution.py` | 6,046 | Runs execution |
+| `runs_history.py` | — | Runs history |
+| `run_state_repository.py` | 3,865 | Run state persistence |
+
+#### MCP / OAuth / Connector Bridge
+
+| File | Purpose |
+|------|---------|
+| `mcp_registry_service.py` | MCP server registry, tool discovery, approval, invocation |
+| `connection_oauth_service.py` | OAuth provider configs + `APP_MCP_SERVER_MAP` (30 providers) + `_register_mcp_servers_for_provider()` |
+| `connection_catalog_service.py` | Connection catalog |
+| `connection_readiness_service.py` | Connection readiness checks |
+| `connection_verify_service.py` | Connection verification |
+| `routes_connections.py` | Connection REST: `GET /api/connections/mcp-catalog`, MCP key CRUD |
+| `connectors_actions.py` | ⚠️ DEPRECATED connector tools (2,521 lines — replaced by MCP, pending removal) |
+| `connectors_core.py` | Connector core utilities |
+| `connector_manifests.py` | Connector manifest catalog |
+| `connector_validators.py` | Connector validation |
+| `routes_connectors.py` | Connector REST routes |
+
+#### Memory
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `memory_service.py` | 2,701 | Memory/embedding service |
+| `unified_memory_service.py` | — | Unified memory across captain + specialists |
+| `agent_memory_tools.py` | — | memory_read, memory_write, memory_list tool implementations |
+
+#### Agent Registry
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `agent_registry_api.py` | 2,168 | Agent registry REST API |
+| `agent_registry_repository.py` | 2,436 | Agent registry persistence (Sage + specialist seeds with display_name) |
+| `agent_specialist_repository.py` | — | Specialist agent persistence |
+| `specialist_service.py` | — | Specialist agent service |
+| `fleet_tools.py` | — | fleet_list_agents, fleet_create_agent, fleet_configure_agent, fleet_get_agent_activity, fleet_message_agent, schedule_task + _parse_when() |
+
+#### Auth / Billing / Quota
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `auth.py` | 5,796 | Authentication — users, sessions, API keys, SQLite fallback |
+| `db.py` | — | Database connection, pool management, `durable_runtime_required()` |
+| `control_plane_repository.py` | 13,049 | **LARGEST FILE** — Postgres: tenants, workspaces, agents, installs |
+| `provider_profiles.py` | 4,289 | Provider profile management |
+| `secrets_broker.py` | — | Secret/vault access — hosted keys, workspace BYOK |
+| `vault_store.py` | — | Encrypted credential vault |
+| `billing_service.py` | — | Billing integration (Stripe) |
+| `routes_billing.py` | — | Billing API routes |
+| `entitlements_service.py` | — | Entitlement and quota enforcement |
+| `quota_response_service.py` | — | ⚠️ Quota response messages |
+| `quota_policy_service.py` | — | Quota policy |
+| `workspace_bootstrap_service.py` | — | New workspace setup, credit grants |
+
+#### Tools / Safety
+
+| File | Purpose |
+|------|---------|
+| `tool_broker.py` | Tool access gateway |
+| `tool_broker_guard_service.py` | Tool brokering safety guards |
+| `direct_tool_approval_service.py` | Tool approval workflow |
+| `direct_tool_loop_guard_service.py` | Loop detection (3 repeat → abort) |
+| `skill_registry.py` | Skill definitions + MCP-to-skill integration (11 strings fixed in T2) |
+| `skill_scanner.py` | Skill file scanner |
+| `unified_governance_gate.py` | Unified governance gate |
+| `hybrid_policy_service.py` | Hybrid cloud/local placement policy |
+| `safe_mode_service.py` | Safe mode — degraded operation |
+| `execution_sandbox_service.py` | Execution sandbox |
+| `external_content_guard.py` | External content safety |
+
+#### Other Services
+
+`activity_ledger_service.py`, `notification_service.py`, `app_registry_api.py`, `app_bridge_service.py`, `acp_bridge_service.py`, `acp_manager.py`, `workflow_service.py`, `workflow_api.py`, `workflow_repository.py`, `agent/action_service.py`, `agent/automation_setup_service.py`, `agent/user_profile_service.py`, `inventory_skill.py`, `personal_context_engine.py`, `shared_operational_board_service.py`, `voice_notification_policy_service.py`, `doctor_report.py`, `health_core.py`, `routes_health.py`, `routes_agents.py`, `api_contract.py`, `logging_config.py`, `config_loader.py`, `cloud_cutover_config.py`, `sqlite_helpers.py`, `attachment_utils.py`, `url_security.py`, `browser_engine.py`, `blackbox_runtime_support.py`, `data_retention_service.py`, `retention_enforcement_job.py`, `platform_analytics_service.py`, `customer_ops_pack.py`
+
+### 2.2 Gateway — `empyralis-gateway/src/` (Node.js/TypeScript)
+
+The Gateway runs on user hardware, opens an outbound WSS tunnel to cloud, and routes capability invocations locally.
+
+| Subsystem | Key Files | Purpose |
+|-----------|-----------|---------|
+| **Entry** | `index.ts`, `config.ts` | Process lock, subsystem init, WSS client start |
+| **Cloud** | `cloud/ws-client.ts` (997 lines), `cloud/heartbeat.ts`, `cloud/heartbeat-payload.ts`, `cloud/reconnect.ts` | WSS connection, heartbeat, exponential-backoff reconnection |
+| **Channels** | `channels/telegram/runtime.ts` (825 lines), `channels/whatsapp/runtime.ts` (665 lines), `channels/foundation/` (6 files: credential-redactor, draft-manager, outbound-store, reconnect-utils, typing-keepalive), `channels/local-bridge-runtime.ts` (433 lines), `channels/personal-runtime.ts`, `channels/personal-config-store.ts` | Personal messaging: Telegram (GramJS), WhatsApp (Baileys), Signal/iMessage/WeChat (local HTTP bridge) |
+| **Supervisor** | `supervisor/client.ts`, `supervisor/capability-router.ts`, `supervisor/signing.ts` | ⚠️ Central dispatch hub — routes tool.invoke to 4 executors: browser, external-agent-proxy, personal-channels, supervisor (Rust daemon). Bundles channel messaging + hardware execution together. |
+| **Browser** | `browser/runtime.ts`, `browser/worker.ts`, `browser/session-store.ts` | Browser automation via Python subprocess |
+| **Pairing** | `pairing/device-identity.ts`, `pairing/token-store.ts` | Device UUID + pairing token persistence |
+| **Protocol** | `protocol/types.ts`, `protocol/codec.ts` | Wire format `v1alpha2`: frame types, validation, 256KB limit, 32-level nesting limit |
+| **Runtime** | `runtime/service-mode.ts`, `runtime/desktop-permissions.ts`, `runtime/runtime-metadata.ts` | OS-level service mode detection, 16 capabilities → 5 permission types |
+| **Health** | `health/service-inventory.ts` (590 lines) | Passive inventory: PostgreSQL, Docker, Ollama, Codex CLI, GPU detection |
+| **Bridges** | `bridges/signal-cli-bridge.ts` (381 lines), `bridges/bluebubbles-bridge.ts` (422 lines) | Standalone HTTP bridge servers for Signal (signal-cli JSON-RPC) and iMessage (BlueBubbles API) |
+| **State** | `state/db.ts`, `state/journal.ts`, `state/outbox.ts`, `state/checkpoints.ts` | JSON-file persistence: atomic writes, corruption detection, NDJSON journal, outbox (at-least-once delivery) |
+
+### 2.3 Supervisor — `empyralis-supervisor/src/` (Rust — ⚠️ NEVER COMPILED)
+
+HTTP server at `127.0.0.1:7788`. HMAC-SHA256 signature verification on all requests.
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `main.rs` | 989 | Axum/Tokio HTTP server. `POST /execute` (policy eval + capability dispatch), `POST /interrupt` (cancellation), `GET /health`. SQLite audit trail. |
+| `execution.rs` | 25 | ExecutionContext — request_id, run_id, CancellationToken |
+| `capabilities/clipboard.rs` | 27 | Clipboard read/write (arboard crate) |
+| `capabilities/control.rs` | 225 | Mouse/keyboard (enigo crate): click, move, type, key combos |
+| `capabilities/filesystem.rs` | 497 | Read/write/append/delete with hard-protected roots (~/.ssh, ~/.gnupg), symlink bypass detection |
+| `capabilities/launch.rs` | 16 | App/URL launch (opener crate) |
+| `capabilities/ocr.rs` | 111 | Tesseract OCR: screen capture → text extraction, text-center finding |
+| `capabilities/screenshot.rs` | 150 | Screenshot (xcap + macOS screencapture fallback), region cropping |
+| `capabilities/shell.rs` | 549 | Shell execution with hard-blocked patterns: `rm -rf /`, `mkfs.*`, fork bombs, shutdown. Shell injection blocking. Read-only command enforcement. |
+| `capabilities/system.rs` | 182 | Desktop notifications, AppleScript execution, text-to-speech |
+| `capabilities/windows.rs` | 23 | Window enumeration (xcap): title, app_name, position, size |
+
+### 2.4 Runtime Kernel — `empyralis-runtime-kernel/src/` (Rust CLI)
+
+52 decision commands dispatched from `main.rs`. Reads JSON from stdin → writes `{ok, decision, reason}` to stdout.
+
+| Group | Files | Purpose |
+|-------|-------|---------|
+| **Policy** | `policy.rs` (492), `presets.rs` (205), `risk.rs`, `authorization.rs`, `approvals.rs`, `safe_mode.rs` | Policy evaluation with 7 autonomy modes (yolo/cautious/read_only/safe_autopilot/trusted_workstation/ask_every_time/deny_all), 3 presets, capability allowlists/blocklists |
+| **Execution** | `execution_plan.rs`, `execution_runtime.rs`, `execution_outcome.rs`, `execution_authorization.rs`, `sandbox.rs`, `sandbox_execution.rs` | Execution planning, Docker sandbox config, outcome processing |
+| **Gateway** | `gateway.rs`, `gateway_action.rs`, `gateway_frame.rs`, `gateway_service.rs`, `gateway_state.rs`, `heartbeat.rs`, `outbox_delivery.rs` | Gateway frame validation, heartbeat evaluation, outbox delivery authorization |
+| **Runs** | `runs.rs`, `run_api.rs`, `run_approval.rs`, `run_preparation.rs`, `run_record.rs`, `run_routing.rs`, `run_service.rs`, `run_triggers.rs` | Run lifecycle (max 3 attempts, 1000-cent budget, 600s runtime) |
+| **Deployed** | `deployed_agent.rs`, `deployed_readiness.rs`, `deployed_data.rs`, `deployed_virtual_runtime.rs` + service variants | Agent deployment authorization |
+| **Infra** | `control_plane.rs`, `session.rs`, `platform_orchestration.rs`, `virtual_computer.rs`, `lease.rs`, `queue.rs`, `scheduler.rs`, `state.rs` | Control plane decisions, session bounds (20/80/200 turns, 4h/24h/168h age) |
+
+### 2.5 Frontend — `frontend/`
+
+#### Pages (`frontend/app/`)
+
+| File | Route | Purpose |
+|------|-------|---------|
+| `layout.tsx` | `/` | Root layout — font, metadata |
+| `page.tsx` | `/` | Landing page → redirects |
+| `login/page.tsx` | `/login` | Login |
+| `signup/page.tsx` | `/signup` | Signup |
+| `auth/complete/page.tsx` | `/auth/complete` | OAuth callback |
+| `onboarding/page.tsx` | `/onboarding` | Onboarding wizard |
+| `(account)/layout.tsx` | `/w/*` | Auth gate layout |
+| `(account)/w/[workspaceId]/page.tsx` | `/w/[workspaceId]` | Workspace root |
+| `(account)/w/[workspaceId]/WorkspaceSurfacePage.tsx` | — | Surface renderer |
+| `api/chat/route.ts` | `/api/chat` | Chat proxy |
+| `api/chat/stream/route.ts` | `/api/chat/stream` | SSE streaming |
+
+#### Workspace Shell (`frontend/lib/workspace/`)
+
+| File | Purpose |
+|------|---------|
+| `workstation-kernel-shell.tsx` | Main shell: nav, routing, surface mounting |
+| `sage-chat-pane.tsx` | Main chat interface |
+| `sage-memory-pane.tsx` | Memory timeline view |
+| `workstation-sage-connectors-pane.tsx` | MCP connector catalog (now data-driven from `/api/connections/mcp-catalog`) |
+| `workspace-channel-pairing-surface.tsx` | ⚠️ Channel pairing — hardcoded `ChannelProvider` type `'telegram' \| 'whatsapp'` |
+| `workstation-billing-pane.tsx` | Billing management |
+| `workstation-runs-pane.tsx` | Durable runs/threads listing |
+| `cloud-vps-setup-panel.tsx` | VPS/node setup |
+| `codex-chat/` | ⚠️ Agent activity/tool-progress timeline — 4 files, not fully audited |
+
+### 2.6 `shared/` (Cross-Project Contracts)
+
+| File | Purpose |
+|------|---------|
+| `nav-manifest.ts` | Canonical navigation destinations |
+| `mini-app-sdk.js` | Mini-app SDK |
+| `design-system/tokens.ts` | Shared design tokens |
+| `api-contract/index.ts` | API type contracts |
+| `api-contract/client.ts` | API client |
+| `api-contract/model-tier-contract.ts` | Model tier definitions |
+
+### 2.7 `legacy/` (v1 Reference Snapshot)
+
+Broad snapshot of the old repo. Contains copies of: `frontend/`, `server_modules/`, `empyralis-gateway/`, `empyralis-supervisor/`, `empyralis-runtime-kernel/`, `cloud-session-manager/`, `python_engine/`, `scripts/`, `docs/`, `references/`. Most subdirectories contain only build artifacts (node_modules, target, venv). The `frontend/` and `server_modules/` copies have real source code — v1 reference implementations. Not yet pruned to clean backend+frontend split per target architecture.
+
+### 2.8 `server/` — DOES NOT EXIST
+
+The v2 target backend directory (`server/`) has NOT been created. The Linear PLATFORM OVERVIEW (2026-07-01) declares `server/` as THE future backend with: `agent/`, `tools/`, `oauth/`, `memory/`, `mcp/`, `vault/`, `channels/` — one file per concern. **Zero files exist at that path.** The consolidation hasn't started. All production backend logic is in `server_modules/`.
+
+### 2.9 Config & Deploy Files
+
+| File | Purpose |
+|------|---------|
+| `server.py` | FastAPI composition root (21 routers, MCP mount) |
+| `mcp.json` | MCP client configuration for Empyralis connecting TO external MCP servers |
+| `pytest.ini` | Pytest config: `blackbox_db` (needs Postgres), `kernel` (needs Rust binary) markers |
+| `Dockerfile.*` | Container builds |
+| `render.yaml` | Render.com deploy config |
+| `graphify-out/graph.json` | AST knowledge graph (40MB, 28,619 nodes) |
+| `graphify-out/GRAPH_REPORT.md` | Human-readable graph analysis with community reports |
+
+---
+
+## Part 3: Subsystem Connection Map
+
+### 3.1 Entry Points — What Kicks Off a Turn?
+
+Every inbound message enters through one of these files:
+
+| Entry Point | Transport | File | Handler |
+|-------------|-----------|------|---------|
+| Telegram Bot webhook | HTTPS POST | `routes_sage_telegram_hosted.py` | Bot API → `sage_turn_adapter.py` → `agent_turn.py` |
+| Telegram Personal | Gateway WSS | `gateway_protocol_service.py` | GramJS → Gateway → WSS → `gateway_execution_service.py` → `agent_turn.py` |
+| Discord Bot | HTTPS Interactions | `connectors/discord_connector.py` | Discord HTTP → `sage_turn_adapter.py` → `agent_turn.py` |
+| Discord Personal | Gateway WSS | `gateway_protocol_service.py` | Bot token via Gateway → `agent_turn.py` |
+| Slack Events | HTTPS webhook | `connectors/slack_connector.py` | Slack API → `sage_turn_adapter.py` → `agent_turn.py` |
+| WhatsApp Business | Twilio webhook | `connectors/whatsapp_webhook_service.py` | Twilio → `sage_turn_adapter.py` → `agent_turn.py` (BLOCKED by Meta ban) |
+| WhatsApp Personal | Gateway WSS | `gateway_protocol_service.py` | Baileys → Gateway → WSS → `agent_turn.py` |
+| Web Chat | HTTP POST | `routes_connectors.py` or chat API | Web → `direct_chat_service.py` |
+| Direct API call | HTTP POST | `server.py` chat route | `direct_chat_entry_service.py` → `direct_chat_service.py` |
+| Signal/iMessage/WeChat | local bridge → Gateway WSS | `gateway_protocol_service.py` | Bridge HTTP → Gateway → WSS (WIRED, untested) |
+| MCP inbound | `/mcp` Streamable HTTP | `mcp_server.py` | External AI client → `empyralis_chat()` → direct chat path |
+
+### 3.2 The Turn Engine
+
+```
+agent_turn.py  ←── All channels converge here
+    │
+    ▼
+turn_runtime.py  ←── Execution switchboard
+    │
+    ├── direct-chat path (synchronous, in-process):
+    │   direct_chat_service.py
+    │     → direct_chat_generation_service.py  (LLM call)
+    │       → direct_chat_provider_service.py  (provider selection)
+    │       → direct_chat_prompt_service.py    (prompt assembly)
+    │       → direct_chat_context_service.py   (context building)
+    │       → direct_chat_tool_catalog_service.py  (available tools)
+    │     → direct_chat_response_service.py    (response parsing)
+    │     → direct_chat_composition_service.py (reply composition)
+    │     → direct_chat_memory_facade_service.py   (memory hooks)
+    │     → direct_chat_handoff_service.py     (agent-to-agent handoff)
+    │
+    └── durable-run path (async, persistent):
+        runs_engine.py
+          → run_service.py  (6,474 lines — orchestration)
+          → runs_execution.py  (6,046 lines — execution)
+          → runtime_policy.py  (3,885 lines — policy enforcement)
+          → local_queue.py  (4,189 lines — claims, heartbeats)
+          → runtime_run_control_service.py  (run lifecycle)
+          → runs_history.py  (persistence)
+```
+
+### 3.3 Tool Dispatch
+
+When the LLM responds with a tool call:
+
+```
+LLM response: "call tool X with args {...}"
+    │
+    ▼
+tool_broker.py  ←── Tool access gateway
+    │
+    ├── MCP tools:
+    │   mcp_registry_service.py
+    │     → invoke_workspace_mcp_skill_async()
+    │     → streamable_http → external MCP server
+    │     → return result
+    │
+    ├── Gateway tools (shell, browser, channels):
+    │   gateway_execution_service.py
+    │     → gateway_protocol_service.py
+    │     → WSS → Gateway capability-router.ts
+    │       → supervisor client (Rust daemon) OR
+    │       → browser worker (Python subprocess) OR
+    │       → personal channel runtime (GramJS/Baileys)
+    │     → return result
+    │
+    ├── VPS tools:
+    │   local_queue.py
+    │     → enqueue task → VPS worker polls → claims → executes
+    │     → HTTP heartbeat → result returned
+    │
+    └── Fleet tools (agent management):
+        fleet_tools.py
+          → fleet_list_agents, fleet_create_agent, fleet_configure_agent, etc.
+          → agent_registry_repository.py
+```
+
+### 3.4 Channel Response
+
+When the agent produces a reply:
+
+```
+Agent output (text or tool result)
+    │
+    ▼
+sage_reply_dispatcher.py  ←── Reply dispatch
+    │
+    ├── Cloud channels (Telegram Bot, Discord Bot, Slack):
+    │   channel_adapter.py → channel-specific delivery
+    │     → Telegram: Bot API sendMessage
+    │     → Discord: Interaction response / REST API
+    │     → Slack: chat.postMessage
+    │
+    ├── Gateway channels (Telegram Personal, WhatsApp Personal, etc.):
+    │   gateway_execution_service.py
+    │     → gateway_protocol_service.py
+    │     → WSS → Gateway → channel runtime → send message
+    │
+    └── Web Chat:
+        direct_chat_transport_service.py → SSE stream or HTTP response
+```
+
+### 3.5 OAuth → MCP Connector Flow
+
+```
+User clicks "Connect Gmail"
+    │
+    ▼
+connection_oauth_service.py
+    → GET /api/connections/oauth/{provider}/authorize
+    → Redirect to Google OAuth consent screen
+    → User approves
+    → Google redirects to OAuth callback
+    │
+    ▼
+connection_oauth_service.py: complete_oauth_callback()
+    → Exchange code for tokens
+    → Store tokens in vault_store.py (encrypted)
+    │
+    ▼
+_register_mcp_servers_for_provider()  [Phase U]
+    → Look up provider in APP_MCP_SERVER_MAP
+    → For each MCP endpoint:
+        mcp_registry_service.py: upsert_workspace_mcp_server_async()
+    → MCP server registered in workspace
+    │
+    ▼
+mcp_registry_service.py: discover_tools()
+    → Connect to MCP endpoint (streamable_http)
+    → Call list_tools()
+    → Store discovered tools (approved: false by default)
+    │
+    ▼
+User approves tools → skill_registry.py dispatches mcp_tool → invocation
+```
+
+### 3.6 Memory Flow
+
+```
+Agent writes memory:
+    agent_memory_tools.py: memory_write(key, value)
+      → memory_service.py
+      → unified_memory_service.py
+      → Three-tier scoping:
+          1. config — agent configuration, prompts, rules
+          2. outputs — generated content, decisions, results
+          3. private — user-specific data, credentials
+
+Agent reads memory:
+    agent_memory_tools.py: memory_read(key)
+      → memory_service.py
+      → unified_memory_service.py
+      → Returns value scoped to workspace + agent
+
+Memory list:
+    agent_memory_tools.py: memory_list()
+      → Returns all keys visible to this agent in this workspace
+```
+
+### 3.7 Gateway Connection Lifecycle
+
+```
+1. User installs Gateway binary
+2. Gateway: pair → POST /gateway/registrations (pairing token)
+3. Cloud: returns gateway_id + session token
+4. Gateway: WSS connect to cloud (outbound, TLS)
+5. Gateway: send heartbeat with capability inventory
+   → health/service-inventory.ts: probes PG, Docker, Ollama, Codex, GPU
+6. Cloud: agent turn arrives with tool call
+7. Cloud → Gateway: WSS tool.invoke frame
+8. Gateway → capability-router.ts: dispatch to executor
+   → browser / external-agent-proxy / personal-channels / supervisor
+9. Gateway → Cloud: WSS tool.result frame
+10. On disconnect: exponential backoff reconnect with outbox replay
+```
+
+### 3.8 VPS Worker Lifecycle
+
+```
+1. User installs worker on VPS
+2. Worker: HTTP poll → GET /runtime/queue/claim?worker_id=X
+3. Cloud: local_queue.py → find pending task → return claim
+4. Worker: execute → shell command or file operation
+5. Worker: HTTP heartbeat → POST /runtime/queue/heartbeat
+6. Worker: HTTP result → POST /runtime/queue/result
+7. Cloud: local_queue.py → mark complete → return result to waiting turn
+8. If heartbeat missed: task returned to queue (dead letter after N retries)
+```
+
+---
+
+## Part 4: God Objects and Fragility Points
+
+### 4.1 God Objects — Top 10 by Edge Count
+
+From `graphify-out/GRAPH_REPORT.md` (2026-07-03):
+
+| Rank | Node | Edges | What Breaks If It Changes |
+|------|------|-------|---------------------------|
+| 1 | `Communities` | 763 | Graph structure — metadata node |
+| 2 | `PATH` | 607 | **Everything.** Referenced by tests, state paths, runtime config, legacy file resolution. 80+ communities depend on it. |
+| 3 | `RunStartRequest` | 174 | All run execution — turn start, session creation, VPS claim |
+| 4 | `RunServiceTests` | 143 | Test suite for the second-largest service file (6,474 lines) |
+| 5 | `InMemoryVirtualComputerRuntime` | 132 | All virtual computer tests and simulation |
+| 6 | `AgentManifest` | 127 | Every agent definition, every registry read, every specialist |
+| 7 | `enforce_workspace_access()` | 124 | Every API route — auth wall across the entire platform |
+| 8 | `_scoped_connection()` | 123 | Every Postgres query through the control plane |
+| 9 | `runtime_state_store_decision_command()` | 114 | All state persistence authorization |
+| 10 | `_token()` | 105 | Auth token resolution — every request |
+
+**Largest files (lines):**
+
+| File | Lines | Risk |
+|------|-------|------|
+| `control_plane_repository.py` | 13,049 | **God object** — tenants, workspaces, agents, installs, migrations all in one file |
+| `run_service.py` | 6,474 | Run orchestration monolith |
+| `runs_execution.py` | 6,046 | Execution monolith |
+| `deployed_agent_service.py` | 6,037 | Deployment monolith |
+| `auth.py` | 5,796 | Auth + session + API keys + SQLite in one file |
+
+### 4.2 Import Cycles — All 19
+
+From the graphify report:
+
+**1-file self-cycles (4):**
+- `empyralis-supervisor/src/capabilities/clipboard.rs` → self
+- `legacy/frontend/shared/nav-manifest.ts` → self
+- `scripts/orion_terminal/wizard/engine.py` → self
+- `shared/nav-manifest.ts` → self
+
+**3-file cycles (15):**
+1. `gateway_execution_service.py → gateway_protocol_service.py → personal_channels_service.py → gateway_execution_service.py`
+2. `conversation_memory_policy.py → memory_service.py → memory_summary_service.py → conversation_memory_policy.py`
+3. `conversation_memory_policy.py → memory_service.py → workspace_context_memory_adapter.py → conversation_memory_policy.py`
+4. `memory_service.py → workspace_context_memory_adapter.py → unified_memory_service.py → memory_service.py`
+5. `local_queue.py → run_service.py → runtime_policy.py → local_queue.py`
+6. `local_queue.py → runtime_runs_api.py → runtime_policy.py → local_queue.py`
+7. `local_queue.py → runtime_runs_api.py → runtime_route_registration_service.py → local_queue.py`
+8. `direct_chat_tool_catalog_service.py → skills_service.py → no_provider_service.py → direct_chat_tool_catalog_service.py`
+9. `policy_service.py → skills_service.py → runs_execution.py → policy_service.py`
+10. `policy_service.py → skills_service.py → runtime_config.py → policy_service.py`
+11. `runtime_config.py → setup_sessions.py → shared.py → runtime_config.py`
+12. `runtime_common.py → runtime_config.py → setup_sessions.py → runtime_common.py`
+13. `connector_validators.py → connectors/discord_connector.py → runtime_config.py → connector_validators.py`
+14. `local_queue.py → run_service.py → runtime_attachment_service.py → local_queue.py`
+
+**4-file cycles (2):**
+15. `scripts/orion_terminal/__init__.py → app.py → flows.py → flows_shared.py → __init__.py`
+16. `auth.py → direct_tool_config_service.py → skills_service.py → gateway_protocol_service.py → auth.py`
+
+`local_queue.py` appears in 4 cycles — it's the most entangled file. `memory_service.py` and `runtime_config.py` each appear in multiple cycles.
+
+### 4.3 Isolated Nodes — 1,079 with ≤1 Connection
+
+The graph has 1,079 nodes with ≤1 connection. These are candidates for dead code, but many are dynamically called (test functions, route handlers registered via decorators). **Do not blindly delete** — each must be audited for dynamic dispatch.
+
+### 4.4 Low-Cohesion Communities (2)
+
+| Community | Cohesion | Nodes | Files |
+|-----------|----------|-------|-------|
+| Community 1 — "Agent Settings UI" | 0.02 | 251 | Frontend components: DataBadge, FormReadout, FormSelect, ListDetailPanel, SkeletonBlock, ChatMessage, AgentActionCapabilitySections |
+| Community 2 — "Run Service Management" | 0.02 | 176 | activate_live_run, approval_resolution_fingerprint, begin_run_pending_approval, assert_workflow_turn_depth_allowed |
+
+Both should be split. Community 1 is a catch-all for UI components that don't really relate. Community 2 bundles run lifecycle functions with approval and workflow functions that have weak connections.
+
+### 4.5 Inferred Edges — 1,571 at 0.61 Avg Confidence
+
+1,571 edges are inferred (not extracted from AST). At 0.61 average confidence, a significant number may be wrong. Key risk: inferred edges involving god objects (`PATH`, `enforce_workspace_access`, `_scoped_connection`) could mislead navigation.
+
+### 4.6 Thin Communities — 321 of 1,162
+
+321 communities have too few nodes or edges to be meaningful — they exist as isolated clusters in the graph. 293 are omitted from the report entirely.
+
+---
+
+## Part 5: Channel System — Truth Table
+
+### 5.1 Personal Channels (require Agent Computer Gateway)
+
+| Channel | Transport | Status | Session Owner | Routes Through Sage? | Requires Hardware? | Files |
+|---------|-----------|--------|---------------|---------------------|--------------------|-------|
+| `telegram_personal` | GramJS via Gateway WSS | **PROVEN** | `paired_gateway` | yes | yes | `gateway/channels/telegram/runtime.ts` (825 lines), `personal_channel_sage_bridge_service.py` |
+| `whatsapp_personal` | Baileys via Gateway WSS | **PROVEN** | `paired_gateway` | yes | yes | `gateway/channels/whatsapp/runtime.ts` (665 lines) |
+| `discord_personal` | discord.py bot token via Gateway | **WIRED** | `cloud_connector` ⚠️ | yes | no ⚠️ | `connectors/discord_connector.py` |
+| `signal_personal` | signal-cli bridge → Gateway WSS | **WIRED** | `paired_gateway` | partial | yes | `gateway/bridges/signal-cli-bridge.ts` (381 lines), `routes_signal.py` (DEAD) |
+| `imessage_personal` | BlueBubbles bridge → Gateway WSS | **WIRED** | `paired_gateway` | partial | yes (Mac) | `gateway/bridges/bluebubbles-bridge.ts` (422 lines), `routes_imessage.py` (DEAD) |
+| `wechat_personal` | WeChat bridge → Gateway WSS | **PLANNED** | `paired_gateway` | no | yes | `routes_wechat.py` (DEAD) |
+
+### 5.2 Business Channels (cloud-only, no hardware)
+
+| Channel | Transport | Status | Routes Through Sage? | Files |
+|---------|-----------|--------|---------------------|-------|
+| `telegram_bot` | Bot API (webhook + polling) | **PROVEN** | yes | `routes_sage_telegram_hosted.py`, `connectors/telegram_ingress_service.py` |
+| `discord_bot` | Discord HTTP Interactions | **PROVEN** | yes | `connectors/discord_connector.py`, `connectors/discord_bot_runtime_service.py` |
+| `slack` | Slack Events API + OAuth | **PROVEN** | yes | `connectors/slack_connector.py` |
+| `email_gmail` | Gmail API (OAuth) | **PARTIAL** | partial | `connectors_actions.py` (DEPRECATED), MCP bridge |
+| `email_smtp` | SMTP/IMAP | **PARTIAL** | partial | `connectors/smtp_connector.py` |
+| `whatsapp_business` | Twilio API | **BLOCKED** (nuance below) | — | Meta banned general-purpose AI assistants Jan 2026; task-specific bots (support, bookings, notifications) remain allowed |
+| `apple_messages_business` | MSP API | **PLANNED** | — | Needs Apple approval |
+| `web_chat` | WebSocket widget | **PLANNED** | — | Not implemented |
+| `teams` | Teams Bot Framework | **PLANNED** | — | Not implemented |
+| `matrix` | Matrix CS API | **PLANNED** | — | Not implemented |
+
+### 5.3 Work System Connectors (cloud-only)
+
+| Connector | Transport | Status |
+|-----------|-----------|--------|
+| `github` | GitHub API webhooks | **PROVEN** |
+| `linear` | Linear API | **PROVEN** |
+| `notion` | Notion API | **PROVEN** |
+| `dropbox` | Dropbox API | **PROVEN** |
+| `s3` | AWS SDK | **PROVEN** |
+| `smtp` | SMTP/IMAP | **PROVEN** |
+| `wechat_work` | WeChat Work webhook | **PROVEN** |
+| `instagram_business` | Facebook Graph API | **PROVEN** |
+| `microsoft_365` | Microsoft Graph API | **PARTIAL** |
+
+### 5.4 Channel Violations Summary
+
+- **Adding a channel requires touching 12+ files** — should be 1-2
+- **Frontend only shows 2 channels** (Telegram, WhatsApp) despite 27 in backend catalog
+- **Only 3 studio channels route through Sage**: `slack`, `discord`, `github`. All others return `channel_unavailable`
+- **Two `telegram_personal` paths**: Gateway (GramJS on user machine) vs Cloud Session Manager (GramJS in cloud) — no code sharing
+- **`discord_personal` metadata contradiction**: `runtime_lane: personal_gateway` but `session_owner: cloud_connector`
+
+---
+
+## Part 6: MCP/Apps Layer — Truth Table
+
+### 6.1 Fully Wired + Bridge Auto-Registers (8)
+
+These providers have OAuth → credential vault → MCP server auto-registration via `_register_mcp_servers_for_provider()` (Phase U):
+
+| App | Provider | OAuth | MCP Transport | Status |
+|-----|----------|-------|---------------|--------|
+| Gmail | google_workspace | yes | streamable_http | **WIRED** |
+| Google Calendar | google_workspace | yes | streamable_http | **WIRED** |
+| GitHub | github | yes | streamable_http | **WIRED** |
+| Notion | notion | yes | streamable_http | **WIRED** |
+| Linear | linear | yes | streamable_http | **WIRED** |
+| Slack | slack | yes | streamable_http | **WIRED** |
+| Figma | figma | yes | streamable_http | **WIRED** |
+| Dropbox | dropbox | yes | streamable_http | **WIRED** |
+
+### 6.2 Frontend + Backend Bridge Live (12)
+
+Endpoints in `APP_MCP_SERVER_MAP`, bridge wired (Phase U), frontend reads from single-source catalog API:
+
+| App | Provider | Status |
+|-----|----------|--------|
+| Calendly | calendly | **WIRED** |
+| ClickUp | clickup | **WIRED** |
+| Webflow | webflow | **WIRED** |
+| Monday.com | monday | **WIRED** |
+| Box | box | **WIRED** |
+| Confluence | confluence | **WIRED** |
+| Miro | miro | **WIRED** |
+| Intercom | intercom | **WIRED** |
+| DocuSign | docusign | **WIRED** |
+| Square | square | **WIRED** |
+| Typeform | typeform | **WIRED** |
+| Vercel | vercel | **WIRED** |
+
+### 6.3 OAuth-Only, No MCP Tools (3)
+
+| App | Provider | Status |
+|-----|----------|--------|
+| Todoist | todoist | **OAUTH_ONLY** — endpoints known, in catalog |
+| HubSpot | hubspot | **OAUTH_ONLY** — endpoints known, in catalog |
+| Jira | jira | **OAUTH_ONLY** — endpoints known, in catalog |
+
+### 6.4 OAuth-Only, No Public MCP Endpoint (1)
+
+| App | Provider | Status |
+|-----|----------|--------|
+| Microsoft 365 | microsoft_365 | **OAUTH_ONLY** — endpoint=null, no public MCP endpoint yet |
+
+### 6.5 OAuth-Only, Standard Exchange (16)
+
+canva, asana, zoom, airtable, stripe, salesforce, webhook, gitlab, and others — use `standard` token_parser.
+
+**Total:** 30 providers in catalog. Honest status per provider (live/partial/preview). Single source: `GET /api/connections/mcp-catalog`.
+
+### 6.6 Empyralis IS an MCP Server (Phase U2)
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `empyralis_list_agents` | Read | List all agents in workspace |
+| `empyralis_get_agent_activity` | Read | Recent ledger activity for a specific agent |
+| `empyralis_memory_read` | Read | Read memory entry by key |
+| `empyralis_memory_list` | Read | List all memory entries |
+| `empyralis_chat` | Read | Full turn through triage + reasoning |
+| `empyralis_create_agent` | Write (gated) | Create new specialist agent |
+| `empyralis_configure_agent` | Write (gated) | Configure agent settings |
+| `empyralis_message_agent` | Write (gated) | Send message to agent's fleet inbox |
+| `empyralis_memory_write` | Write (gated) | Write a memory entry |
+
+Auth: Bearer `empyralis_mcp_...` (SHA-256 hashed). Write tools gated behind `EMPYRALIS_MCP_WRITE_ENABLED=true`. All calls ledgered with `event_class: mcp_inbound`, `actor: external_mcp_client`.
+
+---
+
+## Part 7: Violations — The Full Catalog
+
+### 7.1 Hardcoded "I"/"my" Strings — Platform Impersonates Agent (~57 total)
+
+**Fixed (Phase T2 — 26 strings):** `triage_service.py` (1), `skill_registry.py` (11), `universal_operator.py` (14), `sage_command_dispatcher.py` classify_error leak (1). All converted to platform voice ("Heads up: ...").
+
+**Remaining (~31 strings in lower-priority paths):**
+
+| File | Count | Status |
+|------|-------|--------|
+| `sage_command_dispatcher.py` | 3 | Fixed (platform_event.py constants) |
+| `sage_reply_dispatcher.py` | 1 | Fixed (platform_event.py) |
+| `channel_execution_service.py` | 2 | Fixed (platform_event.py) |
+| `quota_response_service.py` | 3 | Fixed (platform_event.py) |
+| `autopilot_runtime_support_service.py` | 7 | **Deferred** |
+| `inventory_skill.py` | 5 | **Deferred** |
+| `agent/automation_setup_service.py` | 6 | **Deferred** |
+| `agent/user_profile_service.py` | 4 | **Deferred** |
+| `connectors/telegram_run_action_service.py` | 1 | **Deferred** |
+| `tool_broker.py` | 1 | **Deferred** |
+
+### 7.2 "Your"/"You've" Personalization (20 instances)
+
+| Location | Count | Example |
+|----------|-------|---------|
+| `sage_command_dispatcher.py:28-78` | 8 | "your main thread", "your API key", "You've reached your AI limit" |
+| `autopilot_runtime_support_service.py:135-176` | 5 | "your AI account", "your current safety settings" |
+| `entitlements_service.py:552`, `direct_chat_hosted_usage_service.py:197` | 2 | "You've reached your AI limit" |
+| `direct_chat_context_service.py:10-12` | 3 | "sage hit a temporary error" (lowercase — wrong persona) |
+| `agent_policy_context.py:74` | 1 | "Your capabilities are currently suspended..." |
+
+### 7.3 Channel Logic Bleeding into Control Plane (10)
+
+| File | Line(s) | Issue |
+|------|---------|-------|
+| `sage_agent_runtime_service.py` | 130-140 | `_COMMUNICATION_SCOPES` hardcodes channel names |
+| `sage_agent_runtime_service.py` | 158-169 | `_CONNECTOR_ROUTE_KEYWORDS` maps channel names in agent brain |
+| `sage_agent_runtime_service.py` | 170-195 | `_GATEWAY_ROUTE_KEYWORDS` has channel-specific terms |
+| `agent_channel_router.py` | 62-66 | `LOCAL_BRIDGE_PERSONAL_CHANNELS` hardcoded |
+| `personal_channel_sage_bridge_service.py` | 291-514 | 6 near-identical per-channel wrapper functions |
+| `sage_agent_runtime_service.py` | 832-836 | "my hardware", "my mac" routing tokens in agent code |
+
+### 7.4 Gateway Logic Misplaced (6)
+
+| File | Issue |
+|------|-------|
+| `gateway/capability-router.ts:38-214` | Bundles channel messaging + hardware execution in one router |
+| `gateway/capability-router.ts:73-141` | `handleToolInvoke()` mixes browser, channel, and supervisor dispatch |
+| `hardware_runtime_target_resolver.py:93-101` | `self_hosted_node` falls through to wrong label `cloud_provider` |
+| `hardware_runtime_target_resolver.py:121-128` | Gateway-offline fallback loses execution environment info |
+| `channel_lane_contract_service.py:50-56` | `discord_personal` contradicting `runtime_lane` vs `session_owner` |
+
+### 7.5 Structural Problems (8)
+
+1. `AgentTurnResponse.reply` conflates agent responses and platform errors — no flag to distinguish
+2. API contract mirrors the conflation — no `is_platform_error` field
+3. Intervention system exists but is underused — most errors use raw `reply` strings
+4. Frontend `ChannelProvider` type is hardcoded `'telegram' | 'whatsapp'`
+5. Frontend `CHANNEL_PROVIDER_DEFINITIONS` is static, not data-driven
+6. Frontend `visibleProviders` is a hardcoded array
+7. Adding a channel requires touching 12+ files
+8. Generic `build_personal_channel_reply_async()` exists but is bypassed by per-channel wrappers
+
+**Total: 75 known violations across 5 categories. 26 fixed, ~49 remaining.**
+
+---
+
+## Part 8: The Gap — Current vs Target Architecture
+
+### 8.1 Target (from Linear PLATFORM OVERVIEW, 2026-07-01)
+
+The target is ONE of each primitive:
+
+| Primitive | Target Location | Current Reality |
+|-----------|----------------|-----------------|
+| ONE Agent class | `server/agent/` | `server_modules/` — Sage + specialist + autopilot = at least 3 agent classes |
+| ONE channel router | `server/channels/router.py` | `agent_channel_router.py` + `channel_lane_contract_service.py` + `personal_channel_handler_registry.py` + `personal_channel_sage_bridge_service.py` = at least 4 routing layers |
+| ONE OAuth vault | `server/vault/` | `vault_store.py` + `connection_oauth_service.py` + `secrets_broker.py` — 3 files |
+| ONE MCP client | `server/mcp/client.py` | `mcp_registry_service.py` + `skill_registry.py` + `connectors_actions.py` (DEPRECATED) |
+| ONE session store | `server/sessions/` | `session_service.py` + `session_lifecycle_service.py` + `session_manager/` (4 files) + `thread_service.py` + `setup_sessions.py` |
+| ONE memory system | `server/memory/` | `memory_service.py` + `unified_memory_service.py` + `agent_memory_tools.py` + `conversation_memory_policy.py` + `memory_summary_service.py` |
+| ONE remote-hands protocol | `server/hardware/` | 3 adapters + `gateway_protocol_service.py` + `gateway_execution_service.py` + `hardware_runtime_target_resolver.py` + `hardware_action_broker_service.py` |
+| `server/` as THE backend | `server/` | **DOES NOT EXIST** — zero files created |
+| `legacy/` as clean reference | `legacy/frontend/` + `legacy/server_modules/` | Broad snapshot with build artifacts, not yet pruned |
+| `frontend/v2/` deleted | N/A | Still exists (build artifacts only) |
+
+### 8.2 Duplicate Implementations
+
+Each "ONE primitive" in the target currently has multiple implementations:
+
+- **Channel routing**: 4 layers (agent_channel_router, channel_lane_contract, personal_channel_handler_registry, personal_channel_sage_bridge)
+- **Agent classes**: Sage operator + fleet specialist + autopilot = 3 distinct agent types with separate code paths
+- **Session management**: 7 files spread across session_service, session_lifecycle_service, session_manager/ (4 files), thread_service
+- **Tool dispatch**: tool_broker.py + skill_registry.py + connectors_actions.py (DEPRECATED but still 2,521 lines)
+- **Memory**: 5 files with import cycles between them
+
+### 8.3 What `server/` Would Need
+
+To reach feature parity with `server_modules/`, the `server/` directory would need:
+
+- `agent/` — Sage loop, specialist service, triage, turn runtime, context building, prompt assembly
+- `channels/` — Telegram, Discord, Slack, WhatsApp, Signal, iMessage adapters + router
+- `tools/` — Tool broker, fleet tools, skill registry, MCP client, schedule_task
+- `oauth/` — Provider configs, token exchange, refresh, APP_MCP_SERVER_MAP (30 providers)
+- `memory/` — Memory service, unified memory, agent memory tools, embeddings
+- `mcp/` — MCP registry, server auth, MCP server (Empyralis as MCP)
+- `vault/` — Encrypted credential storage
+- `gateway/` — Gateway protocol, execution, pairing, health, WSS handler
+- `runtime/` — Sessions, runs engine, local queue, runtime policy, heartbeat
+- `auth/` — Authentication, billing, entitlements, quotas, workspace bootstrap
+- `connectors/` — Connector actions, manifests, validators
+- `governance/` — Policy service, safe mode, governance gate, sandbox
+
+**Estimated: ~190 files, ~275,000 lines of Python.** This is not a refactor — it's a full rewrite with a different architecture.
+
+---
+
+## Part 9: What's Missing for "One Real User"
+
+Per the platform vision: the cure for doubt is ONE real user who finds it useful enough to come back the next day.
+
+### 9.1 What Works Today
+
+- ✅ Platform boots (frontend :3000, backend :8001)
+- ✅ Preflight checks (kernel, Postgres, Redis) pass for local dev
+- ✅ 108 tests pass, 0 failures
+- ✅ Telegram bot channel (PROVEN)
+- ✅ Discord bot channel (PROVEN)
+- ✅ Slack channel (PROVEN)
+- ✅ OAuth → MCP bridge for 8 providers
+- ✅ MCP catalog API with 30 honest statuses
+- ✅ Empyralis as MCP server (9 tools, per-workspace API keys)
+- ✅ Fleet tools: create, configure, list agents
+- ✅ schedule_task for proactive agents
+- ✅ Operator/specialist agent roles with display_name
+- ✅ Platform voice: 26 "I"/"my" strings fixed
+
+### 9.2 What Blocks a Real User
+
+| Blocker | Detail | Impact |
+|---------|--------|--------|
+| **No Fleet Console UI** | Phase W not built — no UI to create/manage agents, view activity, or bind channels | User can't set up their fleet without API calls |
+| **No onboarding flow** | Wizard exists but creates a workspace only — doesn't guide through agent+channel setup | User hits a blank state after signup |
+| **Frontend channel list incomplete** | 7 channels shown (Telegram, Slack, Discord, WhatsApp, Signal, iMessage, WeChat) vs 27 in backend | User can't connect most channels from UI |
+| **~31 "I"/"my" strings remain** | Platform impersonates agent in autopilot, inventory, automation paths | User gets confused about who's talking |
+| **Rust Supervisor never compiled** | Node.js Gateway runs in dev (Telegram/WhatsApp personal PROVEN through it). Rust Supervisor binary never compiled — hardware security boundary is paper. No external user has run either. | Hardware features are spec-level |
+| **cli_subscription not built** | Spec exists, code not started. Users limited to platform_credits or BYOK API key | Limits AI provider choice |
+| **No real onboarding walkthrough** | The platform has auth + workspace creation, but no guided "create agent → bind channel → send first message → get value" flow | New user has no idea what to do |
+| **No channel health monitoring** | If a Telegram bot token expires or Discord webhook fails, no alert | Silent failures lose messages |
+| **Memory not user-visible** | Agent has memory but user can't see/edit it from UI (sage-memory-pane.tsx exists but state unknown) | User can't debug agent behavior |
+| **No production deploy** | Frontend runs on localhost:3000 — no public URL, no HTTPS, no production build | Nobody outside this machine can use it |
+
+### 9.3 Minimum Viable Onboarding
+
+To get ONE real user:
+
+1. **Build Phase W** — Fleet Console UI with agent cards, activity feed, create wizard
+2. **Deploy frontend** — production build, public URL, HTTPS
+3. **Fix channel catalog** — make frontend channel list data-driven from backend API
+4. **One end-to-end path** — create agent → bind Telegram bot → send message → get AI reply → see activity
+5. **Fix remaining impersonation strings** — at least the high-traffic ones
+
+That's the shortest path to validating with a real user.
+
+---
+
+## Appendix A: Architecture Decisions (Why It's Built This Way)
+
+These are recorded in `docs/PLATFORM.md` Section 7. Do NOT reverse without explicit instruction.
+
+1. **Channels are pure transport (pigeon theory)** — stateless shells, normalize → deliver. No routing logic in channels.
+2. **WSS reverse tunnel, not SSH** — outbound WebSocket survives NAT/firewalls. No inbound holes.
+3. **MCP over custom connectors** — adopt open standard. 30 MCP-bridge connectors vs 5 custom channel adapters.
+4. **No approval/deny flow** — agent is autonomous. Governance internalized. Hard boundaries at execution.
+5. **No "I"/"my" in platform messages** — infrastructure is not a person. Platform voice ≠ agent voice.
+6. **Dead routes preserved, not deleted** — Signal, iMessage, WeChat, Slack routes kept unmounted. One-line remount when bridges are ready.
+7. **Rust Supervisor separate from Node.js Gateway** — separate runtimes, separate blast radius. A Gateway crash can't take down safety layer.
+8. **No fallback to cheaper models** — hard stop at zero credits. Honest, not silent degradation.
+
+## Appendix B: Quick Reference — Key File Paths
+
+```
+Turn engine:        server_modules/agent_turn.py → turn_runtime.py
+Sage agent:         server_modules/sage_agent_runtime_service.py (3,417 lines)
+Tool broker:        server_modules/tool_broker.py
+MCP client:         server_modules/mcp_registry_service.py
+MCP server:         mcp_server.py (267 lines, 9 tools)
+MCP auth:           server_modules/mcp_server_auth.py
+OAuth provider map: server_modules/connection_oauth_service.py → APP_MCP_SERVER_MAP
+Fleet tools:        server_modules/fleet_tools.py
+Memory:             server_modules/memory_service.py (2,701 lines)
+Auth:               server_modules/auth.py (5,796 lines)
+Postgres:           server_modules/control_plane_repository.py (13,049 lines — LARGEST)
+Preflight:          server_modules/preflight.py (223 lines)
+Gateway (Node.js):  empyralis-gateway/src/
+Supervisor (Rust):  empyralis-supervisor/src/ (UNCOMPILED)
+Kernel (Rust CLI):  empyralis-runtime-kernel/src/
+Frontend:           frontend/app/ + frontend/lib/workspace/
+Frontend channels:  frontend/lib/workspace/workspace-channel-pairing-surface.tsx (hardcoded types)
+Shared contracts:   shared/api-contract/
+Legacy (v1 ref):    legacy/
+Graph:              graphify-out/graph.json (40MB, 28,619 nodes)
+Platform doc:       docs/PLATFORM.md (prescriptive rulebook)
+Hardware tiers:     docs/HARDWARE_TIERS.md
+CLI subscription:   docs/CLI_SUBSCRIPTION_SPEC.md (not built)
+MCP client setup:   docs/MCP_CLIENT_SETUP.md
+```
+
+## Appendix C: Test Infrastructure
+
+- **588 test files** in `server_modules/tests/`
+- **108 tests pass** in baseline (without Postgres or Rust kernel)
+- **Markers**: `@pytest.mark.blackbox_db` (needs Postgres), `@pytest.mark.kernel` (needs Rust binary)
+- **Key test files**: `test_hierarchy.py` (33), `test_direct_chat_operator_binding_service.py` (20), `test_preflight.py` (10), `test_chat_voice_integrity.py` (10), `test_mcp_server.py` (7)
+- **Conftest**: Auto-skips kernel tests when binary missing, mocks `run_runtime_kernel` for non-kernel tests, isolates state to tmp_path
+
+---
+
+## Appendix D: Complete server_modules/ File Catalog (~410 files)
+
+Organized by subsystem with verified one-line purposes. Files marked ⚠️ are pass-through stubs that exist only to prevent import errors.
+
+### D.1 Turn Engine (20 files)
+
+| File | Purpose |
+|------|---------|
+| `agent_turn.py` | **Canonical turn contract**: AgentTurnRequest dataclass, all request builders converging on turn_runtime |
+| `turn_runtime.py` | **Execution switchboard**: bridges AgentTurnRequest to direct_chat_service or run_service |
+| `turn_ingress_service.py` | **Canonical ingress facade**: the ONLY accepted boundary for starting work |
+| `sage_turn_adapter.py` | **Unified Sage ingress**: SINGLE entry point for ALL Main Agent channels |
+| `sage_agent_runtime_contract.py` | SageTurnContract, SageTurnResult, SAGE_MODE, surface normalization |
+| `sage_agent_runtime_service.py` | Runtime dispatch: wires activity ledger, specialist repo, transparency, tool broker |
+| `run_service.py` | Durable run execution services + execute_durable_turn_request |
+| `runs_engine.py` | Runs orchestration: model context, tool-loop detection, repeat-limit enforcement |
+| `runs_execution.py` | Run execution with tool dispatch: Slack/Discord/GitHub/Linear connectors |
+| `runs_core.py` | Core run creation, lifecycle management, schedule-to-run mapping |
+| `runs_delegation.py` | Run delegation between agents |
+| `runs_history.py` | Run history retrieval and archival |
+| `runs_output.py` | Run output normalization |
+| `run_execution_handle.py` | Transient runtime key blacklisting |
+| `run_state_repository.py` | Postgres-backed run state: live_runs, archive, claims, queue |
+| `sage_command_dispatcher.py` | Channel command dispatcher: EVERY active channel calls dispatch_command() |
+| `sage_reply_dispatcher.py` | SINGLE owner of ALL channel reliability logic |
+| `command_registry.py` | Single command registry — one source of truth for every /command |
+| `agent_action_metering_service.py` | Action metering: categorizes agent actions into domains with hashes |
+| `sage_transparency_service.py` | Sage/Main Agent transparency event emission |
+
+### D.2 Channel Layer (60 files)
+
+**Core abstraction:** `channel_adapter.py` (ChannelOrigin enum), `channel_transport.py` (ABC — ~30 lines to add a channel), `channel_types.py`, `channel_sdk.py`, `channel_gateway_bridge.py` (ONLY interface channels may use for Gateway), `channel_execution_service.py`, `channel_lane_contract_service.py`, `channel_platform_service.py`, `channel_preflight_service.py`, `channel_activity_service.py`, `channel_event_journal_service.py`, `channel_identity_service.py`, `channel_memory_overlay_service.py`, `channel_pairing_service.py`, `channel_concurrency_service.py` (24-thread default), `channel_blocking_policy_service.py`, `channel_user_acquisition_service.py`, `business_messaging_channel_adapter_service.py`, `channel_routing_models.py`, `channel_turn_request_service.py`, `channel_execution_quota_adapter.py`, `channel_errors.py`
+
+**Telegram (12 files):** `connectors/telegram/transport.py`, `auth.py`, `keyboard.py`, `media.py`, `webhook.py`, `connector_support.py`; `connectors/telegram_connector_services.py`, `telegram_connector_context_service.py`, `telegram_connector_poll_service.py`, `telegram_inbound_context_service.py`, `telegram_ingress_service.py`, `telegram_run_action_service.py`, `telegram_run_dispatch_service.py`, `telegram_terminal_service.py`, `sage_telegram_hosted_service.py`
+
+**Discord (3 files):** `connectors/discord_connector.py`, `connectors/discord_bot_runtime_service.py`, `discord_pairing_service.py`
+
+**WhatsApp (7 files):** `connectors/whatsapp_ingress_service.py`, `whatsapp_transport_service.py`, `whatsapp_webhook_service.py`, `whatsapp_webhook_bridge_service.py`, `whatsapp_run_dispatch_service.py`, `whatsapp_autopilot_service_registry.py`, `whatsapp_autopilot_state_service.py`
+
+**Slack (1 file):** `connectors/slack_connector.py`
+
+**Personal Channels (6 files):** `personal_channels_service.py`, `personal_channels_repository.py`, `personal_channel_handler_registry.py`, `personal_channel_sage_bridge_service.py`, `personal_channel_thread_command_service.py`, `personal_context_engine.py`
+
+**Agent Channel Router (1 file):** `agent_channel_router.py` — Path B: imports gateway services ONLY for channel delivery, not hardware dispatch
+
+**Connector Infrastructure (12 files):** `connectors/connector_runtime.py`, `connector_webhook.py`, `runtime_status_service.py`, `channel_delivery_outbox_service.py`, `channel_workspace_scope_service.py`, `connectors_actions.py`, `connectors_core.py`, `autopilot_connectors.py`
+
+**Other Connectors (6 files):** `connectors/github_connector.py`, `linear_connector.py`, `notion_connector.py`, `dropbox_connector.py`, `s3_connector.py`, `smtp_connector.py`
+
+**Connection Services (6 files):** `connector_manifests.py`, `connector_metadata.py`, `connector_validators.py`, `connection_catalog_service.py`, `connection_certification_service.py`, `connection_readiness_service.py`, `connection_verify_service.py`
+
+**Channel Routes (4 files):** `routes_connectors.py`, `routes_personal_channels.py`, `routes_sage_telegram_hosted.py`, `routes_connections.py`
+
+### D.3 Direct Chat (28 files)
+
+**Core:** `direct_chat_service.py`, `direct_chat_entry_service.py`, `direct_chat_entry_policy_service.py`, `direct_chat_context_service.py`, `direct_chat_generation_service.py`, `direct_chat_provider_service.py`, `direct_chat_provider_facade_service.py`, `direct_chat_response_service.py`, `direct_chat_prompt_service.py`, `direct_chat_routing_service.py`, `direct_chat_tool_catalog_service.py`, `direct_chat_composition_service.py`, `direct_chat_callback_facade_service.py`, `direct_chat_handoff_service.py`, `direct_chat_handoff_facade_service.py`, `direct_chat_transport_service.py`, `direct_chat_memory_facade_service.py`, `direct_chat_metadata_service.py`
+
+**Operator:** `direct_chat_operator_binding_service.py`, `direct_chat_operator_support_service.py`, `direct_chat_support_binding_service.py`
+
+**Other:** `direct_chat_availability_service.py`, `direct_chat_intervention_service.py`, `direct_chat_hosted_usage_service.py`
+
+**Streaming (4 files):** `direct_chat_stream_runtime_service.py`, `direct_chat_stream_response_service.py`, `direct_chat_stream_state_service.py`, `direct_chat_stream_transport_service.py`
+
+**Runtime Facade (4 files):** `direct_chat_runtime_service.py`, `direct_chat_runtime_facade_service.py`, `direct_chat_runtime_entry_facade_service.py`, `direct_chat_runtime_exports.py`
+
+**Direct Tool (4 files):** `direct_tool_execution_service.py`, `direct_tool_config_service.py`, `direct_tool_loop_guard_service.py`, `direct_tool_runtime_facade_service.py`
+
+### D.4 Runtime / Session / Runs (42 files)
+
+**Runtime Core:** `runtime_config.py`, `runtime_common.py`, `runtime_models.py`, `runtime_policy.py`, `runtime_status.py`, `runtime_events.py`, `runtime_events_api.py`, `runtime_state_store.py`, `runtime_attachment_service.py`, `runtime_heartbeat_service.py`, `runtime_history_service.py`, `runtime_lane_queue.py`, `runtime_usage_service.py`, `runtime_workspace_service.py`, `runtime_webhook_trigger_service.py`, `runtime_request_service.py`, `runtime_local_execution_approval_service.py`
+
+**Runtime Routes:** `runtime_route_bootstrap_service.py`, `runtime_route_registration_service.py`, `runtime_route_registry_service.py`, `runtime_route_request_handlers_service.py`, `runtime_route_run_handlers_service.py`
+
+**Runtime Runs:** `runtime_run_access_service.py`, `runtime_run_control_service.py`, `runtime_run_detail_service.py`, `runtime_run_entry_service.py`, `runtime_run_query_service.py`, `runtime_run_replay_service.py`, `runtime_run_resume_service.py`, `runtime_run_delegation_service.py`
+
+**Runtime API:** `runtime_runs_api.py`, `runtime_runtime_api.py`, `routes_runs.py`
+
+**Session Management (10 files):** `session_service.py`, `session_lifecycle_service.py`, `session_diagnostics_service.py`, `session_transcript_store.py`, `setup_sessions.py`, `session_manager/manager.py`, `session_manager/actor_queue.py`, `session_manager/types.py`, `session_manager/runtime_cache.py`, `session_manager/observability.py`
+
+### D.5 Gateway / Hardware (28 files)
+
+**Gateway (16 files):** `gateway_protocol_service.py` (WSS connections, frame routing), `gateway_execution_service.py` (tool dispatch to Agent Computers), `gateway_contracts.py`, `gateway_registry_service.py`, `gateway_state_repository.py`, `gateway_activity_service.py`, `gateway_health_service.py`, `gateway_inventory_service.py`, `gateway_approval_service.py` ⚠️ (pass-through stub), `gateway_pairing_service.py`, `gateway_quota_enforcement.py`, `gateway_transparency_service.py`, `gateway_browser_service.py`, `gateway_browser_runtime.py`, `routes_gateway.py`
+
+**Hardware (10 files):** `hardware_action_broker_service.py`, `hardware_access_policy_service.py`, `hardware_activity_event_service.py`, `hardware_result_correlator_service.py`, `hardware_runtime_session_service.py`, `hardware_runtime_target_resolver.py`, `hardware_runtime_adapters/cloud_computer_adapter.py`, `hardware_runtime_adapters/gateway_adapter.py`, `hardware_runtime_adapters/self_hosted_node_adapter.py`, `hardware_runtime_adapters/common.py`
+
+**Agent Computer (6 files):** `agent_computer_policy_service.py`, `agent_computer_profile_service.py`, `agent_computer_surface_service.py`, `agent_computer_permission_secret_model.py`, `sage_agent_computer_selection_service.py`, `dedicated_workstation_setup_service.py`
+
+### D.6 Memory (17 files)
+
+`memory_service.py` (THE public API), `agent_memory.py` (private implementation), `agent_memory_tools.py` (3 tools: read/write/search), `unified_memory_service.py` (8-layer architecture), `memory_contracts.py`, `memory_summary_service.py`, `conversation_memory_facade_service.py`, `conversation_memory_policy.py`, `conversation_compaction.py`, `compaction_service.py`, `workspace_context_memory_adapter.py`, `semantic_runtime_memory_adapter.py`, `deployed_agent_memory_service.py`, `deployed_channel_memory_adapter.py`, `sage_memory_service.py`, `sage_memory_api.py`
+
+### D.7 MCP / OAuth (6 files)
+
+`mcp_registry_service.py` (MCP server registry, tool discovery, streamable_http), `mcp_server_auth.py` (per-workspace API keys, SHA-256), `connection_oauth_service.py` (OAuthProviderConfig, token exchange, APP_MCP_SERVER_MAP), `google_drive_api.py`, `google_workspace_cli.py`, `microsoft_365_graph.py`
+
+### D.8 Billing / Quota / Credits (16 files)
+
+`billing_service.py` (Stripe), `billing_credit_config.py`, `credit_ledger_contract.py`, `ledger_audit.py`, `durable_quota_store.py`, `quota_policy_service.py`, `quota_response_service.py`, `request_window_quota_adapter.py`, `deployed_agent_daily_quota_adapter.py`, `deployed_agent_rate_limit_service.py`, `deployed_agent_cost_cap_service.py`, `usage_accounting_service.py`, `usage_reporting.py`, `entitlements_service.py`, `pricing_registry_service.py`, `routes_billing.py`, `virtual_computer_billing_hook.py`
+
+### D.9 Governance / Safety (22 files)
+
+`unified_governance_gate.py` (single mandatory choke point), `kill_switch_gate.py` (emergency stop), `safe_mode_service.py` (scoped incident control), `policy_service.py`, `policy_presets.py`, `agent_policy_context.py` (internalized governance in system prompt), `execution_mode_policy.py`, `hybrid_policy_service.py`, `egress_policy.py`, `failure_policy_service.py`, `safety_error_contract.py`, `computer_action_safety.py`, `external_content_guard.py`, `external_write_safety.py`, `external_user_privacy_service.py`, `response_leak_guard_service.py`, `secret_redaction_service.py`, `file_mount_security.py`, `url_security.py`, `healthguide_safety_service.py`, `capability_risk_classifier_service.py`, `security_audit_service.py`, `transparency_settings_service.py`
+
+### D.10 Agent Registry / Deployed Agents (18 files)
+
+`agent_registry_api.py`, `agent_registry_models.py`, `agent_registry_repository.py`, `agent_specialist_repository.py`, `agent_manifest.py`, `agent_workspace_api.py`, `deployed_agent_service.py` (full lifecycle), `deployed_agent_config_schema.py`, `deployed_agent_runtime_contract_service.py`, `deployed_agent_virtual_runtime_service.py`, `deployed_agent_admin_dashboard_service.py`, `deployed_agent_analytics_service.py`, `deployed_agent_business_insights_service.py`, `deployed_agent_marketplace_service.py`, `deployed_agent_test_turn_service.py`, `deployed_agent_transparency_service.py`, `routes_agents.py`, `routes_deployed_agents.py`, `routes_marketplace.py`
+
+### D.11 Sage Services (16 files)
+
+`sage_chat_api.py`, `sage_profile_service.py`, `sage_profile_api.py`, `sage_services_service.py`, `sage_services_api.py`, `sage_skills_api.py`, `sage_context_files_api.py`, `sage_heartbeat_service.py`, `sage_heartbeat_api.py`, `sage_daily_operator_service.py`, `sage_dreaming_pipeline.py`, `sage_instruction_compiler_service.py`, `sage_doctor_service.py`, `sage_proof_log_service.py`, `routes_studio.py`, `routes_health.py`
+
+### D.12 Infrastructure / Cross-Cutting (~130 files)
+
+**Auth (4 files):** `auth.py` (5,796 lines — email/password, JWT, sessions, API keys), `client_identity_service.py`, `jwt_secret.py`, `account_shell_service.py`, `routes_auth.py`
+
+**Database (3 files):** `db.py` (asyncpg pooling), `control_plane_repository.py` (13,049 lines — GOD OBJECT), `sqlite_helpers.py`
+
+**State (2 files):** `state_paths.py`, `acp_manager.py` (ACP protocol v1.0)
+
+**Vault/Secrets (3 files):** `vault_store.py`, `vault_helpers.py`, `vault_migration_stage4b.py`, `secrets_broker.py`
+
+**Provider/Model (6 files):** `provider_profiles.py` (4,289 lines), `provider_catalog_service.py`, `model_router.py`, `multimodal_provider_service.py`, `no_provider_service.py`, `empyralis_model_tier_contract.py`, `empyralis_model_tier_routing_service.py`
+
+**Tools (8 files):** `tool_broker.py`, `tool_broker_guard_service.py`, `tool_registry_service.py` (keyword-searchable, 8 always-visible tools), `tool_availability_truth.py`, `tools_http.py`, `tools_image_gen.py`, `web_tools.py`, `fleet_tools.py` (5 operator-only tools + schedule_task)
+
+**Skills (10 files):** `skills_registry.py`, `skills_service.py`, `skill_registry.py`, `skill_scanner.py`, `capability_registry.py`, `installed_skills.py`, `installed_solutions.py`, `inventory_skill.py`
+
+**Workflows (5 files):** `workflow_api.py`, `workflow_repository.py`, `workflow_service.py`, `demo_workflows.py`, `routes_workflows.py`, `automation_intents.py`
+
+**Apps/Mini-Apps/Builder (10 files):** `app_bridge_service.py`, `app_registry_api.py`, `mini_apps_service.py`, `mini_app_host_service.py`, `mini_app_invoke_service.py`, `mini_app_token_exchange_service.py`, `builder_runtime_mapping.py`, `builder_schema.py`, `studio_app_boundary_service.py`, `studio_proof_agent_seed_service.py`, `routes_builder.py`, `connected_external_agent_service.py`
+
+**Workspace (8 files):** `workspace_context.py`, `workspace_scope.py`, `workspace_config_schema.py`, `workspace_admin_service.py`, `workspace_ai_route_service.py`, `workspace_bootstrap_service.py`, `workspace_channel_operations_service.py`, `routes_workspaces.py`
+
+**Telemetry/Observability (14 files):** `telemetry.py`, `logging_config.py`, `error_notification.py` (single source for every channel), `error_contracts.py`, `error_response_service.py`, `platform_event.py` (PlatformEvent constants), `activity_ledger_service.py`, `agent_trace_service.py`, `agent_transparency_events.py`, `transparency_event_store_service.py`, `transcript_events_service.py`, `transcript_internal_markup_migration.py`, `routes_agent_traces.py`, `notification_service.py`, `agent_completion_notification_service.py`
+
+**Platform/Config/Misc (~25 files):** `shared.py` (global state, all process-local caches), `schemas.py` (all Pydantic models), `config_loader.py`, `config_defaults_service.py`, `platform_config_schema.py`, `api_contract.py`, `preflight.py`, `llm_task.py`, `idempotency.py`, `local_queue.py` (4,189 lines), `local_tool_executor.py`, `outbox_service.py`, `worker_dispatch_service.py`, `bounded_scheduler_service.py`, `execution_router.py`, `execution_sandbox_service.py`, `docker_execution_sandbox.py`, `file_bridge_service.py`, `universal_operator.py`, `internal_tool_markup_service.py`, `browser_checkpoint_service.py`, `browser_engine.py`, `hosted_secure_worker.py`, `blackbox_runtime_support.py`, `cli_companion_service.py`, `machine_capability_check.py`, `machine_lease_service.py`, `cloud_cutover_config.py`, `vps_provisioning_service.py`, `virtual_computer_runtime.py`, `voice_notification_policy_service.py`, `office_ooxml.py`, `attachment_utils.py`, `artifact_service.py`, `template_compiler_service.py`, `triage_service.py`, `rust_runtime_kernel_client.py`, `specialist_service.py`, `profile_api.py`, `public_bot_drill_support.py`, `outcome_packs.py`, `customer_ops_pack.py`, `thread_service.py`, `discovery_feed_service.py`, `marketplace_distribution_service.py`, `product_catalog_live_data_service.py`, `shop_assistant_revenue_agent_service.py`, `calorie_tracking_service.py`, `flashcards_tracking_service.py`, `health_core.py`, `health_diagnostics.py`, `doctor_gate.py`, `doctor_report.py`, `routes_doctor.py`, `routes_platform_analytics.py`, `platform_analytics_service.py`
+
+**Pilot (4 files):** `pilot_invite_service.py`, `pilot_operations_service.py`, `pilot_proof_service.py`, `routes_pilot.py`
+
+**Plugin System (4 files):** `plugin_system/hook_points.py`, `plugin_system/hook_registry.py`, `plugin_system/plugin_base.py`
+
+**Agent Layer (6 files):** `agent/action_service.py`, `agent/routing_service.py`, `agent/menu_content_service.py`, `agent/automation_setup_service.py`, `agent/space_monitoring_service.py`, `agent/user_profile_service.py`
+
+### D.13 Pass-Through Stubs (⚠️ exist only to prevent import errors)
+
+| File | Status |
+|------|--------|
+| `approval_contracts.py` | Pass-through stub — observability via activity_ledger_service |
+| `browser_approval_service.py` | Pass-through stub — observability via activity_ledger_service |
+| `gateway_approval_service.py` | Pass-through stub — all checks return approved/empty |
+| `computer_control.py` | DEPRECATED — must use gateway execution path |
+| `supervisor_client.py` | DEPRECATED — must route through gateway execution path |
+| `runs_engine.py` (lines 6-10) | Phase 3 stubs: _approval_correlation_id, _append_approval_audit are no-ops |
+
+### D.14 File Counts by Subsystem
+
+| Subsystem | Files |
+|-----------|-------|
+| Turn Engine | 20 |
+| Channel Layer | 60 |
+| Direct Chat | 28 |
+| Runtime / Session / Runs | 42 |
+| Gateway / Hardware | 28 |
+| Memory | 17 |
+| MCP / OAuth | 6 |
+| Billing / Quota / Credits | 16 |
+| Governance / Safety | 22 |
+| Agent Registry / Deployed | 18 |
+| Sage Services | 16 |
+| Infrastructure / Cross-Cutting | ~130 |
+| Pass-Through Stubs | 6 |
+| **TOTAL** (non-test source files) | **~410** |
