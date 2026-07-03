@@ -6,7 +6,9 @@ of truth — no hardcoded lists. The owner can override by marking tools as
 customer_facing.
 
 PRESETS (defined in agent_presets.py):
-  - customer_facing: serve-only, 8-tool set, audience instructions ON
+  - customer_facing: serve-only, 8-tool set (task_complete, memory_search,
+    memory_read, memory_get, web__search, web__fetch, sage_service__list_state,
+    memory_list_versions), audience instructions ON
   - internal_assistant: owner-only toolset, no audience exposure
   - operator: Sage-class, fleet tools, owner sessions only
 

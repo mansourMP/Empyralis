@@ -23,8 +23,9 @@ AGENT_PRESETS: Dict[str, Dict[str, Any]] = {
         "label": "Customer-Facing",
         "description": (
             "Serve-only agent for public and audience channels. "
-            "Can reply, search memory (read-only), look up information, "
-            "and check status. No shell, hardware, fleet, memory write, "
+            "8-tool concierge set: task_complete, memory_search/read/get, "
+            "web__search, web__fetch, sage_service__list_state, "
+            "memory_list_versions. No shell, hardware, fleet, memory write, "
             "or connector write access."
         ),
         "triage_enabled": True,

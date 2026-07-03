@@ -6,22 +6,13 @@ import { useRouter } from "next/navigation";
 import {
   Bot,
   MessageSquare,
-  Zap,
-  Circle,
   Clock,
   AlertCircle,
   ChevronRight,
   Activity,
-  Wifi,
   WifiOff,
   Cloud,
   Server,
-  Home as HomeIcon,
-  Layers,
-  Cpu,
-  HardDrive,
-  Brain,
-  CreditCard,
   Radio,
 } from "lucide-react";
 import { useFleetAgents } from "./fleet-data";
@@ -45,20 +36,9 @@ function runtimeIcon(target: string) {
   return RUNTIME_ICON.cloud;
 }
 
-const PRIMARY_RAIL_ITEMS = [
-  { id: "home", label: "Home", icon: <HomeIcon size={18} />, route: "fleet" },
-  { id: "agents", label: "Agents", icon: <Bot size={18} />, route: "agents" },
-  { id: "channels", label: "Channels", icon: <Radio size={18} />, route: "channels" },
-  { id: "connectors", label: "Connectors", icon: <Layers size={18} />, route: "integrations" },
-  { id: "hardware", label: "Hardware", icon: <Cpu size={18} />, route: "hardware" },
-  { id: "memory", label: "Memory", icon: <Brain size={18} />, route: "memory" },
-  { id: "billing", label: "Billing", icon: <CreditCard size={18} />, route: "settings" },
-];
-
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
   const { agents, loading, error } = useFleetAgents(workspaceId);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [activeRailItem, setActiveRailItem] = useState("home");
   const router = useRouter();
 
   const sageAgent = agents.find((a) => a.role === "sage" || a.label?.toLowerCase().includes("sage"));
@@ -67,21 +47,18 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   // ── Empty State ──
   if (!loading && agents.length === 0 && !error) {
     return (
-      <div className="fleet-layout">
-        <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} workspaceId={workspaceId} />
-        <div className="fleet-content fleet-empty">
-          <div className="fleet-empty-state">
-            <Bot size={48} strokeWidth={1} />
-            <h2>No agents yet</h2>
-            <p>Ask Sage to create your first one</p>
-            <button
-              className="fleet-btn fleet-btn-primary"
-              onClick={() => router.push(`/w/${workspaceId}/chat`)}
-            >
-              <MessageSquare size={16} />
-              Open Sage Chat
-            </button>
-          </div>
+      <div className="fleet-content fleet-empty">
+        <div className="fleet-empty-state">
+          <Bot size={48} strokeWidth={1} />
+          <h2>No agents yet</h2>
+          <p>Ask Sage to create your first one</p>
+          <button
+            className="fleet-btn fleet-btn-primary"
+            onClick={() => router.push(`/w/${workspaceId}/chat`)}
+          >
+            <MessageSquare size={16} />
+            Open Sage Chat
+          </button>
         </div>
       </div>
     );
@@ -90,24 +67,18 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   // ── Error State ──
   if (error && agents.length === 0) {
     return (
-      <div className="fleet-layout">
-        <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} workspaceId={workspaceId} />
-        <div className="fleet-content fleet-empty">
-          <div className="fleet-empty-state">
-            <AlertCircle size={48} strokeWidth={1} />
-            <h2>Could not load agents</h2>
-            <p>{error}</p>
-          </div>
+      <div className="fleet-content fleet-empty">
+        <div className="fleet-empty-state">
+          <AlertCircle size={48} strokeWidth={1} />
+          <h2>Could not load agents</h2>
+          <p>{error}</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="fleet-layout">
-      {/* ── Primary Rail (persistent, never swaps) ── */}
-      <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} workspaceId={workspaceId} />
-
+    <>
       {/* ── Content: Agent Cards ── */}
       <div className="fleet-content">
         <div className="fleet-header">
@@ -158,46 +129,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
           onClose={() => setSelectedAgentId(null)}
         />
       )}
-    </div>
-  );
-}
-
-function PrimaryRail({
-  active,
-  onSelect,
-  workspaceId,
-}: {
-  active: string;
-  onSelect: (id: string) => void;
-  workspaceId: string;
-}) {
-  const router = useRouter();
-  return (
-    <nav className="fleet-rail">
-      <div className="fleet-rail-brand">
-        <Zap size={20} />
-      </div>
-      <div className="fleet-rail-items">
-        {PRIMARY_RAIL_ITEMS.map((item) => (
-          <button
-            key={item.id}
-            className={`fleet-rail-item ${active === item.id ? "fleet-rail-item--active" : ""}`}
-            onClick={() => {
-              onSelect(item.id);
-              const route = item.route || item.id;
-              if (route === "fleet") {
-                router.push(`/w/${encodeURIComponent(workspaceId)}/fleet`);
-              } else {
-                router.push(`/w/${encodeURIComponent(workspaceId)}/${route}`);
-              }
-            }}
-            title={item.label}
-          >
-            {item.icon}
-          </button>
-        ))}
-      </div>
-    </nav>
+    </>
   );
 }
 

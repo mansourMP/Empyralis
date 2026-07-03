@@ -26,7 +26,7 @@ async def fleet_agents(
         result = await fleet_list_agents(
             actor_id="fleet_ui",
             workspace_id=workspace_id,
-            tenant_id="system",
+            tenant_id="default",
         )
         return result
     except Exception as exc:

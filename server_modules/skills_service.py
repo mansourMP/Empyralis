@@ -915,6 +915,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["filename"],
             },
+            audience_safe=True,
+            audience_note="Safe: read-only version history. Cannot modify or rollback memory.",
         ),
         ToolDescriptor(
             tool_name="memory_rollback_version",
@@ -940,6 +942,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             action_id="search",
             description="Search the web and return the top 5 results with titles, URLs, and snippets.",
             parameters={"type": "object", "properties": {"query": {"type": "string", "description": "The search query to run."}}, "required": ["query"]},
+            audience_safe=True,
+            audience_note="Safe: read-only public web search. Cannot access private data or workspace internals.",
         ),
         ToolDescriptor(
             tool_name="web__fetch",
@@ -948,6 +952,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             action_id="fetch",
             description="Fetch a webpage and extract readable text from it.",
             parameters={"type": "object", "properties": {"url": {"type": "string", "description": "The URL to fetch."}}, "required": ["url"]},
+            audience_safe=True,
+            audience_note="Safe: read-only public web page fetch. Cannot access private data or workspace internals.",
         ),
         ToolDescriptor(
             tool_name="llm__task",
@@ -1022,6 +1028,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["service_id"],
             },
+            audience_safe=True,
+            audience_note="Safe: read-only service state lookup. Customer can check their own service data.",
         ),
         ToolDescriptor(
             tool_name="sage_service__update_profile",

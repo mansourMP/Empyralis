@@ -254,6 +254,7 @@ async def fleet_list_agents(
         installs = await repo.list_workspace_agent_installs(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
+            include_master=True,
         )
     except Exception as exc:
         return {"ok": False, "error": str(exc), "agents": []}
