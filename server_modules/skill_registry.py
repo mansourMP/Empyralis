@@ -52,7 +52,7 @@ class SkillDefinition:
 async def _manual_skill_stub(*, goal: str, agent_label: str, skill_label: str, **_: Any) -> dict[str, Any]:
     return {
         "status": "manual",
-        "reply": f"{agent_label} recognizes that this request needs {skill_label}, but that skill is still waiting for a live adapter.",
+        "reply": f"Heads up: {skill_label} is not wired to a live execution path yet.",
         "artifact": None,
         "steps": [
             {"label": "Resolving skill requirement", "detail": goal, "status": "done", "kind": "thinking"},
@@ -112,12 +112,12 @@ def _search_url_from_goal(goal: str) -> str:
 
 def _build_search_reply(agent_label: str, goal: str, results: list[dict[str, str]]) -> str:
     if not results:
-        return f"{agent_label} searched the public web for '{goal}' but did not find a confident result set."
+        return f"Heads up: web search for '{goal}' returned no confident results."
     top = results[0]
     title = str(top.get("title") or top.get("url") or "Top result").strip()
     snippet = str(top.get("snippet") or "").strip()
     source = str(top.get("url") or "").strip()
-    reply = f"{agent_label} found public sources for '{goal}'. Top result: {title}."
+    reply = f"Heads up: found public sources for '{goal}'. Top result: {title}."
     if snippet:
         reply += f" {snippet}"
     if source:
@@ -160,7 +160,7 @@ async def _live_web_search(
     if not query:
         return {
             "status": "no_query",
-            "reply": f"{agent_label} needs a search query before it can use Web Search.",
+            "reply": f"Heads up: a search query is required for Web Search.",
             "artifact": None,
             "steps": [
                 {"label": "Resolving public research request", "detail": "Missing query", "status": "error", "kind": "thinking"},
@@ -208,7 +208,7 @@ async def _live_browser_skill(
     preview = str(observation.get("text") or "").strip()
     current_url = str(observation.get("url") or navigation.get("url") or target_url).strip()
     title = str(observation.get("title") or navigation.get("title") or current_url).strip()
-    reply = f"{agent_label} opened {title or current_url}."
+    reply = f"Heads up: opened {title or current_url}."
     if preview:
         reply += f" Preview: {preview[:320].strip()}"
     return {
@@ -285,7 +285,7 @@ async def _execute_handler_skill(
     if completed.returncode != 0:
         return {
             "status": "error",
-            "reply": f"{agent_label} could not execute {definition.label} right now.",
+            "reply": f"Heads up: could not execute {definition.label} right now.",
             "artifact": None,
             "steps": [
                 {"label": "Resolving skill handler", "detail": definition.id, "status": "done", "kind": "thinking"},
@@ -375,7 +375,7 @@ async def _bundled_skill_executor(
                 tenant_id=tenant_id,
             )
             if result and isinstance(result, dict):
-                reply = str(result.get("reply") or result.get("output") or f"{agent_label} completed {skill_id}.")
+                reply = str(result.get("reply") or result.get("output") or f"Heads up: completed {skill_id}.")
                 return {
                     "status": "ok",
                     "reply": reply,
@@ -390,7 +390,7 @@ async def _bundled_skill_executor(
         # Fallback: tool dispatch not available — return manual stub with tool hint
         return {
             "status": "manual",
-            "reply": f"{agent_label} would use {tool_name} for this, but tool dispatch is not available in this environment.",
+            "reply": f"Heads up: {tool_name} requires tool dispatch which is not available in this environment.",
             "artifact": None,
             "steps": [
                 {"label": f"Resolving {skill_id}", "detail": goal, "status": "done", "kind": "thinking"},
@@ -412,7 +412,7 @@ async def _bundled_skill_executor(
     if prompt_content:
         return {
             "status": "ok",
-            "reply": f"{agent_label} loaded the {skill_id} skill context.",
+            "reply": f"Heads up: loaded the {skill_id} skill context.",
             "artifact": {
                 "label": f"{skill_id} skill prompt",
                 "kind": "skill-context",
@@ -442,7 +442,7 @@ async def _live_memory_skill(
         text = memory_service.get_memory(workspace_id) or "No memory facts stored yet."
         return {
             "status": "ok",
-            "reply": f"{agent_label} loaded the current memory context.",
+            "reply": f"Heads up: loaded the current memory context.",
             "artifact": {
                 "label": "Memory context",
                 "kind": "memory-snapshot",
@@ -954,7 +954,7 @@ async def execute_skill(
     if not definition.enabled:
         return {
             "status": "disabled",
-            "reply": f"{agent_label} recognizes that this request needs {definition.label}, but that skill is disabled for this workspace.",
+            "reply": f"Heads up: {definition.label} is disabled for this workspace.",
             "artifact": None,
             "steps": [
                 {"label": "Resolving skill registry", "detail": definition.id, "status": "done", "kind": "thinking"},
@@ -966,7 +966,7 @@ async def execute_skill(
         detail = str(definition.unavailable_reason or f"{definition.label} is not available in this environment.").strip()
         return {
             "status": "unavailable",
-            "reply": f"{agent_label} can use {definition.label}, but it is not ready here yet. {detail}",
+            "reply": f"Heads up: {definition.label} is not ready. {detail}",
             "artifact": None,
             "steps": [
                 {"label": "Resolving skill registry", "detail": definition.id, "status": "done", "kind": "thinking"},
@@ -1031,7 +1031,7 @@ async def execute_skill(
                 if prompt_content:
                     return {
                         "status": "ok",
-                        "reply": f"{agent_label} loaded the {definition.label} skill context.",
+                        "reply": f"Heads up: loaded the {definition.label} skill context.",
                         "artifact": {
                             "label": f"{definition.label} skill prompt",
                             "kind": "skill-context",

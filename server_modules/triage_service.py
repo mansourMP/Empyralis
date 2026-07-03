@@ -272,10 +272,10 @@ async def dispatch_out_of_scope(
         return {"action": "escalate_to_owner", "reply": None}
 
     # polite_decline (default)
+    # polite_decline (default) — platform voice, never agent first-person
     reply = (
-        f"{agent_label} can't help with this request — it's outside my "
-        f"configured scope. If you think this is a mistake, the workspace "
-        f"owner can adjust my scope settings."
+        f"Heads up: this request is outside {agent_label}'s configured scope. "
+        f"The workspace owner can adjust the scope settings if this is a mistake."
     )
     await _ledger_triage(
         workspace_id=workspace_id,

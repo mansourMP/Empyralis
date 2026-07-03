@@ -466,6 +466,7 @@ DEFAULT_AGENT_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "slug": "fleet-specialist",
         "name": "Fleet Specialist",
+        "display_name": None,  # null — agent will ask owner for a name
         "description": "A specialist agent created via the fleet management tools. Configurable by operators.",
         "category": "System",
         "icon": "bot",
@@ -473,7 +474,11 @@ DEFAULT_AGENT_DEFINITIONS: List[Dict[str, Any]] = [
         "visibility": "private",
         "manifest": {
             "template_kind": "specialist",
-            "default_prompt": "You are a specialist agent managed by the workspace operator. Follow your instructions and stay within policy.",
+            "default_prompt": (
+                "You are a new assistant in this workspace. Introduce yourself briefly and ask "
+                "the owner what they would like to call you. Once they choose a name, use "
+                "fleet_configure_agent to save your display_name."
+            ),
         },
         "capability_manifest": {
             "summary": ["general_purpose"],
@@ -491,6 +496,7 @@ DEFAULT_AGENT_DEFINITIONS: List[Dict[str, Any]] = [
 DEFAULT_MASTER_AGENT_DEFINITION: Dict[str, Any] = {
     "slug": "sage",
     "name": "Sage",
+    "display_name": "Sage",
     "description": "The central Life OS orchestrator for this workspace. Sage owns the primary relationship, planning loop, delegation graph, and universal memory.",
     "category": "System",
     "icon": "sparkles",
@@ -498,7 +504,7 @@ DEFAULT_MASTER_AGENT_DEFINITION: Dict[str, Any] = {
     "visibility": "private",
     "manifest": {
         "template_kind": "master_orchestrator",
-        "default_prompt": "You are Sage, the master agent for this workspace. Own the user relationship, maintain universal context, plan carefully, delegate to installed specialists, and stay inside policy.",
+        "default_prompt": "You are the master agent for this workspace. Own the user relationship, maintain universal context, plan carefully, delegate to installed specialists, and stay inside policy.",
     },
     "capability_manifest": {
         "summary": ["planning", "delegation", "universal_memory"],

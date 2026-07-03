@@ -70,9 +70,9 @@ def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
     SINGLE source of truth for error classification — all channels use
     this ONE function.  Returns one of the five SAGE_*_REPLY constants.
 
-    When *raw_error* is non-empty, it is appended as a second line::
-
-        ↳ {raw_error}
+    *raw_error* is accepted for backward compatibility but is NOT appended
+    to the chat reply — raw error details belong in logs, not the chat
+    surface.  The classified base message is always in platform voice.
 
     Five specific buckets, checked in order:
 
@@ -82,6 +82,9 @@ def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
     4. Provider unreachable → SAGE_PROVIDER_UNREACHABLE_REPLY
     5. Catch-all          → SAGE_ERROR_REPLY
     """
+    if raw_error:
+        import logging
+        logging.getLogger(__name__).debug("classify_error raw: %s", raw_error)
     if not error_text:
         base = SAGE_ERROR_REPLY
     else:
@@ -113,8 +116,6 @@ def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
         else:
             base = SAGE_ERROR_REPLY
 
-    if raw_error:
-        return base + "\n↳ " + str(raw_error)
     return base
 
 

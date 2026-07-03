@@ -49,13 +49,13 @@ def _policy_text(manifest: AgentManifest) -> str:
 def _direct_reply(manifest: AgentManifest, goal: str) -> str:
     normalized = str(goal or "").strip()
     if not normalized:
-        return f"{manifest.identity.name} is ready."
+        return "Heads up: agent is ready."
     if re.search(r"\b(refund|discount|legal|privacy)\b", normalized, re.IGNORECASE):
-        return "This request should stay in Owner Mode so the final decision follows the agent policy and approval boundary."
+        return "Heads up: this request should stay in Owner Mode so the final decision follows the agent policy and approval boundary."
     if re.search(r"\b(order|book|schedule|charge)\b", normalized, re.IGNORECASE):
-        return "One clarifying detail is needed before taking that action, to stay within the owner policy."
+        return "Heads up: one clarifying detail is needed before taking that action, to stay within the owner policy."
     return (
-        f"{manifest.identity.name} is operating from its owner-authored Bible. "
+        "Heads up: this agent operates from its owner-authored Bible. "
         "Direct answers are available when the request stays inside that context, or a bound skill can be used when live business facts are required."
     )
 
@@ -72,64 +72,62 @@ def _tool_broker_denial_reply(
 ) -> str:
     if error.code == "skill_not_granted":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but the owner has not bound that skill to this manifest yet."
+            f"Heads up: {needed_skill.label} is not available — "
+            "the owner has not bound that skill to this agent yet."
         )
     if error.code == "elevated_action_blocked":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but that capability is not available in the current safety mode. "
+            f"Heads up: {needed_skill.label} is not available in the current safety mode. "
             "Switch to a less restrictive mode or rephrase the request."
         )
     if error.code == "skill_disabled":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but that skill is disabled for this workspace right now."
+            f"Heads up: {needed_skill.label} is disabled for this workspace right now."
         )
     if error.code == "connector_scope_not_granted":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but the required connector scope is not currently authorized for this run."
+            f"Heads up: {needed_skill.label} is not available — "
+            "the required connector scope is not currently authorized for this run."
         )
     if error.code == "connector_disabled":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but the required connector is disabled by a security control."
+            f"Heads up: {needed_skill.label} is not available — "
+            "the required connector is disabled by a security control."
         )
     if error.code in {"workspace_paused", "workspace_draining", "workspace_rejected"}:
-        return "This workspace is temporarily under an operator incident control and cannot process this request right now."
+        return "Heads up: this workspace is temporarily under an operator incident control and cannot process this request right now."
     if error.code == "connector_paused":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but the required connector is temporarily paused by an operator incident control."
+            f"Heads up: {needed_skill.label} is not available — "
+            "the required connector is temporarily paused by an operator incident control."
         )
     if error.code == "connector_draining":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but the required connector is draining its backlog before it accepts new work."
+            f"Heads up: {needed_skill.label} is not available — "
+            "the required connector is draining its backlog before it accepts new work."
         )
     if error.code == "connector_rejected":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but the required connector is temporarily rejecting new work during an incident."
+            f"Heads up: {needed_skill.label} is not available — "
+            "the required connector is temporarily rejecting new work during an incident."
         )
     if error.code in {"workspace_disabled", "agent_disabled"}:
-        return "This agent is temporarily disabled by a security control and cannot execute right now."
+        return "Heads up: this agent is temporarily disabled by a security control and cannot execute right now."
     if error.code in {"runtime_not_allowed", "runtime_mismatch"}:
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but the current runtime profile does not allow that capability."
+            f"Heads up: {needed_skill.label} is not available — "
+            "the current runtime profile does not allow that capability."
         )
     if error.code == "token_expired":
-        return "The capability grant expired before the tool call executed. Please try again."
+        return "Heads up: the capability grant expired before the tool call executed. Please try again."
     if error.code == "egress_denied":
         return (
-            f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-            "but outbound network policy denied the required destination for this run."
+            f"Heads up: {needed_skill.label} is not available — "
+            "outbound network policy denied the required destination for this run."
         )
     return (
-        f"{manifest.identity.name} recognizes that this request needs {needed_skill.label}, "
-        "but the tool broker denied the capability for this run."
+        f"Heads up: {needed_skill.label} is not available — "
+        "the tool broker denied the capability for this run."
     )
 
 

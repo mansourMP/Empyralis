@@ -26,7 +26,7 @@ FLEET_TOOL_PREFIX = "fleet_"
 # Allowed patch keys for fleet_configure_agent
 _ALLOWED_CONFIGURE_KEYS = {
     "enabled_tools", "connectors", "channel_bindings",
-    "subagents_enabled", "hardware_access", "model_config",
+    "subagents_enabled", "hardware_access", "model_config", "display_name",
 }
 _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local"}
 

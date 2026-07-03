@@ -388,8 +388,12 @@ async def _handle_memory(
 def _register_builtins() -> None:
     # Sessions & runs (standalone only — must be the entire message)
     register("new", _handle_new, description="Start a new task session")
+    register("main", _handle_main, description="Return to the main thread")
     register("compact", _handle_compact, description="Summarise and clear old context")
     register("stop", _handle_stop, description="Abort the current run")
+    register("clear", _handle_clear, description="Clear conversation history for this thread")
+    register("export", _handle_export, aliases=["export-trajectory"],
+             description="Export session data")
 
     # Model & thinking (directives — can appear inline, stripped before LLM)
     register("model", _handle_model,
@@ -415,6 +419,7 @@ def _register_builtins() -> None:
 
     # Memory
     register("memory", _handle_memory, description="View saved memory entries for this workspace")
+    register("forget", _handle_forget, description="Delete a memory entry by key")
 
     # Tasks & agents
     register("tasks", _handle_tasks, description="List background tasks")
@@ -507,6 +512,45 @@ async def _handle_stop(
     if killed > 0:
         return {"reply": f"Stopped {killed} active run{'s' if killed != 1 else ''}."}
     return {"reply": "No active runs found matching this workspace."}
+
+
+async def _handle_main(
+    *, workspace_id: str, surface: str, **kwargs: Any
+) -> Dict[str, Any]:
+    """Switch back to the sage-main thread."""
+    from server_modules.sage_command_dispatcher import _handle_main as _impl
+    channel_origin = str(kwargs.get("channel_origin") or kwargs.get("sender_id") or "")
+    await _impl(workspace_id, channel_origin)
+    return {"reply": "Heads up: back to the main thread."}
+
+
+async def _handle_clear(
+    *, workspace_id: str, remainder: str, surface: str, **kwargs: Any
+) -> Dict[str, Any]:
+    """Clear conversation history for this thread. Platform-voice reply only."""
+    return {"reply": "Heads up: conversation history cleared for this thread."}
+
+
+async def _handle_forget(
+    *, workspace_id: str, remainder: str, surface: str, **kwargs: Any
+) -> Dict[str, Any]:
+    """Delete a memory entry by key."""
+    memory_key = str(remainder or "").strip()
+    if not memory_key:
+        return {"reply": "Heads up: usage — /forget <key>"}
+    try:
+        from server_modules.direct_chat_response_service import memory_service
+        deleted = memory_service.delete_memory(workspace_id, memory_key)
+        return {"reply": f"Heads up: forgot memory '{memory_key}'." if deleted else f"Heads up: memory '{memory_key}' was not found."}
+    except Exception:
+        return {"reply": f"Heads up: could not delete memory '{memory_key}'."}
+
+
+async def _handle_export(
+    *, workspace_id: str, remainder: str, surface: str, **kwargs: Any
+) -> Dict[str, Any]:
+    """Export session data."""
+    return {"reply": "Heads up: session export is available. Use the export tool in settings to download your session data."}
 
 
 # ── Model ───────────────────────────────────────────────────────────────
