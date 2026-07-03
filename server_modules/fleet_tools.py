@@ -543,3 +543,137 @@ async def ensure_sage_is_operator(
         },
     )
     return {"ok": True, "bootstrapped": True, "agent_id": sage_install_id, "role": OPERATOR_ROLE}
+
+
+# ── Phase V: Proactive scheduling ───────────────────────────────────────
+
+
+def _parse_when(when: str) -> Any:
+    """Parse a time expression into a UTC datetime.
+
+    Supported forms:
+      - ISO-8601: ``2026-07-04T09:00:00Z``
+      - Relative minutes: ``in 2 minutes``, ``in 30 min``
+      - Relative hours: ``in 1 hour``, ``in 3 hours``
+      - Cron: ``*/5 * * * *`` (passed through for cron scheduling)
+
+    Returns a ``datetime.datetime`` or ``None`` if unparseable.
+    """
+    import re as _re
+    from datetime import datetime, timedelta, timezone as _timezone
+
+    when_str = str(when or "").strip()
+    if not when_str:
+        return None
+
+    # ISO-8601
+    if "T" in when_str:
+        try:
+            ts = when_str.replace("Z", "+00:00")
+            return datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            pass
+
+    # Relative: "in N minutes/min" or "in N hours/hour"
+    rel = _re.match(r"in\s+(\d+)\s*(minute|minutes|min|m)\w*", when_str, _re.IGNORECASE)
+    if rel:
+        minutes = int(rel.group(1))
+        return datetime.now(_timezone.utc) + timedelta(minutes=minutes)
+    rel_h = _re.match(r"in\s+(\d+)\s*(hour|hours|h)\w*", when_str, _re.IGNORECASE)
+    if rel_h:
+        hours = int(rel_h.group(1))
+        return datetime.now(_timezone.utc) + timedelta(hours=hours)
+    rel_s = _re.match(r"in\s+(\d+)\s*(second|seconds|s)\w*", when_str, _re.IGNORECASE)
+    if rel_s:
+        seconds = int(rel_s.group(1))
+        return datetime.now(_timezone.utc) + timedelta(seconds=seconds)
+
+    return None
+
+
+async def schedule_task(
+    *,
+    workspace_id: str,
+    agent_id: str = "",
+    actor_id: str = "",
+    when: str = "",
+    instruction: str = "",
+    tenant_id: str = "system",
+) -> Dict[str, Any]:
+    """Schedule a future task for this agent.
+
+    The agent will be woken at *when* with *instruction* as its prompt.
+    Results are delivered to the agent's bound channel.
+
+    *when* can be:
+      - ``"in 2 minutes"``, ``"in 30 min"`` — relative time
+      - ``"in 1 hour"`` — relative hours
+      - ``"2026-07-04T09:00:00Z"`` — ISO-8601 UTC datetime
+
+    Returns ``{ok, wake_request_id, due_at, instruction}``.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
+    resolved_instruction = str(instruction or "").strip()
+    if not resolved_instruction:
+        return {"ok": False, "error": "instruction is required — what should the agent do when it wakes?"}
+    resolved_when = str(when or "").strip()
+    if not resolved_when:
+        return {"ok": False, "error": "when is required — e.g. 'in 2 minutes' or '2026-07-04T09:00:00Z'"}
+
+    due_at = _parse_when(resolved_when)
+    if due_at is None:
+        return {"ok": False, "error": f"Could not parse 'when' expression: {resolved_when!r}. Use 'in N minutes' or ISO-8601 datetime."}
+
+    try:
+        from server_modules.bounded_scheduler_service import propose_self_wakeup
+
+        result = await propose_self_wakeup(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            summary=resolved_instruction[:200],
+            reason=f"Agent {agent_id or actor_id} scheduled: {resolved_instruction[:100]}",
+            due_at=due_at,
+            payload={
+                "instruction": resolved_instruction,
+                "agent_id": agent_id or actor_id,
+                "source": "schedule_task_tool",
+            },
+            requested_by=agent_id or actor_id or "agent",
+        )
+        wake_id = (
+            result.get("wake_request", {}).get("id", "")
+            if isinstance(result.get("wake_request"), dict)
+            else ""
+        )
+
+        # Ledger the schedule
+        await _ledger_fleet_action(
+            action="schedule_task",
+            actor_id=actor_id or agent_id or "agent",
+            workspace_id=workspace_id,
+            target_agent_id=agent_id or actor_id,
+            metadata={
+                "when": resolved_when,
+                "instruction": resolved_instruction[:200],
+                "due_at": str(due_at),
+                "wake_request_id": str(wake_id),
+                "accepted": result.get("accepted", False),
+            },
+        )
+        _log.info(
+            "schedule_task: agent=%s workspace=%s due_at=%s accepted=%s wake_id=%s",
+            agent_id or actor_id, workspace_id, due_at, result.get("accepted"), wake_id,
+        )
+        return {
+            "ok": True,
+            "wake_request_id": str(wake_id),
+            "due_at": str(due_at),
+            "instruction": resolved_instruction,
+            "accepted": result.get("accepted", False),
+            "detail": "Task scheduled. The agent will wake and execute this instruction at the specified time.",
+        }
+    except Exception as exc:
+        _log.warning("schedule_task failed: %s", exc)
+        return {"ok": False, "error": str(exc)[:300]}
