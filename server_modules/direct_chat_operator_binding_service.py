@@ -438,6 +438,9 @@ def build_direct_chat_callback_facade_inputs(
     supported_providers: list[str],
     direct_chat_compaction_token_limit: int,
 ):
+    # Approval-era vestige: the approval system was removed in Stage 1.
+    # This callback always returns False — the agent acts on its own reasoning.
+    namespace.setdefault("approval_required_for_direct_tool", lambda *a, **kw: False)
     callback_namespace = {
         name: _lookup(namespace, name)
         for name in direct_chat_composition_service._CALLBACK_INPUT_NAMES
