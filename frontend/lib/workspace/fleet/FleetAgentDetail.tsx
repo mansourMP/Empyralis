@@ -39,11 +39,13 @@ export function FleetAgentDetail({
   const [activeTab, setActiveTab] = useState<TabId>("activity");
   const { events, loading } = useFleetAgentActivity(workspaceId, agentId);
 
-  const dot = {
+  const hwStatus: string = agent?.hardware_status || "unknown";
+  const dotMap: Record<string, { color: string; label: string }> = {
     online: { color: "#22c55e", label: "Online" },
     offline: { color: "#ef4444", label: "Offline" },
     unknown: { color: "#94a3b8", label: "Unknown" },
-  }[agent?.hardware_status || "unknown"];
+  };
+  const dot = dotMap[hwStatus] || dotMap.unknown;
 
   return (
     <div className="fleet-detail">

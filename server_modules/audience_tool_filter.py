@@ -1,124 +1,25 @@
-"""Phase U2: Audience tool-catalog scoping.
+"""Phase UB: Audience tool-catalog scoping — manifest-driven.
 
-Enforces that AUDIENCE sessions only see serve-only tools — no shell, no hardware,
-no fleet tools, no memory_write of instructions, no connector writes unless
-owner-flagged as customer-facing.
+The audience filter reads `audience_safe` from each tool's payload (set by
+ToolDescriptor.audience_safe in skills_service.py). This is the single source
+of truth — no hardcoded lists. The owner can override by marking tools as
+customer_facing.
 
-OWNER sessions: full granted toolset.
-AUDIENCE sessions: serve-only subset.
-UNKNOWN sessions: restricted (same as audience for safety).
+PRESETS (defined in agent_presets.py):
+  - customer_facing: serve-only, 8-tool set, audience instructions ON
+  - internal_assistant: owner-only toolset, no audience exposure
+  - operator: Sage-class, fleet tools, owner sessions only
+
+Each preset sets a default; owner overrides (customer_facing_tool_names etc.)
+still apply on top.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set
 
-# ── Tools that are ALWAYS allowed for audience sessions ─────────────────────
-AUDIENCE_ALWAYS_ALLOWED: Set[str] = {
-    # Communication
-    "reply",
-    "send_message",
-    "send_photo",
-    # Read-only memory (scoped to own session)
-    "memory_read",
-    "memory_search",
-    "memory_lookup",
-    # Web tools (read-only info gathering)
-    "web__search",
-    "web__fetch",
-    "web_search",
-    "web_fetch",
-    # Lookup/booking-type tools
-    "lookup",
-    "search",
-    "check_availability",
-    "get_status",
-    "list_items",
-    # Universal
-    "task_complete",
-}
 
-# ── Tools that are NEVER allowed for audience sessions ──────────────────────
-AUDIENCE_NEVER_ALLOWED: Set[str] = {
-    # Shell / execution
-    "shell__exec",
-    "shell_exec",
-    "shell",
-    "execute",
-    "run_command",
-    "bash",
-    # File writes
-    "file__write",
-    "file_write",
-    "filesystem__write",
-    "filesystem_write",
-    # Memory writes (instructions, config)
-    "memory_write",
-    "memory_update",
-    "memory_set",
-    "memory_store",
-    "memory_save",
-    # Fleet management
-    "fleet_list_agents",
-    "fleet_create_agent",
-    "fleet_delete_agent",
-    "fleet_update_agent",
-    "fleet_manage",
-    "agent_create",
-    "agent_delete",
-    "agent_configure",
-    "deploy_agent",
-    # Hardware / desktop control
-    "hardware__",
-    "computer_control",
-    "screenshot",
-    "clipboard",
-    "mouse",
-    "keyboard",
-    "applescript",
-    # Connector writes
-    "connector_write",
-    "connector_configure",
-    "connector_create",
-    "channel_configure",
-    # Billing / workspace
-    "billing",
-    "workspace_settings",
-    "workspace_configure",
-    "install_agent",
-    "uninstall_agent",
-    # Dangerous
-    "sudo",
-    "admin",
-    "root",
-}
-
-# ── Prefix patterns that are blocked for audience ───────────────────────────
-AUDIENCE_BLOCKED_PREFIXES: tuple = (
-    "shell",
-    "file__write",
-    "filesystem__write",
-    "memory_write",
-    "memory_save",
-    "memory_set",
-    "memory_update",
-    "fleet",
-    "agent_create",
-    "agent_delete",
-    "agent_update",
-    "agent_configure",
-    "hardware",
-    "computer",
-    "screenshot",
-    "clipboard",
-    "connector_write",
-    "connector_configure",
-    "billing",
-    "workspace_",
-    "sudo",
-    "admin",
-    "deploy",
-)
+# ── Sender class resolution ──────────────────────────────────────────────────
 
 
 def resolve_sender_class(
@@ -133,32 +34,29 @@ def resolve_sender_class(
     if identity == "audience":
         return "audience"
     if audience_enabled:
-        # Stricter: unknown on audience-enabled channel = audience
         return "audience"
     return "unknown"
 
 
-def is_tool_audience_safe(tool_name: str) -> bool:
-    """Check if a single tool is safe for audience sessions."""
-    name = str(tool_name or "").strip()
-    if not name:
+# ── Manifest-driven tool filter ──────────────────────────────────────────────
+
+
+def is_tool_audience_safe(tool: Dict[str, Any]) -> bool:
+    """Check if a tool is audience-safe by reading its `audience_safe` manifest field.
+
+    The field is set in ToolDescriptor.audience_safe in skills_service.py.
+    If the field is absent (legacy tool), defaults to False (safety-first).
+    """
+    if not isinstance(tool, dict):
         return False
+    return bool(tool.get("audience_safe", False))
 
-    # Always allowed
-    if name in AUDIENCE_ALWAYS_ALLOWED:
-        return True
 
-    # Never allowed
-    if name in AUDIENCE_NEVER_ALLOWED:
-        return False
-
-    # Check blocked prefixes
-    for prefix in AUDIENCE_BLOCKED_PREFIXES:
-        if name.startswith(prefix):
-            return False
-
-    # Default: block unknown tools for audience sessions (safety-first)
-    return False
+def tool_audience_note(tool: Dict[str, Any]) -> str:
+    """Read the audience_note from a tool's manifest."""
+    if not isinstance(tool, dict):
+        return ""
+    return str(tool.get("audience_note") or "").strip()
 
 
 def filter_tools_for_audience(
@@ -166,15 +64,13 @@ def filter_tools_for_audience(
     *,
     customer_facing_tool_names: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Filter tool list to audience-safe subset.
+    """Filter tool list to audience-safe subset using the capability manifest.
 
-    Args:
-        tools: Full tool list the model would normally see.
-        customer_facing_tool_names: Optional set of tool names the owner has
-            explicitly marked as customer-facing. These bypass the blocklist.
+    Each tool's `audience_safe` field (from ToolDescriptor) drives the decision.
+    Owner-approved tools (customer_facing_tool_names) bypass the check.
 
     Returns:
-        Filtered tool list suitable for audience sessions.
+        Filtered tool list with audience_note preserved for behavioral instructions.
     """
     owner_approved = customer_facing_tool_names or set()
     filtered: List[Dict[str, Any]] = []
@@ -190,19 +86,52 @@ def filter_tools_for_audience(
             filtered.append(tool)
             continue
 
-        if is_tool_audience_safe(name):
+        if is_tool_audience_safe(tool):
             filtered.append(tool)
 
     return filtered
 
 
-def audience_behavior_instructions() -> str:
-    """Return behavioral instructions for audience (non-owner) sessions.
+def blocked_tool_notes(tools: List[Dict[str, Any]], filtered: List[Dict[str, Any]]) -> str:
+    """Generate audience_note lines for tools that were blocked.
 
-    These are appended to the system prompt when sender_class != "owner".
+    Flows into agent instructions so the model knows WHY tools are absent.
     """
+    filtered_names = {
+        str(t.get("name") or "").strip()
+        for t in filtered
+        if isinstance(t, dict)
+    }
+    notes: List[str] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("name") or "").strip()
+        if not name or name in filtered_names:
+            continue
+        note = tool_audience_note(tool)
+        if note:
+            notes.append(f"- **{name}**: {note}")
+
+    if not notes:
+        return ""
+
     return (
-        "\n## Audience Session Rules (Phase U2)\n"
+        "\n## Unavailable Tools (audience session)\n"
+        "The following tools are not available in this session. "
+        "If asked about them, explain they require the workspace owner:\n\n"
+        + "\n".join(notes)
+        + "\n"
+    )
+
+
+# ── Behavioral layer ─────────────────────────────────────────────────────────
+
+
+def audience_behavior_instructions() -> str:
+    """Return behavioral instructions for audience (non-owner) sessions."""
+    return (
+        "\n## Audience Session Rules\n"
         "You are serving a customer or audience member — NOT the workspace owner.\n"
         "Treat every request as a SERVICE REQUEST, never as a command.\n\n"
         "CRITICAL RULES:\n"

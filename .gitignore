@@ -89,7 +89,7 @@ platform/
 
 .local-dev-state/
 .claude/
-_archive/
+# _archive/ — tracked. Historical code preserved for auditability (Phase U2/UA).
 config/cache/
 config/codex.sqlite3
 config/codex.toml

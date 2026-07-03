@@ -44,6 +44,9 @@ class ToolDescriptor:
     parameters: Dict[str, Any] = field(default_factory=dict)
     requires_runtime: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Phase UB: audience safety manifest
+    audience_safe: bool = False
+    audience_note: str = ""
 
 
 def _normalize_action_list(value: Any) -> List[str]:
@@ -330,6 +333,9 @@ def _tool_payload_from_descriptor(descriptor: ToolDescriptor) -> Dict[str, Any]:
         "audit_event_type": permission_manifest["audit_event_type"],
         "permission_manifest": permission_manifest,
         "parameters": descriptor.parameters if isinstance(descriptor.parameters, dict) else {},
+        # Phase UB: audience safety manifest (drives tool-catalog scoping)
+        "audience_safe": bool(descriptor.audience_safe),
+        "audience_note": str(descriptor.audience_note or "").strip(),
     }
 
 
@@ -633,6 +639,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["summary"],
             },
+            audience_safe=True,
+            audience_note="Safe: only signals task completion, no privileged access.",
         ),
         ToolDescriptor(
             tool_name="hardware__action",
@@ -669,6 +677,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["action"],
             },
+            audience_safe=False,
+            audience_note="Blocked: desktop/hardware control (shell, filesystem, browser, mouse/keyboard). Owner-only.",
         ),
         ToolDescriptor(
             tool_name="memory_search",
@@ -688,6 +698,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["query"],
             },
+            audience_safe=True,
+            audience_note="Safe: read-only memory search. Cannot modify instructions or config.",
         ),
         ToolDescriptor(
             tool_name="memory_write",
@@ -709,6 +721,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["path", "content"],
             },
+            audience_safe=False,
+            audience_note="Blocked: can write instructions/config to agent memory. Owner-only.",
         ),
         ToolDescriptor(
             tool_name="memory_read",
@@ -723,6 +737,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["path"],
             },
+            audience_safe=True,
+            audience_note="Safe: read-only memory access. Cannot modify instructions or config.",
         ),
         ToolDescriptor(
             tool_name="memory_get",
@@ -739,6 +755,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["path"],
             },
+            audience_safe=True,
+            audience_note="Safe: read-only memory excerpt. Cannot modify instructions or config.",
         ),
         ToolDescriptor(
             tool_name="memory_update",

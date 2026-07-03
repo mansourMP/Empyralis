@@ -1226,7 +1226,7 @@ def _sage_agent_computer_browser_status(availability_payload: dict[str, Any]) ->
     return "not_selected"
 
 
-def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str = "owner") -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str = "owner") -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], str]:
     try:
         tool_capabilities = direct_chat_runtime_exports.resolve_workspace_tool_capabilities(workspace_id)
     except Exception:
@@ -1254,15 +1254,18 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
     else:
         print(f"[TOOL_FILTER] tool_count_after={len(tools)} (online — no stripping)", flush=True)
 
-    # ── Phase U2: audience tool filter ──
+    # ── Phase UB: manifest-driven audience tool filter ──
     _sender_class = str(sender_class or "owner").strip().lower()
+    _blocked_notes = ""
     if _sender_class != "owner":
-        from server_modules.audience_tool_filter import filter_tools_for_audience
+        from server_modules.audience_tool_filter import filter_tools_for_audience, blocked_tool_notes
         _before_audience = len(tools)
+        _pre_filter = list(tools)  # snapshot before filtering for notes
         tools = filter_tools_for_audience(tools)
+        _blocked_notes = blocked_tool_notes(_pre_filter, tools)
         print(f"[TOOL_FILTER] audience_filter sender_class={_sender_class!r} before={_before_audience} after={len(tools)}", flush=True)
 
-    return _dedupe_tools(tools), tool_capabilities, availability
+    return _dedupe_tools(tools), tool_capabilities, availability, _blocked_notes
 
 
 def _plan_sage_direct_tool_calls(
@@ -1637,7 +1640,7 @@ async def _run_sage_action_loop_v3(
     sender_id: str | None = None,
     sender_class: str = "owner",
 ) -> dict[str, Any] | None:
-    tools, tool_capabilities, availability = _direct_tool_bundle(workspace_id=workspace_id, provider=provider, sender_class=sender_class)
+    tools, tool_capabilities, availability, blocked_notes = _direct_tool_bundle(workspace_id=workspace_id, provider=provider, sender_class=sender_class)
     from server_modules import runtime_config as _rc
     if _rc.AGENT_MACHINE_MODE == "agent":
         blocked = None  # agent machine mode: hardware tools always available
@@ -1878,7 +1881,7 @@ async def _run_sage_action_loop_v2(
     channel_origin: str = "",
     sender_class: str = "owner",
 ) -> dict[str, Any] | None:
-    tools, tool_capabilities, availability = _direct_tool_bundle(workspace_id=workspace_id, provider=provider, sender_class=sender_class)
+    tools, tool_capabilities, availability, blocked_notes = _direct_tool_bundle(workspace_id=workspace_id, provider=provider, sender_class=sender_class)
     route_decision = _build_sage_route_decision(
         message=message,
         tools=tools,

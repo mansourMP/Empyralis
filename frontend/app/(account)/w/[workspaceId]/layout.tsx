@@ -10,6 +10,7 @@ import {
   loadWorkspaceBootstrap,
 } from '@/lib/workspace/server-workspace-bootstrap';
 import { DesktopStartupScreen } from '@/lib/workspace/desktop-startup-screen';
+import { FleetShellDecider } from '@/lib/workspace/fleet/FleetShellDecider';
 import { WorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
 import { WorkstationKernelShell } from '@/lib/workspace/workstation-kernel-shell';
 import { WorkstationShellFrame } from '@/lib/workspace/workstation-shell-frame';
@@ -71,7 +72,9 @@ export default async function WorkspaceRouteLayout({
 
   const resolvedWorkspaceId = bootstrap.workspace.id;
 
-  return (
+  // Phase UC: Fleet page gets its own layout (no workstation shell chrome).
+  // All other routes use the normal workstation shell.
+  const shellFragment = (
     <>
       <DesktopStartupScreen workspaceLabel={bootstrap.workspace.label} />
       <WorkstationShellFrame
@@ -85,5 +88,11 @@ export default async function WorkspaceRouteLayout({
         )}
       />
     </>
+  );
+
+  return (
+    <FleetShellDecider shellSlot={shellFragment}>
+      {children}
+    </FleetShellDecider>
   );
 }

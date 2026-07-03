@@ -17,11 +17,14 @@ export function WorkspaceHomeRedirect({
   const { routeManifest, canAccessRoute } = useWorkspaceBoundary();
   const rememberedRoute = actions.resolveWorkspaceHref(workspaceId);
   const rememberedRouteId = resolveRouteIdFromHref(workspaceId, rememberedRoute);
+  // Phase UC: Fleet Home is the new workspace landing page.
+  // Override routeManifest.defaultRoute to land on /fleet instead of /sage.
+  const fleetRoute = `/w/${encodeURIComponent(workspaceId)}/fleet`;
   const nextRoute =
-    (rememberedRouteId && canAccessRoute(rememberedRouteId)
+    (rememberedRouteId && canAccessRoute(rememberedRouteId) && rememberedRouteId !== 'chat'
       ? routeManifest.routeIndex[rememberedRouteId]?.href ?? null
       : null)
-    ?? routeManifest.defaultRoute;
+    ?? fleetRoute;
 
   useEffect(() => {
     router.replace(nextRoute);

@@ -46,13 +46,13 @@ function runtimeIcon(target: string) {
 }
 
 const PRIMARY_RAIL_ITEMS = [
-  { id: "home", label: "Home", icon: <HomeIcon size={18} /> },
-  { id: "agents", label: "Agents", icon: <Bot size={18} /> },
-  { id: "channels", label: "Channels", icon: <Radio size={18} /> },
-  { id: "connectors", label: "Connectors", icon: <Layers size={18} /> },
-  { id: "hardware", label: "Hardware", icon: <Cpu size={18} /> },
-  { id: "memory", label: "Memory", icon: <Brain size={18} /> },
-  { id: "billing", label: "Billing", icon: <CreditCard size={18} /> },
+  { id: "home", label: "Home", icon: <HomeIcon size={18} />, route: "fleet" },
+  { id: "agents", label: "Agents", icon: <Bot size={18} />, route: "agents" },
+  { id: "channels", label: "Channels", icon: <Radio size={18} />, route: "channels" },
+  { id: "connectors", label: "Connectors", icon: <Layers size={18} />, route: "integrations" },
+  { id: "hardware", label: "Hardware", icon: <Cpu size={18} />, route: "hardware" },
+  { id: "memory", label: "Memory", icon: <Brain size={18} />, route: "memory" },
+  { id: "billing", label: "Billing", icon: <CreditCard size={18} />, route: "settings" },
 ];
 
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
@@ -68,7 +68,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   if (!loading && agents.length === 0 && !error) {
     return (
       <div className="fleet-layout">
-        <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} />
+        <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} workspaceId={workspaceId} />
         <div className="fleet-content fleet-empty">
           <div className="fleet-empty-state">
             <Bot size={48} strokeWidth={1} />
@@ -91,7 +91,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   if (error && agents.length === 0) {
     return (
       <div className="fleet-layout">
-        <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} />
+        <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} workspaceId={workspaceId} />
         <div className="fleet-content fleet-empty">
           <div className="fleet-empty-state">
             <AlertCircle size={48} strokeWidth={1} />
@@ -106,7 +106,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="fleet-layout">
       {/* ── Primary Rail (persistent, never swaps) ── */}
-      <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} />
+      <PrimaryRail active={activeRailItem} onSelect={setActiveRailItem} workspaceId={workspaceId} />
 
       {/* ── Content: Agent Cards ── */}
       <div className="fleet-content">
@@ -165,10 +165,13 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 function PrimaryRail({
   active,
   onSelect,
+  workspaceId,
 }: {
   active: string;
   onSelect: (id: string) => void;
+  workspaceId: string;
 }) {
+  const router = useRouter();
   return (
     <nav className="fleet-rail">
       <div className="fleet-rail-brand">
@@ -179,7 +182,15 @@ function PrimaryRail({
           <button
             key={item.id}
             className={`fleet-rail-item ${active === item.id ? "fleet-rail-item--active" : ""}`}
-            onClick={() => onSelect(item.id)}
+            onClick={() => {
+              onSelect(item.id);
+              const route = item.route || item.id;
+              if (route === "fleet") {
+                router.push(`/w/${encodeURIComponent(workspaceId)}/fleet`);
+              } else {
+                router.push(`/w/${encodeURIComponent(workspaceId)}/${route}`);
+              }
+            }}
             title={item.label}
           >
             {item.icon}
