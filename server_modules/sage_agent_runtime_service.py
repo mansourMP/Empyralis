@@ -1315,6 +1315,8 @@ def _plan_sage_direct_tool_calls(
         compact_text=services.compact_text,
         extract_first_path_reference=services.extract_first_path_reference,
         extract_first_url=services.extract_first_url,
+        parse_memory_write=getattr(services, 'parse_memory_write', None),
+        parse_memory_read=getattr(services, 'parse_memory_read', None),
     )
     return [item for item in planned if isinstance(item, dict) and _coerce_text(item.get("name")) in tool_names]
 

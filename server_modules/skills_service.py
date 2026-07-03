@@ -613,6 +613,28 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
 def _builtin_tool_descriptors() -> List[ToolDescriptor]:
     return [
         ToolDescriptor(
+            tool_name="task_complete",
+            label="Task complete",
+            connector_id="sage",
+            action_id="task_complete",
+            description=(
+                "Call this tool when you have finished the user's task. "
+                "Provide a short summary of what was accomplished. "
+                "Calling this tool signals that the work is complete and no further "
+                "tool calls are needed. The platform will end the run cleanly."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "A short summary of what was accomplished.",
+                    },
+                },
+                "required": ["summary"],
+            },
+        ),
+        ToolDescriptor(
             tool_name="hardware__action",
             label="Hardware action",
             connector_id="hardware",
@@ -665,6 +687,41 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "max_results": {"type": "integer", "description": "Optional maximum number of snippets to return."},
                 },
                 "required": ["query"],
+            },
+        ),
+        ToolDescriptor(
+            tool_name="memory_write",
+            label="Memory write",
+            connector_id="memory",
+            action_id="write",
+            description=(
+                "Write or append content to a file in the agent's memory directory. "
+                "Use path='MEMORY.md' to save to the main memory file. "
+                "Use mode='append' to add to existing content, or mode='overwrite' to replace. "
+                "MUST call this tool to persist facts — text replies alone do not save anything."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path within memory directory (e.g., 'MEMORY.md')."},
+                    "content": {"type": "string", "description": "Text content to write or append."},
+                    "mode": {"type": "string", "enum": ["append", "overwrite"], "description": "Write mode: 'append' (default) or 'overwrite'."},
+                },
+                "required": ["path", "content"],
+            },
+        ),
+        ToolDescriptor(
+            tool_name="memory_read",
+            label="Memory read",
+            connector_id="memory",
+            action_id="read",
+            description="Read a file from the agent's memory directory. Use to recall previously saved facts.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path within memory directory (e.g., 'MEMORY.md')."},
+                },
+                "required": ["path"],
             },
         ),
         ToolDescriptor(

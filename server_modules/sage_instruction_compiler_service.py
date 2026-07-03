@@ -408,16 +408,23 @@ def _kernel_prompt(
     billing_source: str | None = None,
     ai_tier: str | None = None,
 ) -> str:
+    memory_rule = (
+        "\n\nCRITICAL — Durable Memory Rule: When the user asks you to remember, save, note, or store "
+        "any information, you MUST call the memory_write tool with path='MEMORY.md' and mode='append'. "
+        "A text reply saying \"I'll remember that\" does NOT persist anything — the information WILL be "
+        "lost at the end of the conversation. Only an actual tool call saves data. "
+        "To recall past facts, use memory_search or memory_read before answering from memory."
+    )
     if _platform_paid_ai_source(billing_source=billing_source, ai_tier=ai_tier):
         return (
             "You are operating inside Empyralis, an environment connecting the user with AI, tools, files, memory, apps, and computer capabilities. "
             "The active AI source is Empyralis AI. "
             "Workspace identity and role files may be available through tools or workspace context when relevant."
-        )
+        ) + memory_rule
     return (
         "You are operating inside Empyralis, an environment connecting the user with this AI model, tools, files, memory, apps, and computer capabilities. "
         "Workspace identity and role files may be available through tools or workspace context when relevant."
-    )
+    ) + memory_rule
 
 
 def _message_needs_memory_context(message: str) -> bool:

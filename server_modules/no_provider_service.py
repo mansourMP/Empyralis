@@ -385,10 +385,38 @@ def plan_tool_calls(
     compact_text: Callable[[Any], str],
     extract_first_path_reference: Callable[[str], str],
     extract_first_url: Callable[[str], str],
+    parse_memory_write: Callable[[str], dict[str, str] | None] | None = None,
+    parse_memory_read: Callable[[str], str | None] | None = None,
 ) -> list[dict[str, Any]]:
     compact = compact_text(message)
     tool_names = {str(item.get("name") or "").strip() for item in tools if isinstance(item, dict)}
     planned: list[dict[str, Any]] = []
+
+    # ── Memory tools (PM1 fix) ──
+    if parse_memory_write is not None and "memory_write" in tool_names:
+        mem_write = parse_memory_write(message)
+        if mem_write is not None and isinstance(mem_write, dict):
+            # Convert key-value format to file-based memory_write format
+            key = str(mem_write.get("key") or mem_write.get("display_key") or "").strip()
+            value = str(mem_write.get("value") or "").strip()
+            if key and value:
+                line = f"{key}: {value}"
+                planned.append({
+                    "name": "memory_write",
+                    "arguments": {"path": "MEMORY.md", "content": line, "mode": "append"},
+                })
+    if parse_memory_read is not None and "memory_read" in tool_names:
+        mem_read_path = parse_memory_read(message)
+        if mem_read_path:
+            planned.append({"name": "memory_read", "arguments": {"path": mem_read_path}})
+    if "memory_search" in tool_names:
+        mem_query = _extract_memory_search_query(compact)
+        if mem_query:
+            planned.append({"name": "memory_search", "arguments": {"query": mem_query}})
+    # ── Task complete (PM1 companion) ──
+    if "task_complete" in tool_names and _message_is_terminal(compact):
+        planned.append({"name": "task_complete", "arguments": {"summary": _task_summary(compact)}})
+
     path = extract_first_path_reference(message)
     file_requested = bool(path and _path_inspection_requested(compact, path))
     if file_requested and "file__read" in tool_names:
@@ -471,6 +499,33 @@ def plan_tool_calls(
     if web_query and "web__search" in tool_names and not url:
         planned.append({"name": "web__search", "arguments": {"query": web_query}})
     return planned
+
+
+def _extract_memory_search_query(compact: str) -> str | None:
+    """Extract a memory search query from the message text."""
+    import re as _re2
+    for pattern in (
+        r"(?:search|find|look\s*up|recall|remember)\s+(?:memory|memories)\s+(?:for|about)\s+(.+?)(?:\.|$|\n)",
+        r"(?:search|find|look\s*up|recall)\s+(?:for\s+)?(.+?)\s+(?:in|from)\s+(?:memory|memories)(?:\.|$|\n)",
+        r"memory_search\s+query\s*[=:]\s*[\"'](.+?)[\"']",
+    ):
+        match = _re2.search(pattern, compact, _re2.IGNORECASE)
+        if match:
+            return match.group(1).strip(" \"'.,;")
+    return None
+
+
+def _message_is_terminal(compact: str) -> bool:
+    """Detect messages that signal task completion."""
+    return any(m in compact.lower() for m in (
+        "all done", "that's it", "that is it", "i'm done", "i am done",
+        "task complete", "all set", "everything is done",
+    ))
+
+
+def _task_summary(compact: str) -> str:
+    """Extract a one-line summary from a completion message."""
+    return compact.strip().split("\n")[0][:200]
 
 
 def has_obvious_direct_tool_intent(
@@ -593,6 +648,8 @@ def execute_no_provider_request(
         compact_text=services.compact_text,
         extract_first_path_reference=services.extract_first_path_reference,
         extract_first_url=services.extract_first_url,
+        parse_memory_write=getattr(services, 'parse_memory_write', None),
+        parse_memory_read=getattr(services, 'parse_memory_read', None),
     )
     if not tool_calls and directory_listing is None:
         return None

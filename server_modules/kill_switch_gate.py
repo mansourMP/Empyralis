@@ -39,6 +39,7 @@ GLOBAL_KILL_KEY = "global_pilot"
 WORKSPACE_KILL_PREFIX = "workspace:"
 AGENT_KILL_PREFIX = "agent:"
 GATEWAY_KILL_PREFIX = "gateway:"
+CHANNEL_KILL_PREFIX = "channel:"  # key format: channel:{workspace_id}:{channel_name}
 
 
 _KILL_STATE: Dict[str, bool] = {}
@@ -88,6 +89,8 @@ def _kill_switch_scope(key: str) -> str:
         return "agent"
     if key.startswith(GATEWAY_KILL_PREFIX):
         return "gateway"
+    if key.startswith(CHANNEL_KILL_PREFIX):
+        return "channel"
     return "custom"
 
 
@@ -181,6 +184,7 @@ def evaluate_kill_switch(
     workspace_id: str = "",
     agent_id: str = "",
     gateway_id: str = "",
+    channel_id: str = "",
     trace_id: str = "",
 ) -> KillSwitchDecision:
     if is_kill_active(GLOBAL_KILL_KEY):
@@ -219,6 +223,15 @@ def evaluate_kill_switch(
             trace_id=trace_id,
         )
 
+    if channel_id and is_kill_active(f"{CHANNEL_KILL_PREFIX}{channel_id}"):
+        return KillSwitchDecision(
+            blocked=True,
+            reason="channel_kill_active",
+            scope="channel",
+            detail=f"Channel {channel_id} has been stopped.",
+            trace_id=trace_id,
+        )
+
     safe_mode_decision = _evaluate_safe_mode_emergency_kill(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
@@ -238,6 +251,7 @@ def assert_not_killed(
     workspace_id: str = "",
     agent_id: str = "",
     gateway_id: str = "",
+    channel_id: str = "",
     trace_id: str = "",
 ) -> None:
     decision = evaluate_kill_switch(
@@ -245,6 +259,7 @@ def assert_not_killed(
         workspace_id=workspace_id,
         agent_id=agent_id,
         gateway_id=gateway_id,
+        channel_id=channel_id,
         trace_id=trace_id,
     )
     if decision.blocked:

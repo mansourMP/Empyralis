@@ -24,6 +24,9 @@ from server_modules import skills_service
 # These are injected every turn (~800 tokens). Everything else lives in the
 # registry and is loaded on demand via query_tool_registry.
 ALWAYS_ON_TOOL_NAMES: frozenset = frozenset({
+    "task_complete",
+    "memory_write",
+    "memory_read",
     "memory_search",
     "memory_get",
     "memory_update",
