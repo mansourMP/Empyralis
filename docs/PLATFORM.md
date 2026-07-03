@@ -4,8 +4,10 @@ Managed, reliable, safe agent platform. Cloud-first, hardware as upgrade.
 Consumers get their own agent in their channels.
 
 **Stack:** Python (FastAPI) + TypeScript (Next.js 16) + Rust (policy kernel + supervisor)
-**Updated:** 2026-07-02
-**See also:** `OpenClaw.md` (business model reference — zero shared code), `graphify-report.md` (auto-generated knowledge graph, regenerate via `graphify cluster-only .`), [Linear PLATFORM OVERVIEW](https://linear.app/mansurao/document/platform-overview-empyralis-one-agent-one-service-many-configurations-86a18989075a) (the settled target shape — read together with Section 0 below)
+**Updated:** 2026-07-03
+**Current commit:** `ad2377b61` (Phase V — schedule_task tool)
+**Test baseline:** 108 tests, 0 failures
+**See also:** `docs/BUILD_STATE.md` (completed phases, boot requirements), `docs/HARDWARE_TIERS.md` (three-tier offering), `docs/CLI_SUBSCRIPTION_SPEC.md` (Gateway brain spec), `docs/MCP_CLIENT_SETUP.md` (connect AI clients to Empyralis), `graphify-out/graph.json` (AST knowledge graph), [Linear PLATFORM OVERVIEW](https://linear.app/mansurao/document/platform-overview-empyralis-one-agent-one-service-many-configurations-86a18989075a)
 
 ### Agent Maintenance Instructions
 
@@ -257,7 +259,10 @@ graph TD
 |------|---------|
 | `server.py` | ⚠️ Composition root — FastAPI app, middleware, router mounting |
 | `main.py` | Standalone entry (rarely used) |
-| `mcp_server.py` | MCP server for vision-monitor |
+| `mcp_server.py` | MCP server — vision tools + Phase U2 Empyralis-as-MCP tools (fleet, memory, chat) |
+| `mcp_server_auth.py` | Phase U2 — per-workspace MCP API key creation, hashing, revocation, resolution |
+| `preflight.py` | Phase T — startup preflight (kernel, Postgres, Redis), fails loud if missing |
+| `fleet_tools.py` | Phase L+V — operator fleet tools + schedule_task proactive agent tool |
 | `agent_turn.py` | Canonical AgentTurnRequest — all channels converge here |
 | `turn_runtime.py` | Execution switchboard — direct chat vs durable run |
 | `turn_ingress_service.py` | Turn ingress normalization |
@@ -568,51 +573,62 @@ OAuth App → credential vault → MCP server registration → tool discovery �
 
 ### 4.2 Connector MCP Status
 
-- **Fully wired (8):** gmail, google_calendar, github, notion, linear, slack, figma, dropbox
-- **Frontend mcpEndpoint, no backend bridge (12):** calendly, clickup, webflow, monday, box, confluence, miro, intercom, docusign, square, typeform, vercel
-- **Backend knows endpoint, frontend missing (3):** todoist, hubspot, jira
-- **OAuth-only, no MCP tools (16):** canva, asana, zoom, airtable, stripe, salesforce, webhook, gitlab, bitbucket, mailchimp, pipedrive, quickbooks, xero, freshbooks, microsoft_365
+- **Fully wired + bridge auto-registers (8):** gmail, google_calendar, github, notion, linear, slack, figma, dropbox — OAuth tokens stored → MCP server auto-registered via `_register_mcp_servers_for_provider()` (Phase U)
+- **Frontend mcpEndpoint + backend bridge live (12):** calendly, clickup, webflow, monday, box, confluence, miro, intercom, docusign, square, typeform, vercel — endpoints in `APP_MCP_SERVER_MAP`, bridge wired (Phase U), frontend endpoints moved to single-source catalog API
+- **OAuth-only, no MCP tools (3):** todoist, hubspot, jira — endpoints known, surfaced in catalog
+- **OAuth-only, endpoint=null (1):** microsoft_365 — no public MCP endpoint yet
+- **OAuth-only, standard exchange (16):** canva, asana, zoom, airtable, stripe, salesforce, webhook, gitlab, and others — use `standard` token_parser
 
-**Total:** 38 connectors. 20 with mcpEndpoint. 18 credential-vault only (no agent tools).
+**Total:** 30 providers in catalog. Honest status per provider: live | partial | preview (no fake "Set up").
+**Single source:** `GET /api/connections/mcp-catalog` — backend `APP_MCP_SERVER_MAP`, frontend fetches from API (Phase U).
 
-### 4.3 ACP ≠ MCP
+### 4.3 Empyralis IS an MCP Server (Phase U2)
+
+Empyralis exposes itself as an MCP server at `/mcp` for external AI clients (Claude Code, Claude Desktop, ChatGPT).
+
+- **Auth:** Per-workspace API key (bearer token) — create/revoke via `POST/DELETE /api/connections/mcp-keys`. Keys SHA-256 hashed in `~/.empyralis/state/runtime/mcp_api_keys.json`. Workspace resolved from key, never from tool args.
+- **Read tools (live):** `empyralis_list_agents`, `empyralis_get_agent_activity`, `empyralis_memory_read`, `empyralis_memory_list`, `empyralis_chat` (full turn through triage + reasoning)
+- **Write tools (gated):** `empyralis_create_agent`, `empyralis_configure_agent`, `empyralis_message_agent`, `empyralis_memory_write` — require `EMPYRALIS_MCP_WRITE_ENABLED=true`
+- **Ledger:** All MCP calls ledgered with `event_class: mcp_inbound`, `actor: external_mcp_client`
+- **Docs:** `docs/MCP_CLIENT_SETUP.md` — Claude Code, Claude Desktop (mcp-remote bridge), ChatGPT
+
+### 4.4 ACP ≠ MCP
 
 - **MCP** (Model Context Protocol) = how agents talk to external SaaS tools
 - **ACP** (Agent Communication Protocol) = how external clients talk to the Empyralis gateway
 - They share "CP" in the name. Completely different subsystems.
 
-### 4.4 Fragility Points
+### 4.5 Fragility Points
 
-- **MCP endpoint URLs duplicated** in backend (`connection_oauth_service.py`) AND frontend (`workstation-sage-connectors-pane.tsx`) — they've already drifted
+- **MCP endpoint URLs no longer duplicated** — frontend `mcpEndpoint` values removed (Phase U), single source at `GET /api/connections/mcp-catalog`
 - **streamable_http only** — local MCP servers using stdio are unsupported
-- **Adding an OAuth app** requires touching 5 files minimum
+- **Adding an OAuth app** requires touching 3 files (OAuth config, APP_MCP_SERVER_MAP, frontend card)
 - **DEPRECATED** connector tools in `connectors_actions.py` still exist — marked for removal after 30-day stability
 
 ---
 
 ## 5. Known Violations
 
-### 5.1 Hardcoded "I"/"my" Strings — Platform Impersonates Agent (31 instances)
+### 5.1 Hardcoded "I"/"my" Strings — Platform Impersonates Agent
 
-| # | File:Line | Current |
-|---|-----------|---------|
-| 1 | `sage_command_dispatcher.py:22` | "😴 I'm temporarily unavailable." |
-| 2 | `sage_command_dispatcher.py:21` | "📦 My context was too full — I've compacted it." |
-| 3 | `sage_reply_dispatcher.py:35` | "I processed your message but couldn't produce a response." |
-| 4 | `channel_execution_service.py:196` | "I hit an internal problem while handling this message." |
-| 5 | `quota_response_service.py:30` | "I'm still finishing the previous message..." |
-| 6 | `quota_response_service.py:33` | "I'm receiving too many requests right now." |
-| 7 | `quota_response_service.py:34` | "I'm taking longer than the current service window allows." |
-| 8-14 | `autopilot_runtime_support_service.py:158-180` | 7 distinct "I" messages |
-| 15 | `telegram_ingress_service.py:646` | "I couldn't record your deletion request..." |
-| 16 | `whatsapp_ingress_service.py:386` | Same as Telegram above |
-| 17 | `discord_connector.py:1048` | "Sorry, something went wrong." |
-| 18 | `voice_notification_policy_service.py:15` | "I can take this as a voice instruction, but I cannot approve..." |
-| 19 | `sage_agent_runtime_service.py:505-506` | "I will automatically route your request..." |
-| 20 | `sage_agent_runtime_service.py:948` | "I couldn't show internal tool instructions." |
-| 21-25 | `inventory_skill.py:251-289` | "My inventory system...", "I found..." |
-| 26-29 | `universal_operator.py:56-226` | "Before I take that action, I need..." |
-| 30-31 | `channel_execution_service.py:67` | "I can help with product questions..." |
+**Phase T2 fixed (2026-07-03):** 26 strings across `triage_service.py`, `skill_registry.py` (11), `universal_operator.py` (14), and `sage_command_dispatcher.py` (classify_error token leak) converted to platform voice ("Heads up: ..."). `classify_error()` no longer appends raw error text to chat replies.
+
+**Remaining (deferred — lower-priority paths):**
+
+| # | File | Count | Status |
+|---|------|-------|--------|
+| 1 | `sage_command_dispatcher.py` | 3 | Fixed (platform_event.py constants) |
+| 2 | `sage_reply_dispatcher.py` | 1 | Fixed (platform_event.py) |
+| 3 | `channel_execution_service.py` | 2 | Fixed (platform_event.py) |
+| 4 | `quota_response_service.py` | 3 | Fixed (platform_event.py) |
+| 5 | `autopilot_runtime_support_service.py` | 7 | Deferred |
+| 6 | `inventory_skill.py` | 5 | Deferred |
+| 7 | `agent/automation_setup_service.py` | 6 | Deferred |
+| 8 | `agent/user_profile_service.py` | 4 | Deferred |
+| 9 | `connectors/telegram_run_action_service.py` | 1 | Deferred |
+| 10 | `tool_broker.py` | 1 | Deferred |
+
+**Fixed count:** 26 of ~57 identified. **Remaining:** ~31 in lower-priority code paths (autopilot, inventory, legacy connectors).
 
 ### 5.2 "Your"/"You've" Personalization (20 instances)
 
@@ -664,13 +680,35 @@ OAuth App → credential vault → MCP server registration → tool discovery �
 
 ---
 
-## 6. Current Priorities
+## 6. Completed Phases (2026-07-03)
 
-1. **Ship what's proven** — Telegram hosted bot + web chat + Discord DM
-2. **Fix silent drops** — every inbound message must get a response
-3. **Fix violations** — 75 known issues, starting with "I"/"my" strings and channel leakage
-4. **Commit C+D hardening** — done but uncommitted
-5. **Simplify** — merge 3 execution paths into one, one command registry
+| Phase | Commit | Description |
+|-------|--------|-------------|
+| A | `0820a732c` | Remove approval system — agent acts on reasoning |
+| B | `7f594ec1f` | Platform voice — pigeon theory enforced |
+| C | `207cb351c` | Import cycles broken via contract leaf modules |
+| D | `1d5fa116c` | Honest test harness (skips + fakes) |
+| E-F | multiple | Workspace isolation, per-agent credentials, channel bindings, tool gating |
+| G | `cc308e21e` | Router wired, agent_id threaded, workers scoped |
+| K | `38a531f7d` | Gateway ledger — channel + hardware audit trail |
+| L+M+N | multiple | Operator role, 5 fleet tools, sub-agent gate, per-agent AI binding, Telegram single-path, Stage 5 memory |
+| P | `6b66aac28` | Triage layers — scope + identity gates before reasoning |
+| Q | multiple | Live verification — build, boot, migrations, ledger sanity |
+| S | `c499c6d60` | Real turn completes — approval-era callback vestige removed |
+| T | `be4627358` | Boot preflight + reproducible startup + 3 test fixes |
+| T2 | `d1250b966` | Chat voice integrity — 26 "I"/"my" strings fixed, display_name config, slash registry cleaned, classify_error leak closed |
+| U | `9b9947bfb` | MCP catalog honesty — OAuth→MCP bridge wired, single-source catalog API, frontend drift deleted |
+| U2 | `df30aed76` | Empyralis as MCP server — per-workspace API key auth, 9 platform tools, MCP_CLIENT_SETUP.md |
+| V | `ad2377b61` | Proactive agents — schedule_task tool + wake request integration |
+| — | `38be4aa66` | Hardware tiers design doc |
+| — | — | CLI subscription spec (Gateway brain — not built) |
+
+## 6b. Current Priorities
+
+1. **Phase W** — Fleet Console UI (Stage 9): agent cards, activity feed, agent detail, channels catalog, wizard
+2. **Fix remaining violations** — ~31 "I"/"my" strings, channel leakage, structural problems
+3. **Gateway hardening** — cycle #6 (outbox), cli_subscription Gateway build per spec
+4. **One real user** — onboard, connect Telegram, get daily value
 
 ---
 
