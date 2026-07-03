@@ -1703,13 +1703,70 @@ async def complete_oauth_callback(
                 },
             )
         )
+        # ── Phase U: Auto-register MCP servers after OAuth credential is stored ──
+        credential_id = str(result.get("id") or "").strip()
+        mcp_result = await _register_mcp_servers_for_provider(
+            workspace_id=workspace_id,
+            normalized_provider=normalized_provider,
+            credential_id=credential_id,
+        )
+
         return {
             "ok": True,
             "provider": normalized_provider,
             "workspace_id": workspace_id,
             "connector": result,
+            "mcp": mcp_result,
         }
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _register_mcp_servers_for_provider(
+    *,
+    workspace_id: str,
+    normalized_provider: str,
+    credential_id: str,
+) -> Dict[str, Any]:
+    """Register MCP servers from APP_MCP_SERVER_MAP for a provider.
+
+    Called after OAuth credential storage.  Failures are logged, never
+    raised — MCP registration is best-effort and must not block the
+    OAuth flow.
+    """
+    from server_modules import mcp_registry_service
+
+    server_entries = APP_MCP_SERVER_MAP.get(normalized_provider)
+    if not server_entries:
+        return {"registered": 0, "servers": []}
+
+    registered: list[Dict[str, Any]] = []
+    for entry in server_entries:
+        server_id = str(entry.get("server_id") or "").strip()
+        endpoint = entry.get("endpoint")
+        if not server_id or endpoint is None:
+            continue
+        try:
+            server = await mcp_registry_service.upsert_workspace_mcp_server_async(
+                workspace_id=workspace_id,
+                server_id=server_id,
+                label=str(entry.get("label") or server_id).strip(),
+                transport="streamable_http",
+                endpoint=str(endpoint),
+                enabled=True,
+                credential_id=credential_id,
+                discover_tools=True,
+            )
+            registered.append({
+                "server_id": server.get("id"),
+                "tool_count": len(server.get("tools") or []),
+            })
+        except Exception as exc:
+            _log.warning(
+                "MCP auto-register failed for %s/%s: %s",
+                normalized_provider, server_id, exc,
+            )
+
+    return {"registered": len(registered), "servers": registered}

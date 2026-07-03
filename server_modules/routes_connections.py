@@ -684,3 +684,72 @@ async def disconnect_connection(
     if not item:
         raise HTTPException(status_code=404, detail="Connection was not found.")
     raise HTTPException(status_code=409, detail="Use the specific connection surface to disconnect this connection.")
+
+
+# ── Phase U: MCP Catalog API ──────────────────────────────────────────────
+
+@router.get("/connections/mcp-catalog")
+async def get_mcp_catalog():
+    """Return the MCP provider catalog — single source of truth.
+
+    Every provider from ``APP_MCP_SERVER_MAP`` is listed with:
+    - provider: the canonical provider key
+    - label: human-readable name
+    - servers: list of MCP server entries (server_id, label, endpoint)
+    - status: live | partial | preview
+    - status_detail: human-readable explanation of the status
+
+    **live** — OAuth is configured for this provider, an MCP endpoint is
+    known, and the OAuth→MCP bridge is wired (credential stored →
+    MCP server auto-registered).
+
+    **partial** — OAuth is configured and an MCP endpoint is known, but
+    the bridge is not yet fully verified (e.g. provider uses a non-
+    standard OAuth flow, or MCP tools not yet discovered).
+
+    **preview** — MCP endpoint is listed in the catalog but OAuth is not
+    yet configured (or provider is planned but not yet implemented).
+
+    This is the SINGLE source for MCP provider data.  The frontend
+    must fetch this endpoint rather than maintaining its own copy.
+    """
+    from server_modules.connection_oauth_service import (
+        APP_MCP_SERVER_MAP,
+        OAUTH_PROVIDER_CONFIGS,
+        _connector_label,
+    )
+
+    def _status(provider_key: str, server_entries: list) -> tuple[str, str]:
+        """Determine honest status for a provider."""
+        has_oauth = provider_key in OAUTH_PROVIDER_CONFIGS
+        has_endpoint = any(
+            e.get("endpoint") is not None for e in server_entries
+        )
+        if has_oauth and has_endpoint:
+            return ("live", "OAuth configured, MCP endpoint known, bridge wired.")
+        if has_oauth and not has_endpoint:
+            return ("partial", "OAuth configured but no public MCP endpoint yet.")
+        if not has_oauth and has_endpoint:
+            return ("preview", "MCP endpoint listed but OAuth not yet configured.")
+        return ("preview", "Cataloged — implementation pending.")
+
+    providers: list[dict] = []
+    for provider_key, server_entries in APP_MCP_SERVER_MAP.items():
+        status, detail = _status(provider_key, server_entries)
+        providers.append({
+            "provider": provider_key,
+            "label": _connector_label(provider_key),
+            "status": status,
+            "status_detail": detail,
+            "servers": [
+                {
+                    "server_id": e.get("server_id"),
+                    "label": e.get("label"),
+                    "endpoint": e.get("endpoint"),
+                }
+                for e in server_entries
+            ],
+        })
+
+    providers.sort(key=lambda p: ({"live": 0, "partial": 1, "preview": 2}[p["status"]], p["label"]))
+    return {"ok": True, "providers": providers, "total": len(providers)}

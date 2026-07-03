@@ -969,8 +969,9 @@ type ConnectorDetailEntry = {
   description: string;
   examplePrompts: string[];
   suggestedToolNames: string[];
-  /** Official MCP server endpoint for this app (from APP_MCP_SERVER_MAP in connection_oauth_service.py).
-   *  When set, the Connect button triggers OAuth → credential vault → MCP server registration.
+  /** @deprecated — MCP endpoints now served from GET /api/connections/mcp-catalog.
+   *  The backend APP_MCP_SERVER_MAP is the single source of truth.
+   *  Frontend must fetch the catalog API rather than maintaining its own copy.
    *  When undefined, the app uses credential vault only (no MCP tool discovery). */
   mcpEndpoint?: string;
 };
@@ -986,7 +987,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Find any emails with attachments related to the Q3 report',
     ],
     suggestedToolNames: ['gmail.search', 'gmail.read', 'gmail.send', 'gmail.draft', 'gmail.modify', 'gmail.label'],
-    mcpEndpoint: 'https://gmailmcp.googleapis.com/mcp/v1',
   },
   google_calendar: {
     description:
@@ -998,7 +998,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Cancel my 3pm meeting and notify attendees',
     ],
     suggestedToolNames: ['calendar.list', 'calendar.create', 'calendar.update', 'calendar.delete', 'calendar.search'],
-    mcpEndpoint: 'https://calendarmcp.googleapis.com/mcp/v1',
   },
   github: {
     description:
@@ -1010,7 +1009,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Create a new issue for tracking the API migration',
     ],
     suggestedToolNames: ['search_repositories', 'get_issue', 'create_issue', 'list_pull_requests', 'get_pull_request', 'search_code'],
-    mcpEndpoint: 'https://api.githubcopilot.com/mcp/',
   },
   notion: {
     description:
@@ -1022,7 +1020,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Find all pages tagged with "engineering" updated this month',
     ],
     suggestedToolNames: ['notion.search', 'notion.read_page', 'notion.create_page', 'notion.update_page', 'notion.query_database'],
-    mcpEndpoint: 'https://mcp.notion.com/mcp',
   },
   linear: {
     description:
@@ -1034,7 +1031,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Summarize the status of the current cycle',
     ],
     suggestedToolNames: ['linear.search_issues', 'linear.get_issue', 'linear.create_issue', 'linear.update_issue', 'linear.get_teams'],
-    mcpEndpoint: 'https://mcp.linear.app/mcp',
   },
   slack: {
     description:
@@ -1046,7 +1042,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Find messages where someone asked me a question I haven\'t replied to',
     ],
     suggestedToolNames: ['slack.search_messages', 'slack.read_channel', 'slack.send_message', 'slack.list_channels', 'slack.get_user'],
-    mcpEndpoint: 'https://mcp.slack.com/mcp',
   },
   figma: {
     description:
@@ -1058,7 +1053,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'List all components in the shared library',
     ],
     suggestedToolNames: ['figma.get_file', 'figma.get_comments', 'figma.search_files', 'figma.get_me', 'figma.get_file_nodes'],
-    mcpEndpoint: 'https://mcp.figma.com/mcp',
   },
   canva: {
     description:
@@ -1069,7 +1063,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Export my brand kit assets',
     ],
     suggestedToolNames: ['design.search', 'design.create', 'design.export', 'folder.list', 'asset.read'],
-    mcpEndpoint: 'https://mcp.canva.com/mcp',
   },
   dropbox: {
     description:
@@ -1081,7 +1074,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Search my Dropbox for any files named "proposal"',
     ],
     suggestedToolNames: ['dropbox.list_folder', 'dropbox.search', 'dropbox.get_file', 'dropbox.create_folder', 'dropbox.share'],
-    mcpEndpoint: 'https://mcp.dropbox.com/mcp',
   },
   todoist: {
     description:
@@ -1092,7 +1084,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Create a project for the website redesign',
     ],
     suggestedToolNames: ['task.create', 'task.list', 'task.close', 'project.list', 'label.read'],
-    mcpEndpoint: 'https://ai.todoist.net/mcp',
   },
   asana: {
     description:
@@ -1103,7 +1094,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Mark the onboarding project milestone as complete',
     ],
     suggestedToolNames: ['task.create', 'task.list', 'task.update', 'project.list', 'portfolio.read'],
-    mcpEndpoint: 'https://mcp.asana.com/v2/mcp',
   },
   hubspot: {
     description:
@@ -1114,7 +1104,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       "What's the status of the Enterprise deal pipeline",
     ],
     suggestedToolNames: ['contact.search', 'deal.list', 'deal.create', 'company.read', 'activity.log'],
-    mcpEndpoint: 'https://mcp.hubspot.com',
   },
   zoom: {
     description:
@@ -1125,7 +1114,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'List all my upcoming Zoom meetings this week',
     ],
     suggestedToolNames: ['meeting.create', 'meeting.list', 'transcript.read', 'recording.list', 'participant.list'],
-    mcpEndpoint: 'https://mcp.zoom.us/mcp/zoom/streamable',
   },
   airtable: {
     description:
@@ -1136,7 +1124,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Filter the inventory base by status = In Stock',
     ],
     suggestedToolNames: ['record.list', 'record.create', 'record.update', 'base.list', 'view.read'],
-    mcpEndpoint: 'https://mcp.airtable.com/mcp',
   },
   jira: {
     description:
@@ -1147,7 +1134,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       "What's in the current sprint",
     ],
     suggestedToolNames: ['issue.search', 'issue.create', 'issue.update', 'sprint.list', 'project.read'],
-    mcpEndpoint: 'https://mcp.atlassian.com/v1/mcp',
   },
   stripe: {
     description:
@@ -1158,7 +1144,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'What was total revenue in May',
     ],
     suggestedToolNames: ['payment.list', 'customer.search', 'subscription.read', 'invoice.list', 'balance.read'],
-    mcpEndpoint: 'https://mcp.stripe.com',
   },
   salesforce: {
     description:
@@ -1169,7 +1154,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Create a follow-up task for the Enterprise lead',
     ],
     suggestedToolNames: ['opportunity.list', 'lead.search', 'account.read', 'task.create', 'report.run'],
-    mcpEndpoint: 'https://api.salesforce.com/platform/mcp/v1/platform/',
   },
   webhook: {
     description:
@@ -1189,7 +1173,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Cancel my 3pm coaching session tomorrow',
     ],
     suggestedToolNames: ['event_types.list', 'meetings.list', 'meetings.create', 'availability.schedule', 'scheduling_links.create'],
-    mcpEndpoint: 'https://mcp.calendly.com',
   },
   clickup: {
     description:
@@ -1200,7 +1183,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'What tasks are overdue in the product launch list?',
     ],
     suggestedToolNames: ['task.create', 'task.list', 'task.update', 'list.get', 'folder.get', 'space.get'],
-    mcpEndpoint: 'https://mcp.clickup.com/mcp',
   },
   webflow: {
     description:
@@ -1211,7 +1193,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Show me the latest form submissions from the contact page',
     ],
     suggestedToolNames: ['sites.list', 'pages.list', 'cms.items', 'assets.list', 'domains.list'],
-    mcpEndpoint: 'https://mcp.webflow.com/mcp',
   },
   monday: {
     description:
@@ -1222,7 +1203,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'What\'s the status of items in the product roadmap board?',
     ],
     suggestedToolNames: ['board.get_items', 'item.create', 'item.update', 'workspace.list', 'board.list'],
-    mcpEndpoint: 'https://mcp.monday.com/mcp',
   },
   box: {
     description:
@@ -1233,7 +1213,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Search Box for any files named "proposal" from the last month',
     ],
     suggestedToolNames: ['file.search', 'file.read', 'file.upload', 'folder.list', 'folder.create', 'shared_link.create'],
-    mcpEndpoint: 'https://mcp.box.com',
   },
   gitlab: {
     description:
@@ -1244,7 +1223,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'What\'s the status of the latest pipeline on main?',
     ],
     suggestedToolNames: ['issue.create', 'issue.search', 'merge_request.get', 'merge_request.list', 'pipeline.list', 'search.projects'],
-    mcpEndpoint: 'https://gitlab.com/api/v4/mcp',
   },
   confluence: {
     description:
@@ -1255,7 +1233,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Summarize the onboarding guide for new hires',
     ],
     suggestedToolNames: ['page.search', 'page.get', 'page.create', 'page.update', 'space.list', 'comment.create'],
-    mcpEndpoint: 'https://mcp.atlassian.com/v1/mcp/authv2',
   },
   miro: {
     description:
@@ -1266,7 +1243,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'List all items on the product brainstorm board',
     ],
     suggestedToolNames: ['board.create', 'board.list', 'layout.create', 'diagram.create', 'doc.create', 'comment.list'],
-    mcpEndpoint: 'https://mcp.miro.com/',
   },
   intercom: {
     description:
@@ -1277,7 +1253,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'Create a new Help Center article about the updated refund policy',
     ],
     suggestedToolNames: ['conversation.search', 'conversation.get', 'contact.search', 'contact.get', 'article.list', 'article.create'],
-    mcpEndpoint: 'https://mcp.intercom.com/mcp',
   },
   docusign: {
     description:
@@ -1288,7 +1263,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'List all envelopes waiting for my signature',
     ],
     suggestedToolNames: ['envelope.list', 'envelope.get', 'envelope.send', 'template.list', 'envelope.create_from_template', 'recipient.list'],
-    mcpEndpoint: 'https://mcp-d.docusign.com/mcp',
   },
   square: {
     description:
@@ -1299,7 +1273,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'List all items in the catalog that are low on inventory',
     ],
     suggestedToolNames: ['payment.list', 'order.list', 'customer.search', 'invoice.list', 'catalog.list', 'inventory.get'],
-    mcpEndpoint: 'https://mcp.squareup.com/sse',
   },
   typeform: {
     description:
@@ -1310,7 +1283,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'How many people completed the onboarding questionnaire this week?',
     ],
     suggestedToolNames: ['form.list', 'form.get', 'response.list', 'workspace.list', 'theme.list', 'webhook.list'],
-    mcpEndpoint: 'https://api.typeform.com/mcp',
   },
   vercel: {
     description:
@@ -1321,7 +1293,6 @@ const CONNECTOR_DETAIL_MAP: Record<string, ConnectorDetailEntry> = {
       'List all domains configured for my team',
     ],
     suggestedToolNames: ['project.list', 'deployment.list', 'deployment.get', 'runtime_logs.get', 'domain.list', 'build_logs.get'],
-    mcpEndpoint: 'https://mcp.vercel.com',
   },
   microsoft_365: {
     description:
