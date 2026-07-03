@@ -753,3 +753,63 @@ async def get_mcp_catalog():
 
     providers.sort(key=lambda p: ({"live": 0, "partial": 1, "preview": 2}[p["status"]], p["label"]))
     return {"ok": True, "providers": providers, "total": len(providers)}
+
+
+# ── Phase U2: MCP API Key Management ─────────────────────────────────────
+
+
+@router.post("/connections/mcp-keys")
+async def create_mcp_api_key(
+    request: Request,
+    current_user=Depends(get_current_user),
+):
+    """Create a new MCP API key for the user's workspace.
+
+    The plaintext key is returned ONCE — it cannot be retrieved later.
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    workspace_id = str(body.get("workspace_id") or "").strip()
+    label = str(body.get("label") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required.")
+    _workspace_scope(current_user, workspace_id, minimum_role="owner")
+
+    from server_modules.mcp_server_auth import create_workspace_mcp_api_key
+    result = await create_workspace_mcp_api_key(workspace_id=workspace_id, label=label)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to create API key."))
+    return result
+
+
+@router.delete("/connections/mcp-keys/{key_id}")
+async def revoke_mcp_api_key(
+    key_id: str,
+    request: Request,
+    current_user=Depends(get_current_user),
+):
+    """Revoke an MCP API key."""
+    from server_modules.mcp_server_auth import revoke_workspace_mcp_api_key
+    result = await revoke_workspace_mcp_api_key(key_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Key not found."))
+    return result
+
+
+@router.get("/connections/mcp-keys")
+async def list_mcp_api_keys(
+    workspace_id: str = Query(default=""),
+    current_user=Depends(get_current_user),
+):
+    """List MCP API keys for a workspace."""
+    ws = str(workspace_id or "").strip()
+    if not ws:
+        raise HTTPException(status_code=400, detail="workspace_id query parameter is required.")
+    _workspace_scope(current_user, ws, minimum_role="owner")
+
+    from server_modules.mcp_server_auth import list_workspace_mcp_api_keys
+    keys = await list_workspace_mcp_api_keys(ws)
+    return {"ok": True, "workspace_id": ws, "keys": keys}
