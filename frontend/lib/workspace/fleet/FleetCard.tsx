@@ -60,7 +60,7 @@ export function FleetCard({
             onSelect(agent.id);
           }}
         >
-          <Settings2 size={14} strokeWidth={1.75} />
+          <Settings2 size={16} strokeWidth={1.75} />
         </button>
         <button
           type="button"
@@ -72,7 +72,7 @@ export function FleetCard({
             onChat(agent.id);
           }}
         >
-          <MessageSquare size={14} strokeWidth={1.75} />
+          <MessageSquare size={16} strokeWidth={1.75} />
         </button>
       </div>
 

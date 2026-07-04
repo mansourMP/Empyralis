@@ -1,13 +1,20 @@
 /* ============================================================================
-   Fleet UI theme — tokenized, light + dark, driven by [data-theme].
+   Fleet UI theme — tokenized, light + dark, 4px grid, Linear-grade density.
    One accent (#7c3aed), used rarely. 90% grayscale. Sans throughout.
    Motion: 150ms ease-out on hover/panel-open only. No spin, no bounce.
+
+   Type scale (weights 400 / 500 only):
+     11 uppercase-caption, 12 meta, 13 body, 14 rail, 16 title-inline, 24 h1
+   Spacing scale: 4 8 12 16 20 24 28 32 40 48 56 64
+   Icon sizes: 14 (inline), 16 (small), 18 (rail)
+   Radii:  control 8, card 12, pill 999
+   Row heights: 36 (rail), card padding 14 16 (user-specified density).
    ========================================================================== */
 
 .fleet-root {
-  /* dark defaults (current look) — overridden by [data-theme="light"] */
   --fleet-font: var(--font-dm-sans, "DM Sans", "Inter", system-ui, sans-serif);
 
+  /* dark defaults — overridden by [data-theme="light"] */
   --bg-page: #0d0d0f;
   --bg-content: #0d0d0f;
   --bg-rail: #161618;
@@ -22,6 +29,7 @@
   --text-muted: #71717a;
 
   --accent: #7c3aed;
+  --accent-soft: rgba(124, 58, 237, 0.14);
   --accent-ring: rgba(124, 58, 237, 0.45);
 
   --online-text: #22c55e;
@@ -56,10 +64,10 @@
   --text-secondary: #52525b;
   --text-muted: #a1a1aa;
 
+  --accent-soft: rgba(124, 58, 237, 0.10);
+
   --online-text: #15803d;
-  --online-dot: #22c55e;
   --offline-text: #b91c1c;
-  --offline-dot: #ef4444;
   --unknown-dot: #a1a1aa;
 }
 
@@ -99,19 +107,19 @@
 .fleet-rail-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 6px 18px;
-  min-height: 30px;
+  gap: 12px;
+  padding: 0 8px 20px;
+  min-height: 32px;
 }
 
 .fleet-rail--collapsed .fleet-rail-brand {
-  padding: 0 0 18px;
+  padding: 0 0 20px;
   justify-content: center;
 }
 
 .fleet-rail-brand-mark {
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
   border-radius: 8px;
   background: var(--accent);
@@ -119,7 +127,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
 }
 
@@ -133,20 +141,79 @@
 .fleet-rail-nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
+}
+
+.fleet-rail-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.fleet-rail-section + .fleet-rail-section,
+.fleet-rail-section + .fleet-rail-item,
+.fleet-rail-item + .fleet-rail-section {
+  margin-top: 12px;
+}
+
+.fleet-rail-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: var(--radius-control);
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.fleet-rail-section-header:hover {
+  color: var(--text-secondary);
+}
+
+.fleet-rail-section-header-chevron {
+  transition: transform 150ms ease-out;
+}
+
+.fleet-rail-section-header[aria-expanded="false"] .fleet-rail-section-header-chevron {
+  transform: rotate(-90deg);
+}
+
+.fleet-rail-section-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  overflow: hidden;
+  max-height: 400px;
+  transition: max-height 150ms ease-out, opacity 150ms ease-out;
+}
+
+.fleet-rail-section-items[data-collapsed="true"] {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .fleet-rail-item {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 9px 11px;
+  gap: 12px;
+  height: 36px;
+  padding: 0 12px;
   border: none;
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--text-secondary);
   font-family: inherit;
-  font-size: 14.5px;
+  font-size: 14px;
   font-weight: 400;
   text-align: left;
   cursor: pointer;
@@ -170,19 +237,27 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 18px;
+  height: 18px;
 }
 
 .fleet-rail--collapsed .fleet-rail-item {
   justify-content: center;
-  padding: 9px 0;
+  padding: 0;
 }
 
 .fleet-rail--collapsed .fleet-rail-item-label {
   display: none;
 }
 
-.fleet-rail-spacer {
-  margin-top: auto;
+.fleet-rail--collapsed .fleet-rail-section-header {
+  display: none;
+}
+
+.fleet-rail--collapsed .fleet-rail-section-items {
+  max-height: 400px;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .fleet-rail-controls {
@@ -200,7 +275,7 @@
 .fleet-rail-control-btn {
   flex: 1;
   min-width: 0;
-  height: 34px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -220,27 +295,27 @@
 .fleet-rail-owner {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 6px 0;
+  gap: 12px;
+  padding: 12px 8px 0;
   border-top: 1px solid var(--border);
 }
 
 .fleet-rail--collapsed .fleet-rail-owner {
   justify-content: center;
-  padding: 10px 0 0;
+  padding: 12px 0 0;
 }
 
 .fleet-rail-owner-avatar {
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
-  border-radius: 50%;
+  border-radius: 999px;
   background: var(--rail-active);
   color: var(--text-secondary);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
 }
 
@@ -254,7 +329,7 @@
 }
 
 .fleet-rail-owner-name {
-  font-size: 13.5px;
+  font-size: 13px;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -262,7 +337,7 @@
 }
 
 .fleet-rail-owner-role {
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--text-muted);
 }
 
@@ -294,35 +369,136 @@
   font-size: 13px;
   font-weight: 400;
   color: var(--text-muted);
-  margin-top: 5px;
+  margin-top: 4px;
 }
 
 .fleet-btn {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   font-family: inherit;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 400;
-  padding: 8px 14px;
+  height: 32px;
+  padding: 0 12px;
   border-radius: var(--radius-control);
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   white-space: nowrap;
-  transition: background 150ms ease-out, border-color 150ms ease-out;
+  transition: background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out;
 }
 
-.fleet-btn:hover {
+.fleet-btn:hover:not(:disabled) {
   background: var(--bg-card-hover);
   border-color: var(--border-strong);
 }
 
+.fleet-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.fleet-btn--accent {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fleet-btn--accent:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 .fleet-btn-plus {
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1;
   color: var(--text-secondary);
+}
+
+/* ── Pair Telegram panel (first-run CTA) ─────────────────────────────────── */
+
+.fleet-pair-panel {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.fleet-pair-icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fleet-pair-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.fleet-pair-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.fleet-pair-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.fleet-pair-details {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.fleet-pair-code {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
+.fleet-pair-code-label {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.fleet-pair-code-value {
+  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: 0.08em;
+}
+
+.fleet-pair-error {
+  font-size: 12px;
+  color: var(--offline-text);
+  margin-top: 8px;
 }
 
 /* ── Sage operator row (the ONE accent fill on the page) ─────────────────── */
@@ -330,25 +506,25 @@
 .fleet-sage {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  padding: 16px 18px;
+  padding: 16px;
   margin-bottom: 20px;
 }
 
 .fleet-sage-tile {
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   flex-shrink: 0;
-  border-radius: 11px;
+  border-radius: 12px;
   background: var(--accent);
   color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 19px;
+  font-size: 18px;
 }
 
 .fleet-sage-body {
@@ -359,29 +535,29 @@
 .fleet-sage-name-row {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
 }
 
 .fleet-sage-name {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
 }
 
 .fleet-sage-badge {
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 400;
   color: var(--text-secondary);
   background: var(--rail-active);
   border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 2px 10px;
+  border-radius: 999px;
+  padding: 2px 8px;
 }
 
 .fleet-sage-desc {
   font-size: 13px;
   color: var(--text-muted);
-  margin-top: 3px;
+  margin-top: 4px;
 }
 
 /* ── Agent grid ──────────────────────────────────────────────────────────── */
@@ -399,7 +575,7 @@
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  padding: 16px 18px;
+  padding: 14px 16px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -416,14 +592,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   margin-bottom: 12px;
 }
 
 .fleet-card-id {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -437,11 +613,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .fleet-card-name {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -466,21 +643,23 @@
   color: var(--offline-text);
 }
 
-.fleet-card-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+.fleet-card-status-dot,
+.fleet-detail-dot,
+.fleet-activity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
   flex-shrink: 0;
   background: var(--unknown-dot);
 }
 
-.is-online .fleet-card-status-dot {
-  background: var(--online-dot);
-}
+.fleet-card-status.is-online .fleet-card-status-dot,
+.fleet-detail-dot.is-online,
+.fleet-activity-dot { background: var(--online-dot); }
 
-.is-offline .fleet-card-status-dot {
-  background: var(--offline-dot);
-}
+.fleet-card-status.is-offline .fleet-card-status-dot,
+.fleet-detail-dot.is-offline,
+.fleet-activity-dot.is-warn { background: var(--offline-dot); }
 
 .fleet-card-meta {
   font-size: 13px;
@@ -489,11 +668,11 @@
 }
 
 .fleet-card-activity {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--text-muted);
   border-top: 1px solid var(--border);
-  padding-top: 9px;
+  padding-top: 8px;
   margin-top: 12px;
 }
 
@@ -514,8 +693,8 @@
 }
 
 .fleet-card-action-btn {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -533,7 +712,6 @@
   color: var(--text-primary);
 }
 
-/* When actions are visible, keep the status from crowding them. */
 .fleet-card:hover .fleet-card-status,
 .fleet-card:focus-within .fleet-card-status {
   opacity: 0;
@@ -548,14 +726,14 @@
 }
 
 .fleet-empty-title {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 500;
   color: var(--text-primary);
   margin-bottom: 8px;
 }
 
 .fleet-empty-desc {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-muted);
   margin-bottom: 20px;
 }
@@ -576,13 +754,13 @@
 }
 
 .fleet-page-state-title {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 500;
   color: var(--text-primary);
 }
 
 .fleet-page-state-body {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-muted);
 }
 
@@ -642,13 +820,13 @@
 .fleet-detail-avatar-icon {
   width: 40px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--tile-bg, var(--rail-active));
   color: var(--tile-fg, var(--text-secondary));
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 500;
 }
 
@@ -658,13 +836,8 @@
   right: -2px;
   width: 12px;
   height: 12px;
-  border-radius: 50%;
   border: 2px solid var(--bg-card);
-  background: var(--unknown-dot);
 }
-
-.fleet-detail-dot.is-online { background: var(--online-dot); }
-.fleet-detail-dot.is-offline { background: var(--offline-dot); }
 
 .fleet-detail-info {
   flex: 1;
@@ -683,13 +856,13 @@
   color: var(--text-muted);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .fleet-detail-meta-status {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
 }
 
 .fleet-detail-meta-status.is-online { color: var(--online-text); }
@@ -717,27 +890,26 @@
 
 .fleet-detail-tabs {
   display: flex;
-  gap: 2px;
+  gap: 4px;
   padding: 0 12px;
   border-bottom: 1px solid var(--border);
 }
 
 .fleet-detail-tab {
-  padding: 11px 12px;
+  height: 40px;
+  padding: 0 12px;
   border: none;
   background: transparent;
   color: var(--text-muted);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 400;
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: color 150ms ease-out, border-color 150ms ease-out;
 }
 
-.fleet-detail-tab:hover {
-  color: var(--text-primary);
-}
+.fleet-detail-tab:hover { color: var(--text-primary); }
 
 .fleet-detail-tab--active {
   color: var(--text-primary);
@@ -759,48 +931,34 @@
 .fleet-activity-item {
   display: flex;
   gap: 12px;
-  padding: 10px 20px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--border);
 }
 
-.fleet-activity-item:last-child {
-  border-bottom: none;
-}
+.fleet-activity-item:last-child { border-bottom: none; }
 
 .fleet-activity-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-top: 5px;
-  flex-shrink: 0;
-  background: var(--online-dot);
-}
-
-.fleet-activity-dot.is-warn {
-  background: var(--offline-dot);
+  margin-top: 4px;
 }
 
 .fleet-activity-title {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
-  margin-bottom: 2px;
+  margin-bottom: 4px;
 }
 
 .fleet-activity-meta {
   font-size: 11px;
   color: var(--text-muted);
   display: flex;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
   flex-wrap: wrap;
 }
 
-.fleet-activity-time {
-  font-variant-numeric: tabular-nums;
-}
+.fleet-activity-time { font-variant-numeric: tabular-nums; }
 
-/* Calm static skeleton — no shimmer, no spin. */
 .fleet-activity-skeleton {
   padding: 16px 20px;
   display: flex;
@@ -815,8 +973,8 @@
 }
 
 .fleet-skeleton-bar {
-  height: 9px;
-  border-radius: 5px;
+  height: 8px;
+  border-radius: 4px;
   background: var(--rail-active);
 }
 
@@ -842,18 +1000,18 @@
 }
 
 .fleet-coming-soon {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-muted);
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: 999px;
   padding: 2px 8px;
 }
 
 .fleet-tab-state-body {
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--text-muted);
   max-width: 260px;
   line-height: 1.5;
@@ -870,13 +1028,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 11px 0;
+  padding: 12px 0;
   border-bottom: 1px solid var(--border);
 }
 
-.fleet-config-row:last-child {
-  border-bottom: none;
-}
+.fleet-config-row:last-child { border-bottom: none; }
 
 .fleet-config-label {
   font-size: 13px;
@@ -887,4 +1043,133 @@
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
+}
+
+/* ── Command palette (Cmd+K) ─────────────────────────────────────────────── */
+
+.fleet-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.45);
+  animation: fleet-fade 150ms ease-out;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 15vh;
+}
+
+.fleet-palette {
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: 60vh;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fleet-slide-in 150ms ease-out;
+}
+
+.fleet-palette-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-palette-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+}
+
+.fleet-palette-input::placeholder { color: var(--text-muted); }
+
+.fleet-palette-hint {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.fleet-palette-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.fleet-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  height: 36px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 13px;
+  border: none;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.fleet-palette-item--active,
+.fleet-palette-item:hover {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.fleet-palette-item-icon {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.fleet-palette-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-palette-item-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.fleet-palette-empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.fleet-palette-group-label {
+  padding: 8px 16px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }

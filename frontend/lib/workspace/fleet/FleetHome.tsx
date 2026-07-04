@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useFleetAgents } from "./fleet-data";
 import { FleetAgentDetail } from "./FleetAgentDetail";
 import { FleetCard } from "./FleetCard";
+import { TelegramPairPanel } from "./TelegramPairPanel";
 import { isSageAgent, toAgentSummary } from "./fleet-presentation";
 
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
@@ -55,6 +56,9 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
             New agent
           </button>
         </div>
+
+        {/* Pair Telegram — first-run CTA. Self-hides when already paired. */}
+        <TelegramPairPanel workspaceId={workspaceId} />
 
         {/* Sage operator row */}
         {sageAgent && <SageRow onChat={openChat} />}

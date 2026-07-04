@@ -187,6 +187,22 @@ GENERIC_ERROR = PlatformEvent(
     severity="error",
 )
 
+NO_AI_PROVIDER = PlatformEvent(
+    code="no_ai_provider",
+    title="AI provider not configured",
+    detail="Your agent needs an AI provider. Connect one →",
+    channel_text="Your agent needs an AI provider. Connect one →",
+    severity="error",
+)
+
+NO_AI_PROVIDER_WEB = PlatformEvent(
+    code="no_ai_provider_web",
+    title="AI provider not configured",
+    detail="Your agent needs an AI provider. Open AI & Setup →",
+    channel_text="Your agent needs an AI provider. Open AI & Setup →",
+    severity="error",
+)
+
 # Web-chat variants (plain text, no escaping)
 AI_LIMIT_REACHED_WEB = PlatformEvent(
     code="ai_limit_reached_web",

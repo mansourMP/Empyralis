@@ -17,6 +17,8 @@ from server_modules.platform_event import (
     AI_LIMIT_REACHED,
     AUTH_FAILED,
     GENERIC_ERROR,
+    NO_AI_PROVIDER,
+    NO_AI_PROVIDER_WEB,
     PROVIDER_UNREACHABLE,
     SAGE_COMPACT_NOT_NEEDED as _SAGE_COMPACT_NOT_NEEDED,
     SAGE_COMPACTED as _SAGE_COMPACTED,
@@ -53,11 +55,13 @@ SAGE_AI_LIMIT_REPLY = AI_LIMIT_REACHED.channel_text
 SAGE_RATE_LIMITED_REPLY = SERVICE_RATE_LIMITED.channel_text
 SAGE_AI_NEEDS_ATTENTION_REPLY = AUTH_FAILED.channel_text
 SAGE_PROVIDER_UNREACHABLE_REPLY = PROVIDER_UNREACHABLE.channel_text
+SAGE_NO_PROVIDER_REPLY = NO_AI_PROVIDER.channel_text
 SAGE_ERROR_REPLY = GENERIC_ERROR.channel_text
 
 # Web-chat plain-text variants (no Telegram markdown escaping)
 SAGE_AI_LIMIT_MESSAGE = AI_LIMIT_REACHED_WEB.channel_text
 SAGE_AI_NEEDS_ATTENTION_MESSAGE = AUTH_FAILED_WEB.channel_text
+SAGE_NO_PROVIDER_MESSAGE = NO_AI_PROVIDER_WEB.channel_text
 
 SAGE_HELP_TEXT = _SAGE_HELP.channel_text
 
@@ -74,13 +78,14 @@ def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
     to the chat reply — raw error details belong in logs, not the chat
     surface.  The classified base message is always in platform voice.
 
-    Five specific buckets, checked in order:
+    Six specific buckets, checked in order:
 
-    1. Credits exhausted  → SAGE_AI_LIMIT_REPLY
-    2. Rate limited       → SAGE_RATE_LIMITED_REPLY
-    3. Auth / key failed  → SAGE_AI_NEEDS_ATTENTION_REPLY
-    4. Provider unreachable → SAGE_PROVIDER_UNREACHABLE_REPLY
-    5. Catch-all          → SAGE_ERROR_REPLY
+    1. Credits exhausted   → SAGE_AI_LIMIT_REPLY
+    2. Rate limited        → SAGE_RATE_LIMITED_REPLY
+    3. No provider set     → SAGE_NO_PROVIDER_REPLY   (known-fixable state)
+    4. Auth / key failed   → SAGE_AI_NEEDS_ATTENTION_REPLY
+    5. Provider unreachable → SAGE_PROVIDER_UNREACHABLE_REPLY
+    6. Catch-all           → SAGE_ERROR_REPLY
     """
     if raw_error:
         import logging
@@ -100,19 +105,30 @@ def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
             "provider_rate_limited", "429", "rate limit", "too many requests",
         )):
             base = SAGE_RATE_LIMITED_REPLY
-        # 3) Auth / key failed
+        # 3) No cloud provider configured — known, fixable state.
+        #    Must be checked before the auth bucket: "not configured" is not
+        #    the same as "auth failed", and the user-facing action differs
+        #    (connect a provider vs verify an existing key).
+        elif any(kw in msg for kw in (
+            "no cloud provider is configured",
+            "no provider is configured",
+            "no_ai_provider",
+            "provider_not_configured",
+        )):
+            base = SAGE_NO_PROVIDER_REPLY
+        # 4) Auth / key failed
         elif any(kw in msg for kw in (
             "provider_generation_failed", "401", "403", "auth", "api key",
             "invalid key", "unauthorized",
         )):
             base = SAGE_AI_NEEDS_ATTENTION_REPLY
-        # 4) Provider unreachable
+        # 5) Provider unreachable
         elif any(kw in msg for kw in (
             "provider_transport_unavailable", "transport", "connection",
             "timeout", "unreachable",
         )):
             base = SAGE_PROVIDER_UNREACHABLE_REPLY
-        # 5) Catch-all
+        # 6) Catch-all
         else:
             base = SAGE_ERROR_REPLY
 

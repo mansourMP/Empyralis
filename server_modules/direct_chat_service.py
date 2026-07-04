@@ -388,7 +388,26 @@ async def execute_direct_chat_turn_request(
         _thread.join()
 
         if 'error' in error_container:
-            raise error_container['error']
+            # Classify rather than re-raise: an unhandled exception here
+            # propagates as a raw 500, which the frontend renders as
+            # "Sage hit a temporary server issue" — masking known, fixable
+            # states (no provider configured, auth failed, etc.) behind a
+            # generic message. Route through the same classifier the
+            # Telegram/Discord channel dispatcher uses so the reply is
+            # honest and actionable instead.
+            from server_modules.sage_command_dispatcher import classify_error as _classify_stream_error
+            _raw_err = str(error_container['error'])
+            _classified = _classify_stream_error(_raw_err, raw_error=_raw_err)
+            yield {
+                "type": "final",
+                "payload": {
+                    "reply": _classified,
+                    "actions": [],
+                    "mode": "error",
+                    "error": _classified,
+                },
+            }
+            return
 
         sage_result = result_container.get('value')
         if not isinstance(sage_result, dict):

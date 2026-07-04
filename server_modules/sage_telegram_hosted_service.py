@@ -86,8 +86,16 @@ def _webhook_secret() -> str:
     return _text(os.getenv("EMPYRALIS_TELEGRAM_HOSTED_WEBHOOK_SECRET"))
 
 
+_CACHED_BOT_USERNAME: Optional[str] = None
+
+
 def _bot_username() -> str:
-    return _text(os.getenv("EMPYRALIS_TELEGRAM_HOSTED_BOT_USERNAME"))
+    """Return the bot username. Uses env if set, else returns the last cached
+    value (populated on first successful get_bot_info() call)."""
+    env_value = _text(os.getenv("EMPYRALIS_TELEGRAM_HOSTED_BOT_USERNAME"))
+    if env_value:
+        return env_value
+    return _CACHED_BOT_USERNAME or ""
 
 
 def is_configured() -> bool:
@@ -111,11 +119,14 @@ def generate_deep_link_token(*, workspace_id: str) -> str:
     return token
 
 
-def build_deep_link(token: str) -> str:
+def build_deep_link(token: str) -> Optional[str]:
+    """Build a t.me deep link. Returns None when the bot username is
+    unknown — callers should either warm the cache with
+    ensure_bot_username_cached() first, or omit the link from the response."""
     username = _bot_username()
-    if username:
-        return f"https://t.me/{username}?start={token}"
-    return f"https://t.me/?start={token}"
+    if not username:
+        return None
+    return f"https://t.me/{username}?start={token}"
 
 
 def verify_and_pair(code: str, chat_id: str) -> Optional[str]:
@@ -590,7 +601,35 @@ async def get_webhook_info() -> dict:
 
 
 async def get_bot_info() -> dict:
-    return await _telegram_api("getMe", {})
+    """Fetch bot identity via getMe. Caches the resolved username so
+    build_deep_link() works even when EMPYRALIS_TELEGRAM_HOSTED_BOT_USERNAME
+    is not set — the token alone is enough."""
+    global _CACHED_BOT_USERNAME
+    result = await _telegram_api("getMe", {})
+    try:
+        payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+        username = str(payload.get("username") or "").strip()
+        if username:
+            _CACHED_BOT_USERNAME = username
+    except Exception:
+        pass
+    return result
+
+
+async def ensure_bot_username_cached() -> str:
+    """Ensure the bot username is populated in the cache. Safe to call
+    repeatedly — hits the Bot API at most once per process, or per lookup
+    failure. Returns the resolved username, or empty string if unavailable."""
+    if _CACHED_BOT_USERNAME:
+        return _CACHED_BOT_USERNAME
+    env_value = _text(os.getenv("EMPYRALIS_TELEGRAM_HOSTED_BOT_USERNAME"))
+    if env_value:
+        return env_value
+    try:
+        await get_bot_info()
+    except Exception:
+        return ""
+    return _CACHED_BOT_USERNAME or ""
 
 
 # --- Webhook handling ---

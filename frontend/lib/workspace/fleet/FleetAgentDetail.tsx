@@ -66,7 +66,7 @@ export function FleetAgentDetail({
             </div>
           </div>
           <button type="button" className="fleet-detail-close" onClick={onClose} aria-label="Close">
-            <X size={18} strokeWidth={1.75} />
+            <X size={16} strokeWidth={1.75} />
           </button>
         </div>
 
