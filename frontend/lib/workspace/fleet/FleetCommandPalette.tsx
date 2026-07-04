@@ -10,15 +10,12 @@ import {
 import { useRouter } from "next/navigation";
 import {
   Bot,
-  Brain,
   Command,
   CreditCard,
   Cpu,
   Home,
   MessageSquare,
   Moon,
-  Plug,
-  Radio,
   Sun,
   type LucideIcon,
 } from "lucide-react";
@@ -94,11 +91,7 @@ export function FleetCommandPalette({
     const base = `/w/${encodeURIComponent(workspaceId)}`;
     const navigation: Action[] = [
       { id: "nav-home", label: "Home", group: "Navigate", icon: Home, run: () => go(`${base}/fleet`) },
-      { id: "nav-agents", label: "Agents", group: "Navigate", icon: Bot, run: () => go(`${base}/fleet`) },
-      { id: "nav-channels", label: "Channels", group: "Navigate", icon: Radio, run: () => go(`${base}/channels`) },
-      { id: "nav-connectors", label: "Connectors", group: "Navigate", icon: Plug, run: () => go(`${base}/integrations`) },
       { id: "nav-hardware", label: "Hardware", group: "Navigate", icon: Cpu, run: () => go(`${base}/hardware`) },
-      { id: "nav-memory", label: "Memory", group: "Navigate", icon: Brain, run: () => go(`${base}/memory`) },
       { id: "nav-billing", label: "Billing", group: "Navigate", icon: CreditCard, run: () => go(`${base}/settings`) },
     ];
 

@@ -360,6 +360,82 @@ async def fleet_get_agent_activity(
     return {"ok": True, "agent_id": agent_id, "events": events}
 
 
+async def fleet_get_agent_tools(
+    *,
+    workspace_id: str,
+    agent_id: str,
+) -> Dict[str, Any]:
+    """Return the tool manifest for a specific agent.
+
+    Resolves the agent install metadata to find enabled_tools, then
+    looks up each skill definition from the skill registry. Returns
+    a flat list of {id, label, description, action_class} entries.
+    """
+    from server_modules import agent_registry_repository as repo
+    from server_modules import skill_registry
+
+    try:
+        installs = await repo.list_workspace_agent_installs(
+            tenant_id="system",
+            workspace_id=workspace_id,
+            include_master=True,
+        )
+    except Exception:
+        installs = []
+
+    # Find the agent install
+    inst: Dict[str, Any] = {}
+    for i in (installs or []):
+        d = dict(i) if isinstance(i, dict) else {}
+        if str(d.get("id") or "") == agent_id:
+            inst = d
+            break
+
+    if not inst:
+        # Agent not found — return empty, not an error
+        return {"ok": True, "tools": [], "agent_id": agent_id}
+
+    # Read enabled_tools from metadata
+    meta = inst.get("meta") or inst.get("metadata") or {}
+    if isinstance(meta, str):
+        import json as _json
+        try:
+            meta = _json.loads(meta)
+        except Exception:
+            meta = {}
+    enabled_ids: List[str] = []
+    raw = meta.get("enabled_tools") or []
+    if isinstance(raw, list):
+        enabled_ids = [str(t).strip() for t in raw if str(t).strip()]
+
+    # Resolve each tool ID to a skill definition
+    definitions = skill_registry.list_skill_definitions(workspace_id=workspace_id)
+    tools: List[Dict[str, Any]] = []
+    for sid in enabled_ids:
+        match = None
+        for d in definitions:
+            if d.id == sid:
+                match = d
+                break
+        if match:
+            tools.append({
+                "id": match.id,
+                "label": match.label,
+                "description": match.description or "",
+                "action_class": match.action_class,
+            })
+        else:
+            # Tool ID referenced but not in registry — include as unknown
+            tools.append({
+                "id": sid,
+                "label": sid,
+                "description": "This tool is referenced but not in the skill registry.",
+                "action_class": "unknown",
+            })
+
+    return {"ok": True, "tools": tools, "agent_id": agent_id}
+
+
 async def fleet_configure_agent(
     *,
     actor_id: str,

@@ -32,10 +32,8 @@ export function FleetShell({
   const {
     theme,
     collapsed,
-    sections,
     toggleTheme,
     toggleCollapsed,
-    toggleSection,
   } = useFleetPreferences();
 
   return (
@@ -49,8 +47,6 @@ export function FleetShell({
         onToggleCollapsed={toggleCollapsed}
         theme={theme}
         onToggleTheme={toggleTheme}
-        sections={sections}
-        onToggleSection={toggleSection}
       />
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
         <FleetShellDecider shellSlot={shellSlot}>{children}</FleetShellDecider>
