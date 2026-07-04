@@ -1,42 +1,58 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { X } from "lucide-react";
+import {
+  Brain,
+  Cpu,
+  LayoutGrid,
+  MessageSquare,
+  Plug,
+  Radio,
+  Wrench,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 
 import { useFleetAgentActivity, type FleetAgent } from "./fleet-data";
-import { deriveStatus, statusClass } from "./fleet-presentation";
+import { deriveStatus, derivePlacement, statusClass } from "./fleet-presentation";
 
-const TABS = [
-  { id: "activity", label: "Activity" },
-  { id: "channels", label: "Channels" },
-  { id: "tools", label: "Tools" },
-  { id: "memory", label: "Memory" },
-  { id: "model", label: "Model" },
-] as const;
+type TabId = "overview" | "chat" | "memory" | "channels" | "connectors" | "tools" | "model";
 
-type TabId = (typeof TABS)[number]["id"];
+const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
+  { id: "overview", label: "Overview", icon: LayoutGrid },
+  { id: "chat", label: "Chat", icon: MessageSquare },
+  { id: "memory", label: "Memory", icon: Brain },
+  { id: "channels", label: "Channels", icon: Radio },
+  { id: "connectors", label: "Connectors", icon: Plug },
+  { id: "tools", label: "Tools", icon: Wrench },
+  { id: "model", label: "Model", icon: Cpu },
+];
 
+/**
+ * Agent detail — centered modal over a dimmed backdrop (~80vw), with an
+ * internal left nav rather than top tabs (ChatGPT-settings pattern).
+ * Esc or backdrop click closes.
+ */
 export function FleetAgentDetail({
   workspaceId,
   agentId,
   agent,
+  onChat,
   onClose,
 }: {
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
+  onChat: (agentId: string) => void;
   onClose: () => void;
 }) {
-  const [activeTab, setActiveTab] = useState<TabId>("activity");
+  const [activeTab, setActiveTab] = useState<TabId>("overview");
   const { events, loading } = useFleetAgentActivity(workspaceId, agentId);
 
   const status = deriveStatus(agent?.hardware_status || "unknown");
   const dotClass = statusClass(status.tone);
   const deployed = status.tone !== "unknown";
-  const placement =
-    deployed && agent?.runtime_target && agent.runtime_target !== "unknown"
-      ? agent.runtime_target
-      : null;
+  const placement = derivePlacement(agent?.runtime_target || "unknown", deployed);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -47,65 +63,142 @@ export function FleetAgentDetail({
   }, [onClose]);
 
   return (
-    <>
-      <div className="fleet-detail-backdrop" onClick={onClose} />
-      <aside className="fleet-detail" role="dialog" aria-label={`${agent?.label || "Agent"} details`}>
-        {/* Header */}
-        <div className="fleet-detail-header">
-          <div className="fleet-detail-avatar">
-            <div className="fleet-detail-avatar-icon">
-              {(agent?.label || "A").charAt(0).toUpperCase()}
+    <div className="fleet-detail-backdrop" onClick={onClose}>
+      <div
+        className="fleet-detail"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${agent?.label || "Agent"} details`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Left nav */}
+        <div className="fleet-detail-nav">
+          <div className="fleet-detail-nav-header">
+            <div className="fleet-detail-avatar">
+              <div className="fleet-detail-avatar-icon">
+                {(agent?.label || "A").charAt(0).toUpperCase()}
+              </div>
+              <span className={`fleet-detail-dot ${dotClass}`} />
             </div>
-            <span className={`fleet-detail-dot ${dotClass}`} />
-          </div>
-          <div className="fleet-detail-info">
             <div className="fleet-detail-name">{agent?.label || "Agent"}</div>
-            <div className="fleet-detail-meta">
-              <span className={`fleet-detail-meta-status ${dotClass}`}>{status.label}</span>
-              {placement && <span>{placement}</span>}
-            </div>
+            <span className={`fleet-detail-meta-status ${dotClass}`}>{status.label}</span>
           </div>
+          <nav className="fleet-detail-nav-tabs">
+            {TABS.map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className={`fleet-detail-nav-tab${activeTab === tab.id ? " fleet-detail-nav-tab--active" : ""}`}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  <Icon size={16} strokeWidth={1.75} />
+                  {tab.label}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+
+        {/* Content */}
+        <div className="fleet-detail-main">
           <button type="button" className="fleet-detail-close" onClick={onClose} aria-label="Close">
             <X size={16} strokeWidth={1.75} />
           </button>
+          <div className="fleet-detail-body">
+            {activeTab === "overview" && (
+              <OverviewTab
+                agent={agent}
+                placement={placement}
+                statusLabel={status.label}
+                events={events}
+                loading={loading}
+              />
+            )}
+            {activeTab === "chat" && <ChatTab agent={agent} onChat={() => onChat(agentId)} />}
+            {activeTab === "memory" && (
+              <ComingSoon title="Memory" body="This agent's stored memories and retrieval index will live here." />
+            )}
+            {activeTab === "channels" && (
+              <ComingSoon title="Channels" body="This agent's channel pairing and delivery status will live here." />
+            )}
+            {activeTab === "connectors" && (
+              <ComingSoon title="Connectors" body="This agent's connected tools and services will live here." />
+            )}
+            {activeTab === "tools" && (
+              <ComingSoon title="Tools" body="This agent's tool catalog and capability manifest will live here." />
+            )}
+            {activeTab === "model" && <ModelTab agent={agent} />}
+          </div>
         </div>
-
-        {/* Tabs */}
-        <div className="fleet-detail-tabs">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              className={`fleet-detail-tab${activeTab === tab.id ? " fleet-detail-tab--active" : ""}`}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        {/* Body */}
-        <div className="fleet-detail-body">
-          {activeTab === "activity" && <ActivityTab events={events} loading={loading} />}
-          {activeTab === "channels" && (
-            <ComingSoon title="Channels" body="Channel pairing and delivery status will live here." />
-          )}
-          {activeTab === "tools" && (
-            <ComingSoon title="Tools" body="The agent's tool catalog and capability manifest will live here." />
-          )}
-          {activeTab === "memory" && (
-            <ComingSoon title="Memory" body="Stored memories and the retrieval index will live here." />
-          )}
-          {activeTab === "model" && <ModelTab agent={agent} />}
-        </div>
-      </aside>
-    </>
+      </div>
+    </div>
   );
 }
 
-// ── Activity tab ────────────────────────────────────────────────────────────
+// ── Overview tab (status/placement/role + recent activity) ────────────────
 
-function ActivityTab({ events, loading }: { events: any[]; loading: boolean }) {
+function OverviewTab({
+  agent,
+  placement,
+  statusLabel,
+  events,
+  loading,
+}: {
+  agent: FleetAgent | null;
+  placement: string;
+  statusLabel: string;
+  events: any[];
+  loading: boolean;
+}) {
+  const rows: [string, string][] = [
+    ["Status", statusLabel],
+    ["Placement", placement],
+    ["Role", agent?.role || "agent"],
+  ];
+
+  return (
+    <div className="fleet-detail-overview">
+      <div className="fleet-config">
+        {rows.map(([label, value]) => (
+          <div key={label} className="fleet-config-row">
+            <span className="fleet-config-label">{label}</span>
+            <span className="fleet-config-value">{String(value)}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="fleet-detail-section-title">Recent activity</div>
+      <ActivityList events={events} loading={loading} />
+    </div>
+  );
+}
+
+// ── Chat tab (real navigation, not a stub) ─────────────────────────────────
+
+function ChatTab({ agent, onChat }: { agent: FleetAgent | null; onChat: () => void }) {
+  return (
+    <div className="fleet-tab-state">
+      <div className="fleet-tab-state-title">Chat with {agent?.label || "this agent"}</div>
+      <div className="fleet-tab-state-body">
+        Open the shared conversation thread and talk to this agent directly.
+      </div>
+      <button
+        type="button"
+        className="fleet-btn fleet-btn--accent"
+        onClick={onChat}
+        style={{ marginTop: 16 }}
+      >
+        Open chat
+      </button>
+    </div>
+  );
+}
+
+// ── Activity list (feeds Overview) ──────────────────────────────────────
+
+function ActivityList({ events, loading }: { events: any[]; loading: boolean }) {
   if (loading) {
     return (
       <div className="fleet-activity-skeleton" aria-label="Loading activity">
@@ -163,8 +256,6 @@ function ModelTab({ agent }: { agent: FleetAgent | null }) {
   const items: [string, string][] = [
     ["Provider", config.provider || "Platform default"],
     ["Model", config.model || "Platform default"],
-    ["Role", agent?.role || "agent"],
-    ["Status", agent?.status || "active"],
   ];
 
   return (

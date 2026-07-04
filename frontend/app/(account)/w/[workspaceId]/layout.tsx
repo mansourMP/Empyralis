@@ -95,7 +95,13 @@ export default async function WorkspaceRouteLayout({
   // content area via FleetShellDecider: fleet children (no shell chrome) or the
   // normal workstation shell. Landing page (null segment) = fleet.
   return (
-    <FleetShell workspaceId={resolvedWorkspaceId} shellSlot={shellFragment}>
+    <FleetShell
+      workspaceId={resolvedWorkspaceId}
+      shellSlot={shellFragment}
+      ownerName={bootstrap.account.displayName || bootstrap.account.email}
+      ownerEmail={bootstrap.account.email}
+      ownerRole={bootstrap.membership.role}
+    >
       {children}
     </FleetShell>
   );

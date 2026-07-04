@@ -94,7 +94,7 @@ export function FleetCommandPalette({
     const base = `/w/${encodeURIComponent(workspaceId)}`;
     const navigation: Action[] = [
       { id: "nav-home", label: "Home", group: "Navigate", icon: Home, run: () => go(`${base}/fleet`) },
-      { id: "nav-agents", label: "Agents", group: "Navigate", icon: Bot, run: () => go(`${base}/agents`) },
+      { id: "nav-agents", label: "Agents", group: "Navigate", icon: Bot, run: () => go(`${base}/fleet`) },
       { id: "nav-channels", label: "Channels", group: "Navigate", icon: Radio, run: () => go(`${base}/channels`) },
       { id: "nav-connectors", label: "Connectors", group: "Navigate", icon: Plug, run: () => go(`${base}/integrations`) },
       { id: "nav-hardware", label: "Hardware", group: "Navigate", icon: Cpu, run: () => go(`${base}/hardware`) },

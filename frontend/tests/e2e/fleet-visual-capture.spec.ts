@@ -49,7 +49,7 @@ test.describe("Fleet UI — Visual Proof", () => {
     console.log(`Fleet Home: ${cardCount} agent cards`);
 
     if (cardCount > 0) {
-      await expect(page.locator(".fleet-card-dot").first()).toBeVisible();
+      await expect(page.locator(".fleet-card-status-dot").first()).toBeVisible();
       await page.locator(".fleet-card").first().click();
       await page.waitForTimeout(500);
     }
@@ -57,7 +57,7 @@ test.describe("Fleet UI — Visual Proof", () => {
     await saveScreenshot(page, "01-fleet-home");
   });
 
-  test("(b) Agent detail panel — Activity + Model", async ({ page }) => {
+  test("(b) Agent detail modal — Overview + Model", async ({ page }) => {
     await authenticateOwner(page);
     await page.goto(`/w/${WORKSPACE_ID}/fleet`, { waitUntil: "networkidle" });
     await page.waitForTimeout(3000);
@@ -69,15 +69,16 @@ test.describe("Fleet UI — Visual Proof", () => {
 
       const detail = page.locator(".fleet-detail");
       if (await detail.isVisible()) {
-        // Model tab (real data from agent config)
-        await page.locator(".fleet-detail-tab").nth(4).click();
+        // Model tab (real data from agent config) — nav order:
+        // Overview, Chat, Memory, Channels, Connectors, Tools, Model
+        await page.locator(".fleet-detail-nav-tab").nth(6).click();
         await page.waitForTimeout(500);
         await saveScreenshot(page, "02-detail-model");
 
-        // Activity tab
-        await page.locator(".fleet-detail-tab").first().click();
+        // Overview tab (status/placement/role + recent activity)
+        await page.locator(".fleet-detail-nav-tab").first().click();
         await page.waitForTimeout(500);
-        await saveScreenshot(page, "03-detail-activity");
+        await saveScreenshot(page, "03-detail-overview");
       }
     }
   });
@@ -87,7 +88,7 @@ test.describe("Fleet UI — Visual Proof", () => {
     await page.goto(`/w/${WORKSPACE_ID}/fleet`, { waitUntil: "networkidle" });
     await page.waitForTimeout(3000);
 
-    const chatBtn = page.locator(".fleet-card-chat-btn");
+    const chatBtn = page.locator('[aria-label="Open chat with agent"]');
     if ((await chatBtn.count()) > 0) {
       await chatBtn.first().click();
       await page.waitForTimeout(3000);

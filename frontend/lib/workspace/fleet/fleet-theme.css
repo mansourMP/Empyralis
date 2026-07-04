@@ -1,6 +1,7 @@
 /* ============================================================================
    Fleet UI theme — tokenized, light + dark, 4px grid, Linear-grade density.
-   One accent (#7c3aed), used rarely. 90% grayscale. Sans throughout.
+   Accent is ink (theme text-primary), used rarely. 90% grayscale. The one
+   surviving hue is --brand-clay on the rail logo mark. Sans throughout.
    Motion: 150ms ease-out on hover/panel-open only. No spin, no bounce.
 
    Type scale (weights 400 / 500 only):
@@ -28,9 +29,15 @@
   --text-secondary: #a1a1aa;
   --text-muted: #71717a;
 
-  --accent: #7c3aed;
-  --accent-soft: rgba(124, 58, 237, 0.14);
-  --accent-ring: rgba(124, 58, 237, 0.45);
+  /* Ink accent — matches text-primary per theme. No hue, no purple. */
+  --accent: #f4f4f5;
+  --accent-contrast: #0d0d0f;
+  --accent-soft: rgba(244, 244, 245, 0.12);
+  --accent-ring: rgba(244, 244, 245, 0.45);
+
+  /* Brand mark only — the one place color survives. */
+  --brand-clay: #bc6c4c;
+  --brand-clay-contrast: #fff;
 
   --online-text: #22c55e;
   --online-dot: #22c55e;
@@ -64,7 +71,10 @@
   --text-secondary: #52525b;
   --text-muted: #a1a1aa;
 
-  --accent-soft: rgba(124, 58, 237, 0.10);
+  --accent: #18181b;
+  --accent-contrast: #fff;
+  --accent-soft: rgba(24, 24, 27, 0.08);
+  --accent-ring: rgba(24, 24, 27, 0.35);
 
   --online-text: #15803d;
   --offline-text: #b91c1c;
@@ -122,8 +132,8 @@
   height: 28px;
   flex-shrink: 0;
   border-radius: 8px;
-  background: var(--accent);
-  color: #fff;
+  background: var(--brand-clay);
+  color: var(--brand-clay-contrast);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -293,16 +303,36 @@
 }
 
 .fleet-rail-owner {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  position: relative;
   padding: 12px 8px 0;
   border-top: 1px solid var(--border);
 }
 
 .fleet-rail--collapsed .fleet-rail-owner {
-  justify-content: center;
   padding: 12px 0 0;
+}
+
+.fleet-rail-owner-trigger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 4px;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background 150ms ease-out;
+}
+
+.fleet-rail-owner-trigger:hover {
+  background: var(--rail-active);
+}
+
+.fleet-rail--collapsed .fleet-rail-owner-trigger {
+  justify-content: center;
 }
 
 .fleet-rail-owner-avatar {
@@ -339,6 +369,67 @@
 .fleet-rail-owner-role {
   font-size: 11px;
   color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-rail-account-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 8px;
+  right: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 10;
+  animation: fleet-fade 150ms ease-out;
+}
+
+.fleet-rail--collapsed .fleet-rail-account-popover {
+  left: 8px;
+  right: auto;
+  width: 200px;
+}
+
+.fleet-rail-account-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  width: 100%;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.fleet-rail-account-popover-row:hover {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.fleet-rail-account-popover-row:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.fleet-rail-account-error {
+  font-size: 11px;
+  color: var(--offline-text);
+  padding: 4px 10px;
 }
 
 /* ── Content area ────────────────────────────────────────────────────────── */
@@ -409,7 +500,7 @@
 .fleet-btn--accent:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast);
 }
 
 .fleet-btn-plus {
@@ -512,6 +603,13 @@
   border-radius: var(--radius-card);
   padding: 16px;
   margin-bottom: 20px;
+  cursor: pointer;
+  transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+
+.fleet-sage:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
 }
 
 .fleet-sage-tile {
@@ -520,7 +618,7 @@
   flex-shrink: 0;
   border-radius: 12px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -633,6 +731,9 @@
   flex-shrink: 0;
   font-size: 12px;
   color: var(--text-muted);
+  /* Decorative only — never intercept clicks meant for the hover
+     quick-actions overlaid in the same corner (fleet-card-actions). */
+  pointer-events: none;
 }
 
 .fleet-card-status.is-online {
@@ -764,32 +865,36 @@
   color: var(--text-muted);
 }
 
-/* ── Agent detail — overlay panel over dimmed background ─────────────────── */
+/* ── Agent detail — centered modal over dimmed backdrop ───────────────────── */
+/* ChatGPT-settings pattern: ~80% viewport, internal left nav + content pane. */
 
 .fleet-detail-backdrop {
   position: fixed;
   inset: 0;
   z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
   background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
   animation: fleet-fade 150ms ease-out;
 }
 
 .fleet-detail {
-  position: fixed;
-  z-index: 51;
-  top: 12px;
-  right: 12px;
-  bottom: 12px;
-  width: 420px;
-  max-width: calc(100vw - 24px);
+  width: 80vw;
+  height: 80vh;
+  max-width: 1120px;
+  max-height: 840px;
+  min-height: 0;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 16px;
-  box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.55);
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   overflow: hidden;
-  animation: fleet-slide-in 150ms ease-out;
+  animation: fleet-modal-in 150ms ease-out;
 }
 
 @keyframes fleet-fade {
@@ -797,17 +902,32 @@
   to { opacity: 1; }
 }
 
-@keyframes fleet-slide-in {
-  from { opacity: 0; transform: translateX(8px); }
+@keyframes fleet-modal-in {
+  from { opacity: 0; transform: scale(0.97); }
   to { opacity: 1; transform: none; }
 }
 
-.fleet-detail-header {
-  padding: 20px;
-  border-bottom: 1px solid var(--border);
+/* Left nav column */
+
+.fleet-detail-nav {
+  width: 220px;
+  flex-shrink: 0;
   display: flex;
+  flex-direction: column;
+  background: var(--bg-rail);
+  border-right: 1px solid var(--border);
+  padding: 20px 12px 12px;
+  overflow-y: auto;
+}
+
+.fleet-detail-nav-header {
+  display: flex;
+  flex-direction: column;
   align-items: flex-start;
-  gap: 12px;
+  gap: 8px;
+  padding: 0 8px 16px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
 }
 
 .fleet-detail-avatar {
@@ -836,39 +956,81 @@
   right: -2px;
   width: 12px;
   height: 12px;
-  border: 2px solid var(--bg-card);
-}
-
-.fleet-detail-info {
-  flex: 1;
-  min-width: 0;
+  border: 2px solid var(--bg-rail);
 }
 
 .fleet-detail-name {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
-  margin-bottom: 4px;
-}
-
-.fleet-detail-meta {
-  font-size: 12px;
-  color: var(--text-muted);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .fleet-detail-meta-status {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .fleet-detail-meta-status.is-online { color: var(--online-text); }
 .fleet-detail-meta-status.is-offline { color: var(--offline-text); }
 
+.fleet-detail-nav-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fleet-detail-nav-tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.fleet-detail-nav-tab:hover {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.fleet-detail-nav-tab--active {
+  background: var(--rail-active);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Right content column */
+
+.fleet-detail-main {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .fleet-detail-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 1;
   flex-shrink: 0;
   width: 28px;
   height: 28px;
@@ -888,38 +1050,19 @@
   color: var(--text-primary);
 }
 
-.fleet-detail-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-.fleet-detail-tab {
-  height: 40px;
-  padding: 0 12px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 400;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: color 150ms ease-out, border-color 150ms ease-out;
-}
-
-.fleet-detail-tab:hover { color: var(--text-primary); }
-
-.fleet-detail-tab--active {
-  color: var(--text-primary);
-  font-weight: 500;
-  border-bottom-color: var(--accent);
-}
-
 .fleet-detail-body {
   flex: 1;
   overflow-y: auto;
+  padding: 56px 28px 28px;
+}
+
+.fleet-detail-section-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 24px 0 8px;
 }
 
 /* ── Activity ledger ─────────────────────────────────────────────────────── */

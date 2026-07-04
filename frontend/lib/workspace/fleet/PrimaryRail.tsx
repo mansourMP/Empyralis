@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSelectedLayoutSegment } from "next/navigation";
 import {
   Bot,
@@ -8,14 +10,19 @@ import {
   CreditCard,
   Cpu,
   Home,
+  LogOut,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Plug,
   Radio,
+  Settings,
   Sun,
   type LucideIcon,
 } from "lucide-react";
+
+import { logout } from "@/lib/auth/auth-client";
+import { useAccountShell } from "@/lib/shell/account-shell-context";
 
 import type { FleetSectionKey, FleetTheme } from "./fleet-preferences";
 
@@ -25,7 +32,7 @@ const FLAT_TOP: RailNavItem = { key: "home", label: "Home", segment: "fleet", ic
 const FLAT_BOTTOM: RailNavItem = { key: "billing", label: "Billing", segment: "settings", icon: CreditCard };
 
 const WORKSPACE_ITEMS: RailNavItem[] = [
-  { key: "agents", label: "Agents", segment: "agents", icon: Bot },
+  { key: "agents", label: "Agents", segment: "fleet", icon: Bot },
   { key: "channels", label: "Channels", segment: "channels", icon: Radio },
   { key: "connectors", label: "Connectors", segment: "integrations", icon: Plug },
 ];
@@ -42,11 +49,14 @@ const CHEVRON_ICON = 14;
 /**
  * Persistent primary rail. Expands to 220px, collapses to icon-only 56px.
  * Two collapsible sections (Workspace, Infrastructure) between two flat items.
- * Hosts fleet theme + collapse toggles.
+ * Hosts fleet theme + collapse toggles, and the account menu (the only
+ * place logout lives now that the old workstation shell is gone).
  */
 export function PrimaryRail({
   workspaceId,
   ownerName = "Owner",
+  ownerEmail = "",
+  ownerRole = "Owner",
   collapsed,
   onToggleCollapsed,
   theme,
@@ -56,6 +66,8 @@ export function PrimaryRail({
 }: {
   workspaceId: string;
   ownerName?: string;
+  ownerEmail?: string;
+  ownerRole?: string;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   theme: FleetTheme;
@@ -151,15 +163,111 @@ export function PrimaryRail({
         </button>
       </div>
 
-      <div className="fleet-rail-owner">
-        <div className="fleet-rail-owner-avatar">{ownerName.charAt(0).toUpperCase()}</div>
+      <AccountMenu
+        workspaceId={workspaceId}
+        ownerName={ownerName}
+        ownerEmail={ownerEmail}
+        ownerRole={ownerRole}
+        collapsed={collapsed}
+      />
+    </aside>
+  );
+}
+
+// ── Account menu (owner block + popover: Settings / Credits / Log out) ─────
+
+function AccountMenu({
+  workspaceId,
+  ownerName,
+  ownerEmail,
+  ownerRole,
+  collapsed,
+}: {
+  workspaceId: string;
+  ownerName: string;
+  ownerEmail: string;
+  ownerRole: string;
+  collapsed: boolean;
+}) {
+  const { actions: accountShellActions } = useAccountShell();
+  const [open, setOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  const settingsHref = `/w/${encodeURIComponent(workspaceId)}/settings`;
+  const creditsHref = `${settingsHref}?section=billing`;
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (ref.current?.contains(event.target as Node)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    setError(null);
+    try {
+      await logout();
+      accountShellActions.clearSession();
+      window.location.replace("/login");
+    } catch {
+      setError("Logout could not finish.");
+      setLoggingOut(false);
+    }
+  };
+
+  return (
+    <div className="fleet-rail-owner" ref={ref}>
+      {open && (
+        <div className="fleet-rail-account-popover" role="menu" aria-label="Account menu">
+          <Link className="fleet-rail-account-popover-row" href={settingsHref} role="menuitem" onClick={() => setOpen(false)}>
+            <Settings size={14} strokeWidth={1.75} />
+            Settings
+          </Link>
+          <Link className="fleet-rail-account-popover-row" href={creditsHref} role="menuitem" onClick={() => setOpen(false)}>
+            <CreditCard size={14} strokeWidth={1.75} />
+            Credits
+          </Link>
+          <button
+            type="button"
+            className="fleet-rail-account-popover-row"
+            role="menuitem"
+            disabled={loggingOut}
+            onClick={() => { void handleLogout(); }}
+          >
+            <LogOut size={14} strokeWidth={1.75} />
+            {loggingOut ? "Signing out…" : "Log out"}
+          </button>
+          {error && <div className="fleet-rail-account-error">{error}</div>}
+        </div>
+      )}
+      <button
+        type="button"
+        className="fleet-rail-owner-trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => { setOpen((v) => !v); setError(null); }}
+      >
+        <div className="fleet-rail-owner-avatar">{(ownerName || "O").charAt(0).toUpperCase()}</div>
         {!collapsed && (
           <div className="fleet-rail-owner-text">
             <div className="fleet-rail-owner-name">{ownerName}</div>
-            <div className="fleet-rail-owner-role">Owner</div>
+            <div className="fleet-rail-owner-role">{ownerEmail || ownerRole}</div>
           </div>
         )}
-      </div>
-    </aside>
+      </button>
+    </div>
   );
 }

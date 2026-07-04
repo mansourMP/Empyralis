@@ -61,7 +61,9 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
         <TelegramPairPanel workspaceId={workspaceId} />
 
         {/* Sage operator row */}
-        {sageAgent && <SageRow onChat={openChat} />}
+        {sageAgent && (
+          <SageRow agentId={sageAgent.id} onChat={openChat} onSelect={setSelectedAgentId} />
+        )}
 
         {/* Grid or empty */}
         {mapped.length === 0 ? (
@@ -86,6 +88,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
           workspaceId={workspaceId}
           agentId={selectedAgentId}
           agent={agents.find((a) => a.agent_id === selectedAgentId) || null}
+          onChat={openChat}
           onClose={() => setSelectedAgentId(null)}
         />
       )}
@@ -95,9 +98,28 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 
 // ── Sage operator row (the single accent fill on the page) ─────────────────
 
-function SageRow({ onChat }: { onChat: () => void }) {
+function SageRow({
+  agentId,
+  onChat,
+  onSelect,
+}: {
+  agentId: string;
+  onChat: () => void;
+  onSelect: (id: string) => void;
+}) {
   return (
-    <div className="fleet-sage">
+    <div
+      role="button"
+      tabIndex={0}
+      className="fleet-sage"
+      onClick={() => onSelect(agentId)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect(agentId);
+        }
+      }}
+    >
       <div className="fleet-sage-tile">✦</div>
       <div className="fleet-sage-body">
         <div className="fleet-sage-name-row">
@@ -108,7 +130,14 @@ function SageRow({ onChat }: { onChat: () => void }) {
           Ask me to create or configure any agent for you.
         </div>
       </div>
-      <button type="button" className="fleet-btn" onClick={onChat}>
+      <button
+        type="button"
+        className="fleet-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          onChat();
+        }}
+      >
         Chat with Sage
       </button>
     </div>

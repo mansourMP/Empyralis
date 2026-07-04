@@ -18,10 +18,16 @@ export function FleetShell({
   workspaceId,
   shellSlot,
   children,
+  ownerName,
+  ownerEmail,
+  ownerRole,
 }: {
   workspaceId: string;
   shellSlot: ReactNode;
   children: ReactNode;
+  ownerName?: string;
+  ownerEmail?: string;
+  ownerRole?: string;
 }) {
   const {
     theme,
@@ -36,6 +42,9 @@ export function FleetShell({
     <div className="fleet-root" data-theme={theme}>
       <PrimaryRail
         workspaceId={workspaceId}
+        ownerName={ownerName}
+        ownerEmail={ownerEmail}
+        ownerRole={ownerRole}
         collapsed={collapsed}
         onToggleCollapsed={toggleCollapsed}
         theme={theme}
