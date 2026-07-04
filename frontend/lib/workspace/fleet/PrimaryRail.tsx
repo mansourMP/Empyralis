@@ -1,167 +1,117 @@
 "use client";
 
 import { useRouter, useSelectedLayoutSegment } from "next/navigation";
+import {
+  Bot,
+  Brain,
+  CreditCard,
+  Cpu,
+  Home,
+  Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plug,
+  Radio,
+  Sun,
+  type LucideIcon,
+} from "lucide-react";
 
-// ── Design tokens (matching FleetHome.reference.tsx) ──
-const C = {
-  railBg: "#161618",
-  border: "rgba(255,255,255,0.08)",
-  textPrimary: "#f4f4f5",
-  textSecondary: "#a1a1aa",
-  textMuted: "#71717a",
-  accent: "#7c3aed",
-  activeBg: "rgba(255,255,255,0.06)",
-};
+import type { FleetTheme } from "./fleet-preferences";
 
-const RAIL_ITEMS = [
-  { key: "home", label: "Home", segment: "fleet" },
-  { key: "agents", label: "Agents", segment: "agents" },
-  { key: "channels", label: "Channels", segment: "channels" },
-  { key: "connectors", label: "Connectors", segment: "integrations" },
-  { key: "hardware", label: "Hardware", segment: "hardware" },
-  { key: "memory", label: "Memory", segment: "memory" },
-  { key: "billing", label: "Billing", segment: "settings" },
+const RAIL_ITEMS: { key: string; label: string; segment: string; icon: LucideIcon }[] = [
+  { key: "home", label: "Home", segment: "fleet", icon: Home },
+  { key: "agents", label: "Agents", segment: "agents", icon: Bot },
+  { key: "channels", label: "Channels", segment: "channels", icon: Radio },
+  { key: "connectors", label: "Connectors", segment: "integrations", icon: Plug },
+  { key: "hardware", label: "Hardware", segment: "hardware", icon: Cpu },
+  { key: "memory", label: "Memory", segment: "memory", icon: Brain },
+  { key: "billing", label: "Billing", segment: "settings", icon: CreditCard },
 ];
 
 /**
- * Persistent primary rail — 220px wide, lives in the workspace layout.
- * Matches FleetHome.reference.tsx exactly.
+ * Persistent primary rail. Expands to 220px, collapses to icon-only 56px.
+ * Hosts the fleet theme + collapse toggles.
  */
 export function PrimaryRail({
   workspaceId,
   ownerName = "Owner",
+  collapsed,
+  onToggleCollapsed,
+  theme,
+  onToggleTheme,
 }: {
   workspaceId: string;
   ownerName?: string;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  theme: FleetTheme;
+  onToggleTheme: () => void;
 }) {
   const router = useRouter();
   const segment = useSelectedLayoutSegment();
   const activeSegment = segment || "fleet"; // landing page = fleet
 
   return (
-    <aside
-      style={{
-        width: 220,
-        flexShrink: 0,
-        background: C.railBg,
-        borderRight: `0.5px solid ${C.border}`,
-        padding: "1rem 0.75rem",
-        display: "flex",
-        flexDirection: "column",
-        fontFamily: "var(--font-dm-sans, system-ui)",
-      }}
-    >
+    <aside className={`fleet-rail${collapsed ? " fleet-rail--collapsed" : ""}`}>
       {/* Brand */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "0 8px 1.25rem",
-        }}
-      >
-        <div
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: 8,
-            background: C.accent,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 16,
-            fontWeight: 700,
-            color: "#fff",
-            flexShrink: 0,
-          }}
-        >
-          E
-        </div>
-        <span style={{ fontSize: 16, fontWeight: 500, color: C.textPrimary }}>
-          Empyralis
-        </span>
+      <div className="fleet-rail-brand">
+        <div className="fleet-rail-brand-mark">E</div>
+        {!collapsed && <span className="fleet-rail-brand-name">Empyralis</span>}
       </div>
 
-      {/* Nav items */}
-      <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {/* Nav */}
+      <nav className="fleet-rail-nav">
         {RAIL_ITEMS.map((item) => {
+          const Icon = item.icon;
           const active = activeSegment === item.segment;
           return (
             <button
               key={item.key}
-              onClick={() => {
-                if (item.segment === "fleet") {
-                  router.push(`/w/${encodeURIComponent(workspaceId)}/fleet`);
-                } else {
-                  router.push(
-                    `/w/${encodeURIComponent(workspaceId)}/${item.segment}`
-                  );
-                }
-              }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 11,
-                padding: "9px 11px",
-                borderRadius: 8,
-                border: "none",
-                cursor: "pointer",
-                textAlign: "left" as const,
-                background: active ? C.activeBg : "transparent",
-                color: active ? C.textPrimary : C.textSecondary,
-                fontSize: 14.5,
-                fontFamily: "inherit",
-                width: "100%",
-              }}
+              type="button"
+              title={collapsed ? item.label : undefined}
+              className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}`}
+              onClick={() => router.push(`/w/${encodeURIComponent(workspaceId)}/${item.segment}`)}
             >
-              {item.label}
+              <span className="fleet-rail-item-icon">
+                <Icon size={17} strokeWidth={1.75} />
+              </span>
+              {!collapsed && <span className="fleet-rail-item-label">{item.label}</span>}
             </button>
           );
         })}
       </nav>
 
-      {/* Owner footer */}
-      <div
-        style={{
-          marginTop: "auto",
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "10px 8px 0",
-          borderTop: `0.5px solid ${C.border}`,
-        }}
-      >
-        <div
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: "50%",
-            background: "#0C447C",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 13,
-            fontWeight: 500,
-            color: "#85B7EB",
-            flexShrink: 0,
-          }}
+      {/* Controls: theme + collapse */}
+      <div className="fleet-rail-controls">
+        <button
+          type="button"
+          className="fleet-rail-control-btn"
+          onClick={onToggleTheme}
+          title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+          aria-label="Toggle theme"
         >
-          {ownerName.charAt(0).toUpperCase()}
-        </div>
-        <div style={{ lineHeight: 1.25, minWidth: 0 }}>
-          <div
-            style={{
-              fontSize: 13.5,
-              color: C.textPrimary,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap" as const,
-            }}
-          >
-            {ownerName}
+          {theme === "dark" ? <Sun size={16} strokeWidth={1.75} /> : <Moon size={16} strokeWidth={1.75} />}
+        </button>
+        <button
+          type="button"
+          className="fleet-rail-control-btn"
+          onClick={onToggleCollapsed}
+          title={collapsed ? "Expand" : "Collapse"}
+          aria-label="Toggle rail"
+        >
+          {collapsed ? <PanelLeftOpen size={16} strokeWidth={1.75} /> : <PanelLeftClose size={16} strokeWidth={1.75} />}
+        </button>
+      </div>
+
+      {/* Owner */}
+      <div className="fleet-rail-owner">
+        <div className="fleet-rail-owner-avatar">{ownerName.charAt(0).toUpperCase()}</div>
+        {!collapsed && (
+          <div className="fleet-rail-owner-text">
+            <div className="fleet-rail-owner-name">{ownerName}</div>
+            <div className="fleet-rail-owner-role">Owner</div>
           </div>
-          <div style={{ fontSize: 11.5, color: C.textMuted }}>Owner</div>
-        </div>
+        )}
       </div>
     </aside>
   );

@@ -1,39 +1,20 @@
 "use client";
 
-import { useState } from "react";
-import { X, Loader2 } from "lucide-react";
-import { useFleetAgentActivity, type FleetAgent } from "./fleet-data";
+import { useEffect, useState } from "react";
+import { X } from "lucide-react";
 
-// ── Design tokens ──
-const C = {
-  panelBg: "#161618",
-  border: "rgba(255,255,255,0.08)",
-  textPrimary: "#f4f4f5",
-  textSecondary: "#a1a1aa",
-  textMuted: "#71717a",
-  accent: "#7c3aed",
-  online: "#1D9E75",
-  offline: "#E24B4A",
-  onlineText: "#5DCAA5",
-  offlineText: "#F09595",
-  cardBg: "#1c1c1f",
-};
+import { useFleetAgentActivity, type FleetAgent } from "./fleet-data";
+import { deriveStatus, statusClass } from "./fleet-presentation";
 
 const TABS = [
-  { id: "activity" as const, label: "Activity" },
-  { id: "channels" as const, label: "Channels" },
-  { id: "tools" as const, label: "Tools" },
-  { id: "memory" as const, label: "Memory" },
-  { id: "model" as const, label: "Model" },
-];
+  { id: "activity", label: "Activity" },
+  { id: "channels", label: "Channels" },
+  { id: "tools", label: "Tools" },
+  { id: "memory", label: "Memory" },
+  { id: "model", label: "Model" },
+] as const;
 
 type TabId = (typeof TABS)[number]["id"];
-
-const HW_STYLES: Record<string, { color: string; label: string }> = {
-  online: { color: C.online, label: "Online" },
-  offline: { color: C.offline, label: "Offline" },
-  unknown: { color: C.textMuted, label: "Unknown" },
-};
 
 export function FleetAgentDetail({
   workspaceId,
@@ -49,237 +30,124 @@ export function FleetAgentDetail({
   const [activeTab, setActiveTab] = useState<TabId>("activity");
   const { events, loading } = useFleetAgentActivity(workspaceId, agentId);
 
-  const hwStatus = agent?.hardware_status || "unknown";
-  const dot = HW_STYLES[hwStatus] || HW_STYLES.unknown;
+  const status = deriveStatus(agent?.hardware_status || "unknown");
+  const dotClass = statusClass(status.tone);
+  const deployed = status.tone !== "unknown";
+  const placement =
+    deployed && agent?.runtime_target && agent.runtime_target !== "unknown"
+      ? agent.runtime_target
+      : null;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   return (
-    <aside
-      style={{
-        width: 380,
-        minWidth: 380,
-        borderLeft: `0.5px solid ${C.border}`,
-        background: C.panelBg,
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-        fontFamily: "var(--font-dm-sans, system-ui)",
-      }}
-    >
-      {/* Header */}
-      <div style={{ padding: 20, borderBottom: `0.5px solid ${C.border}` }}>
-        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-          <div style={{ position: "relative", width: 40, height: 40, flexShrink: 0 }}>
-            <div
-              style={{
-                width: 40,
-                height: 40,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "rgba(124,58,237,0.08)",
-                color: C.accent,
-                borderRadius: 10,
-                fontSize: 18,
-                fontWeight: 600,
-              }}
-            >
+    <>
+      <div className="fleet-detail-backdrop" onClick={onClose} />
+      <aside className="fleet-detail" role="dialog" aria-label={`${agent?.label || "Agent"} details`}>
+        {/* Header */}
+        <div className="fleet-detail-header">
+          <div className="fleet-detail-avatar">
+            <div className="fleet-detail-avatar-icon">
               {(agent?.label || "A").charAt(0).toUpperCase()}
             </div>
-            <span
-              style={{
-                position: "absolute",
-                bottom: -2,
-                right: -2,
-                width: 12,
-                height: 12,
-                borderRadius: "50%",
-                border: `2px solid ${C.panelBg}`,
-                background: dot.color,
-              }}
-            />
+            <span className={`fleet-detail-dot ${dotClass}`} />
           </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h2 style={{ fontSize: 16, fontWeight: 600, margin: "0 0 4px", color: C.textPrimary }}>
-              {agent?.label || "Agent"}
-            </h2>
-            <div style={{ fontSize: 12, color: C.textMuted, display: "flex", flexDirection: "column", gap: 2 }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: dot.color,
-                    display: "inline-block",
-                  }}
-                />
-                {dot.label}
-              </span>
-              <span>
-                {(agent as any)?.runtime_target || "unknown placement"}
-              </span>
+          <div className="fleet-detail-info">
+            <div className="fleet-detail-name">{agent?.label || "Agent"}</div>
+            <div className="fleet-detail-meta">
+              <span className={`fleet-detail-meta-status ${dotClass}`}>{status.label}</span>
+              {placement && <span>{placement}</span>}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: "none",
-              border: "none",
-              color: C.textMuted,
-              cursor: "pointer",
-              padding: 4,
-              borderRadius: 6,
-              display: "flex",
-            }}
-          >
-            <X size={18} />
+          <button type="button" className="fleet-detail-close" onClick={onClose} aria-label="Close">
+            <X size={18} strokeWidth={1.75} />
           </button>
         </div>
-      </div>
 
-      {/* Tabs */}
-      <div
-        style={{
-          display: "flex",
-          borderBottom: `0.5px solid ${C.border}`,
-          padding: "0 12px",
-          gap: 2,
-        }}
-      >
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            style={{
-              padding: "10px 14px",
-              border: "none",
-              background: "transparent",
-              color: activeTab === tab.id ? C.accent : C.textMuted,
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              borderBottom: activeTab === tab.id ? `2px solid ${C.accent}` : "2px solid transparent",
-              transition: "all 0.15s",
-              fontFamily: "inherit",
-            }}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+        {/* Tabs */}
+        <div className="fleet-detail-tabs">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={`fleet-detail-tab${activeTab === tab.id ? " fleet-detail-tab--active" : ""}`}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
 
-      {/* Tab content */}
-      <div style={{ flex: 1, overflowY: "auto" }}>
-        {activeTab === "activity" && (
-          <ActivityTab events={events} loading={loading} />
-        )}
-        {activeTab === "channels" && (
-          <PlaceholderTab title="Channels" body="Channel configuration and pairing status will appear here." />
-        )}
-        {activeTab === "tools" && (
-          <PlaceholderTab title="Tools" body="Tool catalog and capability manifest will appear here." />
-        )}
-        {activeTab === "memory" && (
-          <PlaceholderTab title="Memory" body="Memory store contents and retrieval index will appear here." />
-        )}
-        {activeTab === "model" && (
-          <ModelTab agent={agent} />
-        )}
-      </div>
-    </aside>
+        {/* Body */}
+        <div className="fleet-detail-body">
+          {activeTab === "activity" && <ActivityTab events={events} loading={loading} />}
+          {activeTab === "channels" && (
+            <ComingSoon title="Channels" body="Channel pairing and delivery status will live here." />
+          )}
+          {activeTab === "tools" && (
+            <ComingSoon title="Tools" body="The agent's tool catalog and capability manifest will live here." />
+          )}
+          {activeTab === "memory" && (
+            <ComingSoon title="Memory" body="Stored memories and the retrieval index will live here." />
+          )}
+          {activeTab === "model" && <ModelTab agent={agent} />}
+        </div>
+      </aside>
+    </>
   );
 }
 
-// ── Activity tab ──────────────────────────────────────────────────────────
+// ── Activity tab ────────────────────────────────────────────────────────────
 
-function ActivityTab({
-  events,
-  loading,
-}: {
-  events: any[];
-  loading: boolean;
-}) {
+function ActivityTab({ events, loading }: { events: any[]; loading: boolean }) {
   if (loading) {
     return (
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "48px 24px",
-          gap: 12,
-          color: C.textMuted,
-          fontSize: 13,
-        }}
-      >
-        <Loader2 size={20} style={{ animation: "spin 0.8s linear infinite" }} />
-        Loading activity ledger…
+      <div className="fleet-activity-skeleton" aria-label="Loading activity">
+        {[68, 52, 60].map((w, i) => (
+          <div key={i} className="fleet-skeleton-row">
+            <div className="fleet-skeleton-bar" style={{ width: 8 }} />
+            <div style={{ flex: 1 }}>
+              <div className="fleet-skeleton-bar" style={{ width: `${w}%`, marginBottom: 6 }} />
+              <div className="fleet-skeleton-bar" style={{ width: `${w - 24}%`, opacity: 0.6 }} />
+            </div>
+          </div>
+        ))}
       </div>
     );
   }
 
   if (events.length === 0) {
     return (
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "48px 24px",
-          textAlign: "center" as const,
-          color: C.textMuted,
-        }}
-      >
-        <div style={{ fontSize: 14, fontWeight: 500, color: C.textPrimary, marginBottom: 4 }}>
-          No activity recorded yet
+      <div className="fleet-tab-state">
+        <div className="fleet-tab-state-title">No activity yet</div>
+        <div className="fleet-tab-state-body">
+          Events appear here after the agent processes its first turn.
         </div>
-        <div style={{ fontSize: 12 }}>Events will appear here after the agent processes a turn.</div>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: "8px 0" }}>
+    <div className="fleet-activity">
       {events.map((event) => (
-        <div
-          key={event.event_id}
-          style={{
-            display: "flex",
-            gap: 12,
-            padding: "10px 20px",
-            borderBottom: `0.5px solid ${C.border}`,
-          }}
-        >
-          <div style={{ paddingTop: 4 }}>
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: event.status === "logged" ? C.online : C.offline,
-              }}
-            />
-          </div>
+        <div key={event.event_id} className="fleet-activity-item">
+          <div className={`fleet-activity-dot${event.status === "logged" ? "" : " is-warn"}`} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 500, color: C.textPrimary, marginBottom: 2 }}>
-              {event.title}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: C.textMuted,
-                display: "flex",
-                gap: 6,
-                alignItems: "center",
-              }}
-            >
+            <div className="fleet-activity-title">{event.title}</div>
+            <div className="fleet-activity-meta">
               <span>{event.event_class}</span>
               <span>·</span>
               <span>{event.action}</span>
               <span>·</span>
-              <span>{new Date(event.created_at).toLocaleString()}</span>
+              <span className="fleet-activity-time">
+                {new Date(event.created_at).toLocaleString()}
+              </span>
             </div>
           </div>
         </div>
@@ -288,58 +156,39 @@ function ActivityTab({
   );
 }
 
-// ── Model tab ─────────────────────────────────────────────────────────────
+// ── Model tab ───────────────────────────────────────────────────────────────
 
 function ModelTab({ agent }: { agent: FleetAgent | null }) {
-  const config = (agent as any)?.model_config || {};
-  const items = [
-    ["Provider", config.provider || "Default"],
-    ["Model", config.model || "Default"],
-    ["Role", (agent as any)?.role || "agent"],
-    ["Status", (agent as any)?.status || "active"],
+  const config = agent?.model_config || {};
+  const items: [string, string][] = [
+    ["Provider", config.provider || "Platform default"],
+    ["Model", config.model || "Platform default"],
+    ["Role", agent?.role || "agent"],
+    ["Status", agent?.status || "active"],
   ];
 
   return (
-    <div style={{ padding: "16px 20px" }}>
+    <div className="fleet-config">
       {items.map(([label, value]) => (
-        <div
-          key={label}
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            padding: "10px 0",
-            borderBottom: `0.5px solid ${C.border}`,
-          }}
-        >
-          <span style={{ fontSize: 13, color: C.textMuted }}>{label}</span>
-          <span style={{ fontSize: 13, fontWeight: 500, color: C.textPrimary }}>
-            {String(value)}
-          </span>
+        <div key={label} className="fleet-config-row">
+          <span className="fleet-config-label">{label}</span>
+          <span className="fleet-config-value">{String(value)}</span>
         </div>
       ))}
     </div>
   );
 }
 
-// ── Placeholder tab ───────────────────────────────────────────────────────
+// ── Coming soon ─────────────────────────────────────────────────────────────
 
-function PlaceholderTab({ title, body }: { title: string; body: string }) {
+function ComingSoon({ title, body }: { title: string; body: string }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "48px 24px",
-        textAlign: "center" as const,
-      }}
-    >
-      <div style={{ fontSize: 14, fontWeight: 500, color: C.textPrimary, marginBottom: 4 }}>
+    <div className="fleet-tab-state">
+      <div className="fleet-tab-state-title">
         {title}
+        <span className="fleet-coming-soon">Soon</span>
       </div>
-      <div style={{ fontSize: 12, color: C.textMuted }}>{body}</div>
+      <div className="fleet-tab-state-body">{body}</div>
     </div>
   );
 }

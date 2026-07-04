@@ -10,8 +10,7 @@ import {
   loadWorkspaceBootstrap,
 } from '@/lib/workspace/server-workspace-bootstrap';
 import { DesktopStartupScreen } from '@/lib/workspace/desktop-startup-screen';
-import { FleetShellDecider } from '@/lib/workspace/fleet/FleetShellDecider';
-import { PrimaryRail } from '@/lib/workspace/fleet/PrimaryRail';
+import { FleetShell } from '@/lib/workspace/fleet/FleetShell';
 import { WorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
 import { WorkstationKernelShell } from '@/lib/workspace/workstation-kernel-shell';
 import { WorkstationShellFrame } from '@/lib/workspace/workstation-shell-frame';
@@ -92,16 +91,12 @@ export default async function WorkspaceRouteLayout({
   );
 
   // Phase UX-C / U4: Primary rail persists across all workspace sub-routes.
-  // FleetShellDecider picks the content area: fleet children (no shell chrome)
-  // or the normal workstation shell. Landing page (null segment) = fleet.
+  // FleetShell owns the themed root (light/dark + rail collapse) and picks the
+  // content area via FleetShellDecider: fleet children (no shell chrome) or the
+  // normal workstation shell. Landing page (null segment) = fleet.
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#0d0d0f", overflow: "hidden" }}>
-      <PrimaryRail workspaceId={resolvedWorkspaceId} />
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        <FleetShellDecider shellSlot={shellFragment}>
-          {children}
-        </FleetShellDecider>
-      </div>
-    </div>
+    <FleetShell workspaceId={resolvedWorkspaceId} shellSlot={shellFragment}>
+      {children}
+    </FleetShell>
   );
 }

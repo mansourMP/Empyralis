@@ -1,0 +1,890 @@
+/* ============================================================================
+   Fleet UI theme — tokenized, light + dark, driven by [data-theme].
+   One accent (#7c3aed), used rarely. 90% grayscale. Sans throughout.
+   Motion: 150ms ease-out on hover/panel-open only. No spin, no bounce.
+   ========================================================================== */
+
+.fleet-root {
+  /* dark defaults (current look) — overridden by [data-theme="light"] */
+  --fleet-font: var(--font-dm-sans, "DM Sans", "Inter", system-ui, sans-serif);
+
+  --bg-page: #0d0d0f;
+  --bg-content: #0d0d0f;
+  --bg-rail: #161618;
+  --bg-card: #1c1c1f;
+  --bg-card-hover: #212124;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --rail-active: rgba(255, 255, 255, 0.06);
+
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+
+  --accent: #7c3aed;
+  --accent-ring: rgba(124, 58, 237, 0.45);
+
+  --online-text: #22c55e;
+  --online-dot: #22c55e;
+  --offline-text: #f87171;
+  --offline-dot: #ef4444;
+  --unknown-dot: #71717a;
+
+  --radius-card: 12px;
+  --radius-control: 8px;
+
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-family: var(--fleet-font);
+  -webkit-font-smoothing: antialiased;
+}
+
+.fleet-root[data-theme="light"] {
+  --bg-page: #ffffff;
+  --bg-content: #ffffff;
+  --bg-rail: #f7f7f8;
+  --bg-card: #ffffff;
+  --bg-card-hover: #fafafa;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --rail-active: rgba(0, 0, 0, 0.05);
+
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #a1a1aa;
+
+  --online-text: #15803d;
+  --online-dot: #22c55e;
+  --offline-text: #b91c1c;
+  --offline-dot: #ef4444;
+  --unknown-dot: #a1a1aa;
+}
+
+/* Defeat the global serif heading style inside the fleet surface. */
+.fleet-root h1,
+.fleet-root h2,
+.fleet-root h3 {
+  font-family: var(--fleet-font);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.fleet-root *:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+
+/* ── Primary rail ────────────────────────────────────────────────────────── */
+
+.fleet-rail {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--bg-rail);
+  border-right: 1px solid var(--border);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  transition: width 150ms ease-out;
+}
+
+.fleet-rail--collapsed {
+  width: 56px;
+  padding: 16px 8px;
+}
+
+.fleet-rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 6px 18px;
+  min-height: 30px;
+}
+
+.fleet-rail--collapsed .fleet-rail-brand {
+  padding: 0 0 18px;
+  justify-content: center;
+}
+
+.fleet-rail-brand-mark {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.fleet-rail-brand-name {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.fleet-rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fleet-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 11px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 14.5px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.fleet-rail-item:hover {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.fleet-rail-item--active {
+  background: var(--rail-active);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.fleet-rail-item-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fleet-rail--collapsed .fleet-rail-item {
+  justify-content: center;
+  padding: 9px 0;
+}
+
+.fleet-rail--collapsed .fleet-rail-item-label {
+  display: none;
+}
+
+.fleet-rail-spacer {
+  margin-top: auto;
+}
+
+.fleet-rail-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px;
+  margin-top: auto;
+}
+
+.fleet-rail--collapsed .fleet-rail-controls {
+  flex-direction: column;
+}
+
+.fleet-rail-control-btn {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.fleet-rail-control-btn:hover {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.fleet-rail-owner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.fleet-rail--collapsed .fleet-rail-owner {
+  justify-content: center;
+  padding: 10px 0 0;
+}
+
+.fleet-rail-owner-avatar {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--rail-active);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.fleet-rail-owner-text {
+  line-height: 1.25;
+  min-width: 0;
+}
+
+.fleet-rail--collapsed .fleet-rail-owner-text {
+  display: none;
+}
+
+.fleet-rail-owner-name {
+  font-size: 13.5px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-rail-owner-role {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ── Content area ────────────────────────────────────────────────────────── */
+
+.fleet-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--bg-content);
+  padding: 28px 32px;
+}
+
+.fleet-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.fleet-title {
+  font-size: 24px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.fleet-subtitle {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-top: 5px;
+}
+
+.fleet-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 400;
+  padding: 8px 14px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+
+.fleet-btn:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+}
+
+.fleet-btn-plus {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+/* ── Sage operator row (the ONE accent fill on the page) ─────────────────── */
+
+.fleet-sage {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+
+.fleet-sage-tile {
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 19px;
+}
+
+.fleet-sage-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.fleet-sage-name-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.fleet-sage-name {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.fleet-sage-badge {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  background: var(--rail-active);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 10px;
+}
+
+.fleet-sage-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+/* ── Agent grid ──────────────────────────────────────────────────────────── */
+
+.fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 320px));
+  justify-content: start;
+  gap: 12px;
+}
+
+.fleet-card {
+  position: relative;
+  text-align: left;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 16px 18px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  color: var(--text-primary);
+  transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+
+.fleet-card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+}
+
+.fleet-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.fleet-card-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fleet-card-tile {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--tile-bg, var(--rail-active));
+  color: var(--tile-fg, var(--text-secondary));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.fleet-card-name {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.fleet-card-status.is-online {
+  color: var(--online-text);
+}
+
+.fleet-card-status.is-offline {
+  color: var(--offline-text);
+}
+
+.fleet-card-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--unknown-dot);
+}
+
+.is-online .fleet-card-status-dot {
+  background: var(--online-dot);
+}
+
+.is-offline .fleet-card-status-dot {
+  background: var(--offline-dot);
+}
+
+.fleet-card-meta {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.fleet-card-activity {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  padding-top: 9px;
+  margin-top: 12px;
+}
+
+/* Hover quick-actions — hidden until hover, top-right. */
+.fleet-card-actions {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+
+.fleet-card:hover .fleet-card-actions,
+.fleet-card:focus-within .fleet-card-actions {
+  opacity: 1;
+}
+
+.fleet-card-action-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+}
+
+.fleet-card-action-btn:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+/* When actions are visible, keep the status from crowding them. */
+.fleet-card:hover .fleet-card-status,
+.fleet-card:focus-within .fleet-card-status {
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+
+.fleet-empty {
+  text-align: center;
+  padding: 64px 16px;
+}
+
+.fleet-empty-title {
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.fleet-empty-desc {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+}
+
+/* ── Loading / error full-page ───────────────────────────────────────────── */
+
+.fleet-page-state {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--bg-content);
+  padding: 64px 32px;
+  text-align: center;
+}
+
+.fleet-page-state-title {
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.fleet-page-state-body {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* ── Agent detail — overlay panel over dimmed background ─────────────────── */
+
+.fleet-detail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.45);
+  animation: fleet-fade 150ms ease-out;
+}
+
+.fleet-detail {
+  position: fixed;
+  z-index: 51;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: 420px;
+  max-width: calc(100vw - 24px);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fleet-slide-in 150ms ease-out;
+}
+
+@keyframes fleet-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fleet-slide-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.fleet-detail-header {
+  padding: 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fleet-detail-avatar {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+
+.fleet-detail-avatar-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--tile-bg, var(--rail-active));
+  color: var(--tile-fg, var(--text-secondary));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.fleet-detail-dot {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-card);
+  background: var(--unknown-dot);
+}
+
+.fleet-detail-dot.is-online { background: var(--online-dot); }
+.fleet-detail-dot.is-offline { background: var(--offline-dot); }
+
+.fleet-detail-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.fleet-detail-name {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.fleet-detail-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fleet-detail-meta-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.fleet-detail-meta-status.is-online { color: var(--online-text); }
+.fleet-detail-meta-status.is-offline { color: var(--offline-text); }
+
+.fleet-detail-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.fleet-detail-close:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.fleet-detail-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-detail-tab {
+  padding: 11px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 400;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 150ms ease-out, border-color 150ms ease-out;
+}
+
+.fleet-detail-tab:hover {
+  color: var(--text-primary);
+}
+
+.fleet-detail-tab--active {
+  color: var(--text-primary);
+  font-weight: 500;
+  border-bottom-color: var(--accent);
+}
+
+.fleet-detail-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ── Activity ledger ─────────────────────────────────────────────────────── */
+
+.fleet-activity {
+  padding: 8px 0;
+}
+
+.fleet-activity-item {
+  display: flex;
+  gap: 12px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-activity-item:last-child {
+  border-bottom: none;
+}
+
+.fleet-activity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex-shrink: 0;
+  background: var(--online-dot);
+}
+
+.fleet-activity-dot.is-warn {
+  background: var(--offline-dot);
+}
+
+.fleet-activity-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.fleet-activity-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.fleet-activity-time {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Calm static skeleton — no shimmer, no spin. */
+.fleet-activity-skeleton {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.fleet-skeleton-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.fleet-skeleton-bar {
+  height: 9px;
+  border-radius: 5px;
+  background: var(--rail-active);
+}
+
+/* ── Tab empty / coming soon ─────────────────────────────────────────────── */
+
+.fleet-tab-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 56px 24px;
+  text-align: center;
+}
+
+.fleet-tab-state-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fleet-coming-soon {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 8px;
+}
+
+.fleet-tab-state-body {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  max-width: 260px;
+  line-height: 1.5;
+}
+
+/* ── Model / config tab ──────────────────────────────────────────────────── */
+
+.fleet-config {
+  padding: 16px 20px;
+}
+
+.fleet-config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-config-row:last-child {
+  border-bottom: none;
+}
+
+.fleet-config-label {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.fleet-config-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
