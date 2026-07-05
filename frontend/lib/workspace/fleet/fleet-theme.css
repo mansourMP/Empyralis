@@ -1,7 +1,9 @@
 /* ============================================================================
    Fleet UI theme — tokenized, light + dark, 4px grid, Linear-grade density.
-   Accent is ink (theme text-primary), used rarely. 90% grayscale. The one
+   Accent is a restrained indigo (theme-tokens --accent), used only on
+   interactive/selected states. Near-neutral grayscale otherwise; the other
    surviving hue is --brand-clay on the rail logo mark. Sans throughout.
+   Type/space/motion scales are the shared tokens from theme-tokens.css.
    Motion: 150ms ease-out on hover/panel-open only. No spin, no bounce.
 
    Type scale (weights 400 / 500 only):
@@ -18,16 +20,17 @@
      one shared source consumed by both fleet and legacy chrome surfaces. */
   --fleet-font: var(--font-dm-sans, "DM Sans", "Inter", system-ui, sans-serif);
 
-  --radius-card: 12px;
-  --radius-control: 8px;
-
   display: flex;
   height: 100vh;
   overflow: hidden;
   background: var(--bg-page);
   color: var(--text-primary);
   font-family: var(--fleet-font);
+  font-size: var(--text-base);          /* 14px — dense operator baseline */
+  line-height: var(--leading-normal);   /* 1.45 */
+  letter-spacing: -0.006em;             /* subtle tightening for crispness */
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* Defeat the global serif heading style inside the fleet surface. */
@@ -43,6 +46,60 @@
 .fleet-root *:focus-visible {
   outline: 2px solid var(--accent-ring);
   outline-offset: 2px;
+}
+
+/* ── Shell content frame (breadcrumb topbar + scroll area) ─────────────────── */
+.fleet-shell-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.fleet-shell-topbar {
+  display: flex;
+  align-items: center;
+  height: 45px;
+  min-height: 45px;
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-page);
+}
+.fleet-shell-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.fleet-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  font-size: var(--text-sm);
+}
+.fleet-breadcrumb-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+.fleet-breadcrumb {
+  color: var(--text-secondary);
+  text-decoration: none;
+  padding: 2px 6px;
+  border-radius: var(--radius-control);
+  transition: color var(--motion-base) ease-out, background var(--motion-base) ease-out;
+}
+a.fleet-breadcrumb:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+.fleet-breadcrumb--current {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+.fleet-breadcrumb-sep {
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 /* ── Primary rail ────────────────────────────────────────────────────────── */
@@ -1839,3 +1896,200 @@
   outline: 2px solid var(--accent-ring);
   outline-offset: 1px;
 }
+
+/* ── Phase 7A shell pages: lists, segmented control, stat cards ───────────── */
+.fleet-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.fleet-list-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  text-decoration: none;
+  transition: background var(--motion-base) ease-out, border-color var(--motion-base) ease-out;
+}
+a.fleet-list-row:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+}
+.fleet-list-row-icon { display: inline-flex; color: var(--text-secondary); flex-shrink: 0; }
+.fleet-list-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.fleet-list-row-title { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary); }
+.fleet-list-row-desc {
+  font-size: var(--text-xs); color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fleet-list-row-meta { font-size: var(--text-xs); color: var(--text-secondary); flex-shrink: 0; }
+
+.fleet-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.fleet-segmented-btn {
+  padding: 4px 12px;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--motion-base) ease-out, color var(--motion-base) ease-out;
+}
+.fleet-segmented-btn--active { background: var(--bg-card); color: var(--text-primary); }
+
+.fleet-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+.fleet-stat-card {
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+.fleet-stat-value {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+.fleet-stat-label { margin-top: 2px; font-size: var(--text-xs); color: var(--text-muted); }
+
+/* Agent detail rendered as a routed page (not a modal): fill the content
+   frame, drop the overlay chrome. Comes after .fleet-detail so it wins. */
+.fleet-detail--page {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--bg-page);
+  animation: none;
+}
+
+/* ── Phase 7A rail: focus highlight, chord hints, projects subnav ─────────── */
+.fleet-rail-nav-group { display: flex; flex-direction: column; }
+.fleet-rail-item--focus { box-shadow: inset 0 0 0 1px var(--accent-ring); }
+.fleet-rail-item-caret {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  color: var(--text-muted);
+  padding: 2px;
+}
+.fleet-rail-item-chord {
+  margin-left: auto;
+  font-family: var(--app-font-mono, ui-monospace, monospace);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  opacity: 0;
+  transition: opacity var(--motion-base) ease-out;
+}
+.fleet-rail-item:hover .fleet-rail-item-chord { opacity: 0.7; }
+.fleet-rail-subnav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0;
+  padding-left: 10px;
+}
+.fleet-rail-subitem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: var(--text-sm);
+  transition: background var(--motion-base) ease-out, color var(--motion-base) ease-out;
+}
+.fleet-rail-subitem:hover { background: var(--rail-active); color: var(--text-primary); }
+.fleet-rail-subitem--active { background: var(--rail-active); color: var(--text-primary); }
+.fleet-rail-subitem-dot {
+  width: 4px; height: 4px; border-radius: 999px;
+  background: var(--text-muted); flex-shrink: 0;
+}
+.fleet-rail-subitem--active .fleet-rail-subitem-dot { background: var(--accent); }
+.fleet-rail-subitem-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fleet-rail-subitem-count { font-size: var(--text-2xs); color: var(--text-muted); }
+
+/* ── Phase 7B: agent-detail tab content ───────────────────────────────────── */
+.fleet-detail-pad { padding: var(--space-5); overflow-y: auto; height: 100%; }
+.fleet-link { color: var(--accent); text-decoration: none; }
+.fleet-link:hover { text-decoration: underline; }
+.fleet-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  margin-left: var(--space-2);
+  padding: 1px 7px; border-radius: var(--radius-pill);
+  font-size: var(--text-2xs); font-weight: var(--weight-medium);
+  border: 1px solid var(--border); color: var(--text-secondary);
+}
+.fleet-badge--lock { color: var(--accent); border-color: var(--accent-ring); background: var(--accent-soft); }
+.fleet-badge--preset { text-transform: capitalize; }
+
+/* WORK split view */
+.fleet-work-split { display: flex; height: 100%; min-height: 0; }
+.fleet-work-list {
+  width: 300px; flex-shrink: 0; border-right: 1px solid var(--border);
+  overflow-y: auto; display: flex; flex-direction: column;
+}
+.fleet-work-conv {
+  display: flex; flex-direction: column; gap: 3px; align-items: stretch;
+  padding: var(--space-3) var(--space-4); border: none; border-bottom: 1px solid var(--border);
+  background: transparent; text-align: left; cursor: pointer;
+  transition: background var(--motion-base) ease-out;
+}
+.fleet-work-conv:hover { background: var(--bg-card-hover); }
+.fleet-work-conv--active { background: var(--rail-active); }
+.fleet-work-conv-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.fleet-work-conv-title { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fleet-work-conv-time { font-size: var(--text-2xs); color: var(--text-muted); flex-shrink: 0; }
+.fleet-work-conv-preview { font-size: var(--text-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fleet-work-transcript { flex: 1; min-width: 0; overflow-y: auto; padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-3); }
+.fleet-work-msg { max-width: 72%; padding: var(--space-3) var(--space-4); border-radius: var(--radius-card); border: 1px solid var(--border); }
+.fleet-work-msg--user { align-self: flex-start; background: var(--bg-card); }
+.fleet-work-msg--agent { align-self: flex-end; background: var(--accent-soft); border-color: var(--accent-ring); }
+.fleet-work-msg-role { font-size: var(--text-2xs); color: var(--text-muted); text-transform: capitalize; margin-bottom: 3px; }
+.fleet-work-msg-body { font-size: var(--text-sm); color: var(--text-primary); white-space: pre-wrap; }
+.fleet-work-msg-time { font-size: var(--text-2xs); color: var(--text-muted); margin-top: 4px; }
+.fleet-work-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--space-3); height: 100%; padding: var(--space-8);
+  color: var(--text-muted); text-align: center;
+}
+.fleet-work-empty-title { font-size: var(--text-md); font-weight: var(--weight-medium); color: var(--text-secondary); }
+.fleet-work-empty-desc { font-size: var(--text-sm); max-width: 380px; }
+
+/* HARDWARE + generic detail cards */
+.fleet-hw-card {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  background: var(--bg-card); margin: var(--space-3) 0;
+}
+.fleet-hw-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
+.fleet-hw-row:last-child { border-bottom: none; }
+.fleet-hw-label { font-size: var(--text-sm); color: var(--text-secondary); }
+.fleet-hw-value { font-size: var(--text-sm); color: var(--text-primary); display: inline-flex; align-items: center; gap: 6px; }
+.fleet-hw-note { font-size: var(--text-sm); color: var(--text-muted); line-height: var(--leading-normal); margin-top: var(--space-3); }

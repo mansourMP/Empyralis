@@ -4,7 +4,7 @@ body[data-theme='dark'] {
   color-scheme: dark;
 
   --app-font-sans: var(--font-dm-sans), "DM Sans", "Inter", "Geist", "SF Pro Text", "SF Pro Display", "Segoe UI", sans-serif;
-  --app-font-heading: var(--font-fraunces), "Fraunces", "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --app-font-heading: var(--app-font-sans);
   --app-font-mono: "SF Mono", "JetBrains Mono", "IBM Plex Mono", "Menlo", monospace;
 
   --z-dropdown: 10;
@@ -16,9 +16,9 @@ body[data-theme='dark'] {
 
   --app-bg-page: var(--bg-page);
   --app-surface-1: var(--bg-rail);
-  --app-surface-2: #1A1A1A;
+  --app-surface-2: var(--bg-surface-2);
   --app-surface-hover: var(--bg-card-hover);
-  --app-surface-inset: #101010;
+  --app-surface-inset: var(--bg-inset);
 
   --app-bg-app: var(--bg-page);
   --app-bg-canvas: var(--bg-page);
@@ -32,19 +32,19 @@ body[data-theme='dark'] {
   --app-border-strong: var(--border-strong);
   --app-border-muted: var(--border);
   --app-border-default: var(--border);
-  --app-border-accent: rgba(0, 217, 146, 0.30);
+  --app-border-accent: var(--accent-ring);
 
   --app-text-primary: var(--text-primary);
   --app-text-secondary: var(--text-secondary);
   --app-text-tertiary: var(--text-muted);
   --app-text-inverse: var(--accent-contrast);
 
-  --app-accent: #00D992;
-  --app-accent-primary: #00D992;
-  --app-accent-strong: #00BF7A;
-  --app-accent-muted: rgba(0, 217, 146, 0.12);
-  --app-accent-soft: rgba(0, 217, 146, 0.08);
-  --app-accent-text: #0C0C0C;
+  --app-accent: var(--accent);
+  --app-accent-primary: var(--accent);
+  --app-accent-strong: var(--accent-strong);
+  --app-accent-muted: var(--accent-muted);
+  --app-accent-soft: var(--accent-soft);
+  --app-accent-text: var(--accent-contrast);
 
   --app-success: #4ec598;
   --app-success-muted: rgba(78, 197, 152, 0.18);
@@ -341,9 +341,9 @@ body.theme-light {
 
   --app-bg-page: var(--bg-page);
   --app-surface-1: var(--bg-rail);
-  --app-surface-2: #F0F0F0;
+  --app-surface-2: var(--bg-surface-2);
   --app-surface-hover: var(--bg-card-hover);
-  --app-surface-inset: #EEEEEE;
+  --app-surface-inset: var(--bg-inset);
 
   --app-bg-app: var(--bg-page);
   --app-bg-canvas: var(--bg-page);
@@ -356,21 +356,21 @@ body.theme-light {
   --app-border-strong: var(--border-strong);
   --app-border-muted: var(--border);
   --app-border-default: var(--border);
-  --app-border-accent: #202020;
-  --interactive-accent: #60737C;
-  --interactive-accent-hover: #122026;
+  --app-border-accent: var(--accent-ring);
+  --interactive-accent: var(--accent);
+  --interactive-accent-hover: var(--accent-hover);
 
   --app-text-primary: var(--text-primary);
   --app-text-secondary: var(--text-secondary);
   --app-text-tertiary: var(--text-muted);
   --app-text-inverse: var(--accent-contrast);
 
-  --app-accent: #202020;
-  --app-accent-primary: #202020;
-  --app-accent-strong: #2F2F2F;
-  --app-accent-muted: rgba(32, 32, 32, 0.12);
-  --app-accent-soft: rgba(32, 32, 32, 0.08);
-  --app-accent-text: #FBFCFC;
+  --app-accent: var(--accent);
+  --app-accent-primary: var(--accent);
+  --app-accent-strong: var(--accent-strong);
+  --app-accent-muted: var(--accent-muted);
+  --app-accent-soft: var(--accent-soft);
+  --app-accent-text: var(--accent-contrast);
 
   --app-success: #218E68;
   --app-success-muted: rgba(33, 142, 104, 0.12);
@@ -2222,9 +2222,9 @@ body[data-theme='dark'] .app-textarea:focus {
   --app-text-primary: #1f2329;
   --app-text-secondary: #747b86;
   --app-text-tertiary: #9aa1ab;
-  --app-accent: #2f2f2f;
-  --app-accent-strong: #202020;
-  --app-accent-soft: rgba(32, 32, 32, 0.08);
+  --app-accent: var(--accent);
+  --app-accent-strong: var(--accent-strong);
+  --app-accent-soft: var(--accent-soft);
   --premium-shell-bg: #f7f9fb;
   --premium-glass-bg: rgba(255, 255, 255, 0.72);
   --premium-glass-border: rgba(30, 32, 36, 0.08);

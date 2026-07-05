@@ -36,23 +36,6 @@ const dmSans = localFont({
   display: 'swap',
 });
 
-const fraunces = localFont({
-  src: [
-    {
-      path: './fonts/Fraunces-Regular.ttf',
-      weight: '400',
-      style: 'normal',
-    },
-    {
-      path: './fonts/Fraunces-Bold.ttf',
-      weight: '700',
-      style: 'normal',
-    },
-  ],
-  variable: '--font-fraunces',
-  display: 'swap',
-});
-
 function buildThemeBootstrapScript(storageKey: string): string {
   return `
     (function () {
@@ -97,7 +80,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
       lang="en"
       data-theme="light"
       suppressHydrationWarning
-      className={`${dmSans.variable} ${fraunces.variable}`}
+      className={dmSans.variable}
     >
       <body data-theme="light" suppressHydrationWarning>
         <script

@@ -5,9 +5,58 @@
    Both the fleet UI (fleet-theme.css) and legacy chrome surfaces
    (chrome.css) read these variables instead of defining their own colors.
 
-   Extracted from fleet-theme.css's .fleet-root block — see that file for
-   the design rationale (ink accent, 90% grayscale, --brand-clay exception).
+   The palette is a near-neutral grayscale with a single restrained indigo
+   accent (--accent, one base hex with derived hover/strong/soft/muted/ring
+   steps) and the --brand-clay mark exception. Kept intentionally sparse so
+   the accent only reads on interactive/selected states, not everywhere.
    ========================================================================== */
+
+/* ── Scale tokens (theme-independent) ────────────────────────────────────────
+   Type, spacing (4px grid), radii, control heights, motion. Promoted here as
+   the single source so chrome.css and fleet-theme.css consume the same steps
+   instead of scattered literals. */
+:root {
+  /* Type scale — rem. 14px body is deliberately below the 16px web default:
+     the correct density for an operator tool. */
+  --text-2xs: 0.6875rem;   /* 11px */
+  --text-xs: 0.75rem;      /* 12px */
+  --text-sm: 0.8125rem;    /* 13px */
+  --text-base: 0.875rem;   /* 14px */
+  --text-md: 1rem;         /* 16px */
+  --text-lg: 1.5rem;       /* 24px */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --tracking-tight: -0.01em;
+  --tracking-wide: 0.04em;
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+
+  /* Spacing — 4px grid */
+  --space-1: 0.25rem;   /* 4  */
+  --space-2: 0.5rem;    /* 8  */
+  --space-3: 0.75rem;   /* 12 */
+  --space-4: 1rem;      /* 16 */
+  --space-5: 1.25rem;   /* 20 */
+  --space-6: 1.5rem;    /* 24 */
+  --space-7: 1.75rem;   /* 28 */
+  --space-8: 2rem;      /* 32 */
+  --space-10: 2.5rem;   /* 40 */
+  --space-12: 3rem;     /* 48 */
+  --space-14: 3.5rem;   /* 56 */
+  --space-16: 4rem;     /* 64 */
+
+  /* Radii + control heights */
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-pill: 999px;
+  --h-control-sm: 2rem;     /* 32px */
+  --h-control-md: 2.25rem;  /* 36px */
+
+  /* Motion — appear instant, dismiss brief (Linear's asymmetric timing) */
+  --motion-fast: 100ms;
+  --motion-base: 150ms;
+  --motion-slow: 250ms;
+}
 
 :root,
 html[data-theme="dark"] {
@@ -16,6 +65,8 @@ html[data-theme="dark"] {
   --bg-rail: #161618;
   --bg-card: #1c1c1f;
   --bg-card-hover: #212124;
+  --bg-surface-2: #1a1a1d;
+  --bg-inset: #101012;
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.16);
   --rail-active: rgba(255, 255, 255, 0.06);
@@ -24,11 +75,15 @@ html[data-theme="dark"] {
   --text-secondary: #a1a1aa;
   --text-muted: #71717a;
 
-  /* Ink accent — matches text-primary per theme. No hue, no purple. */
-  --accent: #f4f4f5;
-  --accent-contrast: #0d0d0f;
-  --accent-soft: rgba(244, 244, 245, 0.12);
-  --accent-ring: rgba(244, 244, 245, 0.45);
+  /* Accent — restrained indigo. One base hex; every step is derived from it,
+     so re-tuning the whole ramp means changing a single value. */
+  --accent: oklch(56.7% 0.158 286);  /* distinct violet-indigo — not Linear's literal #5e6ad2 */
+  --accent-hover: color-mix(in oklch, var(--accent) 84%, #ffffff 16%);
+  --accent-strong: color-mix(in oklch, var(--accent) 78%, #ffffff 22%);
+  --accent-contrast: #ffffff;
+  --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent);
+  --accent-muted: color-mix(in oklch, var(--accent) 24%, transparent);
+  --accent-ring: color-mix(in oklch, var(--accent) 55%, transparent);
 
   /* Brand mark only — the one place color survives. */
   --brand-clay: #bc6c4c;
@@ -47,6 +102,8 @@ html[data-theme="light"] {
   --bg-rail: #f7f7f8;
   --bg-card: #ffffff;
   --bg-card-hover: #fafafa;
+  --bg-surface-2: #f0f0f2;
+  --bg-inset: #eeeeef;
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.16);
   --rail-active: rgba(0, 0, 0, 0.05);
@@ -55,10 +112,15 @@ html[data-theme="light"] {
   --text-secondary: #52525b;
   --text-muted: #a1a1aa;
 
-  --accent: #18181b;
-  --accent-contrast: #fff;
-  --accent-soft: rgba(24, 24, 27, 0.08);
-  --accent-ring: rgba(24, 24, 27, 0.35);
+  /* Accent — same restrained indigo, tuned to darken (not lighten) on hover
+     so it stays legible against light surfaces. */
+  --accent: oklch(56.7% 0.158 286);  /* distinct violet-indigo — not Linear's literal #5e6ad2 */
+  --accent-hover: color-mix(in oklch, var(--accent) 86%, #000000 14%);
+  --accent-strong: color-mix(in oklch, var(--accent) 80%, #000000 20%);
+  --accent-contrast: #ffffff;
+  --accent-soft: color-mix(in oklch, var(--accent) 10%, transparent);
+  --accent-muted: color-mix(in oklch, var(--accent) 18%, transparent);
+  --accent-ring: color-mix(in oklch, var(--accent) 42%, transparent);
 
   --online-text: #15803d;
   --offline-text: #b91c1c;

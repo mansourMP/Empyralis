@@ -49,7 +49,7 @@ export function FleetShell({
         onToggleTheme={toggleTheme}
       />
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        <FleetShellDecider shellSlot={shellSlot}>{children}</FleetShellDecider>
+        <FleetShellDecider workspaceId={workspaceId} shellSlot={shellSlot}>{children}</FleetShellDecider>
       </div>
       <FleetCommandPalette
         workspaceId={workspaceId}

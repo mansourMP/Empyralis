@@ -49,16 +49,8 @@ h3,
 h4,
 h5,
 h6 {
-  font-family: var(
-    --app-font-heading,
-    'Fraunces',
-    'Iowan Old Style',
-    'Palatino Linotype',
-    'Book Antiqua',
-    Georgia,
-    serif
-  );
-  font-weight: 700;
+  font-family: var(--app-font-heading, var(--app-font-sans));
+  font-weight: 600;
   letter-spacing: -0.02em;
 }
 

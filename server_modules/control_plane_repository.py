@@ -10633,22 +10633,30 @@ async def ensure_workspace_tenant_binding(
                     )
                     fallback.commit()
             return {"workspace_id": resolved_workspace_id, "tenant_id": resolved_tenant_id}
-        await connection.execute(
-            """
-            INSERT INTO tenants (
-                id, tenant_id, workspace_id, slug, name, status, created_by_user_id, metadata, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, 'active', NULL, '{}'::jsonb, $6::timestamptz, $6::timestamptz)
-            ON CONFLICT (id) DO UPDATE SET
-                workspace_id = EXCLUDED.workspace_id,
-                updated_at = EXCLUDED.updated_at
-            """,
+        # tenants.tenant_id is uniquely constrained, and an existing tenant may
+        # carry a different surrogate id (e.g. id='tenant_default' for
+        # tenant_id='default'). A plain ON CONFLICT (id) upsert would then trip
+        # the tenant_id unique key instead of matching. Only create the tenant
+        # row when its tenant_id isn't already present.
+        existing_tenant = await connection.fetchrow(
+            "SELECT id FROM tenants WHERE tenant_id = $1 LIMIT 1",
             resolved_tenant_id,
-            resolved_tenant_id,
-            resolved_workspace_id,
-            _slugify(resolved_tenant_id, resolved_tenant_id),
-            resolved_tenant_id,
-            created_at,
         )
+        if existing_tenant is None:
+            await connection.execute(
+                """
+                INSERT INTO tenants (
+                    id, tenant_id, workspace_id, slug, name, status, created_by_user_id, metadata, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, 'active', NULL, '{}'::jsonb, $6::timestamptz, $6::timestamptz)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                resolved_tenant_id,
+                resolved_tenant_id,
+                resolved_workspace_id,
+                _slugify(resolved_tenant_id, resolved_tenant_id),
+                resolved_tenant_id,
+                created_at,
+            )
         await connection.execute(
             """
             INSERT INTO workspaces (

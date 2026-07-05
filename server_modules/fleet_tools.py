@@ -326,6 +326,11 @@ async def fleet_list_agents(
             inst_dict, _heartbeats
         )
 
+        # ── Phase 7B: capability preset + hardware access + context policy ──
+        _meta_i = inst_dict.get("metadata") if isinstance(inst_dict.get("metadata"), dict) else {}
+        _pco_i = inst_dict.get("policy_context_overrides") if isinstance(inst_dict.get("policy_context_overrides"), dict) else {}
+        _ctx_pol = _meta_i.get("context_policy") if isinstance(_meta_i.get("context_policy"), dict) else {}
+
         agents.append({
             "agent_id": str(inst_dict.get("id") or "").strip(),
             "label": str(inst_dict.get("label") or "").strip(),
@@ -336,6 +341,10 @@ async def fleet_list_agents(
             "enabled": bool(inst_dict.get("enabled", True)),
             "subagents_enabled": resolve_subagents_enabled(inst_dict),
             "model_config": resolve_model_config(inst_dict),
+            "capability_preset": str(_meta_i.get("capability_preset") or "").strip(),
+            "hardware_access": str(inst_dict.get("hardware_access") or "none").strip(),
+            "hardware_access_locked": bool(_meta_i.get("hardware_access_locked") or _pco_i.get("hardware_access_locked")),
+            "context_policy": dict(_ctx_pol),
             # Phase U3: placement visibility
             "runtime_target": _runtime_target,
             "hardware_status": _hardware_status,

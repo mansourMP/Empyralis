@@ -6,15 +6,21 @@ import {
   Check,
   Cpu,
   ExternalLink,
+  Inbox,
   LayoutGrid,
   Loader2,
+  Lock,
   MessageSquare,
   Plug,
   Radio,
+  Sparkles,
   Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
+
+import { WorkTab } from "./tabs/WorkTab";
+import { HardwareTab } from "./tabs/HardwareTab";
 
 import {
   useFleetAgentActivity,
@@ -30,16 +36,16 @@ import { CHANNEL_ICONS, CONNECTOR_ICONS } from "./fleet-icons";
 import { GatewayPairPanel } from "../../gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
-type TabId = "overview" | "chat" | "memory" | "channels" | "connectors" | "tools" | "model";
+type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory";
 
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
-  { id: "chat", label: "Chat", icon: MessageSquare },
-  { id: "memory", label: "Memory", icon: Brain },
+  { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
-  { id: "tools", label: "Tools", icon: Wrench },
-  { id: "model", label: "Model", icon: Cpu },
+  { id: "hardware", label: "Hardware", icon: Cpu },
+  { id: "model", label: "Model", icon: Sparkles },
+  { id: "memory", label: "Memory", icon: Brain },
 ];
 
 /**
@@ -53,38 +59,134 @@ export function FleetAgentDetail({
   agent,
   onChat,
   onClose,
+  variant = "modal",
+  initialTab,
+  onTabChange,
 }: {
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
   onChat: (agentId: string) => void;
-  onClose: () => void;
+  onClose?: () => void;
+  variant?: "modal" | "page";
+  initialTab?: TabId;
+  onTabChange?: (tab: TabId) => void;
 }) {
-  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab || "overview");
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
 
   const status = deriveStatus(agent?.hardware_status || "unknown");
   const dotClass = statusClass(status.tone);
 
+  // Page mode: keep the active tab in sync with the URL {tab} segment.
   useEffect(() => {
+    if (initialTab) setActiveTab(initialTab);
+  }, [initialTab]);
+
+  const selectTab = useCallback(
+    (tab: TabId) => {
+      setActiveTab(tab);
+      onTabChange?.(tab);
+    },
+    [onTabChange],
+  );
+
+  // Modal mode closes on Escape; the routed page has no overlay to close.
+  useEffect(() => {
+    if (variant !== "modal" || !onClose) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [variant, onClose]);
 
   // Bridge for the command palette (mounted separately at the shell level) —
-  // it can't reach this component's state directly, so it dispatches a
-  // named event instead of requiring a prop-threaded tab-switch callback.
+  // it dispatches a named event instead of a prop-threaded callback.
   useEffect(() => {
     const onSwitchTab = (e: Event) => {
       const tab = (e as CustomEvent<TabId>).detail;
-      if (tab) setActiveTab(tab);
+      if (tab) selectTab(tab);
     };
     window.addEventListener("fleet:switch-tab", onSwitchTab);
     return () => window.removeEventListener("fleet:switch-tab", onSwitchTab);
-  }, []);
+  }, [selectTab]);
+
+  const inner = (
+    <>
+      {/* Left nav */}
+      <div className="fleet-detail-nav">
+        <div className="fleet-detail-nav-header">
+          <div className="fleet-detail-avatar">
+            <div className="fleet-detail-avatar-icon">
+              {(agent?.label || "A").charAt(0).toUpperCase()}
+            </div>
+            <span className={`fleet-detail-dot ${dotClass}`} />
+          </div>
+          <div className="fleet-detail-name">{agent?.label || "Agent"}</div>
+          <span className={`fleet-detail-meta-status ${dotClass}`}>{status.label}</span>
+        </div>
+        <nav className="fleet-detail-nav-tabs">
+          {TABS.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                className={`fleet-detail-nav-tab${activeTab === tab.id ? " fleet-detail-nav-tab--active" : ""}`}
+                onClick={() => selectTab(tab.id)}
+              >
+                <Icon size={16} strokeWidth={1.75} />
+                {tab.label}
+              </button>
+            );
+          })}
+        </nav>
+      </div>
+
+      {/* Content */}
+      <div className="fleet-detail-main">
+        {variant === "modal" && onClose && (
+          <button type="button" className="fleet-detail-close" onClick={onClose} aria-label="Close">
+            <X size={16} strokeWidth={1.75} />
+          </button>
+        )}
+        <div className="fleet-detail-body">
+          {activeTab === "overview" && (
+            <OverviewTab
+              workspaceId={workspaceId}
+              agentId={agentId}
+              agent={agent}
+              statusLabel={status.label}
+              events={events}
+              loading={activityLoading}
+              onChat={() => onChat(agentId)}
+            />
+          )}
+          {activeTab === "work" && <WorkTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
+          {activeTab === "channels" && (
+            <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
+          )}
+          {activeTab === "connectors" && (
+            <ConnectorsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
+          )}
+          {activeTab === "hardware" && <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
+          {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
+          {activeTab === "memory" && (
+            <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
+          )}
+        </div>
+      </div>
+    </>
+  );
+
+  if (variant === "page") {
+    return (
+      <div className="fleet-detail fleet-detail--page" aria-label={`${agent?.label || "Agent"} details`}>
+        {inner}
+      </div>
+    );
+  }
 
   return (
     <div className="fleet-detail-backdrop" onClick={onClose}>
@@ -95,67 +197,7 @@ export function FleetAgentDetail({
         aria-label={`${agent?.label || "Agent"} details`}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Left nav */}
-        <div className="fleet-detail-nav">
-          <div className="fleet-detail-nav-header">
-            <div className="fleet-detail-avatar">
-              <div className="fleet-detail-avatar-icon">
-                {(agent?.label || "A").charAt(0).toUpperCase()}
-              </div>
-              <span className={`fleet-detail-dot ${dotClass}`} />
-            </div>
-            <div className="fleet-detail-name">{agent?.label || "Agent"}</div>
-            <span className={`fleet-detail-meta-status ${dotClass}`}>{status.label}</span>
-          </div>
-          <nav className="fleet-detail-nav-tabs">
-            {TABS.map((tab) => {
-              const Icon = tab.icon;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  className={`fleet-detail-nav-tab${activeTab === tab.id ? " fleet-detail-nav-tab--active" : ""}`}
-                  onClick={() => setActiveTab(tab.id)}
-                >
-                  <Icon size={16} strokeWidth={1.75} />
-                  {tab.label}
-                </button>
-              );
-            })}
-          </nav>
-        </div>
-
-        {/* Content */}
-        <div className="fleet-detail-main">
-          <button type="button" className="fleet-detail-close" onClick={onClose} aria-label="Close">
-            <X size={16} strokeWidth={1.75} />
-          </button>
-          <div className="fleet-detail-body">
-            {activeTab === "overview" && (
-              <OverviewTab
-                agent={agent}
-                statusLabel={status.label}
-                events={events}
-                loading={activityLoading}
-                onChat={() => onChat(agentId)}
-              />
-            )}
-            {activeTab === "chat" && <ChatTab agent={agent} onChat={() => onChat(agentId)} />}
-            {activeTab === "memory" && (
-              <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
-            )}
-            {activeTab === "channels" && (
-              <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
-            )}
-            {activeTab === "connectors" && (
-              <ConnectorsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
-            )}
-            {activeTab === "tools" && (
-              <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
-            )}
-            {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
-          </div>
-        </div>
+        {inner}
       </div>
     </div>
   );
@@ -1017,6 +1059,46 @@ function resolveDisplayMode(config: Record<string, any>): ProviderMode {
   return "platform_credits";
 }
 
+// Phase 7B: preset / hardware-lock / context-policy / today's cost, shown at
+// the top of the Model tab so the agent's governance + spend are visible.
+function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
+  const [cost, setCost] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled && d?.totals) setCost(Number(d.totals.usd_cost || 0)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [workspaceId, agentId]);
+  const preset = (agent?.capability_preset || "standard").toLowerCase();
+  const locked = !!agent?.hardware_access_locked;
+  const pol = agent?.context_policy || {};
+  const maxTok = Number(pol.max_context_tokens || 0);
+  const action = pol.on_context_full === "fresh_session" ? "fresh session" : "compact";
+  return (
+    <div className="fleet-config" style={{ marginBottom: 20 }}>
+      <div className="fleet-config-row">
+        <span className="fleet-config-label">Capability preset</span>
+        <span className="fleet-config-value">
+          <span className="fleet-badge fleet-badge--preset">{preset}</span>
+          {locked && <span className="fleet-badge fleet-badge--lock"><Lock size={11} strokeWidth={2} /> hardware locked</span>}
+        </span>
+      </div>
+      <div className="fleet-config-row">
+        <span className="fleet-config-label">Context policy</span>
+        <span className="fleet-config-value">
+          {maxTok > 0 ? `${maxTok.toLocaleString()} tokens` : "model default"} → {action}
+        </span>
+      </div>
+      <div className="fleet-config-row">
+        <span className="fleet-config-label">Cost today</span>
+        <span className="fleet-config-value">{cost === null ? "…" : `$${cost.toFixed(4)}`}</span>
+      </div>
+    </div>
+  );
+}
+
 function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
   const config = agent?.model_config || {};
   const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
@@ -1088,6 +1170,7 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
 
   return (
     <div>
+      <AgentModelSummary workspaceId={workspaceId} agentId={agentId} agent={agent} />
       {/* Current state — always visible */}
       <div className="fleet-config" style={{ marginBottom: 20 }}>
         <div className="fleet-config-row">

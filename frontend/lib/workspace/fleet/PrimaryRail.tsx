@@ -2,11 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSelectedLayoutSegment } from "next/navigation";
+import { useParams, useRouter, useSelectedLayoutSegment } from "next/navigation";
 import {
-  CreditCard,
+  Bot,
+  ChevronRight,
   Cpu,
-  Home,
+  CreditCard,
+  FolderKanban,
+  Inbox,
   LogOut,
   Moon,
   PanelLeftClose,
@@ -19,23 +22,29 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 
+import { useFleetProjects } from "./fleet-data";
 import type { FleetTheme } from "./fleet-preferences";
 
-type RailNavItem = { key: string; label: string; segment: string; icon: LucideIcon };
+type RailNavItem = { key: string; label: string; segment: string; icon: LucideIcon; chord: string };
 
+// Rail vocabulary. `chord` is the second key of Linear-style "g then <key>".
 const RAIL_ITEMS: RailNavItem[] = [
-  { key: "home", label: "Home", segment: "fleet", icon: Home },
-  { key: "hardware", label: "Hardware", segment: "hardware", icon: Cpu },
-  { key: "billing", label: "Billing", segment: "settings", icon: CreditCard },
+  { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i" },
+  { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
+  { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a" },
+  { key: "hardware", label: "Hardware", segment: "hardware", icon: Cpu, chord: "h" },
+  { key: "billing", label: "Billing", segment: "billing", icon: CreditCard, chord: "b" },
+  { key: "settings", label: "Settings", segment: "settings", icon: Settings, chord: "s" },
 ];
 
 const RAIL_ICON = 18;
 const CONTROL_ICON = 16;
 
 /**
- * Persistent primary rail — three items, no sections, no collapsibles.
- * Channels, Connectors, Memory, and per-agent detail all live inside
- * the agent modal (FleetAgentDetail), not in the rail.
+ * Persistent primary rail — the app's spine. Six sections, Projects expands to
+ * its live list. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then a
+ * section key jumps directly (g i inbox, g p projects, g a agents, g h
+ * hardware, g b billing, g s settings) — the Linear muscle-memory model.
  */
 export function PrimaryRail({
   workspaceId,
@@ -60,10 +69,59 @@ export function PrimaryRail({
 }) {
   const router = useRouter();
   const segment = useSelectedLayoutSegment();
-  const activeSegment = segment || "fleet";
+  const params = useParams();
+  const activeProjectId = String((params?.projectId as string) || "");
+  const { projects } = useFleetProjects(workspaceId);
 
-  const nav = (item: RailNavItem) =>
-    router.push(`/w/${encodeURIComponent(workspaceId)}/${item.segment}`);
+  const [projectsOpen, setProjectsOpen] = useState(true);
+  const [focusIdx, setFocusIdx] = useState(-1);
+  const gPendingRef = useRef(false);
+  const gTimer = useRef<number | null>(null);
+
+  const hrefFor = (seg: string) => `/w/${encodeURIComponent(workspaceId)}/${seg}`;
+
+  // Keyboard navigation. Ignored while typing or when a modifier is held (so
+  // ⌘K and browser shortcuts are untouched).
+  useEffect(() => {
+    const isTyping = () => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el) return false;
+      return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || isTyping()) return;
+      const key = e.key.toLowerCase();
+
+      if (gPendingRef.current) {
+        gPendingRef.current = false;
+        const item = RAIL_ITEMS.find((i) => i.chord === key);
+        if (item) {
+          e.preventDefault();
+          router.push(hrefFor(item.segment));
+        }
+        return;
+      }
+      if (key === "g") {
+        gPendingRef.current = true;
+        if (gTimer.current) window.clearTimeout(gTimer.current);
+        gTimer.current = window.setTimeout(() => { gPendingRef.current = false; }, 1200);
+        return;
+      }
+      if (key === "j") {
+        e.preventDefault();
+        setFocusIdx((i) => Math.min(RAIL_ITEMS.length - 1, i + 1));
+      } else if (key === "k") {
+        e.preventDefault();
+        setFocusIdx((i) => (i < 0 ? RAIL_ITEMS.length - 1 : Math.max(0, i - 1)));
+      } else if (key === "enter" && focusIdx >= 0) {
+        e.preventDefault();
+        router.push(hrefFor(RAIL_ITEMS[focusIdx].segment));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusIdx, router, workspaceId]);
 
   return (
     <aside className={`fleet-rail${collapsed ? " fleet-rail--collapsed" : ""}`}>
@@ -73,22 +131,63 @@ export function PrimaryRail({
       </div>
 
       <nav className="fleet-rail-nav">
-        {RAIL_ITEMS.map((item) => {
+        {RAIL_ITEMS.map((item, idx) => {
           const Icon = item.icon;
-          const active = activeSegment === item.segment;
+          const active = segment === item.segment;
+          const focused = focusIdx === idx;
+          const isProjects = item.key === "projects";
           return (
-            <button
-              key={item.key}
-              type="button"
-              title={collapsed ? item.label : undefined}
-              className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}`}
-              onClick={() => nav(item)}
-            >
-              <span className="fleet-rail-item-icon">
-                <Icon size={RAIL_ICON} strokeWidth={1.75} />
-              </span>
-              {!collapsed && <span className="fleet-rail-item-label">{item.label}</span>}
-            </button>
+            <div key={item.key} className="fleet-rail-nav-group">
+              <button
+                type="button"
+                title={collapsed ? item.label : undefined}
+                className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
+                onClick={() => {
+                  if (isProjects && !collapsed) setProjectsOpen((v) => !v);
+                  router.push(hrefFor(item.segment));
+                }}
+              >
+                <span className="fleet-rail-item-icon">
+                  <Icon size={RAIL_ICON} strokeWidth={1.75} />
+                </span>
+                {!collapsed && <span className="fleet-rail-item-label">{item.label}</span>}
+                {!collapsed && isProjects && (
+                  <span
+                    className="fleet-rail-item-caret"
+                    role="button"
+                    tabIndex={-1}
+                    aria-label={projectsOpen ? "Collapse projects" : "Expand projects"}
+                    onClick={(e) => { e.stopPropagation(); setProjectsOpen((v) => !v); }}
+                  >
+                    <ChevronRight size={13} strokeWidth={2} style={{ transform: projectsOpen ? "rotate(90deg)" : "none", transition: "transform 150ms ease-out" }} />
+                  </span>
+                )}
+                {!collapsed && !isProjects && (
+                  <kbd className="fleet-rail-item-chord">G {item.chord.toUpperCase()}</kbd>
+                )}
+              </button>
+
+              {isProjects && projectsOpen && !collapsed && projects.length > 0 && (
+                <div className="fleet-rail-subnav">
+                  {projects.map((p) => {
+                    const subActive = segment === "projects" && activeProjectId === p.id;
+                    return (
+                      <Link
+                        key={p.id}
+                        href={`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(p.id)}`}
+                        className={`fleet-rail-subitem${subActive ? " fleet-rail-subitem--active" : ""}`}
+                      >
+                        <span className="fleet-rail-subitem-dot" />
+                        <span className="fleet-rail-subitem-label">{p.name || p.id}</span>
+                        {typeof p.agent_count === "number" && (
+                          <span className="fleet-rail-subitem-count">{p.agent_count}</span>
+                        )}
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
       </nav>
@@ -147,7 +246,7 @@ function AccountMenu({
   const ref = useRef<HTMLDivElement | null>(null);
 
   const settingsHref = `/w/${encodeURIComponent(workspaceId)}/settings`;
-  const creditsHref = `${settingsHref}?section=billing`;
+  const creditsHref = `/w/${encodeURIComponent(workspaceId)}/billing`;
 
   useEffect(() => {
     if (!open) return;
@@ -189,7 +288,7 @@ function AccountMenu({
           </Link>
           <Link className="fleet-rail-account-popover-row" href={creditsHref} role="menuitem" onClick={() => setOpen(false)}>
             <CreditCard size={14} strokeWidth={1.75} />
-            Credits
+            Billing
           </Link>
           <button
             type="button"

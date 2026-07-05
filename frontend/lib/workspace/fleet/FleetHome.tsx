@@ -6,7 +6,6 @@ import { useRouter } from "next/navigation";
 import { Radio, Plug, Cpu } from "lucide-react";
 
 import { useFleetAgents, useWorkspaceActivity, useWorkspaceStatusStrip } from "./fleet-data";
-import { FleetAgentDetail } from "./FleetAgentDetail";
 import { FleetCard } from "./FleetCard";
 import { FleetCreateAgentWizard } from "./FleetCreateAgentWizard";
 import { TelegramPairPanel } from "./TelegramPairPanel";
@@ -14,11 +13,22 @@ import { isSageAgent, toAgentSummary } from "./fleet-presentation";
 
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
   const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
   const router = useRouter();
 
-  const openChat = () => router.push(`/w/${encodeURIComponent(workspaceId)}/chat`);
+  const base = `/w/${encodeURIComponent(workspaceId)}`;
+  // Selecting an agent opens its routed detail page (was a modal). Ungrouped
+  // agents still carry the backend's default project id.
+  const goToAgentTab = (agentId: string, tab = "overview") => {
+    const a = agents.find((x) => x.agent_id === agentId);
+    const pid = (a?.project_id || "").trim();
+    if (!pid) return;
+    router.push(`${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(agentId)}/${tab}`);
+  };
+  const openChat = () => {
+    const sage = agents.find((a) => (a.role || "").toLowerCase() === "operator") || agents[0];
+    if (sage) goToAgentTab(sage.agent_id, "chat");
+  };
 
   // ── Loading ──
   if (loading && agents.length === 0) {
@@ -66,7 +76,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 
         {/* Sage operator row */}
         {sageAgent && (
-          <SageRow agentId={sageAgent.id} onChat={openChat} onSelect={setSelectedAgentId} />
+          <SageRow agentId={sageAgent.id} onChat={openChat} onSelect={(id) => goToAgentTab(id, "overview")} />
         )}
 
         {/* Grid or empty */}
@@ -78,7 +88,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
               <FleetCard
                 key={a.id}
                 agent={a}
-                onSelect={setSelectedAgentId}
+                onSelect={(id) => goToAgentTab(id, "overview")}
                 onChat={openChat}
               />
             ))}
@@ -92,27 +102,15 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
         <ActivityFeed workspaceId={workspaceId} />
       </main>
 
-      {/* Detail overlay */}
-      {selectedAgentId && (
-        <FleetAgentDetail
-          workspaceId={workspaceId}
-          agentId={selectedAgentId}
-          agent={agents.find((a) => a.agent_id === selectedAgentId) || null}
-          onChat={openChat}
-          onClose={() => setSelectedAgentId(null)}
-        />
-      )}
-
-      {/* Create-agent wizard — on finish, refresh the list and open the new
-          agent's detail modal at Overview, already configured. */}
+      {/* Create-agent wizard — on finish, refresh the list; the new agent
+          appears in the grid and opens to its routed detail page on click. */}
       {wizardOpen && (
         <FleetCreateAgentWizard
           workspaceId={workspaceId}
           onClose={() => setWizardOpen(false)}
-          onCreated={(newAgentId) => {
+          onCreated={() => {
             setWizardOpen(false);
             refresh();
-            setSelectedAgentId(newAgentId);
           }}
         />
       )}

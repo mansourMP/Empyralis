@@ -15,6 +15,20 @@ export type FleetAgent = {
   last_activity?: string | null;
   activity_preview?: string;
   model_config?: Record<string, any>;
+  project_id?: string;
+  capability_preset?: string;
+  hardware_access?: string;
+  hardware_access_locked?: boolean;
+  context_policy?: { max_context_tokens?: number; on_context_full?: string };
+  subagents_enabled?: boolean;
+};
+
+export type FleetProject = {
+  id: string;
+  name: string;
+  description?: string;
+  agent_count?: number;
+  status?: string;
 };
 
 export type FleetAgentActivity = {
@@ -53,6 +67,35 @@ export function useFleetAgents(workspaceId: string) {
   }, [refresh]);
 
   return { agents, loading, error, refresh };
+}
+
+export function useFleetProjects(workspaceId: string) {
+  const [projects, setProjects] = useState<FleetProject[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/w/${workspaceId}/fleet/projects`, { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setProjects(Array.isArray(data.projects) ? data.projects : []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load projects");
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 60_000);
+    return () => clearInterval(interval);
+  }, [refresh]);
+
+  return { projects, loading, error, refresh };
 }
 
 export function useFleetAgentActivity(workspaceId: string, agentId: string | null) {
