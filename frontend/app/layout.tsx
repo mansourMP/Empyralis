@@ -3,6 +3,7 @@ import localFont from 'next/font/local';
 import type { ReactNode } from 'react';
 
 import './globals.css';
+import '../lib/ui/theme-tokens.css';
 import '../lib/ui/chrome.css';
 import { AccountShellProvider } from '@/lib/shell/account-shell-context';
 import { ACCOUNT_SHELL_STORAGE_KEY } from '@/lib/shell/account-shell-storage';
@@ -75,10 +76,10 @@ function buildThemeBootstrapScript(storageKey: string): string {
 
         var root = document.documentElement;
         var body = document.body;
-        root.setAttribute('data-emp-theme', resolved);
+        root.setAttribute('data-theme', resolved);
         root.style.colorScheme = resolved;
         if (body) {
-          body.setAttribute('data-emp-theme', resolved);
+          body.setAttribute('data-theme', resolved);
           body.style.colorScheme = resolved;
         }
       } catch (_error) {
@@ -94,11 +95,11 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   return (
     <html
       lang="en"
-      data-emp-theme="light"
+      data-theme="light"
       suppressHydrationWarning
       className={`${dmSans.variable} ${fraunces.variable}`}
     >
-      <body data-emp-theme="light" suppressHydrationWarning>
+      <body data-theme="light" suppressHydrationWarning>
         <script
           // Keep document theme in sync with persisted preference before hydration.
           dangerouslySetInnerHTML={{ __html: themeBootstrapScript }}

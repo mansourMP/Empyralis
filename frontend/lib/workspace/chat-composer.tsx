@@ -242,6 +242,7 @@ export function ChatComposer({
   onVoiceTranscribe,
   attachments = [],
   onRemoveAttachment,
+  visionSupported = true,
 }: {
   draft: string;
   onDraftChange: (nextDraft: string) => void;
@@ -274,6 +275,9 @@ export function ChatComposer({
   onVoiceTranscribe?: (audio: Blob) => Promise<string>;
   attachments?: any[];
   onRemoveAttachment?: (attachment: any) => void;
+  /** False when the active model can't read images — the attach button
+   * stays visible but disabled with a tooltip, never hidden. */
+  visionSupported?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -295,20 +299,11 @@ export function ChatComposer({
   const showSendButton = busy || hasDraft;
   const selectedReasoningLabel = composerOptionLabel(reasoningOptions, reasoningEffort) || reasoningEffort || 'Auto';
   const fileDropEnabled = typeof onFilesSelected === 'function' && !controlsDisabled;
-  const menuCapabilityItems = useMemo<readonly ComposerCapabilityItem[]>(() => {
-    if (!fileDropEnabled || capabilityItems.some((item) => item.id === 'files')) {
-      return capabilityItems;
-    }
-    return [
-      {
-        id: 'files',
-        title: 'Add files',
-        icon: Paperclip,
-        onSelect: () => {},
-      },
-      ...capabilityItems,
-    ];
-  }, [capabilityItems, fileDropEnabled]);
+  // "Add files" used to live buried inside this menu (id: "files", clickable
+  // only after opening "+"). It's now the standalone attach button in the
+  // toolbar below, so it isn't injected here anymore — one visible entry
+  // point instead of two ways to do the same thing.
+  const menuCapabilityItems = capabilityItems;
   const availableReasoningOptions = useMemo(
     () => reasoningOptions.filter((option) => !option.disabled),
     [reasoningOptions],
@@ -918,6 +913,18 @@ export function ChatComposer({
                 </div>
               ) : null}
             </div>
+            {fileDropEnabled ? (
+              <button
+                type="button"
+                className="app-chat-composer__icon-trigger app-chat-composer__attach"
+                disabled={!visionSupported}
+                title={visionSupported ? 'Attach a file' : "This model doesn't support images"}
+                aria-label={visionSupported ? 'Attach a file' : "Attach a file — this model doesn't support images"}
+                onClick={openFilePicker}
+              >
+                <Paperclip size={18} strokeWidth={2} aria-hidden="true" />
+              </button>
+            ) : null}
             {modelControl}
           </div>
 

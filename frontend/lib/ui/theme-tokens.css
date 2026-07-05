@@ -1,0 +1,66 @@
+/* ============================================================================
+   Shared theme tokens — the single source of color truth for light/dark.
+   `data-theme` on <html> (set by lib/ui/app-theme.tsx, resolved from the
+   account's globalTheme preference) is the only theme switch in the app.
+   Both the fleet UI (fleet-theme.css) and legacy chrome surfaces
+   (chrome.css) read these variables instead of defining their own colors.
+
+   Extracted from fleet-theme.css's .fleet-root block — see that file for
+   the design rationale (ink accent, 90% grayscale, --brand-clay exception).
+   ========================================================================== */
+
+:root,
+html[data-theme="dark"] {
+  --bg-page: #0d0d0f;
+  --bg-content: #0d0d0f;
+  --bg-rail: #161618;
+  --bg-card: #1c1c1f;
+  --bg-card-hover: #212124;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --rail-active: rgba(255, 255, 255, 0.06);
+
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+
+  /* Ink accent — matches text-primary per theme. No hue, no purple. */
+  --accent: #f4f4f5;
+  --accent-contrast: #0d0d0f;
+  --accent-soft: rgba(244, 244, 245, 0.12);
+  --accent-ring: rgba(244, 244, 245, 0.45);
+
+  /* Brand mark only — the one place color survives. */
+  --brand-clay: #bc6c4c;
+  --brand-clay-contrast: #fff;
+
+  --online-text: #22c55e;
+  --online-dot: #22c55e;
+  --offline-text: #f87171;
+  --offline-dot: #ef4444;
+  --unknown-dot: #71717a;
+}
+
+html[data-theme="light"] {
+  --bg-page: #ffffff;
+  --bg-content: #ffffff;
+  --bg-rail: #f7f7f8;
+  --bg-card: #ffffff;
+  --bg-card-hover: #fafafa;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --rail-active: rgba(0, 0, 0, 0.05);
+
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #a1a1aa;
+
+  --accent: #18181b;
+  --accent-contrast: #fff;
+  --accent-soft: rgba(24, 24, 27, 0.08);
+  --accent-ring: rgba(24, 24, 27, 0.35);
+
+  --online-text: #15803d;
+  --offline-text: #b91c1c;
+  --unknown-dot: #a1a1aa;
+}

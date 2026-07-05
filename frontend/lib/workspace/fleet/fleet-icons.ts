@@ -1,0 +1,56 @@
+// Icon paths for the platform/connector grids. The backend catalog has no
+// image field (confirmed by reading connection_catalog_service.py) — brand
+// icons are a client-side lookup by id, matching the same static assets the
+// workspace-wide Channels/Connectors pages use.
+
+export const CHANNEL_ICONS: Record<string, string> = {
+  sage_telegram_hosted: "/brand-assets/channels/telegram.svg",
+  telegram_personal: "/brand-assets/channels/telegram.svg",
+  telegram_bot: "/brand-assets/channels/telegram.svg",
+  slack: "/brand-assets/channels/slack.svg",
+  discord_bot: "/brand-assets/channels/discord.svg",
+  whatsapp_personal: "/brand-assets/channels/whatsapp.svg",
+  whatsapp_twilio: "/brand-assets/channels/whatsapp.svg",
+  signal_personal: "/brand-assets/channels/signal.svg",
+  imessage_personal: "/brand-assets/channels/imessage.svg",
+  wechat_personal: "/brand-assets/channels/wechat.svg",
+  apple_messages_business: "/brand-assets/channels/imessage.svg",
+  email: "/brand-assets/generic/email.svg",
+};
+
+export const CONNECTOR_ICONS: Record<string, string> = {
+  google_workspace: "/brand-assets/apps/gmail.svg",
+  microsoft_365: "/brand-assets/apps/microsoft365.svg",
+  github: "/brand-assets/apps/github.svg",
+  notion: "/brand-assets/apps/notion.svg",
+  linear: "/brand-assets/apps/linear.svg",
+  dropbox: "/brand-assets/apps/dropbox.svg",
+  figma: "/brand-assets/apps/figma.ico",
+  todoist: "/brand-assets/apps/todoist.ico",
+  airtable: "/brand-assets/apps/airtable.png",
+  canva: "/brand-assets/apps/canva.ico",
+  asana: "/brand-assets/apps/asana.ico",
+  hubspot: "/brand-assets/apps/hubspot.png",
+  zoom: "/brand-assets/apps/zoom.ico",
+  calendly: "/brand-assets/apps/calendly.ico",
+  clickup: "/brand-assets/apps/clickup.png",
+  jira: "/brand-assets/apps/jira.ico",
+  stripe: "/brand-assets/apps/stripe.ico",
+  salesforce: "/brand-assets/apps/salesforce.ico",
+  webflow: "/brand-assets/apps/webflow.ico",
+  monday: "/brand-assets/apps/monday.ico",
+  box: "/brand-assets/apps/box.ico",
+  gitlab: "/brand-assets/apps/gitlab.ico",
+  confluence: "/brand-assets/apps/confluence.ico",
+  miro: "/brand-assets/apps/miro.png",
+  intercom: "/brand-assets/apps/intercom.ico",
+  docusign: "/brand-assets/apps/docusign.ico",
+  square: "/brand-assets/apps/square.ico",
+  typeform: "/brand-assets/apps/typeform.ico",
+  vercel: "/brand-assets/apps/vercel.ico",
+  s3: "/brand-assets/apps/aws-s3.svg",
+  smtp: "/brand-assets/generic/email.svg",
+  wechat_work: "/brand-assets/channels/wechat.svg",
+  instagram_business: "/brand-assets/apps/instagram.svg",
+  webhook: "/brand-assets/generic/webhook.svg",
+};

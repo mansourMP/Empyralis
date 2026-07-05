@@ -15,6 +15,7 @@ import {
 } from '@/lib/workspace/cloud-vps-setup-panel';
 import { useWorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
 import { useWorkspaceServices } from '@/lib/workspace/workspace-services';
+import { GatewayPairPanel } from '@/lib/gateway/GatewayPairPanel';
 
 type HardwareKind = 'local_companion' | 'self_hosted_business_node' | 'cloud_computer';
 type HardwareStatus = 'Connected' | 'Offline' | 'Needs approval' | 'Unavailable';
@@ -790,6 +791,7 @@ export function WorkstationHardwarePane() {
   const [remoteExpanded, setRemoteExpanded] = useState(false);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [manualCommandOpen, setManualCommandOpen] = useState(false);
+  const [manualPairOpen, setManualPairOpen] = useState(false);
   const [pendingFullAccessPairingOption, setPendingFullAccessPairingOption] = useState<ConnectOptionId | null>(null);
   const [sshHost, setSshHost] = useState('');
   const [sshPort, setSshPort] = useState('22');
@@ -1670,6 +1672,27 @@ export function WorkstationHardwarePane() {
                 {trayStatus?.error ? <p className="workstation-hardware-connect-card__error">{trayStatus.error}</p> : null}
 	                {trayProcessConnected(trayStatus) && !trayStatusConnected(trayStatus) ? (
 	                  <p className="workstation-hardware-connect-card__note">{localTrayConnectionNote(trayStatus)}</p>
+	                ) : null}
+	                {!trayDetected ? (
+	                  <>
+	                    <button
+	                      className="workstation-hardware-inline-link"
+	                      type="button"
+	                      onClick={() => setManualPairOpen((open) => !open)}
+	                    >
+	                      {manualPairOpen ? 'Hide manual pairing ↑' : 'Or pair without the tray app ↓'}
+	                    </button>
+	                    {manualPairOpen ? (
+	                      <GatewayPairPanel
+	                        workspaceId={workspaceId}
+	                        defaultPlatform="macos"
+	                        onPaired={() => {
+	                          setManualPairOpen(false);
+	                          void refreshSageAgentComputerState();
+	                        }}
+	                      />
+	                    ) : null}
+	                  </>
 	                ) : null}
 	              </article>
 	              ) : null}

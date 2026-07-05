@@ -1,6 +1,6 @@
 :root,
-:root[data-emp-theme='dark'],
-body[data-emp-theme='dark'] {
+:root[data-theme='dark'],
+body[data-theme='dark'] {
   color-scheme: dark;
 
   --app-font-sans: var(--font-dm-sans), "DM Sans", "Inter", "Geist", "SF Pro Text", "SF Pro Display", "Segoe UI", sans-serif;
@@ -14,30 +14,30 @@ body[data-emp-theme='dark'] {
   --z-modal: 100;
   --z-toast: 200;
 
-  --app-bg-page: #0C0C0C;
-  --app-surface-1: #151515;
+  --app-bg-page: var(--bg-page);
+  --app-surface-1: var(--bg-rail);
   --app-surface-2: #1A1A1A;
-  --app-surface-hover: #1E1E1E;
+  --app-surface-hover: var(--bg-card-hover);
   --app-surface-inset: #101010;
 
-  --app-bg-app: #0C0C0C;
-  --app-bg-canvas: #0C0C0C;
-  --app-bg-shell: #111111;
-  --app-bg-panel: #151515;
-  --app-bg-panel-elevated: #1C1C1C;
-  --app-bg-overlay: #222222;
+  --app-bg-app: var(--bg-page);
+  --app-bg-canvas: var(--bg-page);
+  --app-bg-shell: var(--bg-rail);
+  --app-bg-panel: var(--bg-rail);
+  --app-bg-panel-elevated: var(--bg-card);
+  --app-bg-overlay: var(--bg-card-hover);
   --app-bg-raised: var(--app-bg-panel-elevated);
 
-  --app-border-subtle: rgba(255, 255, 255, 0.06);
-  --app-border-strong: rgba(255, 255, 255, 0.15);
-  --app-border-muted: rgba(255, 255, 255, 0.06);
-  --app-border-default: rgba(255, 255, 255, 0.10);
+  --app-border-subtle: var(--border);
+  --app-border-strong: var(--border-strong);
+  --app-border-muted: var(--border);
+  --app-border-default: var(--border);
   --app-border-accent: rgba(0, 217, 146, 0.30);
 
-  --app-text-primary: #E8E8E8;
-  --app-text-secondary: #A0A0A0;
-  --app-text-tertiary: #707070;
-  --app-text-inverse: #0C0C0C;
+  --app-text-primary: var(--text-primary);
+  --app-text-secondary: var(--text-secondary);
+  --app-text-tertiary: var(--text-muted);
+  --app-text-inverse: var(--accent-contrast);
 
   --app-accent: #00D992;
   --app-accent-primary: #00D992;
@@ -79,13 +79,15 @@ body[data-emp-theme='dark'] {
   --bg-active: var(--color-base-40);
   --bg-base: var(--bg-primary);
 
+  /* --text-primary, --text-secondary, --border-strong, and --accent are NOT
+     redeclared here — lib/ui/theme-tokens.css defines them once at :root
+     and this block would otherwise create a var() cycle with --app-*
+     (see docs/UI-MODEL.md theme section). Everything below derives from
+     the shared token, not from --app-*, so it stays in sync automatically. */
   --border-faint: color-mix(in srgb, var(--app-border-muted) 72%, transparent);
   --border-subtle: var(--app-border-subtle);
   --border-default: var(--app-border-default);
-  --border-strong: var(--app-border-strong);
 
-  --text-primary: var(--app-text-primary);
-  --text-secondary: var(--app-text-secondary);
   --text-tertiary: var(--app-text-tertiary);
   --text-faint: var(--color-base-60);
   --text-accent: var(--app-text-primary);
@@ -94,9 +96,8 @@ body[data-emp-theme='dark'] {
   --interactive-accent-hover: var(--app-accent-strong);
   --interactive-normal: var(--app-bg-panel);
   --interactive-hover: var(--app-bg-panel-elevated);
-  --accent: var(--interactive-accent);
-  --accent-hover: var(--interactive-accent-hover);
-  --accent-subtle: var(--app-accent-soft);
+  --accent-hover: var(--accent);
+  --accent-subtle: var(--accent-soft);
   --sidebar: var(--app-bg-shell);
   --sidebar-border: var(--app-border-subtle);
   --primary: var(--app-text-primary);
@@ -172,8 +173,8 @@ body[data-emp-theme='dark'] {
 
   --app-shadow-subtle: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   --app-shadow-panel: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  --app-shadow-focus: 0 0 0 2px rgba(0, 217, 146, 0.35);
-  --app-shadow-glow: 0 0 16px rgba(0, 217, 146, 0.12);
+  --app-shadow-focus: 0 0 0 2px var(--accent-ring);
+  --app-shadow-glow: 0 0 16px var(--accent-soft);
 
   --app-motion-fast: 120ms;
   --app-motion-normal: 160ms;
@@ -213,26 +214,26 @@ body[data-emp-theme='dark'] {
   --premium-card-border: rgba(240, 240, 240, 0.06);
 }
 
-:root[data-emp-theme='dark'] .app-root,
-:root[data-emp-theme='dark'] .app-shell-frame,
-:root[data-emp-theme='dark'] .workstation-shell,
-:root[data-emp-theme='dark'] .workstation-shell-frame,
-body[data-emp-theme='dark'] .app-root,
-body[data-emp-theme='dark'] .app-shell-frame,
-body[data-emp-theme='dark'] .workstation-shell,
-body[data-emp-theme='dark'] .workstation-shell-frame {
-  --app-border-accent: #3a3a3a;
-  --app-accent: #2f2f2f;
-  --app-accent-primary: #2f2f2f;
-  --app-accent-strong: #3a3a3a;
-  --app-accent-muted: rgba(58, 58, 58, 0.3);
-  --app-accent-soft: rgba(58, 58, 58, 0.16);
-  --interactive-accent: #3a3a3a;
-  --interactive-accent-hover: #4a4a4a;
-  --accent: #3a3a3a;
-  --accent-hover: #4a4a4a;
-  --accent-subtle: rgba(58, 58, 58, 0.16);
-  --app-shadow-focus: 0 0 0 2px rgba(180, 180, 180, 0.14);
+:root[data-theme='dark'] .app-root,
+:root[data-theme='dark'] .app-shell-frame,
+:root[data-theme='dark'] .workstation-shell,
+:root[data-theme='dark'] .workstation-shell-frame,
+body[data-theme='dark'] .app-root,
+body[data-theme='dark'] .app-shell-frame,
+body[data-theme='dark'] .workstation-shell,
+body[data-theme='dark'] .workstation-shell-frame {
+  --app-border-accent: var(--accent-ring);
+  --app-accent: var(--accent);
+  --app-accent-primary: var(--accent);
+  --app-accent-strong: var(--accent);
+  --app-accent-muted: var(--accent-soft);
+  --app-accent-soft: color-mix(in srgb, var(--accent) 8%, transparent);
+  --app-accent-text: var(--accent-contrast);
+  --interactive-accent: var(--accent);
+  --interactive-accent-hover: var(--accent);
+  --accent-subtle: var(--accent-soft);
+  --app-shadow-focus: 0 0 0 2px var(--accent-ring);
+  --app-shadow-glow: 0 0 16px var(--accent-soft);
 }
 
 body {
@@ -242,33 +243,33 @@ body {
   cursor: default;
 }
 
-:root[data-emp-theme='dark'] .app-shell-frame,
-:root[data-emp-theme='dark'] .app-shell-frame__kernel,
-:root[data-emp-theme='dark'] .app-shell-viewport,
-:root[data-emp-theme='dark'] .workstation-shell,
-:root[data-emp-theme='dark'] .workstation-layout,
-:root[data-emp-theme='dark'] .workstation-primary-canvas,
-:root[data-emp-theme='dark'] .app-chat-page,
-:root[data-emp-theme='dark'] .app-chat-page--surface,
-:root[data-emp-theme='dark'] .app-chat-thread,
-:root[data-emp-theme='dark'] .app-chat-thread--surface,
-:root[data-emp-theme='dark'] .app-chat-thread--blank,
-body[data-emp-theme='dark'] .app-shell-frame,
-body[data-emp-theme='dark'] .app-shell-frame__kernel,
-body[data-emp-theme='dark'] .app-shell-viewport,
-body[data-emp-theme='dark'] .workstation-shell,
-body[data-emp-theme='dark'] .workstation-layout,
-body[data-emp-theme='dark'] .workstation-primary-canvas,
-body[data-emp-theme='dark'] .app-chat-page,
-body[data-emp-theme='dark'] .app-chat-page--surface,
-body[data-emp-theme='dark'] .app-chat-thread,
-body[data-emp-theme='dark'] .app-chat-thread--surface,
-body[data-emp-theme='dark'] .app-chat-thread--blank {
+:root[data-theme='dark'] .app-shell-frame,
+:root[data-theme='dark'] .app-shell-frame__kernel,
+:root[data-theme='dark'] .app-shell-viewport,
+:root[data-theme='dark'] .workstation-shell,
+:root[data-theme='dark'] .workstation-layout,
+:root[data-theme='dark'] .workstation-primary-canvas,
+:root[data-theme='dark'] .app-chat-page,
+:root[data-theme='dark'] .app-chat-page--surface,
+:root[data-theme='dark'] .app-chat-thread,
+:root[data-theme='dark'] .app-chat-thread--surface,
+:root[data-theme='dark'] .app-chat-thread--blank,
+body[data-theme='dark'] .app-shell-frame,
+body[data-theme='dark'] .app-shell-frame__kernel,
+body[data-theme='dark'] .app-shell-viewport,
+body[data-theme='dark'] .workstation-shell,
+body[data-theme='dark'] .workstation-layout,
+body[data-theme='dark'] .workstation-primary-canvas,
+body[data-theme='dark'] .app-chat-page,
+body[data-theme='dark'] .app-chat-page--surface,
+body[data-theme='dark'] .app-chat-thread,
+body[data-theme='dark'] .app-chat-thread--surface,
+body[data-theme='dark'] .app-chat-thread--blank {
   background: var(--app-bg-page);
 }
 
-:root[data-emp-theme='dark'] .workstation-shell__topbar,
-body[data-emp-theme='dark'] .workstation-shell__topbar {
+:root[data-theme='dark'] .workstation-shell__topbar,
+body[data-theme='dark'] .workstation-shell__topbar {
   border-bottom-color: rgba(255, 255, 255, 0.1);
   background: var(--app-bg-page);
   box-shadow: none;
@@ -333,36 +334,36 @@ body[data-emp-theme='dark'] .workstation-shell__topbar {
   outline: none !important;
 }
 
-:root[data-emp-theme='light'],
-body[data-emp-theme='light'],
+:root[data-theme='light'],
+body[data-theme='light'],
 body.theme-light {
   color-scheme: light;
 
-  --app-bg-page: #FFFFFF;
-  --app-surface-1: #F7F7F7;
+  --app-bg-page: var(--bg-page);
+  --app-surface-1: var(--bg-rail);
   --app-surface-2: #F0F0F0;
-  --app-surface-hover: #F0F0F0;
+  --app-surface-hover: var(--bg-card-hover);
   --app-surface-inset: #EEEEEE;
 
-  --app-bg-app: #FFFFFF;
-  --app-bg-canvas: #FFFFFF;
-  --app-bg-shell: #F5F5F5;
-  --app-bg-panel: #FFFFFF;
-  --app-bg-panel-elevated: #F5F5F5;
-  --app-bg-overlay: #F5F5F5;
+  --app-bg-app: var(--bg-page);
+  --app-bg-canvas: var(--bg-page);
+  --app-bg-shell: var(--bg-rail);
+  --app-bg-panel: var(--bg-rail);
+  --app-bg-panel-elevated: var(--bg-card);
+  --app-bg-overlay: var(--bg-card-hover);
 
-  --app-border-subtle: rgba(0, 0, 0, 0.06);
-  --app-border-strong: rgba(0, 0, 0, 0.15);
-  --app-border-muted: rgba(0, 0, 0, 0.06);
-  --app-border-default: rgba(0, 0, 0, 0.10);
+  --app-border-subtle: var(--border);
+  --app-border-strong: var(--border-strong);
+  --app-border-muted: var(--border);
+  --app-border-default: var(--border);
   --app-border-accent: #202020;
   --interactive-accent: #60737C;
   --interactive-accent-hover: #122026;
 
-  --app-text-primary: #171717;
-  --app-text-secondary: #666666;
-  --app-text-tertiary: rgba(0, 0, 0, 0.48);
-  --app-text-inverse: #FFFFFF;
+  --app-text-primary: var(--text-primary);
+  --app-text-secondary: var(--text-secondary);
+  --app-text-tertiary: var(--text-muted);
+  --app-text-inverse: var(--accent-contrast);
 
   --app-accent: #202020;
   --app-accent-primary: #202020;
@@ -394,14 +395,14 @@ body.theme-light {
   --premium-card-border: rgba(0, 0, 0, 0.06);
 }
 
-:root[data-emp-theme='light'] .app-shell-frame__sidebar,
-body[data-emp-theme='light'] .app-shell-frame__sidebar,
+:root[data-theme='light'] .app-shell-frame__sidebar,
+body[data-theme='light'] .app-shell-frame__sidebar,
 body.theme-light .app-shell-frame__sidebar {
   background: color-mix(in srgb, var(--premium-shell-bg) 92%, #000 2%);
   backdrop-filter: blur(16px);
 }
 
-:root[data-emp-theme='dark'] {
+:root[data-theme='dark'] {
   --premium-shell-bg: #0C0C0C;
   --premium-glass-bg: rgba(21, 21, 21, 0.76);
   --premium-glass-border: rgba(255, 255, 255, 0.06);
@@ -1652,12 +1653,12 @@ textarea {
   box-shadow: var(--app-shadow-focus);
 }
 
-:root[data-emp-theme='dark'] .app-field:focus,
-:root[data-emp-theme='dark'] .app-select:focus,
-:root[data-emp-theme='dark'] .app-textarea:focus,
-body[data-emp-theme='dark'] .app-field:focus,
-body[data-emp-theme='dark'] .app-select:focus,
-body[data-emp-theme='dark'] .app-textarea:focus {
+:root[data-theme='dark'] .app-field:focus,
+:root[data-theme='dark'] .app-select:focus,
+:root[data-theme='dark'] .app-textarea:focus,
+body[data-theme='dark'] .app-field:focus,
+body[data-theme='dark'] .app-select:focus,
+body[data-theme='dark'] .app-textarea:focus {
   border-color: rgba(255, 255, 255, 0.16) !important;
   background: #202020 !important;
   box-shadow: 0 0 0 2px rgba(180, 180, 180, 0.12) !important;
@@ -2246,8 +2247,8 @@ body[data-emp-theme='dark'] .app-textarea:focus {
   color: var(--app-text-primary);
 }
 
-:root[data-emp-theme='dark'] .app-auth-page,
-body[data-emp-theme='dark'] .app-auth-page {
+:root[data-theme='dark'] .app-auth-page,
+body[data-theme='dark'] .app-auth-page {
   --app-bg-panel: rgba(24, 24, 24, 0.82);
   --app-bg-panel-elevated: rgba(32, 32, 32, 0.94);
   --app-border-default: #2f2f2f;
@@ -2673,12 +2674,12 @@ body[data-emp-theme='dark'] .app-auth-page {
   transition: background-color 5000s ease-in-out 0s;
 }
 
-:root[data-emp-theme='light'] .app-auth-input:-webkit-autofill,
-:root[data-emp-theme='light'] .app-auth-input:-webkit-autofill:hover,
-:root[data-emp-theme='light'] .app-auth-input:-webkit-autofill:focus,
-body[data-emp-theme='light'] .app-auth-input:-webkit-autofill,
-body[data-emp-theme='light'] .app-auth-input:-webkit-autofill:hover,
-body[data-emp-theme='light'] .app-auth-input:-webkit-autofill:focus,
+:root[data-theme='light'] .app-auth-input:-webkit-autofill,
+:root[data-theme='light'] .app-auth-input:-webkit-autofill:hover,
+:root[data-theme='light'] .app-auth-input:-webkit-autofill:focus,
+body[data-theme='light'] .app-auth-input:-webkit-autofill,
+body[data-theme='light'] .app-auth-input:-webkit-autofill:hover,
+body[data-theme='light'] .app-auth-input:-webkit-autofill:focus,
 body.theme-light .app-auth-input:-webkit-autofill,
 body.theme-light .app-auth-input:-webkit-autofill:hover,
 body.theme-light .app-auth-input:-webkit-autofill:focus {
@@ -2687,12 +2688,12 @@ body.theme-light .app-auth-input:-webkit-autofill:focus {
   box-shadow: 0 0 0 1000px #ffffff inset !important;
 }
 
-:root[data-emp-theme='dark'] .app-auth-input:-webkit-autofill,
-:root[data-emp-theme='dark'] .app-auth-input:-webkit-autofill:hover,
-:root[data-emp-theme='dark'] .app-auth-input:-webkit-autofill:focus,
-body[data-emp-theme='dark'] .app-auth-input:-webkit-autofill,
-body[data-emp-theme='dark'] .app-auth-input:-webkit-autofill:hover,
-body[data-emp-theme='dark'] .app-auth-input:-webkit-autofill:focus {
+:root[data-theme='dark'] .app-auth-input:-webkit-autofill,
+:root[data-theme='dark'] .app-auth-input:-webkit-autofill:hover,
+:root[data-theme='dark'] .app-auth-input:-webkit-autofill:focus,
+body[data-theme='dark'] .app-auth-input:-webkit-autofill,
+body[data-theme='dark'] .app-auth-input:-webkit-autofill:hover,
+body[data-theme='dark'] .app-auth-input:-webkit-autofill:focus {
   -webkit-text-fill-color: var(--app-text-primary) !important;
   -webkit-box-shadow: 0 0 0 1000px var(--app-bg-panel) inset !important;
   box-shadow: 0 0 0 1000px var(--app-bg-panel) inset !important;
@@ -2997,33 +2998,33 @@ body[data-emp-theme='dark'] .app-auth-input:-webkit-autofill:focus {
   color: #2f2f2f;
 }
 
-:root[data-emp-theme='dark'] .app-auth-social__title,
-body[data-emp-theme='dark'] .app-auth-social__title,
-:root[data-emp-theme='dark'] .app-auth-field__label,
-body[data-emp-theme='dark'] .app-auth-field__label,
-:root[data-emp-theme='dark'] .app-auth-footer a,
-body[data-emp-theme='dark'] .app-auth-footer a {
+:root[data-theme='dark'] .app-auth-social__title,
+body[data-theme='dark'] .app-auth-social__title,
+:root[data-theme='dark'] .app-auth-field__label,
+body[data-theme='dark'] .app-auth-field__label,
+:root[data-theme='dark'] .app-auth-footer a,
+body[data-theme='dark'] .app-auth-footer a {
   color: var(--app-text-primary);
 }
 
-:root[data-emp-theme='dark'] .app-auth-social__meta,
-body[data-emp-theme='dark'] .app-auth-social__meta,
-:root[data-emp-theme='dark'] .app-auth-provider-note,
-body[data-emp-theme='dark'] .app-auth-provider-note,
-:root[data-emp-theme='dark'] .app-auth-divider,
-body[data-emp-theme='dark'] .app-auth-divider,
-:root[data-emp-theme='dark'] .app-auth-footer,
-body[data-emp-theme='dark'] .app-auth-footer {
+:root[data-theme='dark'] .app-auth-social__meta,
+body[data-theme='dark'] .app-auth-social__meta,
+:root[data-theme='dark'] .app-auth-provider-note,
+body[data-theme='dark'] .app-auth-provider-note,
+:root[data-theme='dark'] .app-auth-divider,
+body[data-theme='dark'] .app-auth-divider,
+:root[data-theme='dark'] .app-auth-footer,
+body[data-theme='dark'] .app-auth-footer {
   color: var(--app-text-secondary);
 }
 
-:root[data-emp-theme='dark'] .app-auth-input-shell__icon,
-body[data-emp-theme='dark'] .app-auth-input-shell__icon {
+:root[data-theme='dark'] .app-auth-input-shell__icon,
+body[data-theme='dark'] .app-auth-input-shell__icon {
   color: var(--app-text-tertiary);
 }
 
-:root[data-emp-theme='dark'] .app-auth-divider > span[aria-hidden="true"],
-body[data-emp-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
+:root[data-theme='dark'] .app-auth-divider > span[aria-hidden="true"],
+body[data-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
   background: var(--app-border-default);
 }
 
@@ -5846,8 +5847,8 @@ body[data-emp-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
   box-shadow: 0 22px 56px -42px color-mix(in srgb, var(--foreground) 44%, transparent);
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__surface,
-body[data-emp-theme='dark'] .app-chat-composer__surface,
+:root[data-theme='dark'] .app-chat-composer__surface,
+body[data-theme='dark'] .app-chat-composer__surface,
 :root[data-theme='dark'] .app-chat-composer__surface,
 body[data-theme='dark'] .app-chat-composer__surface,
 :root.theme-dark .app-chat-composer__surface,
@@ -5857,8 +5858,8 @@ body.theme-dark .app-chat-composer__surface {
   box-shadow: none !important;
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__surface:focus-within,
-body[data-emp-theme='dark'] .app-chat-composer__surface:focus-within,
+:root[data-theme='dark'] .app-chat-composer__surface:focus-within,
+body[data-theme='dark'] .app-chat-composer__surface:focus-within,
 :root[data-theme='dark'] .app-chat-composer__surface:focus-within,
 body[data-theme='dark'] .app-chat-composer__surface:focus-within,
 :root.theme-dark .app-chat-composer__surface:focus-within,
@@ -6064,37 +6065,37 @@ body.theme-dark .app-chat-composer__surface:focus-within {
   cursor: pointer;
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__action-trigger,
-:root[data-emp-theme='dark'] .app-chat-composer__tool-trigger,
-:root[data-emp-theme='dark'] .app-chat-composer__provider-pill,
-:root[data-emp-theme='dark'] .app-chat-composer__permission-pill,
-:root[data-emp-theme='dark'] .app-chat-composer__status-pill,
-body[data-emp-theme='dark'] .app-chat-composer__action-trigger,
-body[data-emp-theme='dark'] .app-chat-composer__tool-trigger,
-body[data-emp-theme='dark'] .app-chat-composer__provider-pill,
-body[data-emp-theme='dark'] .app-chat-composer__permission-pill,
-body[data-emp-theme='dark'] .app-chat-composer__status-pill {
+:root[data-theme='dark'] .app-chat-composer__action-trigger,
+:root[data-theme='dark'] .app-chat-composer__tool-trigger,
+:root[data-theme='dark'] .app-chat-composer__provider-pill,
+:root[data-theme='dark'] .app-chat-composer__permission-pill,
+:root[data-theme='dark'] .app-chat-composer__status-pill,
+body[data-theme='dark'] .app-chat-composer__action-trigger,
+body[data-theme='dark'] .app-chat-composer__tool-trigger,
+body[data-theme='dark'] .app-chat-composer__provider-pill,
+body[data-theme='dark'] .app-chat-composer__permission-pill,
+body[data-theme='dark'] .app-chat-composer__status-pill {
   border-color: transparent !important;
   background: transparent !important;
   box-shadow: none !important;
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__action-trigger:hover,
-:root[data-emp-theme='dark'] .app-chat-composer__action-trigger:focus-visible,
-:root[data-emp-theme='dark'] .app-chat-composer__tool-trigger:hover,
-:root[data-emp-theme='dark'] .app-chat-composer__tool-trigger:focus-visible,
-:root[data-emp-theme='dark'] .app-chat-composer__provider-pill:hover,
-:root[data-emp-theme='dark'] .app-chat-composer__provider-pill:focus-visible,
-:root[data-emp-theme='dark'] .app-chat-composer__permission-pill:hover,
-:root[data-emp-theme='dark'] .app-chat-composer__permission-pill:focus-visible,
-body[data-emp-theme='dark'] .app-chat-composer__action-trigger:hover,
-body[data-emp-theme='dark'] .app-chat-composer__action-trigger:focus-visible,
-body[data-emp-theme='dark'] .app-chat-composer__tool-trigger:hover,
-body[data-emp-theme='dark'] .app-chat-composer__tool-trigger:focus-visible,
-body[data-emp-theme='dark'] .app-chat-composer__provider-pill:hover,
-body[data-emp-theme='dark'] .app-chat-composer__provider-pill:focus-visible,
-body[data-emp-theme='dark'] .app-chat-composer__permission-pill:hover,
-body[data-emp-theme='dark'] .app-chat-composer__permission-pill:focus-visible {
+:root[data-theme='dark'] .app-chat-composer__action-trigger:hover,
+:root[data-theme='dark'] .app-chat-composer__action-trigger:focus-visible,
+:root[data-theme='dark'] .app-chat-composer__tool-trigger:hover,
+:root[data-theme='dark'] .app-chat-composer__tool-trigger:focus-visible,
+:root[data-theme='dark'] .app-chat-composer__provider-pill:hover,
+:root[data-theme='dark'] .app-chat-composer__provider-pill:focus-visible,
+:root[data-theme='dark'] .app-chat-composer__permission-pill:hover,
+:root[data-theme='dark'] .app-chat-composer__permission-pill:focus-visible,
+body[data-theme='dark'] .app-chat-composer__action-trigger:hover,
+body[data-theme='dark'] .app-chat-composer__action-trigger:focus-visible,
+body[data-theme='dark'] .app-chat-composer__tool-trigger:hover,
+body[data-theme='dark'] .app-chat-composer__tool-trigger:focus-visible,
+body[data-theme='dark'] .app-chat-composer__provider-pill:hover,
+body[data-theme='dark'] .app-chat-composer__provider-pill:focus-visible,
+body[data-theme='dark'] .app-chat-composer__permission-pill:hover,
+body[data-theme='dark'] .app-chat-composer__permission-pill:focus-visible {
   border-color: rgba(255, 255, 255, 0.14) !important;
   background: #202020 !important;
 }
@@ -6241,12 +6242,12 @@ body[data-emp-theme='dark'] .app-chat-composer__permission-pill:focus-visible {
   box-shadow: none;
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__textarea:hover,
-:root[data-emp-theme='dark'] .app-chat-composer__textarea:focus,
-:root[data-emp-theme='dark'] .app-chat-composer__textarea:focus-visible,
-body[data-emp-theme='dark'] .app-chat-composer__textarea:hover,
-body[data-emp-theme='dark'] .app-chat-composer__textarea:focus,
-body[data-emp-theme='dark'] .app-chat-composer__textarea:focus-visible {
+:root[data-theme='dark'] .app-chat-composer__textarea:hover,
+:root[data-theme='dark'] .app-chat-composer__textarea:focus,
+:root[data-theme='dark'] .app-chat-composer__textarea:focus-visible,
+body[data-theme='dark'] .app-chat-composer__textarea:hover,
+body[data-theme='dark'] .app-chat-composer__textarea:focus,
+body[data-theme='dark'] .app-chat-composer__textarea:focus-visible {
   border: 0 !important;
   outline: 0 !important;
   background: transparent !important;
@@ -6641,14 +6642,14 @@ textarea.app-field.app-chat-composer__textarea:focus-visible {
   animation: app-chat-composer-capability-menu-in 160ms var(--app-ease-standard, cubic-bezier(0.16, 1, 0.3, 1));
 }
 
-:root[data-emp-theme='light'] .app-chat-composer__capability-menu,
-body[data-emp-theme='light'] .app-chat-composer__capability-menu,
+:root[data-theme='light'] .app-chat-composer__capability-menu,
+body[data-theme='light'] .app-chat-composer__capability-menu,
 body.theme-light .app-chat-composer__capability-menu {
   background: #ffffff;
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__capability-menu,
-body[data-emp-theme='dark'] .app-chat-composer__capability-menu {
+:root[data-theme='dark'] .app-chat-composer__capability-menu,
+body[data-theme='dark'] .app-chat-composer__capability-menu {
   background: #202020;
 }
 
@@ -7635,25 +7636,25 @@ body[data-emp-theme='dark'] .app-chat-composer__capability-menu {
   gap: 0;
 }
 
-:root[data-emp-theme='light'] .app-chat-composer__model-popover,
-body[data-emp-theme='light'] .app-chat-composer__model-popover,
+:root[data-theme='light'] .app-chat-composer__model-popover,
+body[data-theme='light'] .app-chat-composer__model-popover,
 body.theme-light .app-chat-composer__model-popover {
   background: #ffffff;
 }
 
-:root[data-emp-theme='light'] .app-chat-composer__hardware-popover,
-body[data-emp-theme='light'] .app-chat-composer__hardware-popover,
+:root[data-theme='light'] .app-chat-composer__hardware-popover,
+body[data-theme='light'] .app-chat-composer__hardware-popover,
 body.theme-light .app-chat-composer__hardware-popover {
   background: #ffffff;
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__model-popover,
-body[data-emp-theme='dark'] .app-chat-composer__model-popover {
+:root[data-theme='dark'] .app-chat-composer__model-popover,
+body[data-theme='dark'] .app-chat-composer__model-popover {
   background: #202020;
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__hardware-popover,
-body[data-emp-theme='dark'] .app-chat-composer__hardware-popover {
+:root[data-theme='dark'] .app-chat-composer__hardware-popover,
+body[data-theme='dark'] .app-chat-composer__hardware-popover {
   background: #202020;
 }
 
@@ -7739,28 +7740,28 @@ body[data-emp-theme='dark'] .app-chat-composer__hardware-popover {
   color: var(--text-primary);
 }
 
-body[data-emp-theme='light'] .app-chat-composer__hardware-menu-row--selected,
+body[data-theme='light'] .app-chat-composer__hardware-menu-row--selected,
 body.theme-light .app-chat-composer__hardware-menu-row--selected {
   background: var(--workstation-shell-row-selected, color-mix(in srgb, var(--app-text-primary) 7%, transparent));
   color: var(--text-primary);
 }
 
-body[data-emp-theme='light'] .app-chat-composer__hardware-menu-row--selected:hover:not(:disabled),
+body[data-theme='light'] .app-chat-composer__hardware-menu-row--selected:hover:not(:disabled),
 body.theme-light .app-chat-composer__hardware-menu-row--selected:hover:not(:disabled) {
   background: var(--workstation-shell-row-selected, color-mix(in srgb, var(--app-text-primary) 7%, transparent));
 }
 
-body[data-emp-theme='dark'] .app-chat-composer__hardware-menu-row--selected {
+body[data-theme='dark'] .app-chat-composer__hardware-menu-row--selected {
   background: #2f2f2f;
   color: #ffffff;
 }
 
-body[data-emp-theme='light'] .app-chat-composer__hardware-menu-row:not(.app-chat-composer__hardware-menu-row--selected),
+body[data-theme='light'] .app-chat-composer__hardware-menu-row:not(.app-chat-composer__hardware-menu-row--selected),
 body.theme-light .app-chat-composer__hardware-menu-row:not(.app-chat-composer__hardware-menu-row--selected) {
   background: transparent;
 }
 
-body[data-emp-theme='light'] .app-chat-composer__hardware-menu-row:not(.app-chat-composer__hardware-menu-row--selected):hover:not(:disabled),
+body[data-theme='light'] .app-chat-composer__hardware-menu-row:not(.app-chat-composer__hardware-menu-row--selected):hover:not(:disabled),
 body.theme-light .app-chat-composer__hardware-menu-row:not(.app-chat-composer__hardware-menu-row--selected):hover:not(:disabled) {
   background: var(--workstation-shell-row-hover, color-mix(in srgb, var(--app-text-primary) 4%, transparent));
 }
@@ -7818,18 +7819,18 @@ body.theme-light .app-chat-composer__hardware-menu-row:not(.app-chat-composer__h
   background: color-mix(in srgb, var(--app-text-primary, var(--foreground)) 16%, transparent);
 }
 
-body[data-emp-theme='light'] .app-chat-composer__hardware-menu-row--selected .app-chat-composer__hardware-menu-icon,
+body[data-theme='light'] .app-chat-composer__hardware-menu-row--selected .app-chat-composer__hardware-menu-icon,
 body.theme-light .app-chat-composer__hardware-menu-row--selected .app-chat-composer__hardware-menu-icon {
   background: color-mix(in srgb, var(--app-text-primary) 9%, transparent);
   color: var(--text-primary);
 }
 
-body[data-emp-theme='dark'] .app-chat-composer__hardware-menu-row--selected .app-chat-composer__hardware-menu-icon {
+body[data-theme='dark'] .app-chat-composer__hardware-menu-row--selected .app-chat-composer__hardware-menu-icon {
   background: rgba(255, 255, 255, 0.14);
   color: #ffffff;
 }
 
-body[data-emp-theme='light'] .app-chat-composer__hardware-menu-icon,
+body[data-theme='light'] .app-chat-composer__hardware-menu-icon,
 body.theme-light .app-chat-composer__hardware-menu-icon {
   background: transparent;
   color: #5f5f5f;
@@ -8089,12 +8090,12 @@ body.theme-light .app-chat-composer__hardware-menu-icon {
   background: color-mix(in srgb, var(--bg-hover) 76%, var(--bg-surface) 24%);
 }
 
-:root[data-emp-theme='dark'] .app-chat-composer__action-trigger,
-:root[data-emp-theme='dark'] .app-chat-composer__provider-pill,
-:root[data-emp-theme='dark'] .app-chat-composer__computer-status,
-:root[data-emp-theme='dark'] .app-chat-composer__permission-pill,
-:root[data-emp-theme='dark'] .app-chat-composer__tool-trigger,
-:root[data-emp-theme='dark'] .app-chat-composer__status-pill {
+:root[data-theme='dark'] .app-chat-composer__action-trigger,
+:root[data-theme='dark'] .app-chat-composer__provider-pill,
+:root[data-theme='dark'] .app-chat-composer__computer-status,
+:root[data-theme='dark'] .app-chat-composer__permission-pill,
+:root[data-theme='dark'] .app-chat-composer__tool-trigger,
+:root[data-theme='dark'] .app-chat-composer__status-pill {
   background: transparent !important;
   border-color: transparent !important;
 }
@@ -8956,11 +8957,11 @@ body[data-workstation-app-surface='open'] .app-shell-viewport {
   font-weight: 500;
 }
 
-:root[data-emp-theme='light'] .workstation-titlebar__link:hover {
+:root[data-theme='light'] .workstation-titlebar__link:hover {
   background: transparent;
 }
 
-:root[data-emp-theme='light'] .workstation-titlebar__link--active {
+:root[data-theme='light'] .workstation-titlebar__link--active {
   background: transparent;
   border-bottom-color: var(--foreground);
 }
@@ -9873,21 +9874,21 @@ body[data-workstation-app-surface='open'] .app-shell-viewport {
   opacity: 1;
 }
 
-:root[data-emp-theme='dark'] .app-shell-frame__sidebar,
-body[data-emp-theme='dark'] .app-shell-frame__sidebar {
+:root[data-theme='dark'] .app-shell-frame__sidebar,
+body[data-theme='dark'] .app-shell-frame__sidebar {
   background: var(--app-surface-inset);
   backdrop-filter: blur(24px);
 }
 
-:root[data-emp-theme='dark'] .account-switcher__link:hover,
-body[data-emp-theme='dark'] .account-switcher__link:hover {
+:root[data-theme='dark'] .account-switcher__link:hover,
+body[data-theme='dark'] .account-switcher__link:hover {
   color: var(--text-primary);
 }
 
-:root[data-emp-theme='dark'] .account-switcher__link--active,
-body[data-emp-theme='dark'] .account-switcher__link--active,
-:root[data-emp-theme='dark'] .account-switcher__link[aria-current='page'],
-body[data-emp-theme='dark'] .account-switcher__link[aria-current='page'] {
+:root[data-theme='dark'] .account-switcher__link--active,
+body[data-theme='dark'] .account-switcher__link--active,
+:root[data-theme='dark'] .account-switcher__link[aria-current='page'],
+body[data-theme='dark'] .account-switcher__link[aria-current='page'] {
   color: var(--text-primary);
 }
 
@@ -11419,8 +11420,8 @@ body[data-emp-theme='dark'] .account-switcher__link[aria-current='page'] {
   overflow: visible;
 }
 
-:root[data-emp-theme='light'] .workstation-shell__topbar,
-body[data-emp-theme='light'] .workstation-shell__topbar,
+:root[data-theme='light'] .workstation-shell__topbar,
+body[data-theme='light'] .workstation-shell__topbar,
 body.theme-light .workstation-shell__topbar {
   background: var(--app-bg-page);
   box-shadow: none;
@@ -11851,12 +11852,12 @@ body.theme-light .workstation-shell__topbar {
   color: var(--app-text-primary);
 }
 
-:root[data-emp-theme='light'] .studio-agents-nav__agent:hover,
-:root[data-emp-theme='light'] .studio-agents-nav__agent--active,
-:root[data-emp-theme='light'] .studio-agents-nav__agent[aria-selected='true'],
-body[data-emp-theme='light'] .studio-agents-nav__agent:hover,
-body[data-emp-theme='light'] .studio-agents-nav__agent--active,
-body[data-emp-theme='light'] .studio-agents-nav__agent[aria-selected='true'],
+:root[data-theme='light'] .studio-agents-nav__agent:hover,
+:root[data-theme='light'] .studio-agents-nav__agent--active,
+:root[data-theme='light'] .studio-agents-nav__agent[aria-selected='true'],
+body[data-theme='light'] .studio-agents-nav__agent:hover,
+body[data-theme='light'] .studio-agents-nav__agent--active,
+body[data-theme='light'] .studio-agents-nav__agent[aria-selected='true'],
 body.theme-light .studio-agents-nav__agent:hover,
 body.theme-light .studio-agents-nav__agent--active,
 body.theme-light .studio-agents-nav__agent[aria-selected='true'] {
@@ -19266,8 +19267,8 @@ body.theme-light .studio-agents-nav__agent[aria-selected='true'] {
   box-shadow: none !important;
 }
 
-:root[data-emp-theme='dark'] .app-memory-document-textarea:focus,
-body[data-emp-theme='dark'] .app-memory-document-textarea:focus {
+:root[data-theme='dark'] .app-memory-document-textarea:focus,
+body[data-theme='dark'] .app-memory-document-textarea:focus {
   box-shadow: none !important;
 }
 
@@ -20275,14 +20276,14 @@ body[data-emp-theme='dark'] .app-memory-document-textarea:focus {
   background: color-mix(in srgb, #242424 88%, var(--app-bg-panel) 12%);
 }
 
-:root[data-emp-theme='light'] .sage-integrations-nav__bucket:hover,
-body[data-emp-theme='light'] .sage-integrations-nav__bucket:hover,
+:root[data-theme='light'] .sage-integrations-nav__bucket:hover,
+body[data-theme='light'] .sage-integrations-nav__bucket:hover,
 body.theme-light .sage-integrations-nav__bucket:hover {
   background: color-mix(in srgb, var(--app-surface-hover) 76%, var(--app-bg-panel) 24%);
 }
 
-:root[data-emp-theme='light'] .sage-integrations-nav__bucket--active,
-body[data-emp-theme='light'] .sage-integrations-nav__bucket--active,
+:root[data-theme='light'] .sage-integrations-nav__bucket--active,
+body[data-theme='light'] .sage-integrations-nav__bucket--active,
 body.theme-light .sage-integrations-nav__bucket--active {
   background: #ffffff;
   box-shadow:
@@ -20675,8 +20676,8 @@ body.theme-light .sage-integrations-nav__bucket--active {
     0 8px 18px -15px color-mix(in srgb, black 32%, transparent);
 }
 
-:root[data-emp-theme='light'] .sage-integrations-topnav .sage-integrations-nav__bucket--active,
-body[data-emp-theme='light'] .sage-integrations-topnav .sage-integrations-nav__bucket--active,
+:root[data-theme='light'] .sage-integrations-topnav .sage-integrations-nav__bucket--active,
+body[data-theme='light'] .sage-integrations-topnav .sage-integrations-nav__bucket--active,
 body.theme-light .sage-integrations-topnav .sage-integrations-nav__bucket--active {
   background: var(--app-bg-panel);
   box-shadow:
@@ -21526,33 +21527,33 @@ body.theme-light .sage-integrations-topnav .sage-integrations-nav__bucket--activ
   opacity: 0.96;
 }
 
-:root[data-emp-theme='dark'] .sage-unified-card,
-body[data-emp-theme='dark'] .sage-unified-card {
+:root[data-theme='dark'] .sage-unified-card,
+body[data-theme='dark'] .sage-unified-card {
   background: #1E1E1E;
 }
 
-:root[data-emp-theme='dark'] .sage-unified-card:hover,
-body[data-emp-theme='dark'] .sage-unified-card:hover {
+:root[data-theme='dark'] .sage-unified-card:hover,
+body[data-theme='dark'] .sage-unified-card:hover {
   background: #232323;
 }
 
-:root[data-emp-theme='dark'] .sage-unified-card:disabled:hover,
-body[data-emp-theme='dark'] .sage-unified-card:disabled:hover {
+:root[data-theme='dark'] .sage-unified-card:disabled:hover,
+body[data-theme='dark'] .sage-unified-card:disabled:hover {
   background: #1E1E1E;
 }
 
-:root[data-emp-theme='dark'] .sage-integration-brand__image[src*='/brand-assets/generic/'],
-body[data-emp-theme='dark'] .sage-integration-brand__image[src*='/brand-assets/generic/'] {
+:root[data-theme='dark'] .sage-integration-brand__image[src*='/brand-assets/generic/'],
+body[data-theme='dark'] .sage-integration-brand__image[src*='/brand-assets/generic/'] {
   filter: brightness(1.4);
 }
 
-:root[data-emp-theme='dark'] .sage-integration-brand__image[src*='github.svg'],
-body[data-emp-theme='dark'] .sage-integration-brand__image[src*='github.svg'] {
+:root[data-theme='dark'] .sage-integration-brand__image[src*='github.svg'],
+body[data-theme='dark'] .sage-integration-brand__image[src*='github.svg'] {
   filter: invert(1);
 }
 
-:root[data-emp-theme='dark'] .sage-integration-brand__image[src*='notion.svg'],
-body[data-emp-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
+:root[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'],
+body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   filter: invert(0.9);
 }
 

@@ -2,30 +2,33 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { useAccountShell } from "@/lib/shell/account-shell-context";
+import { useAppTheme } from "@/lib/ui/app-theme";
+
 export type FleetTheme = "light" | "dark";
 export type FleetSectionKey = "workspace" | "infrastructure";
 type SectionMap = Record<FleetSectionKey, boolean>;
 
-const THEME_KEY = "fleet:theme";
 const COLLAPSED_KEY = "fleet:rail-collapsed";
 const SECTIONS_KEY = "fleet:rail-sections";
-const DEFAULT_THEME: FleetTheme = "dark";
 const DEFAULT_SECTIONS: SectionMap = { workspace: true, infrastructure: true };
 
 /**
- * Fleet-local UI preferences (theme, rail collapse, section expansion),
- * persisted to localStorage. Server/first render uses defaults to avoid
- * hydration mismatch; stored choices are applied on mount.
+ * Fleet-local UI preferences (rail collapse, section expansion), persisted
+ * to localStorage. Theme is NOT fleet-local: it delegates to the single
+ * account-wide theme (useAppTheme/useAccountShell) so `data-theme` on
+ * <html> and `.fleet-root` always agree — see docs/UI-MODEL.md. Fleet used
+ * to keep its own `fleet:theme` key defaulting to dark while the account
+ * shell defaulted to light, so the two could show opposite themes at once.
  */
 export function useFleetPreferences() {
-  const [theme, setTheme] = useState<FleetTheme>(DEFAULT_THEME);
+  const { resolvedTheme } = useAppTheme();
+  const { actions } = useAccountShell();
   const [collapsed, setCollapsed] = useState(false);
   const [sections, setSections] = useState<SectionMap>(DEFAULT_SECTIONS);
 
   useEffect(() => {
     try {
-      const storedTheme = window.localStorage.getItem(THEME_KEY);
-      if (storedTheme === "light" || storedTheme === "dark") setTheme(storedTheme);
       if (window.localStorage.getItem(COLLAPSED_KEY) === "1") setCollapsed(true);
       const raw = window.localStorage.getItem(SECTIONS_KEY);
       if (raw) {
@@ -40,16 +43,8 @@ export function useFleetPreferences() {
   }, []);
 
   const toggleTheme = useCallback(() => {
-    setTheme((prev) => {
-      const next = prev === "dark" ? "light" : "dark";
-      try {
-        window.localStorage.setItem(THEME_KEY, next);
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
+    actions.setGlobalTheme(resolvedTheme === "dark" ? "light" : "dark");
+  }, [actions, resolvedTheme]);
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -75,5 +70,5 @@ export function useFleetPreferences() {
     });
   }, []);
 
-  return { theme, collapsed, sections, toggleTheme, toggleCollapsed, toggleSection };
+  return { theme: resolvedTheme as FleetTheme, collapsed, sections, toggleTheme, toggleCollapsed, toggleSection };
 }

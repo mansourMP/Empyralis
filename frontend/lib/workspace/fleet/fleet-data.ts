@@ -6,6 +6,7 @@ export type FleetAgent = {
   agent_id: string;
   label: string;
   role: string;
+  purpose_preset?: "customer_facing" | "internal_assistant" | "operator";
   status: string;
   enabled: boolean;
   runtime_target: string;
@@ -85,29 +86,28 @@ export function useFleetAgentActivity(workspaceId: string, agentId: string | nul
   return { events, loading };
 }
 
-export type FleetMemoryFile = {
-  path: string;
-  size: number;
-  modified: string;
-};
-
 export type FleetChannel = {
   id: string;
   label: string;
   summary: string;
-  image: string | null;
   connected: boolean;
-  setupHint: string;
+  requiresGateway: boolean;
+  gatewayCount: number;
+  onlineGatewayCount: number;
+  nextAction: string;
+  runtimeUsable: boolean;
+  setupAvailable: boolean;
 };
 
 export type FleetConnector = {
   id: string;
   label: string;
   summary: string;
-  image: string | null;
   connected: boolean;
   kind: string;
-  oauthUrl: string | null;
+  nextAction: string;
+  healthStatus: string;
+  authRequiredFields: string[];
 };
 
 export type FleetTool = {
@@ -116,31 +116,6 @@ export type FleetTool = {
   description: string;
   action_class: string;
 };
-
-export function useFleetAgentMemory(workspaceId: string, agentId: string | null) {
-  const [files, setFiles] = useState<FleetMemoryFile[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!agentId) { setFiles([]); return; }
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const res = await fetch(
-          `/api/w/${workspaceId}/fleet/agent-memory?agent_id=${encodeURIComponent(agentId)}`
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) setFiles(data.files || []);
-      } catch { if (!cancelled) setFiles([]); }
-      finally { if (!cancelled) setLoading(false); }
-    })();
-    return () => { cancelled = true; };
-  }, [workspaceId, agentId]);
-
-  return { files, loading };
-}
 
 export function useFleetAgentChannels(workspaceId: string, agentId: string | null) {
   const [channels, setChannels] = useState<FleetChannel[]>([]);
@@ -219,4 +194,105 @@ export function useFleetAgentTools(workspaceId: string, agentId: string | null) 
   }, [workspaceId, agentId]);
 
   return { tools, loading };
+}
+
+export type WorkspaceActivityEvent = {
+  id: string | null;
+  title: string | null;
+  summary: string | null;
+  event_class: string | null;
+  action: string | null;
+  status: string | null;
+  created_at: string | null;
+};
+
+export function useWorkspaceActivity(workspaceId: string, limit = 8) {
+  const [events, setEvents] = useState<WorkspaceActivityEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/activity/timeline?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}`, {
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setEvents(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setEvents([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId, limit]);
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 30_000);
+    return () => clearInterval(interval);
+  }, [refresh]);
+
+  return { events, loading };
+}
+
+export type WorkspaceStatusStrip = {
+  channelsConnected: number;
+  channelsTotal: number;
+  connectorsConnected: number;
+  connectorsTotal: number;
+  hardwareOnline: number;
+  hardwareTotal: number;
+  loading: boolean;
+};
+
+export function useWorkspaceStatusStrip(workspaceId: string): WorkspaceStatusStrip {
+  const [state, setState] = useState<Omit<WorkspaceStatusStrip, "loading">>({
+    channelsConnected: 0,
+    channelsTotal: 0,
+    connectorsConnected: 0,
+    connectorsTotal: 0,
+    hardwareOnline: 0,
+    hardwareTotal: 0,
+  });
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        // Phase 2: channels/connectors counters are the HONEST workspace
+        // aggregate — the sum of ENABLED per-agent bindings over catalog size —
+        // served by fleet/connection-summary. Computers still come from live
+        // gateway registrations.
+        const [summaryRes, gatewaysRes] = await Promise.all([
+          fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/connection-summary`, { credentials: "include" }),
+          fetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" }),
+        ]);
+        const summary = summaryRes.ok ? await summaryRes.json() : {};
+        const gatewaysData = gatewaysRes.ok ? await gatewaysRes.json() : { items: [] };
+
+        const connectors = summary.connectors || { connected: 0, total: 0 };
+        const channels = summary.channels || { connected: 0, total: 0 };
+        const gatewayItems = gatewaysData.items || [];
+
+        if (!cancelled) {
+          setState({
+            channelsConnected: Number(channels.connected) || 0,
+            channelsTotal: Number(channels.total) || 0,
+            connectorsConnected: Number(connectors.connected) || 0,
+            connectorsTotal: Number(connectors.total) || 0,
+            hardwareOnline: gatewayItems.filter((g: any) =>
+              String(g.connection_status || g.status || "").toLowerCase() === "online").length,
+            hardwareTotal: gatewayItems.length,
+          });
+        }
+      } catch {
+        // Leave defaults — status strip just shows zeros rather than erroring the page.
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  return { ...state, loading };
 }

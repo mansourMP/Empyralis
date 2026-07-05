@@ -46,7 +46,10 @@ export function toAgentSummary(agent: FleetAgent, index: number): AgentSummary {
     id: agent.agent_id,
     name: agent.label || "Unnamed agent",
     role: agent.role,
-    preset: presetForRole(agent.role),
+    // purpose_preset is set at creation time by the create-agent wizard
+    // (step 2) and returned by fleet_list_agents. Older agents created
+    // before that field existed fall back to a role-based guess.
+    preset: agent.purpose_preset || presetForRole(agent.role),
     runtimeTarget: agent.runtime_target || "unknown",
     hardwareStatus: agent.hardware_status || "unknown",
     lastActivity: agent.last_activity || null,

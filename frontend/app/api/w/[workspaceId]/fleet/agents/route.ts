@@ -1,22 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BACKEND_URL = process.env.EMPYRALIS_API_URL || "http://127.0.0.1:8001";
+import { forwardControlPlaneRequest } from "@/lib/server/control-plane-proxy";
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ workspaceId: string }> }
 ) {
   const { workspaceId } = await params;
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/w/${workspaceId}/fleet/agents`, {
-      headers: { cookie: _req.headers.get("cookie") || "" },
-    });
-    const data = await res.json();
-    return NextResponse.json(data, { status: res.status });
-  } catch (e) {
-    return NextResponse.json(
-      { ok: false, error: "Backend unreachable", agents: [] },
-      { status: 502 }
-    );
-  }
+  return forwardControlPlaneRequest(_req, `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`);
 }
+
+export async function POST(
+  _req: NextRequest,
+  { params }: { params: Promise<{ workspaceId: string }> }
+) {
+  const { workspaceId } = await params;
+  return forwardControlPlaneRequest(_req, `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`);
+}
+
+// PATCH /api/w/{workspaceId}/fleet/agents/{agentId} is NOT handled here —
+// there is no [agentId] folder under this route, so it falls through to
+// the catch-all [...path]/route.ts which correctly forwards PATCH.

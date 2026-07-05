@@ -2800,7 +2800,7 @@ export function WorkstationSageConnectorsPane({
   const [whatsappChannelMode, setWhatsappChannelMode] = useState<ChannelRouteMode>('hardware');
   const [selectedIntegrationId, setSelectedIntegrationId] = useState<IntegrationWorkbenchCategoryId>(() => (
     normalizeIntegrationCategoryId(searchParams.get('section') ?? searchParams.get('connection'))
-    ?? (showProviders ? 'apps' : 'channels')
+    ?? (showProviders ? 'ai_runtime' : 'channels')
   ));
   const [providerDraftKeys, setProviderDraftKeys] = useState<Record<string, string>>({});
   const [providerDraftBaseUrls, setProviderDraftBaseUrls] = useState<Record<string, string>>({});
@@ -3832,20 +3832,20 @@ export function WorkstationSageConnectorsPane({
     [communicationPersonalCards, connectorCards, showPersonalSurface],
   );
 
-  const includeAiRuntimeGroup = normalizeIntegrationCategoryId(searchParams.get('section') ?? searchParams.get('connection')) === 'ai_runtime';
+  const includeAiRuntimeGroup = showProviders;
 
   const integrationGroups = useMemo<IntegrationWorkbenchGroup[]>(() => {
+    const groups: IntegrationWorkbenchGroup[] = [];
     if (includeAiRuntimeGroup) {
-      return [{
+      groups.push({
         id: 'ai_runtime' as const,
         label: 'AI setup',
         description: 'Default AI route, provider accounts, and model source.',
         detail: aiProviderSummary.activeLabel,
         countLabel: activeProviderCard ? 'Active' : 'Setup',
         statusTone: activeProviderCard ? 'connected' : 'warning',
-      }];
+      });
     }
-    const groups: IntegrationWorkbenchGroup[] = [];
     groups.push({
       id: 'apps',
       label: 'Apps',

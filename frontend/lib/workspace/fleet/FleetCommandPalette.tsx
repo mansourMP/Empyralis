@@ -10,12 +10,15 @@ import {
 import { useRouter } from "next/navigation";
 import {
   Bot,
+  Brain,
   Command,
   CreditCard,
   Cpu,
   Home,
   MessageSquare,
   Moon,
+  Plug,
+  Radio,
   Sun,
   type LucideIcon,
 } from "lucide-react";
@@ -70,13 +73,24 @@ export function FleetCommandPalette({
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
+  const [agentModalOpen, setAgentModalOpen] = useState(false);
+
   useEffect(() => {
     if (open) {
       setQuery("");
       setActiveIndex(0);
+      // The agent detail modal lives in a different component tree (mounted
+      // from FleetHome, not here) — there's no shared state to read, so
+      // check for its root element instead of prop-threading a callback
+      // through FleetShell just for the palette.
+      setAgentModalOpen(Boolean(document.querySelector(".fleet-detail-backdrop")));
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [open]);
+
+  const switchAgentTab = useCallback((tab: string) => {
+    window.dispatchEvent(new CustomEvent("fleet:switch-tab", { detail: tab }));
+  }, []);
 
   const close = useCallback(() => setOpen(false), []);
   const go = useCallback(
@@ -130,8 +144,14 @@ export function FleetCommandPalette({
         run: () => go(`${base}/fleet`),
       }));
 
-    return [...commands, ...navigation, ...agentActions];
-  }, [workspaceId, theme, agents, go, onToggleTheme, close]);
+    const agentModalActions: Action[] = agentModalOpen ? [
+      { id: "modal-channels", label: "Channels", hint: "in this agent", group: "Agent modal", icon: Radio, run: () => { switchAgentTab("channels"); close(); } },
+      { id: "modal-connectors", label: "Connectors", hint: "in this agent", group: "Agent modal", icon: Plug, run: () => { switchAgentTab("connectors"); close(); } },
+      { id: "modal-memory", label: "Memory", hint: "in this agent", group: "Agent modal", icon: Brain, run: () => { switchAgentTab("memory"); close(); } },
+    ] : [];
+
+    return [...agentModalActions, ...commands, ...navigation, ...agentActions];
+  }, [workspaceId, theme, agents, go, onToggleTheme, close, agentModalOpen, switchAgentTab]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return actions;

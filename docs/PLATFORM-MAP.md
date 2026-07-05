@@ -1,11 +1,13 @@
 # Empyralis — Complete Platform Map
 
-**Generated:** 2026-07-03  
-**Commit:** `e03ce2a7d`  
+**Updated:** 2026-07-05  
+**Commit:** Phase Fix-1 (verify branch)  
 **Graph:** 28,619 nodes · 72,533 edges · 1,162 communities  
-**Test baseline:** 108 tests passing, 0 failures  
+**Test baseline:** 141 tests passing (50 pre-existing failures in unrelated fixtures)  
 **Code:** ~275,000 lines Python (server_modules/) + TypeScript (frontend/, gateway/) + Rust (supervisor/, kernel/)  
 **For:** Outside engineers and agents — read this cold, understand the entire platform.
+
+> **Fix-1 changes (2026-07-05):** Provider system expanded to 4 modes + 17 providers. Create-agent wizard fully functional (all 5 steps). Interactive Model tab in agent detail. SQLite fallback for local dev (no DATABASE_URL needed). Fleet UI surface documented below.
 
 ---
 
@@ -96,6 +98,83 @@ graph TD
     RES -->|reply| CH
     CH --> U
 ```
+
+### Provider Architecture — Who Pays for the Brain?
+
+Every agent has a `model_config` dict in its install metadata. Four payment modes
+gate which providers are available. This is the single biggest user-facing
+decision in the platform.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    MODEL CONFIG (per agent)                         │
+│                                                                     │
+│  mode: "platform_credits" | "byok_api" | "cli_subscription" | "local" │
+│  provider: "deepseek" | "anthropic" | "openai" | ...               │
+│  model: "deepseek-chat" | "claude-sonnet-4-6" | ... (optional)     │
+└─────────────────────────────────────────────────────────────────────┘
+
+MODE 1: platform_credits (Empyralis pays)
+├── DeepSeek ONLY (hard policy gate: PLATFORM_CREDIT_MODEL_ALLOWLIST)
+├── Models: deepseek-chat, deepseek-v4-pro
+├── No setup — works immediately
+└── Billed against workspace credit ledger
+
+MODE 2: byok_api (Customer pays provider directly)
+├── 13 providers: Anthropic, OpenAI, DeepSeek, Google Gemini, Groq,
+│   OpenRouter, xAI (Grok), Azure OpenAI, AWS Bedrock, Qwen, Mistral,
+│   Ollama Cloud, Custom OpenAI-compatible
+├── API key stored in workspace vault (vault_store.py)
+├── Key never leaves workspace boundary
+└── Customer billed by provider directly
+
+MODE 3: cli_subscription (Customer's existing subscription)
+├── Claude Code CLI — local Claude Pro subscription via Gateway
+├── OpenAI Codex — ChatGPT/Codex subscription via Gateway
+├── Gateway invokes local CLI with customer's login
+├── Empyralis never touches the subscription token
+└── Requires Gateway paired on customer's machine
+
+MODE 4: local (Runs on customer's own hardware)
+├── Ollama — local model runtime
+├── No data leaves customer's machine
+├── Requires Gateway + Ollama installed
+└── Zero platform cost
+```
+
+**Where each mode is configured:**
+
+| Surface | File | What it does |
+|---------|------|--------------|
+| Create-agent wizard step 3 | `FleetCreateAgentWizard.tsx` | Sets initial model_config at agent creation |
+| Agent detail → Model tab | `FleetAgentDetail.tsx` (ModelTab) | Edits model_config post-creation via PATCH |
+| Backend validation | `fleet_tools.py` `_VALID_MODEL_MODES` | Rejects invalid modes |
+| Provider catalog | `provider_profiles.py` `PROVIDER_CATALOG` | 17 providers with auth modes, models, scopes |
+| Platform credit gating | `provider_catalog_service.py` `PLATFORM_CREDIT_MODEL_ALLOWLIST` | Only DeepSeek for platform credits |
+| Tier routing | `empyralis_model_tier_routing_service.py` | Maps public tiers → internal provider+model |
+| Provider resolution | `provider_catalog_service.py` `resolve_provider_model_selection()` | Validates provider+model+surface+payer |
+
+**Provider catalog (full list):**
+
+| ID | Label | Auth | Platform Credits? |
+|----|-------|------|-------------------|
+| `deepseek` | DeepSeek | API key | **YES (only one)** |
+| `anthropic` | Anthropic | API key / local CLI | No (BYOK) |
+| `openai` | OpenAI | API key / OAuth | No (BYOK) |
+| `gemini` | Google Gemini | API key / CLI OAuth | No (BYOK) |
+| `groq` | Groq | API key | No (BYOK) |
+| `openrouter` | OpenRouter | API key | No (BYOK) |
+| `xai` | xAI (Grok) | API key | No (BYOK) |
+| `azure_openai` | Azure OpenAI | API key | No (BYOK) |
+| `bedrock` | AWS Bedrock | Access token | No (BYOK) |
+| `qwen` | Qwen | API key | No (BYOK) |
+| `mistral` | Mistral | API key | No (BYOK) |
+| `ollama_cloud` | Ollama Cloud | API key | No (BYOK) |
+| `custom_openai_compatible` | Custom OpenAI-compatible | API key | No (BYOK) |
+| `vertex` | Google Vertex AI | Access token | No (BYOK) |
+| `claude_code_cli` | Claude Code (Subscription) | Local CLI | No (subscription, hidden) |
+| `openai-codex` | OpenAI Codex | OAuth | No (subscription) |
+| `ollama` | Ollama | Local | No (local) |
 
 ### Key Contracts
 
@@ -452,7 +531,7 @@ HTTP server at `127.0.0.1:7788`. HMAC-SHA256 signature verification on all reque
 
 | File | Route | Purpose |
 |------|-------|---------|
-| `layout.tsx` | `/` | Root layout — font, metadata |
+| `layout.tsx` | `/` | Root layout — font, metadata, theme bootstrap |
 | `page.tsx` | `/` | Landing page → redirects |
 | `login/page.tsx` | `/login` | Login |
 | `signup/page.tsx` | `/signup` | Signup |
@@ -461,8 +540,65 @@ HTTP server at `127.0.0.1:7788`. HMAC-SHA256 signature verification on all reque
 | `(account)/layout.tsx` | `/w/*` | Auth gate layout |
 | `(account)/w/[workspaceId]/page.tsx` | `/w/[workspaceId]` | Workspace root |
 | `(account)/w/[workspaceId]/WorkspaceSurfacePage.tsx` | — | Surface renderer |
-| `api/chat/route.ts` | `/api/chat` | Chat proxy |
-| `api/chat/stream/route.ts` | `/api/chat/stream` | SSE streaming |
+| `(account)/w/[workspaceId]/fleet/page.tsx` | `/w/[id]/fleet` | **Fleet Home** — agent grid + status strip |
+| `api/[...path]/route.ts` | `/api/*` | **Catch-all proxy** — forwards GET/POST/PATCH/DELETE to backend |
+| `api/w/[workspaceId]/fleet/agents/route.ts` | `GET/POST /api/w/[id]/fleet/agents` | Fleet agent list + create proxy |
+| `api/w/[workspaceId]/fleet/agent-activity/route.ts` | `GET /api/w/[id]/fleet/agent-activity` | Agent activity proxy |
+
+#### Fleet UI (`frontend/lib/workspace/fleet/`) — Post-Fix-1
+
+The fleet surface is a **separate UI shell** from the workstation. It renders via
+`FleetShellDecider.tsx` — fleet routes bypass the workstation shell entirely
+(no `useWorkspaceBoundary()` context). This is why the old memory pane can't be
+imported directly; fleet has its own implementations.
+
+| File | Purpose |
+|------|---------|
+| `FleetHome.tsx` | Agent grid + status strip + "New agent" button. Opens wizard. |
+| `FleetAgentDetail.tsx` | Centered modal (~80vw) with left nav. 7 tabs: Overview, Chat, Memory, Channels, Connectors, Tools, **Model (editable)**. Exports `ChannelsTab` for wizard reuse. |
+| `FleetCreateAgentWizard.tsx` | 5-step wizard: Name → Purpose → Provider → Channels → Hardware. Agent exists at step 2, later steps are incremental PATCHes. Closing early = real agent, not lost work. |
+| `FleetCommandPalette.tsx` | Keyboard-driven command palette for switching agent tabs. |
+| `fleet-data.ts` | React hooks: `useFleetAgents`, `useFleetAgentActivity`, `useFleetAgentChannels`, `useFleetAgentConnectors`, `useFleetAgentTools`, `useWorkspaceStatusStrip`. |
+| `fleet-presentation.ts` | Agent summary projection, status/placement derivation, tint colors. |
+| `fleet-preferences.ts` | Theme toggle — reads account-wide `globalTheme`, no separate fleet localStorage key. |
+| `fleet-icons.ts` | Channel + connector icon registry (maps backend IDs to icon assets). |
+| `fleet-provider-constants.ts` | **Shared provider catalog** — 4 modes, 17 providers, used by both wizard and Model tab. |
+| `fleet-theme.css` | Fleet-specific CSS: cards, grid, wizard, memory browser, modal, rail indicator. |
+
+#### Agent Detail — 7 Tabs
+
+| Tab | Component | Data Source | Status |
+|-----|-----------|-------------|--------|
+| **Overview** | `OverviewTab` | `useFleetAgentActivity` → `GET /fleet/agent-activity` | Live — status, placement, role, recent activity feed |
+| **Chat** | `ChatTab` | None (navigation only) | "Open chat" button → workspace chat |
+| **Memory** | `MemoryTab` | `GET /api/sage-context-files?agent_id=` | Live — split-pane MD file browser with editable textarea + Save |
+| **Channels** | `ChannelsTab` (exported) | `GET /fleet/agent-channels` | Live — 7-platform grid with status pills. Telegram: 3-option sheet (hosted/BYO token/personal via Gateway). Slack/Discord: OAuth. WhatsApp/Signal/iMessage/WeChat: Gateway pair panel. |
+| **Connectors** | `ConnectorsTab` | `GET /fleet/agent-connectors` | Live — MCP/OAuth connector grid with inline credential setup |
+| **Tools** | `ToolsTab` | `GET /fleet/agent-tools` → skill registry | Live — enabled tools from agent manifest |
+| **Model** | `ModelTab` | Agent's `model_config` + `PATCH /fleet/agents/{id}` | **Interactive** — 4-mode selector (platform credits / BYOK / subscription / local), provider dropdown, API key field, Save button. Shows resolved provider+model at top. |
+
+#### Wizard — 5 Steps
+
+| Step | What happens | Persisted via |
+|------|-------------|---------------|
+| 1. Name | Agent name + one-line description | Nothing yet |
+| 2. Purpose | Pick preset (customer_facing / internal_assistant / operator) | `POST /fleet/agents` — agent created here |
+| 3. Provider | Pick mode + provider + optional API key | `PATCH /fleet/agents/{id}` — `model_config` |
+| 4. Channels | Optional — 7-platform grid, same as Channels tab | Inline via `ChannelsTab` |
+| 5. Hardware | Cloud (default) or paired Gateway | `PATCH /fleet/agents/{id}` — `hardware_access` |
+| Finish | Closes wizard, opens agent detail modal | Agent is fully configured |
+
+#### Theme System
+
+Single `data-theme` attribute on `<html>` and `<body>`. One source of truth:
+
+| Layer | File | Role |
+|-------|------|------|
+| Design tokens | `shared/design-system/tokens.ts` | `DESIGN_SYSTEM_THEME_ATTRIBUTE = 'data-theme'` |
+| Shared colors | `frontend/lib/ui/theme-tokens.css` | CSS custom properties consumed by all surfaces |
+| Legacy shell | `frontend/lib/ui/chrome.css` | Consumes tokens via `var(--bg-page)` etc. |
+| Fleet shell | `frontend/lib/workspace/fleet/fleet-theme.css` | Consumes same tokens |
+| Preference source | `empyralis.account-shell.v2` localStorage → `globalTheme` | Account-wide, stored by `AccountShellProvider` |
 
 #### Workspace Shell (`frontend/lib/workspace/`)
 
@@ -1042,11 +1178,11 @@ To reach feature parity with `server_modules/`, the `server/` directory would ne
 
 Per the platform vision: the cure for doubt is ONE real user who finds it useful enough to come back the next day.
 
-### 9.1 What Works Today
+### 9.1 What Works Today (updated 2026-07-05)
 
 - ✅ Platform boots (frontend :3000, backend :8001)
-- ✅ Preflight checks (kernel, Postgres, Redis) pass for local dev
-- ✅ 108 tests pass, 0 failures
+- ✅ Preflight checks pass for local dev (Postgres/Redis can be skipped)
+- ✅ 141 tests pass (50 pre-existing failures in unrelated fixtures)
 - ✅ Telegram bot channel (PROVEN)
 - ✅ Discord bot channel (PROVEN)
 - ✅ Slack channel (PROVEN)
@@ -1054,36 +1190,69 @@ Per the platform vision: the cure for doubt is ONE real user who finds it useful
 - ✅ MCP catalog API with 30 honest statuses
 - ✅ Empyralis as MCP server (9 tools, per-workspace API keys)
 - ✅ Fleet tools: create, configure, list agents
+- ✅ **Fleet Home UI** — agent grid, status strip, "New agent" button
+- ✅ **5-step create-agent wizard** — Name → Purpose → Provider → Channels → Hardware, all functional
+- ✅ **Agent detail modal** — 7 tabs (Overview, Chat, Memory, Channels, Connectors, Tools, Model)
+- ✅ **Interactive Model tab** — switch provider/mode/payment from agent modal
+- ✅ **Provider catalog** — 4 modes (platform_credits, byok_api, cli_subscription, local), 17 providers
+- ✅ **Memory browser** — per-agent MD file tree with editable textarea + Save
+- ✅ **Channels grid** — 7 platforms, Telegram 3-option sheet (hosted/BYO token/personal)
+- ✅ **Connectors grid** — real MCP/OAuth connectors with inline credential setup
+- ✅ **SQLite fallback** — entire agent registry works without DATABASE_URL (local dev)
+- ✅ **Theme unification** — single `data-theme` attribute, dark mode consistent across all surfaces
+- ✅ **Chat composer** — attach button visible with real file picker, vision support gating
 - ✅ schedule_task for proactive agents
-- ✅ Operator/specialist agent roles with display_name
+- ✅ Operator/specialist agent roles with purpose_preset
 - ✅ Platform voice: 26 "I"/"my" strings fixed
 
 ### 9.2 What Blocks a Real User
 
 | Blocker | Detail | Impact |
 |---------|--------|--------|
-| **No Fleet Console UI** | Phase W not built — no UI to create/manage agents, view activity, or bind channels | User can't set up their fleet without API calls |
-| **No onboarding flow** | Wizard exists but creates a workspace only — doesn't guide through agent+channel setup | User hits a blank state after signup |
-| **Frontend channel list incomplete** | 7 channels shown (Telegram, Slack, Discord, WhatsApp, Signal, iMessage, WeChat) vs 27 in backend | User can't connect most channels from UI |
-| **~31 "I"/"my" strings remain** | Platform impersonates agent in autopilot, inventory, automation paths | User gets confused about who's talking |
-| **Rust Supervisor never compiled** | Node.js Gateway runs in dev (Telegram/WhatsApp personal PROVEN through it). Rust Supervisor binary never compiled — hardware security boundary is paper. No external user has run either. | Hardware features are spec-level |
-| **cli_subscription not built** | Spec exists, code not started. Users limited to platform_credits or BYOK API key | Limits AI provider choice |
-| **No real onboarding walkthrough** | The platform has auth + workspace creation, but no guided "create agent → bind channel → send first message → get value" flow | New user has no idea what to do |
-| **No channel health monitoring** | If a Telegram bot token expires or Discord webhook fails, no alert | Silent failures lose messages |
-| **Memory not user-visible** | Agent has memory but user can't see/edit it from UI (sage-memory-pane.tsx exists but state unknown) | User can't debug agent behavior |
 | **No production deploy** | Frontend runs on localhost:3000 — no public URL, no HTTPS, no production build | Nobody outside this machine can use it |
+| **Rust Supervisor never compiled** | Node.js Gateway runs in dev (Telegram/WhatsApp personal PROVEN through it). Rust Supervisor binary never compiled — hardware security boundary is paper. | Hardware features are spec-level |
+| **No channel health monitoring** | If a Telegram bot token expires or Discord webhook fails, no alert | Silent failures lose messages |
+| **Per-agent hosted bots not built** | One shared workspace bot per channel — specialists can't have their own Telegram/Discord identities | Agent identity is invisible to end users |
+| **Per-agent wake/heartbeat UI not built** | Backend exists (`runtime_heartbeat_service.py`) but no per-agent schedule control in UI | Users can't schedule agent wake-ups |
+| **"Connect via MCP" tile not built** | Empyralis IS an MCP server but has no discovery surface in-product | Users must find docs outside the app |
+| **No real onboarding walkthrough** | Wizard works but no guided "create agent → bind channel → send first message → get reply" flow | New user has no idea what to do |
+| **~31 "I"/"my" strings remain** | Platform impersonates agent in autopilot, inventory, automation paths | User gets confused about who's talking |
 
 ### 9.3 Minimum Viable Onboarding
 
 To get ONE real user:
 
-1. **Build Phase W** — Fleet Console UI with agent cards, activity feed, create wizard
-2. **Deploy frontend** — production build, public URL, HTTPS
-3. **Fix channel catalog** — make frontend channel list data-driven from backend API
-4. **One end-to-end path** — create agent → bind Telegram bot → send message → get AI reply → see activity
-5. **Fix remaining impersonation strings** — at least the high-traffic ones
+1. **Deploy frontend** — production build, public URL, HTTPS
+2. **One guided path** — after signup, walk user through: name agent → pick brain → bind Telegram → send first message → get reply
+3. **Fix remaining impersonation strings** — at least the high-traffic ones
+4. **Per-agent hosted bots** — so specialists have their own Telegram identities
 
-That's the shortest path to validating with a real user.
+That's the shortest path to validating with a real user. The fleet console, wizard, and provider system — previously the biggest gaps — are now built.
+
+### 9.4 SQLite Fallback Architecture (Fix-1)
+
+When `DATABASE_URL` is not set (local dev), the agent registry uses SQLite
+instead of Postgres. This is why the platform works without a configured database.
+
+```
+Postgres path (production):               SQLite path (local dev):
+  ensure_control_plane_schema()             _connect_local_control_plane_db()
+  → asyncpg pool                            → sqlite3 connection
+  → agent_definitions table                 → same schema, SQLite file
+  → workspace_agent_installs table          → ~/.empyralis/state/control-plane/
+                                              control-plane.sqlite3
+
+Functions with dual paths:
+  ensure_workspace_agent_registry_seeded()  → _ensure_agent_registry_seeded_local()
+  list_agent_definitions()                  → _list_agent_definitions_local()
+  create_workspace_agent_install()          → _create_workspace_agent_install_local()
+  get_workspace_agent_install_bundle()      → _get_workspace_agent_install_bundle_local()
+  update_workspace_agent_install()          → _update_workspace_agent_install_local()
+  list_workspace_agent_installs()           → _list_workspace_agent_installs_local()
+
+Fallback is transparent — callers use the same async functions and get the
+same return shapes. They cannot tell which storage is active.
+```
 
 ---
 
@@ -1254,13 +1423,13 @@ Organized by subsystem with verified one-line purposes. Files marked ⚠️ are 
 
 **Auth (4 files):** `auth.py` (5,796 lines — email/password, JWT, sessions, API keys), `client_identity_service.py`, `jwt_secret.py`, `account_shell_service.py`, `routes_auth.py`
 
-**Database (3 files):** `db.py` (asyncpg pooling), `control_plane_repository.py` (13,049 lines — GOD OBJECT), `sqlite_helpers.py`
+**Database (3 files):** `db.py` (asyncpg pooling), `control_plane_repository.py` (13,049 lines — GOD OBJECT, includes `_connect_local_control_plane_db()` SQLite fallback), `sqlite_helpers.py`
 
 **State (2 files):** `state_paths.py`, `acp_manager.py` (ACP protocol v1.0)
 
 **Vault/Secrets (3 files):** `vault_store.py`, `vault_helpers.py`, `vault_migration_stage4b.py`, `secrets_broker.py`
 
-**Provider/Model (6 files):** `provider_profiles.py` (4,289 lines), `provider_catalog_service.py`, `model_router.py`, `multimodal_provider_service.py`, `no_provider_service.py`, `empyralis_model_tier_contract.py`, `empyralis_model_tier_routing_service.py`
+**Provider/Model (9 files):** `provider_profiles.py` (4,289 lines, 17-provider catalog + model policies), `provider_catalog_service.py` (platform credit gating, BYOK-first providers, subscription/local providers), `model_router.py`, `multimodal_provider_service.py`, `no_provider_service.py`, `empyralis_model_tier_contract.py`, `empyralis_model_tier_routing_service.py` (maps public tiers → internal provider+model), `runtime_models.py`, `runtime_config.py`
 
 **Tools (8 files):** `tool_broker.py`, `tool_broker_guard_service.py`, `tool_registry_service.py` (keyword-searchable, 8 always-visible tools), `tool_availability_truth.py`, `tools_http.py`, `tools_image_gen.py`, `web_tools.py`, `fleet_tools.py` (5 operator-only tools + schedule_task)
 

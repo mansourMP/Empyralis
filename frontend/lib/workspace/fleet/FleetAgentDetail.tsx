@@ -20,11 +20,15 @@ import {
   useFleetAgentActivity,
   useFleetAgentChannels,
   useFleetAgentConnectors,
-  useFleetAgentMemory,
   useFleetAgentTools,
   type FleetAgent,
+  type FleetChannel,
+  type FleetConnector,
 } from "./fleet-data";
 import { deriveStatus, derivePlacement, statusClass } from "./fleet-presentation";
+import { CHANNEL_ICONS, CONNECTOR_ICONS } from "./fleet-icons";
+import { GatewayPairPanel } from "../../gateway/GatewayPairPanel";
+import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
 type TabId = "overview" | "chat" | "memory" | "channels" | "connectors" | "tools" | "model";
 
@@ -69,6 +73,18 @@ export function FleetAgentDetail({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Bridge for the command palette (mounted separately at the shell level) —
+  // it can't reach this component's state directly, so it dispatches a
+  // named event instead of requiring a prop-threaded tab-switch callback.
+  useEffect(() => {
+    const onSwitchTab = (e: Event) => {
+      const tab = (e as CustomEvent<TabId>).detail;
+      if (tab) setActiveTab(tab);
+    };
+    window.addEventListener("fleet:switch-tab", onSwitchTab);
+    return () => window.removeEventListener("fleet:switch-tab", onSwitchTab);
+  }, []);
 
   return (
     <div className="fleet-detail-backdrop" onClick={onClose}>
@@ -137,7 +153,7 @@ export function FleetAgentDetail({
             {activeTab === "tools" && (
               <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
             )}
-            {activeTab === "model" && <ModelTab agent={agent} />}
+            {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
           </div>
         </div>
       </div>
@@ -239,10 +255,83 @@ function ChatTab({ agent, onChat }: { agent: FleetAgent | null; onChat: () => vo
 
 // ── Memory ──────────────────────────────────────────────────────────────────
 
+// Real per-agent SOUL.md/MEMORY.md/GOALS.md/etc. — the same context-file
+// store the agent's own system prompt is built from (server_modules/
+// workspace_context.py), scoped by agent_id via /api/sage-context-files.
+// This is a fleet-native rewrite of the old workstation-activity-pane.tsx
+// file-tree browser rather than a mount of that component directly: it
+// hard-depends on useWorkspaceBoundary(), a context fleet routes never
+// mount (see FleetShellDecider.tsx — fleet renders without the workstation
+// shell), so importing it here would throw. Same files, same API, same
+// "real, editable content" — a smaller editor, not the full pane's
+// preview/pin/export feature set.
 function MemoryTab({
   workspaceId, agentId, agent, onChat,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
-  const { files, loading } = useFleetAgentMemory(workspaceId, agentId);
+  const [files, setFiles] = useState<{ filename: string; content: string }[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(
+          `/api/sage-context-files?workspace_id=${encodeURIComponent(workspaceId)}&agent_id=${encodeURIComponent(agentId)}`,
+          { credentials: "include" },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        const list: { filename: string; content: string }[] = Array.isArray(data.files) ? data.files : [];
+        setFiles(list);
+        if (list.length > 0) {
+          setSelected(list[0].filename);
+          setDraft(list[0].content);
+        }
+      } catch {
+        if (!cancelled) setError("Could not load memory files.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [workspaceId, agentId]);
+
+  function selectFile(filename: string) {
+    const f = files.find((x) => x.filename === filename);
+    setSelected(filename);
+    setDraft(f?.content || "");
+    setSaved(false);
+  }
+
+  async function save() {
+    if (!selected) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/sage-context-files/${encodeURIComponent(selected)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ workspace_id: workspaceId, agent_id: agentId, content: draft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+      setFiles((cur) => cur.map((f) => (f.filename === selected ? { ...f, content: draft } : f)));
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -260,7 +349,7 @@ function MemoryTab({
   if (files.length === 0) {
     return (
       <EmptyState
-        title="Nothing here yet"
+        title={error || "Nothing here yet"}
         body="Sage will write memories here as it learns about this agent's preferences, facts, and context."
         action="Chat with this agent"
         onAction={onChat}
@@ -269,33 +358,136 @@ function MemoryTab({
   }
 
   return (
-    <div className="fleet-config">
-      <div className="fleet-detail-section-title">
-        {files.length} {files.length === 1 ? "file" : "files"}
+    <div className="fleet-memory-browser">
+      <div className="fleet-memory-file-list">
+        {files.map((f) => (
+          <button
+            key={f.filename}
+            type="button"
+            className={`fleet-memory-file-item${selected === f.filename ? " is-active" : ""}`}
+            onClick={() => selectFile(f.filename)}
+          >
+            {f.filename}
+          </button>
+        ))}
       </div>
-      {files.map((f) => (
-        <div key={f.path} className="fleet-config-row">
-          <span className="fleet-config-label">{f.path}</span>
-          <span className="fleet-config-value" style={{ fontSize: 11 }}>
-            {formatBytes(f.size)} · {new Date(f.modified).toLocaleDateString()}
-          </span>
-        </div>
-      ))}
+      <div className="fleet-memory-editor">
+        {selected && (
+          <>
+            <div className="fleet-memory-editor-header">
+              <span>{selected}</span>
+              <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
+                {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
+              </button>
+            </div>
+            <textarea
+              className="fleet-memory-editor-textarea"
+              value={draft}
+              onChange={(e) => { setDraft(e.currentTarget.value); setSaved(false); }}
+              spellCheck={false}
+            />
+          </>
+        )}
+        {error && <p className="fleet-channel-expand-error">{error}</p>}
+      </div>
     </div>
   );
 }
 
 // ── Channels ────────────────────────────────────────────────────────────────
 
-function ChannelsTab({
+// Fixed platform order the grid renders in, mapped to the backend
+// connection id that carries that platform's live status.
+const CHANNEL_GRID_PLATFORMS: { label: string; id: string; mode: "hosted" | "oauth" | "gateway" }[] = [
+  { label: "Telegram", id: "sage_telegram_hosted", mode: "hosted" },
+  { label: "Slack", id: "slack", mode: "oauth" },
+  { label: "Discord", id: "discord_bot", mode: "oauth" },
+  { label: "WhatsApp", id: "whatsapp_personal", mode: "gateway" },
+  { label: "Signal", id: "signal_personal", mode: "gateway" },
+  { label: "iMessage", id: "imessage_personal", mode: "gateway" },
+  { label: "WeChat", id: "wechat_personal", mode: "gateway" },
+];
+
+function channelStatePill(channel: FleetChannel | undefined): { label: string; tone: "connected" | "gateway" | "locked" | "setup" } {
+  if (!channel) return { label: "Unavailable", tone: "locked" };
+  if (channel.connected) return { label: "Connected", tone: "connected" };
+  if (channel.requiresGateway && channel.onlineGatewayCount === 0) return { label: "Needs Gateway", tone: "gateway" };
+  if (channel.nextAction === "locked" || !channel.setupAvailable) return { label: "Not configured here", tone: "locked" };
+  return { label: "Set up", tone: "setup" };
+}
+
+export function ChannelsTab({
   workspaceId, agentId, agent,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
   const { channels, hostedTelegramConfigured, loading } = useFleetAgentChannels(workspaceId, agentId);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const [pairing, setPairing] = useState(false);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [deepLink, setDeepLink] = useState<string | null>(null);
   const [pairError, setPairError] = useState<string | null>(null);
   const [pairResult, setPairResult] = useState<string | null>(null);
+  const [oauthBusy, setOauthBusy] = useState<string | null>(null);
+  const [oauthError, setOauthError] = useState<string | null>(null);
+
+  // Telegram's 3-option sheet: hosted bot (already works) / your own bot
+  // token / your personal account via Gateway. Slack and Discord stay
+  // single-path OAuth below — they have no BYO-bot or personal-account
+  // capability in the catalog today, so a 3-option sheet for them would be
+  // two fake buttons. Wire those up when those paths actually exist.
+  const [telegramOption, setTelegramOption] = useState<"hosted" | "byo_bot" | "personal" | null>(null);
+  const [byoBotFields, setByoBotFields] = useState<string[]>([]);
+  const [byoBotValues, setByoBotValues] = useState<Record<string, string>>({});
+  const [byoBotBusy, setByoBotBusy] = useState(false);
+  const [byoBotError, setByoBotError] = useState<string | null>(null);
+  const [byoBotSaved, setByoBotSaved] = useState(false);
+  const [personalWarningAck, setPersonalWarningAck] = useState(false);
+
+  const startByoBotSetup = useCallback(async () => {
+    setByoBotBusy(true);
+    setByoBotError(null);
+    try {
+      const res = await fetch("/api/connections/telegram_bot/setup/start", {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ workspace_id: workspaceId, surface: "sage" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+      const fields: string[] = data?.auth_required_fields?.length ? data.auth_required_fields : ["bot_token"];
+      setByoBotFields(fields);
+      setByoBotValues({});
+    } catch (e) {
+      setByoBotError(e instanceof Error ? e.message : "Could not start bot setup.");
+    } finally {
+      setByoBotBusy(false);
+    }
+  }, [workspaceId]);
+
+  const saveByoBotToken = useCallback(async () => {
+    setByoBotBusy(true);
+    setByoBotError(null);
+    try {
+      const res = await fetch("/api/connectors/vault", {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          connector: "telegram_bot",
+          label: "Telegram Bot",
+          credentials: byoBotValues,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+      setByoBotSaved(true);
+    } catch (e) {
+      setByoBotError(e instanceof Error ? e.message : "Could not save the bot token.");
+    } finally {
+      setByoBotBusy(false);
+    }
+  }, [workspaceId, byoBotValues]);
 
   const startHostedPairing = useCallback(async () => {
     setPairing(true);
@@ -305,7 +497,7 @@ function ChannelsTab({
       const res = await fetch("/api/sage/telegram-hosted/pair/start", {
         method: "POST",
         credentials: "include",
-        headers: { "Content-Type": "application/json" },
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
         body: JSON.stringify({ workspace_id: workspaceId }),
       });
       if (!res.ok) {
@@ -318,7 +510,6 @@ function ChannelsTab({
         setDeepLink(data.deep_link);
         window.open(data.deep_link, "_blank");
       }
-      // Poll for completion
       const check = setInterval(async () => {
         try {
           const s = await fetch(
@@ -336,89 +527,242 @@ function ChannelsTab({
           }
         } catch { /* keep polling */ }
       }, 3000);
-      setTimeout(() => clearInterval(check), 120_000); // 2 min timeout
+      setTimeout(() => clearInterval(check), 120_000);
     } catch (e) {
       setPairError(e instanceof Error ? e.message : "Could not start pairing. Try again.");
       setPairing(false);
     }
   }, [workspaceId]);
 
-  const hostedConnected = channels.some((c) => c.id === "sage_telegram_hosted" && c.connected);
+  const startOAuth = useCallback(async (id: string) => {
+    setOauthBusy(id);
+    setOauthError(null);
+    try {
+      const res = await fetch(`/api/connections/${encodeURIComponent(id)}/setup/start`, {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ workspace_id: workspaceId, surface: "sage" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+      }
+      if (data?.authorization_url) {
+        window.location.href = data.authorization_url;
+        return;
+      }
+      throw new Error("No OAuth redirect was returned for this connection.");
+    } catch (e) {
+      setOauthError(e instanceof Error ? e.message : "Could not start OAuth setup.");
+    } finally {
+      setOauthBusy(null);
+    }
+  }, [workspaceId]);
 
   if (loading) {
     return <div className="fleet-activity-skeleton" aria-label="Loading channels"><div className="fleet-skeleton-bar" style={{ width: "80%" }} /></div>;
   }
 
+  const byId = new Map(channels.map((c) => [c.id, c]));
+
+  function handleCardClick(platform: typeof CHANNEL_GRID_PLATFORMS[number]) {
+    if (platform.mode === "hosted") {
+      setExpanded(expanded === platform.id ? null : platform.id);
+      setTelegramOption(null);
+      setByoBotFields([]);
+      setByoBotError(null);
+      setByoBotSaved(false);
+      setPersonalWarningAck(false);
+      return;
+    }
+    if (platform.mode === "oauth") {
+      setExpanded(expanded === platform.id ? null : platform.id);
+      setOauthError(null);
+      return;
+    }
+    // gateway mode
+    setExpanded(expanded === platform.id ? null : platform.id);
+  }
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* Bot channel card */}
-      <div className="fleet-card" style={{ cursor: "default", padding: 20 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-          <Radio size={20} strokeWidth={1.75} />
-          <span style={{ fontWeight: 500, fontSize: 14 }}>Bot channel</span>
-          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>No phone, no hardware</span>
-        </div>
-        <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 16px" }}>
-          The hosted Empyralis bot replies through Telegram. No BotFather setup, no token, no Gateway. Send one code and you're done.
-        </p>
-
-        {pairResult ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--online-text)", fontSize: 13, fontWeight: 500 }}>
-            <Check size={16} strokeWidth={2} /> {pairResult}
-          </div>
-        ) : pairingCode ? (
-          <div>
-            <div className="fleet-pair-code" style={{ padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8, display: "inline-flex", gap: 12, alignItems: "baseline", marginBottom: 8 }}>
-              <span style={{ fontSize: 11, textTransform: "uppercase", color: "var(--text-muted)", letterSpacing: "0.04em" }}>Code</span>
-              <code style={{ fontSize: 18, fontWeight: 500 }}>{pairingCode}</code>
-            </div>
-            {deepLink && (
-              <a href={deepLink} target="_blank" rel="noopener noreferrer" className="fleet-btn fleet-btn--accent" style={{ marginLeft: 8 }}>
-                Open Telegram <ExternalLink size={14} style={{ marginLeft: 4 }} />
-              </a>
-            )}
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-              Send this code to the Empyralis bot on Telegram. This tab will update when paired.
-            </p>
-          </div>
-        ) : hostedConnected ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span className="fleet-card-status-dot" style={{ background: "var(--online-dot)" }} />
-            <span style={{ fontSize: 13, color: "var(--online-text)", fontWeight: 500 }}>Connected</span>
-          </div>
-        ) : (
-          <div>
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={startHostedPairing} disabled={pairing}>
-              {pairing ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Starting…</> : "Pair Telegram"}
+    <div>
+      <div className="fleet-channel-grid">
+        {CHANNEL_GRID_PLATFORMS.map((platform) => {
+          const channel = byId.get(platform.id);
+          const pill = channelStatePill(channel);
+          const icon = CHANNEL_ICONS[platform.id];
+          const isExpanded = expanded === platform.id;
+          return (
+            <button
+              key={platform.id}
+              type="button"
+              className={`fleet-channel-card${isExpanded ? " fleet-channel-card--active" : ""}`}
+              onClick={() => handleCardClick(platform)}
+            >
+              <span className="fleet-channel-card-icon">
+                {icon ? <img src={icon} alt="" width={32} height={32} /> : platform.label.charAt(0)}
+              </span>
+              <span className="fleet-channel-card-label">{platform.label}</span>
+              <span className={`fleet-channel-card-pill fleet-channel-card-pill--${pill.tone}`}>
+                {pill.tone === "connected" ? <span className="fleet-channel-card-dot" /> : null}
+                {pill.label}
+              </span>
             </button>
-            {!hostedTelegramConfigured && (
-              <p style={{ fontSize: 12, color: "var(--offline-text)", marginTop: 8 }}>
-                The hosted Telegram bot is not configured on this server.
-              </p>
-            )}
-            {pairError && <p style={{ fontSize: 12, color: "var(--offline-text)", marginTop: 8 }}>{pairError}</p>}
-          </div>
-        )}
+          );
+        })}
       </div>
 
-      {/* Personal channel card */}
-      <div className="fleet-card" style={{ cursor: "default", padding: 20 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-          <Cpu size={20} strokeWidth={1.75} />
-          <span style={{ fontWeight: 500, fontSize: 14 }}>Personal channel</span>
-          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Your account, needs Gateway</span>
+      {expanded === "sage_telegram_hosted" && (
+        <div className="fleet-channel-expand">
+          <div className="fleet-wizard-options">
+            <button
+              type="button"
+              className={`fleet-wizard-option${telegramOption === "hosted" ? " is-selected" : ""}`}
+              onClick={() => setTelegramOption(telegramOption === "hosted" ? null : "hosted")}
+            >
+              <span className="fleet-wizard-option-label">Empyralis-hosted bot <span className="fleet-wizard-option-tag">Recommended</span></span>
+              <span className="fleet-wizard-option-body">One-click pair. No BotFather setup, no token, no Gateway.</span>
+            </button>
+            <button
+              type="button"
+              className={`fleet-wizard-option${telegramOption === "byo_bot" ? " is-selected" : ""}`}
+              onClick={() => setTelegramOption(telegramOption === "byo_bot" ? null : "byo_bot")}
+            >
+              <span className="fleet-wizard-option-label">Your own bot</span>
+              <span className="fleet-wizard-option-body">Paste a BotFather token — we handle the rest.</span>
+            </button>
+            <button
+              type="button"
+              className={`fleet-wizard-option${telegramOption === "personal" ? " is-selected" : ""}`}
+              onClick={() => setTelegramOption(telegramOption === "personal" ? null : "personal")}
+            >
+              <span className="fleet-wizard-option-label">Your personal Telegram account</span>
+              <span className="fleet-wizard-option-body">The agent acts as you. Requires the Gateway.</span>
+            </button>
+          </div>
+
+          {telegramOption === "hosted" && (
+            <div className="fleet-channel-expand" style={{ marginTop: 12 }}>
+              {pairResult ? (
+                <div className="fleet-channel-expand-success">
+                  <Check size={16} strokeWidth={2} /> {pairResult}
+                </div>
+              ) : pairingCode ? (
+                <div>
+                  <div className="fleet-pair-code">
+                    <span className="fleet-pair-code-label">Code</span>
+                    <code className="fleet-pair-code-value">{pairingCode}</code>
+                  </div>
+                  {deepLink && (
+                    <a href={deepLink} target="_blank" rel="noopener noreferrer" className="fleet-btn fleet-btn--accent" style={{ marginLeft: 8 }}>
+                      Open Telegram <ExternalLink size={14} style={{ marginLeft: 4 }} />
+                    </a>
+                  )}
+                  <p className="fleet-channel-expand-hint" style={{ marginTop: 8 }}>
+                    Send this code to the Empyralis bot on Telegram. This tab updates automatically when paired.
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={startHostedPairing} disabled={pairing}>
+                    {pairing ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Starting…</> : "Pair Telegram"}
+                  </button>
+                  {!hostedTelegramConfigured && (
+                    <p className="fleet-channel-expand-error">The hosted Telegram bot is not configured on this server.</p>
+                  )}
+                  {pairError && <p className="fleet-channel-expand-error">{pairError}</p>}
+                </div>
+              )}
+            </div>
+          )}
+
+          {telegramOption === "byo_bot" && (
+            <div className="fleet-channel-expand" style={{ marginTop: 12 }}>
+              {byoBotSaved ? (
+                <div className="fleet-channel-expand-success">
+                  <Check size={16} strokeWidth={2} /> Bot token saved. Sage will use it for this channel.
+                </div>
+              ) : byoBotFields.length > 0 ? (
+                <>
+                  <p className="fleet-channel-expand-hint">Paste the token BotFather gave you when you created the bot.</p>
+                  {byoBotFields.map((field) => (
+                    <label key={field} className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                      <span>{field.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}</span>
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        value={byoBotValues[field] || ""}
+                        onChange={(e) => setByoBotValues((cur) => ({ ...cur, [field]: e.currentTarget.value }))}
+                      />
+                    </label>
+                  ))}
+                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={saveByoBotToken} disabled={byoBotBusy}>
+                    {byoBotBusy ? "Saving…" : "Save token"}
+                  </button>
+                </>
+              ) : (
+                <button type="button" className="fleet-btn fleet-btn--accent" onClick={startByoBotSetup} disabled={byoBotBusy}>
+                  {byoBotBusy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Connect your bot"}
+                </button>
+              )}
+              {byoBotError && <p className="fleet-channel-expand-error">{byoBotError}</p>}
+            </div>
+          )}
+
+          {telegramOption === "personal" && (
+            <div className="fleet-channel-expand" style={{ marginTop: 12 }}>
+              {!personalWarningAck ? (
+                <>
+                  <p className="fleet-channel-expand-error" style={{ marginTop: 0 }}>
+                    This agent will act as <strong>you</strong> on Telegram. It can read your DMs and send
+                    messages under your name. This needs the Gateway paired on your machine. Are you sure?
+                  </p>
+                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setPersonalWarningAck(true)}>
+                    Yes, continue
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="fleet-channel-expand-hint">
+                    This channel runs through Agent Computer (Gateway) on the paired machine.
+                  </p>
+                  <GatewayPairPanel workspaceId={workspaceId} compact />
+                </>
+              )}
+            </div>
+          )}
         </div>
-        <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 16px" }}>
-          Connect your personal Telegram account via Agent Computer (Gateway). Messages come from your own number. Requires the Gateway desktop app paired and online.
-        </p>
-        <button
-          type="button"
-          className="fleet-btn"
-          onClick={() => window.location.href = `/w/${encodeURIComponent(workspaceId)}/hardware`}
-        >
-          Open Hardware to pair Gateway first
-        </button>
-      </div>
+      )}
+
+      {(expanded === "slack" || expanded === "discord_bot") && (
+        <div className="fleet-channel-expand">
+          <p className="fleet-channel-expand-hint">
+            {expanded === "slack"
+              ? "Connect Slack with OAuth to route signed mentions or DMs into Sage."
+              : "Connect Discord with an app install to route signed messages into Sage."}
+          </p>
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--accent"
+            onClick={() => void startOAuth(expanded)}
+            disabled={oauthBusy === expanded}
+          >
+            {oauthBusy === expanded ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+            {oauthBusy === expanded ? "Starting…" : `Connect ${expanded === "slack" ? "Slack" : "Discord"}`}
+          </button>
+          {oauthError && <p className="fleet-channel-expand-error">{oauthError}</p>}
+        </div>
+      )}
+
+      {expanded && ["whatsapp_personal", "signal_personal", "imessage_personal", "wechat_personal"].includes(expanded) && (
+        <div className="fleet-channel-expand">
+          <p className="fleet-channel-expand-hint">
+            This channel runs through Agent Computer (Gateway) on the paired machine. Pair one below, or open Hardware for the full view.
+          </p>
+          <GatewayPairPanel workspaceId={workspaceId} compact />
+        </div>
+      )}
     </div>
   );
 }
@@ -445,30 +789,180 @@ function ConnectorsTab({
     );
   }
 
+  return <ConnectorGrid workspaceId={workspaceId} connectors={connectors} />;
+}
+
+function connectorPill(c: FleetConnector): { label: string; tone: "connected" | "reconnect" | "setup" } {
+  if (c.connected && c.healthStatus && c.healthStatus !== "healthy" && c.healthStatus !== "unknown") {
+    return { label: "Reconnect", tone: "reconnect" };
+  }
+  if (c.connected) return { label: "Connected", tone: "connected" };
+  return { label: "Set up", tone: "setup" };
+}
+
+function fieldLabel(field: string): string {
+  return field.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function ConnectorGrid({ workspaceId, connectors }: { workspaceId: string; connectors: FleetConnector[] }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [fields, setFields] = useState<string[]>([]);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [saved, setSaved] = useState<string | null>(null);
+
+  const startSetup = useCallback(async (c: FleetConnector) => {
+    setBusy(c.id);
+    setError(null);
+    setSaved(null);
+    try {
+      const res = await fetch(`/api/connections/${encodeURIComponent(c.id)}/setup/start`, {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ workspace_id: workspaceId, surface: "apps" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+      }
+      if (data?.authorization_url) {
+        window.location.href = data.authorization_url;
+        return;
+      }
+      const requiredFields: string[] = data?.auth_required_fields?.length
+        ? data.auth_required_fields
+        : c.authRequiredFields;
+      if (requiredFields && requiredFields.length > 0) {
+        setFields(requiredFields);
+        setValues({});
+        setExpanded(c.id);
+        return;
+      }
+      throw new Error("This connector has no inline setup path yet — open the workspace Connectors page.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not start setup.");
+      setExpanded(c.id);
+    } finally {
+      setBusy(null);
+    }
+  }, [workspaceId]);
+
+  const saveCredentials = useCallback(async (c: FleetConnector) => {
+    setBusy(c.id);
+    setError(null);
+    try {
+      const res = await fetch("/api/connectors/vault", {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          connector: c.id,
+          label: c.label,
+          credentials: values,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+      }
+      setSaved(c.id);
+      setExpanded(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save credentials.");
+    } finally {
+      setBusy(null);
+    }
+  }, [workspaceId, values]);
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {connectors.map((c) => (
-        <div key={c.id} className="fleet-card" style={{ cursor: "default", padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontWeight: 500, fontSize: 13 }}>{c.label}</div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{c.summary}</div>
-          </div>
-          {c.connected ? (
-            <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--online-text)", fontSize: 12, fontWeight: 500 }}>
-              <span style={{ width: 8, height: 8, borderRadius: 999, background: "var(--online-dot)", flexShrink: 0 }} />
-              Connected
-            </span>
-          ) : (
+    <div>
+      <div className="fleet-connector-grid">
+        {connectors.map((c) => {
+          const pill = connectorPill(c);
+          const icon = CONNECTOR_ICONS[c.id];
+          const isExpanded = expanded === c.id;
+          return (
             <button
+              key={c.id}
               type="button"
-              className="fleet-btn fleet-btn--accent"
-              onClick={() => window.location.href = `/w/${encodeURIComponent(workspaceId)}/integrations`}
+              className={`fleet-connector-card${isExpanded ? " fleet-connector-card--active" : ""}`}
+              onClick={() => {
+                if (pill.tone === "connected") {
+                  setExpanded(isExpanded ? null : c.id);
+                  return;
+                }
+                void startSetup(c);
+              }}
+              disabled={busy === c.id}
             >
-              Connect
+              <span className="fleet-connector-card-icon">
+                {icon ? <img src={icon} alt="" width={28} height={28} /> : c.label.charAt(0)}
+              </span>
+              <span className="fleet-connector-card-label">{c.label}</span>
+              <span className="fleet-connector-card-summary">{c.summary}</span>
+              <span className={`fleet-connector-card-pill fleet-connector-card-pill--${pill.tone}`}>
+                {pill.tone === "connected" ? <span className="fleet-channel-card-dot" /> : null}
+                {busy === c.id ? "Working…" : pill.label}
+              </span>
             </button>
-          )}
-        </div>
-      ))}
+          );
+        })}
+      </div>
+
+      {expanded && (() => {
+        const c = connectors.find((item) => item.id === expanded);
+        if (!c) return null;
+        if (c.connected) {
+          return (
+            <div className="fleet-channel-expand">
+              <p className="fleet-channel-expand-hint">
+                {c.label} is connected and healthy. Manage credentials from the workspace Connectors page.
+              </p>
+              <button
+                type="button"
+                className="fleet-btn"
+                onClick={() => window.location.href = `/w/${encodeURIComponent(workspaceId)}/integrations`}
+              >
+                Open Connectors
+              </button>
+            </div>
+          );
+        }
+        return (
+          <div className="fleet-channel-expand">
+            {fields.length > 0 ? (
+              <>
+                <p className="fleet-channel-expand-hint">Enter credentials for {c.label}.</p>
+                {fields.map((field) => (
+                  <label key={field} className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                    <span>{fieldLabel(field)}</span>
+                    <input
+                      type={/key|token|secret|password/i.test(field) ? "password" : "text"}
+                      value={values[field] || ""}
+                      onChange={(e) => setValues((cur) => ({ ...cur, [field]: e.currentTarget.value }))}
+                      autoComplete="off"
+                    />
+                  </label>
+                ))}
+                <button
+                  type="button"
+                  className="fleet-btn fleet-btn--accent"
+                  onClick={() => void saveCredentials(c)}
+                  disabled={busy === c.id}
+                >
+                  {busy === c.id ? "Saving…" : "Save"}
+                </button>
+              </>
+            ) : (
+              <p className="fleet-channel-expand-error">{error || "Setup could not start."}</p>
+            )}
+            {error && fields.length > 0 && <p className="fleet-channel-expand-error">{error}</p>}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -513,21 +1007,193 @@ function ToolsTab({
 
 // ── Model ───────────────────────────────────────────────────────────────────
 
-function ModelTab({ agent }: { agent: FleetAgent | null }) {
+import { BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, providerLabel, MODE_LABELS, type ProviderMode } from "./fleet-provider-constants";
+
+function resolveDisplayMode(config: Record<string, any>): ProviderMode {
+  const mode = config.mode;
+  if (mode === "byok_api") return "byok_api";
+  if (mode === "cli_subscription") return "cli_subscription";
+  if (mode === "local") return "local";
+  return "platform_credits";
+}
+
+function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
   const config = agent?.model_config || {};
-  const items: [string, string][] = [
-    ["Provider", config.provider || "Platform default"],
-    ["Model", config.model || "Platform default"],
-  ];
+  const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
+  const [provider, setProvider] = useState<string>(config.provider || "");
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const resolvedProvider = config.provider || config.resolved_provider_label;
+  const resolvedModel = config.model || config.resolved_model;
+  const displayProvider = resolvedProvider || "Platform default";
+  const displayModel = resolvedModel || "Platform default";
+  const isPlatformDefault = !config.provider && config.mode !== "byok_api" && config.mode !== "cli_subscription" && config.mode !== "local";
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      if (mode === "byok_api") {
+        if (!apiKey.trim()) {
+          // Reusing existing vault key — only patch config
+          await patchModelConfig();
+        } else {
+          const vaultRes = await fetch("/api/connectors/vault", {
+            method: "POST",
+            credentials: "include",
+            headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              workspace_id: workspaceId,
+              connector: provider,
+              label: providerLabel(provider),
+              credentials: { api_key: apiKey.trim() },
+            }),
+          });
+          const vaultData = await vaultRes.json().catch(() => ({}));
+          if (!vaultRes.ok) throw new Error(vaultData?.detail || vaultData?.error || `HTTP ${vaultRes.status}`);
+          await patchModelConfig();
+        }
+      } else if (mode === "cli_subscription" || mode === "local") {
+        await patchModelConfig();
+      } else {
+        // platform_credits
+        await patchModelConfig();
+      }
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function patchModelConfig() {
+    const patch: Record<string, any> = { mode };
+    if (mode === "byok_api" || mode === "cli_subscription" || mode === "local") {
+      patch.provider = provider;
+    }
+    const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+      body: JSON.stringify({ patch: { model_config: patch } }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+  }
 
   return (
-    <div className="fleet-config">
-      {items.map(([label, value]) => (
-        <div key={label} className="fleet-config-row">
-          <span className="fleet-config-label">{label}</span>
-          <span className="fleet-config-value">{String(value)}</span>
+    <div>
+      {/* Current state — always visible */}
+      <div className="fleet-config" style={{ marginBottom: 20 }}>
+        <div className="fleet-config-row">
+          <span className="fleet-config-label">Provider</span>
+          <span className="fleet-config-value">{displayProvider}{isPlatformDefault ? " (platform default)" : ""}</span>
         </div>
-      ))}
+        <div className="fleet-config-row">
+          <span className="fleet-config-label">Model</span>
+          <span className="fleet-config-value">{displayModel}{isPlatformDefault ? " (platform default)" : ""}</span>
+        </div>
+        {config.mode && (
+          <div className="fleet-config-row">
+            <span className="fleet-config-label">Payment</span>
+            <span className="fleet-config-value">{MODE_LABELS[config.mode as ProviderMode] || config.mode}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Editor */}
+      <div className="fleet-detail-section-title">Change provider</div>
+      <div className="fleet-wizard-options" style={{ marginTop: 8 }}>
+        <button
+          type="button"
+          className={`fleet-wizard-option${mode === "platform_credits" ? " is-selected" : ""}`}
+          onClick={() => { setMode("platform_credits"); setSaved(false); }}
+        >
+          <span className="fleet-wizard-option-label">Platform credits</span>
+          <span className="fleet-wizard-option-body">DeepSeek. Empyralis pays.</span>
+        </button>
+        <button
+          type="button"
+          className={`fleet-wizard-option${mode === "byok_api" ? " is-selected" : ""}`}
+          onClick={() => { setMode("byok_api"); setProvider(provider || "anthropic"); setSaved(false); }}
+        >
+          <span className="fleet-wizard-option-label">Your own API key</span>
+          <span className="fleet-wizard-option-body">Use your key for any provider.</span>
+        </button>
+        <button
+          type="button"
+          className={`fleet-wizard-option${mode === "cli_subscription" ? " is-selected" : ""}`}
+          onClick={() => { setMode("cli_subscription"); setProvider(provider || "claude_code_cli"); setSaved(false); }}
+        >
+          <span className="fleet-wizard-option-label">Your subscription</span>
+          <span className="fleet-wizard-option-body">Claude Code or Codex via Gateway.</span>
+        </button>
+        <button
+          type="button"
+          className={`fleet-wizard-option${mode === "local" ? " is-selected" : ""}`}
+          onClick={() => { setMode("local"); setProvider(provider || "ollama"); setSaved(false); }}
+        >
+          <span className="fleet-wizard-option-label">Run locally</span>
+          <span className="fleet-wizard-option-body">Ollama on your own machine.</span>
+        </button>
+      </div>
+
+      {mode === "byok_api" && (
+        <div className="fleet-channel-expand">
+          <label className="fleet-wizard-label">Provider</label>
+          <select className="fleet-wizard-input" value={provider} onChange={(e) => { setProvider(e.currentTarget.value); setSaved(false); }}>
+            {BYOK_PROVIDERS.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
+          </select>
+          <label className="fleet-wizard-label">API key {apiKey ? "" : "(leave blank to keep existing)"}</label>
+          <input
+            className="fleet-wizard-input"
+            type="password"
+            autoComplete="off"
+            value={apiKey}
+            onChange={(e) => { setApiKey(e.currentTarget.value); setSaved(false); }}
+            placeholder="sk-..."
+          />
+          <p className="fleet-channel-expand-hint">Stored in this workspace's vault.</p>
+        </div>
+      )}
+
+      {mode === "cli_subscription" && (
+        <div className="fleet-channel-expand">
+          <label className="fleet-wizard-label">Subscription</label>
+          <select className="fleet-wizard-input" value={provider} onChange={(e) => { setProvider(e.currentTarget.value); setSaved(false); }}>
+            {SUBSCRIPTION_PROVIDERS.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
+          </select>
+          <p className="fleet-channel-expand-hint">{SUBSCRIPTION_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
+        </div>
+      )}
+
+      {mode === "local" && (
+        <div className="fleet-channel-expand">
+          <label className="fleet-wizard-label">Runtime</label>
+          <select className="fleet-wizard-input" value={provider} onChange={(e) => { setProvider(e.currentTarget.value); setSaved(false); }}>
+            {LOCAL_PROVIDERS.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
+          </select>
+          <p className="fleet-channel-expand-hint">{LOCAL_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
+        </div>
+      )}
+
+      <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12 }}>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
+          {saving ? "Saving…" : saved ? "Saved ✓" : "Save"}
+        </button>
+        {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
+      </div>
     </div>
   );
 }
@@ -563,10 +1229,3 @@ function EmptyState({
   );
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
