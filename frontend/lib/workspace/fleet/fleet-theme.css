@@ -1928,6 +1928,17 @@ a.fleet-list-row:hover {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .fleet-list-row-meta { font-size: var(--text-xs); color: var(--text-secondary); flex-shrink: 0; }
+button.fleet-list-row { width: 100%; cursor: pointer; text-align: left; font: inherit; }
+button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
+.fleet-select {
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
 
 .fleet-segmented {
   display: inline-flex;
@@ -2093,6 +2104,16 @@ a.fleet-list-row:hover {
 .fleet-hw-label { font-size: var(--text-sm); color: var(--text-secondary); }
 .fleet-hw-value { font-size: var(--text-sm); color: var(--text-primary); display: inline-flex; align-items: center; gap: 6px; }
 .fleet-hw-note { font-size: var(--text-sm); color: var(--text-muted); line-height: var(--leading-normal); margin-top: var(--space-3); }
+
+/* Billing: project → agent breakdown */
+.fleet-bill-group { margin-top: var(--space-5); }
+.fleet-bill-group-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 0 var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+.fleet-bill-group-name { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary); }
+.fleet-bill-group-cost { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary); }
 
 /* Wizard: knowledge-preset lock note */
 .fleet-wizard-option-note {
