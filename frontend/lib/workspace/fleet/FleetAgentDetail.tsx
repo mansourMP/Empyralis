@@ -21,6 +21,7 @@ import {
 
 import { WorkTab } from "./tabs/WorkTab";
 import { HardwareTab } from "./tabs/HardwareTab";
+import { MemoryTab } from "./tabs/MemoryTab";
 
 import {
   useFleetAgentActivity,
@@ -307,7 +308,8 @@ function ChatTab({ agent, onChat }: { agent: FleetAgent | null; onChat: () => vo
 // shell), so importing it here would throw. Same files, same API, same
 // "real, editable content" — a smaller editor, not the full pane's
 // preview/pin/export feature set.
-function MemoryTab({
+// Superseded by ./tabs/MemoryTab (Phase 6 tree). Kept until the 7B cleanup.
+function LegacyMemoryTab({
   workspaceId, agentId, agent, onChat,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
   const [files, setFiles] = useState<{ filename: string; content: string }[]>([]);
