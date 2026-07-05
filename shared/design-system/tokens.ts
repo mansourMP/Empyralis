@@ -9,7 +9,7 @@ palette, radii, and semantic status colors without changing layout structure.
 const px = (value: number): string => `${value}px`;
 const ms = (value: number): string => `${value}ms`;
 
-export const DESIGN_SYSTEM_THEME_ATTRIBUTE = 'data-emp-theme';
+export const DESIGN_SYSTEM_THEME_ATTRIBUTE = 'data-theme';
 export const DESIGN_SYSTEM_DEFAULT_THEME = 'light' as const;
 
 export const DESIGN_SYSTEM_FONTS = {

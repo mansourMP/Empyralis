@@ -37,6 +37,14 @@ from server_modules.connectors.slack_connector import (
 )
 from server_modules.schemas import ConnectorCreate, ConnectorDocumentCreateRequest, ConnectorSpreadsheetCreateRequest
 from server_modules.tool_availability_truth import capability_verification_metadata
+from server_modules.vault_store import (
+    add_credential,
+    upsert_credential,
+    update_credential_metadata,
+    delete_credential,
+    get_credential,
+    list_credentials,
+)
 
 globals().update({key: value for key, value in vars(config).items() if not key.startswith("__")})
 globals().update({key: value for key, value in vars(shared).items() if not key.startswith("__")})
@@ -925,31 +933,13 @@ def _telegram_webhook_registration_result(
 
 
 def _persist_connector_metadata_patch(credential_id: str, patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    vault = load_vault()
-    items = vault.get("credentials", [])
-    if not isinstance(items, list):
+    cid = str(credential_id or "").strip()
+    item = get_credential(cid)
+    if not isinstance(item, dict):
         return None
-    updated_entry: Optional[Dict[str, Any]] = None
-    next_items: List[Dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            next_items.append(item)
-            continue
-        if str(item.get("id") or "").strip() != str(credential_id or "").strip():
-            next_items.append(item)
-            continue
-        next_item = dict(item)
-        metadata = dict(next_item.get("metadata") if isinstance(next_item.get("metadata"), dict) else {})
-        metadata.update(patch)
-        next_item["metadata"] = _sanitize_connector_metadata(metadata)
-        next_item["updated_at"] = _utc_now_iso()
-        updated_entry = next_item
-        next_items.append(next_item)
-    if updated_entry is None:
-        return None
-    vault["credentials"] = next_items
-    save_vault(vault)
-    return updated_entry
+    metadata = dict(item.get("metadata") if isinstance(item.get("metadata"), dict) else {})
+    metadata.update(patch)
+    return update_credential_metadata(cid, _sanitize_connector_metadata(metadata))
 
 
 def _register_telegram_webhook_for_connector(
@@ -1013,52 +1003,34 @@ def _upsert_slack_oauth_connector_entry(
     if str(authed_user.get("id") or "").strip():
         connector_metadata["authed_user_id"] = str(authed_user.get("id")).strip()
 
-    vault = load_vault()
-    items = vault.get("credentials", [])
-    if not isinstance(items, list):
-        items = []
     duplicate = _find_duplicate_connector_entry(connector, credentials, workspace_id)
     entry_id = str((duplicate or {}).get("id") or uuid.uuid4()).strip()
     created_at = str((duplicate or {}).get("created_at") or now).strip() or now
-    found = False
-    next_items: List[Dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            next_items.append(item)
-            continue
-        if str(item.get("id") or "").strip() != entry_id:
-            next_items.append(item)
-            continue
-        found = True
-        next_items.append(
-            {
-                **item,
-                "label": label.strip() or str(item.get("label") or "Slack").strip() or "Slack",
-                "provider": connector,
-                "workspace_id": _normalize_workspace_id(workspace_id),
-                "mode": "connector",
-                "metadata": _sanitize_connector_metadata(connector_metadata),
-                "created_at": created_at,
-                "updated_at": now,
-                "encrypted_secret": _openssl_encrypt(json.dumps(credentials, separators=(",", ":"))),
-            }
-        )
-    if not found:
-        next_items.append(
-            {
-                "id": entry_id,
-                "label": label.strip() or str(team.get("name") or "Slack").strip() or "Slack",
-                "provider": connector,
-                "workspace_id": _normalize_workspace_id(workspace_id),
-                "mode": "connector",
-                "metadata": _sanitize_connector_metadata(connector_metadata),
-                "created_at": created_at,
-                "updated_at": now,
-                "encrypted_secret": _openssl_encrypt(json.dumps(credentials, separators=(",", ":"))),
-            }
-        )
-    vault["credentials"] = next_items
-    save_vault(vault)
+    if isinstance(duplicate, dict):
+        entry = {
+            **duplicate,
+            "label": label.strip() or str(duplicate.get("label") or "Slack").strip() or "Slack",
+            "provider": connector,
+            "workspace_id": _normalize_workspace_id(workspace_id),
+            "mode": "connector",
+            "metadata": _sanitize_connector_metadata(connector_metadata),
+            "created_at": created_at,
+            "updated_at": now,
+            "encrypted_secret": _openssl_encrypt(json.dumps(credentials, separators=(",", ":"))),
+        }
+    else:
+        entry = {
+            "id": entry_id,
+            "label": label.strip() or str(team.get("name") or "Slack").strip() or "Slack",
+            "provider": connector,
+            "workspace_id": _normalize_workspace_id(workspace_id),
+            "mode": "connector",
+            "metadata": _sanitize_connector_metadata(connector_metadata),
+            "created_at": created_at,
+            "updated_at": now,
+            "encrypted_secret": _openssl_encrypt(json.dumps(credentials, separators=(",", ":"))),
+        }
+    upsert_credential(entry)
 
     return {
         "id": entry_id,
@@ -1972,26 +1944,8 @@ async def create_connector_vault(body: ConnectorCreate):
         "encrypted_secret": _openssl_encrypt(json.dumps(credentials, separators=(",", ":"))),
     }
 
-    vault = load_vault()
-    existing = vault.get("credentials", [])
-    if not isinstance(existing, list):
-        existing = []
-    # Upsert: replace existing entry with same identity, otherwise append
-    found = False
-    next_items: List[Dict[str, Any]] = []
-    for item in existing:
-        if not isinstance(item, dict):
-            next_items.append(item)
-            continue
-        if str(item.get("id") or "").strip() != entry_id:
-            next_items.append(item)
-            continue
-        found = True
-        next_items.append(entry)
-    if not found:
-        next_items.append(entry)
-    vault["credentials"] = next_items
-    save_vault(vault)
+    # Upsert: replace existing entry with same identity, otherwise insert.
+    upsert_credential(entry)
 
     if connector == "telegram_bot":
         registration = _register_telegram_webhook_for_connector(
@@ -2019,46 +1973,30 @@ async def create_connector_vault(body: ConnectorCreate):
 
 async def update_connector_vault(credential_id: str, body: ConnectorPatchRequest):
     body.validate_fields()
-    vault = load_vault()
-    existing = vault.get("credentials", [])
-    if not isinstance(existing, list):
-        existing = []
-
-    found = False
-    updated_entry: Dict[str, Any] | None = None
-    next_items: List[Dict[str, Any]] = []
     requested_workspace = _normalize_workspace_id(body.workspace_id)
-    for item in existing:
-        if not isinstance(item, dict):
-            next_items.append(item)
-            continue
-        if str(item.get("id") or "").strip() != credential_id:
-            next_items.append(item)
-            continue
-        found = True
-        if str(item.get("mode") or "").strip().lower() != "connector":
-            raise HTTPException(status_code=400, detail="Credential is not a connector.")
-        if not _workspace_visible(item.get("workspace_id"), requested_workspace):
-            raise HTTPException(status_code=403, detail="Connector is not accessible for this workspace.")
-        next_item = dict(item)
-        if body.label is not None:
-            next_item["label"] = body.label.strip()
-        if body.metadata is not None:
-            merged_metadata = dict(next_item.get("metadata") if isinstance(next_item.get("metadata"), dict) else {})
-            for key, value in body.metadata.items():
-                if value is None:
-                    merged_metadata.pop(str(key), None)
-                else:
-                    merged_metadata[str(key)] = value
-            next_item["metadata"] = _sanitize_connector_metadata(merged_metadata)
-        next_item["updated_at"] = _utc_now_iso()
-        updated_entry = next_item
-        next_items.append(next_item)
-    if not found or not isinstance(updated_entry, dict):
+    item = get_credential(str(credential_id or "").strip())
+    if not isinstance(item, dict):
         raise HTTPException(status_code=404, detail="Connector not found.")
+    if str(item.get("mode") or "").strip().lower() != "connector":
+        raise HTTPException(status_code=400, detail="Credential is not a connector.")
+    if not _workspace_visible(item.get("workspace_id"), requested_workspace):
+        raise HTTPException(status_code=403, detail="Connector is not accessible for this workspace.")
+    next_item = dict(item)
+    if body.label is not None:
+        next_item["label"] = body.label.strip()
+    if body.metadata is not None:
+        merged_metadata = dict(next_item.get("metadata") if isinstance(next_item.get("metadata"), dict) else {})
+        for key, value in body.metadata.items():
+            if value is None:
+                merged_metadata.pop(str(key), None)
+            else:
+                merged_metadata[str(key)] = value
+        next_item["metadata"] = _sanitize_connector_metadata(merged_metadata)
+    next_item["updated_at"] = _utc_now_iso()
+    updated_entry = next_item
 
-    vault["credentials"] = next_items
-    save_vault(vault)
+    # label and/or metadata may change together — upsert the whole row by id.
+    upsert_credential(next_item)
     if str(updated_entry.get("provider") or "").strip().lower() == "telegram_bot":
         try:
             secret = resolve_vault_credential(str(updated_entry.get("id") or "").strip(), requested_workspace)
@@ -2087,34 +2025,18 @@ async def update_connector_vault(credential_id: str, body: ConnectorPatchRequest
 
 async def test_connector_vault(credential_id: str, workspace_id: Optional[str] = None):
     def _persist_capability_verification(test_result: Any) -> None:
-        vault = load_vault()
-        items = vault.get("credentials", [])
-        if not isinstance(items, list):
+        cid = str(credential_id or "").strip()
+        item = get_credential(cid)
+        if not isinstance(item, dict):
             return
-        updated = False
-        next_items: List[Dict[str, Any]] = []
-        for item in items:
-            if not isinstance(item, dict):
-                next_items.append(item)
-                continue
-            if str(item.get("id") or "").strip() != str(credential_id or "").strip():
-                next_items.append(item)
-                continue
-            next_item = dict(item)
-            metadata = dict(next_item.get("metadata") if isinstance(next_item.get("metadata"), dict) else {})
-            metadata["capability_verification"] = capability_verification_metadata(connector, test_result)
-            if connector == "telegram_bot":
-                metadata[TELEGRAM_WEBHOOK_REGISTRATION_METADATA_KEY] = _telegram_webhook_registration_result(
-                    connector_id=str(credential_id or "").strip(),
-                    credentials=credentials,
-                )
-            next_item["metadata"] = _sanitize_connector_metadata(metadata)
-            next_item["updated_at"] = _utc_now_iso()
-            next_items.append(next_item)
-            updated = True
-        if updated:
-            vault["credentials"] = next_items
-            save_vault(vault)
+        metadata = dict(item.get("metadata") if isinstance(item.get("metadata"), dict) else {})
+        metadata["capability_verification"] = capability_verification_metadata(connector, test_result)
+        if connector == "telegram_bot":
+            metadata[TELEGRAM_WEBHOOK_REGISTRATION_METADATA_KEY] = _telegram_webhook_registration_result(
+                connector_id=cid,
+                credentials=credentials,
+            )
+        update_credential_metadata(cid, _sanitize_connector_metadata(metadata))
 
     try:
         credentials = resolve_vault_credential(credential_id, workspace_id)
@@ -2394,34 +2316,20 @@ async def test_connector_vault(credential_id: str, workspace_id: Optional[str] =
     return test_result
 
 async def delete_connector_vault(credential_id: str, workspace_id: Optional[str] = None):
-    vault = load_vault()
-    existing = vault.get("credentials", [])
-    if not isinstance(existing, list):
-        existing = []
-    found = False
-    next_items = []
-    for item in existing:
-        if not isinstance(item, dict):
-            next_items.append(item)
-            continue
-        if str(item.get("id") or "").strip() != credential_id:
-            next_items.append(item)
-            continue
-        found = True
-        if str(item.get("mode") or "").strip().lower() != "connector":
-            raise HTTPException(status_code=400, detail="Credential is not a connector.")
-        if not _workspace_visible(item.get("workspace_id"), workspace_id):
-            raise HTTPException(status_code=403, detail="Connector is not accessible for this workspace.")
-        if str(item.get("provider") or "").strip().lower() == "telegram_bot":
-            try:
-                secret = resolve_vault_credential(str(item.get("id") or "").strip(), workspace_id)
-            except Exception:
-                secret = {}
-            _delete_telegram_webhook_best_effort(secret)
-    if not found:
+    item = get_credential(str(credential_id or "").strip())
+    if not isinstance(item, dict):
         raise HTTPException(status_code=404, detail="Connector not found.")
-    vault["credentials"] = next_items
-    save_vault(vault)
+    if str(item.get("mode") or "").strip().lower() != "connector":
+        raise HTTPException(status_code=400, detail="Credential is not a connector.")
+    if not _workspace_visible(item.get("workspace_id"), workspace_id):
+        raise HTTPException(status_code=403, detail="Connector is not accessible for this workspace.")
+    if str(item.get("provider") or "").strip().lower() == "telegram_bot":
+        try:
+            secret = resolve_vault_credential(str(item.get("id") or "").strip(), workspace_id)
+        except Exception:
+            secret = {}
+        _delete_telegram_webhook_best_effort(secret)
+    delete_credential(str(item.get("id") or "").strip())
     return {"status": "ok"}
 
 async def create_vault_credential(body: CredentialUpsertRequest):
@@ -2460,13 +2368,7 @@ async def create_vault_credential(body: CredentialUpsertRequest):
         "encrypted_secret": _openssl_encrypt(json.dumps(credentials, separators=(",", ":"))),
     }
 
-    vault = load_vault()
-    existing = vault.get("credentials", [])
-    if not isinstance(existing, list):
-        existing = []
-    existing.append(entry)
-    vault["credentials"] = existing
-    save_vault(vault)
+    add_credential(entry)
 
     return {
         "id": entry["id"],
@@ -2481,23 +2383,12 @@ async def create_vault_credential(body: CredentialUpsertRequest):
     }
 
 async def delete_vault_credential(credential_id: str, workspace_id: Optional[str] = None):
-    vault = load_vault()
-    existing = vault.get("credentials", [])
-    if not isinstance(existing, list):
-        existing = []
-    found = False
-    next_items = []
-    for item in existing:
-        if item.get("id") != credential_id:
-            next_items.append(item)
-            continue
-        found = True
-        if not _workspace_visible(item.get("workspace_id"), workspace_id):
-            raise HTTPException(status_code=403, detail="Credential is not accessible for this workspace.")
-    if not found:
+    item = get_credential(credential_id)
+    if not isinstance(item, dict):
         raise HTTPException(status_code=404, detail="Credential not found.")
-    vault["credentials"] = next_items
-    save_vault(vault)
+    if not _workspace_visible(item.get("workspace_id"), workspace_id):
+        raise HTTPException(status_code=403, detail="Credential is not accessible for this workspace.")
+    delete_credential(credential_id)
     return {"status": "ok"}
 
 async def test_vault_credential(credential_id: str, workspace_id: Optional[str] = None):
@@ -2519,3 +2410,110 @@ async def test_vault_credential(credential_id: str, workspace_id: Optional[str] 
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ── Phase 2: agent-scoped connector credentials ─────────────────────────────
+# A connector connected inside an agent's Connectors tab belongs to THAT agent
+# only. The credential carries the agent's install id, and an enabled binding
+# row is written so the two-part truth (scoped credential AND enabled binding)
+# holds. workspace_id is kept for tenant/workspace visibility.
+
+async def store_agent_connector_credential(
+    *,
+    workspace_id: str,
+    agent_install_id: str,
+    provider: str,
+    label: str,
+    credentials: Dict[str, Any],
+    tenant_id: str = "default",
+    account_label: str = "default",
+    mode: str = "connector",
+    metadata: Optional[Dict[str, Any]] = None,
+    connector_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    provider = str(provider or "").strip().lower()
+    agent_install_id = str(agent_install_id or "").strip()
+    workspace_id = _normalize_workspace_id(workspace_id)
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider is required.")
+    if not agent_install_id:
+        raise HTTPException(status_code=400, detail="agent_install_id is required for an agent-scoped connector.")
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required.")
+    if not isinstance(credentials, dict) or not credentials:
+        raise HTTPException(status_code=400, detail="credentials payload is required.")
+
+    now = _utc_now_iso()
+    entry_metadata = {
+        **_provider_public_metadata(provider, credentials),
+        **(metadata or {}),
+    }
+    entry = {
+        "id": str(uuid.uuid4()),
+        "label": str(label or provider).strip(),
+        "provider": provider,
+        "workspace_id": workspace_id,
+        "agent_install_id": agent_install_id,   # Phase 2 canonical agent scope
+        "account_label": str(account_label or "default").strip(),
+        "mode": mode,
+        "metadata": entry_metadata,
+        "created_at": now,
+        "updated_at": now,
+        "encrypted_secret": _openssl_encrypt(json.dumps(credentials, separators=(",", ":"))),
+    }
+    add_credential(entry)
+
+    # Second half of the truth: an enabled binding row for this agent.
+    from server_modules import agent_bindings_repository as bindings
+    binding = await bindings.upsert_connector_binding(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_install_id=agent_install_id,
+        connector_key=str(connector_key or provider).strip(),
+        enabled=True,
+        binding={"credential_id": entry["id"]},
+    )
+    return {
+        "id": entry["id"],
+        "provider": provider,
+        "label": entry["label"],
+        "workspace_id": workspace_id,
+        "agent_install_id": agent_install_id,
+        "connector_key": str(connector_key or provider).strip(),
+        "binding_enabled": bool(binding and binding.get("enabled")),
+    }
+
+
+async def delete_agent_connector_credential(
+    *,
+    workspace_id: str,
+    agent_install_id: str,
+    connector_key: str,
+    tenant_id: str = "default",
+) -> Dict[str, Any]:
+    """Remove an agent's connector: delete the enabled binding and any vault
+    credentials for that provider scoped to this agent in this workspace."""
+    workspace_id = _normalize_workspace_id(workspace_id)
+    agent_install_id = str(agent_install_id or "").strip()
+    connector_key = str(connector_key or "").strip().lower()
+
+    # This can match MORE than one credential — delete each matching row
+    # individually (single-row DELETEs), preserving the removed count.
+    removed = 0
+    for item in list_credentials():
+        item_agent = str(item.get("agent_install_id") or item.get("agent_id") or "").strip()
+        same_provider = str(item.get("provider") or "").strip().lower() == connector_key
+        same_agent = item_agent == agent_install_id
+        same_ws = _workspace_visible(item.get("workspace_id"), workspace_id)
+        if same_provider and same_agent and same_ws:
+            delete_credential(str(item.get("id") or "").strip())
+            removed += 1
+
+    from server_modules import agent_bindings_repository as bindings
+    binding_deleted = await bindings.delete_connector_binding(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_install_id=agent_install_id,
+        connector_key=connector_key,
+    )
+    return {"status": "ok", "credentials_removed": removed, "binding_deleted": binding_deleted}

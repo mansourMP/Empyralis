@@ -296,6 +296,32 @@ async def execute_direct_chat_turn_request(
     workspace_id = str(turn_request.workspace_id or body.get("workspace_id") or "default").strip() or "default"
     session_key, thread_id, client_request_id = services.chat_stream_key(current_user, body)
 
+    # ── Phase 4: resolve specialist runtime context ──────────────────────────
+    # channel_turn_request_service populates context_hints["metadata"] with the
+    # resolved active_agent_install_id (+ provider/model). If that install is a
+    # specialist, the turn runs as THAT agent (persona/model/memory); if it's the
+    # master (Sage) or absent, specialist_context is None and Sage runs unchanged.
+    _ctx_metadata = turn_request.context_hints.get("metadata") if isinstance(turn_request.context_hints, dict) else {}
+    if not isinstance(_ctx_metadata, dict):
+        _ctx_metadata = {}
+    _active_install_id = str(
+        _ctx_metadata.get("active_agent_install_id")
+        or _ctx_metadata.get("workspace_agent_install_id")
+        or ""
+    ).strip()
+    specialist_context = None
+    if _active_install_id:
+        try:
+            from server_modules import specialist_runtime_context as _src_mod
+            specialist_context = await _src_mod.resolve_specialist_runtime_context(
+                workspace_id=workspace_id,
+                tenant_id=str(turn_request.tenant_id or "").strip(),
+                active_agent_install_id=_active_install_id,
+                metadata=_ctx_metadata,
+            )
+        except Exception:
+            specialist_context = None
+
     # ── UNIFIED ENTRY: route web chat through the SAME handle_sage_chat() that channels use ──
     import sys as _sys_turn
     print(f"[TRACE_UNIFIED_ENTRY] ws={workspace_id} channel={turn_request.channel} routing through handle_sage_chat (unified entry)", flush=True, file=_sys_turn.stderr)
@@ -356,6 +382,7 @@ async def execute_direct_chat_turn_request(
                     attachments=list(turn_request.attachments) if getattr(turn_request, 'attachments', None) else None,
                     thread_id=thread_id,
                     request_id=client_request_id,
+                    specialist_context=specialist_context,
                 ))
                 _loop.close()
                 result_container['value'] = sage_result

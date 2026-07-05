@@ -58,6 +58,11 @@ __pycache__/
 .orion_channel_events.json.bak.*
 .orion_credentials_vault.json
 .orion_credentials_vault.json.bak.*
+# Phase 3C: the JSON credential vault is retired (secrets live in Postgres).
+# The file is kept only as a cold backup and must never be committed.
+credentials.json
+credentials.json.*
+**/state/vault/
 .orion_idempotency_log.json
 .orion-media/
 .orion-object-store/

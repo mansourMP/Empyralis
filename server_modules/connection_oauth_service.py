@@ -1538,7 +1538,7 @@ def refresh_oauth_token_if_needed(credential_id: str) -> Dict[str, Any]:
     """
     import json as _json
     import time as _time
-    from server_modules.vault_store import _openssl_decrypt, _openssl_encrypt, load_vault, save_vault
+    from server_modules.vault_store import _openssl_decrypt, _openssl_encrypt, load_vault, update_credential_secret
     from server_modules.vault_helpers import resolve_vault_credential
 
     normalized_id = str(credential_id or "").strip()
@@ -1621,16 +1621,10 @@ def refresh_oauth_token_if_needed(credential_id: str) -> Dict[str, Any]:
         if new_refresh_token:
             credential["refresh_token"] = new_refresh_token
 
-        # Step 5: Persist updated credential back to vault
-        vault = load_vault()
-        credentials_list = vault.get("credentials", [])
-        for entry in credentials_list:
-            if isinstance(entry, dict) and str(entry.get("id") or "").strip() == normalized_id:
-                plain = _json.dumps(credential, separators=(",", ":"))
-                entry["encrypted_secret"] = _openssl_encrypt(plain)
-                entry["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                break
-        save_vault(vault)
+        # Step 5: Persist updated credential back to vault (Phase 3C: single-row
+        # UPDATE of just this credential's ciphertext — no whole-file rewrite).
+        plain = _json.dumps(credential, separators=(",", ":"))
+        update_credential_secret(normalized_id, encrypted_secret=_openssl_encrypt(plain))
         _log.info("refresh_oauth_token_if_needed: refreshed token for credential %s (provider %s)", normalized_id, provider)
     except Exception as exc:
         _log.warning("refresh_oauth_token_if_needed: refresh failed for credential %s: %s", normalized_id, exc)

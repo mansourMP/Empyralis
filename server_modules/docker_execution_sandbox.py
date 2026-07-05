@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Portions adapted from hermes-agent (MIT, Copyright (c) 2025 Nous Research):
+# the hardened-container security posture below (cap-drop ALL + minimal
+# re-adds, no-new-privileges, pids-limit, nosuid/noexec size-capped tmpfs,
+# non-root --user, --init) is derived from hermes-agent
+# tools/environments/docker.py `_BASE_SECURITY_ARGS` / `_PRIVDROP_CAP_ARGS`.
+# Full license text: THIRD_PARTY_LICENSES at the repo root.
+# ---------------------------------------------------------------------------
+
 import json
 import os
 import shutil
@@ -7,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from server_modules import rust_runtime_kernel_client
 
@@ -47,6 +56,144 @@ def docker_driver_available() -> bool:
     return _is_docker_available()
 
 
+# ── Hermes-derived hardened container posture (Phase 3A) ────────────────────
+# Adapted from hermes-agent tools/environments/docker.py (MIT, Nous Research).
+# `--cap-drop ALL` then re-add only what a sandboxed build needs; block
+# privilege escalation; cap PIDs (fork-bomb); mount writable dirs as size-
+# limited nosuid (and noexec where exec isn't needed) tmpfs.
+_HERMES_BASE_SECURITY_ARGS: List[str] = [
+    "--cap-drop", "ALL",
+    "--cap-add", "DAC_OVERRIDE",
+    "--cap-add", "CHOWN",
+    "--cap-add", "FOWNER",
+    "--security-opt", "no-new-privileges",
+    "--pids-limit", "256",
+    "--tmpfs", "/tmp:rw,nosuid,size=512m",
+    "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",
+    "--tmpfs", "/run:rw,noexec,nosuid,size=64m",
+]
+# Extra caps only needed when the container starts as root and an entrypoint
+# must drop privileges (s6/gosu/su). Skipped when we pass --user, since the
+# container already starts unprivileged and never switches.
+_HERMES_PRIVDROP_CAP_ARGS: List[str] = ["--cap-add", "SETUID", "--cap-add", "SETGID"]
+
+
+def _hardened_security_args(*, run_as_user: bool) -> List[str]:
+    """Return cap/security/pids/tmpfs args tailored to the privilege mode."""
+    args = list(_HERMES_BASE_SECURITY_ARGS)
+    if not run_as_user:
+        args += _HERMES_PRIVDROP_CAP_ARGS
+    return args
+
+
+def _flag_present(command: List[str], flag: str) -> bool:
+    return flag in command
+
+
+def hardened_run_flags(
+    *,
+    network_enabled: bool,
+    run_as_uid: Optional[int],
+    run_as_gid: Optional[int],
+    memory_mb: int,
+    cpus: float,
+) -> List[str]:
+    """The full Hermes-derived flag set for a hardened ``docker run``.
+
+    network is ``none`` unless ``network_enabled`` opts into egress; memory is
+    hard-capped with swap pinned to the same size (no swap escape); a non-root
+    ``--user`` and ``--init`` (zombie reaping) are added when available.
+    """
+    flags: List[str] = ["--init"]
+    flags += ["--network", "bridge"] if network_enabled else ["--network", "none"]
+    if run_as_uid is not None and run_as_gid is not None:
+        flags += ["--user", f"{int(run_as_uid)}:{int(run_as_gid)}"]
+    mb = max(32, int(memory_mb))
+    flags += ["--memory", f"{mb}m", "--memory-swap", f"{mb}m"]
+    flags += ["--cpus", f"{max(0.25, float(cpus)):.2f}"]
+    flags += _hardened_security_args(run_as_user=run_as_uid is not None)
+    return flags
+
+
+def inject_hardening(
+    command: List[str],
+    *,
+    network_enabled: bool,
+    run_as_uid: Optional[int],
+    run_as_gid: Optional[int],
+    memory_mb: int,
+    cpus: float,
+) -> List[str]:
+    """Idempotently insert the hardened flag set into a ``docker run`` argv,
+    right after the ``run`` subcommand and before the image/positional args.
+    Flags already present in the base command are not duplicated, so this is
+    safe to layer on top of a kernel-built command."""
+    if len(command) < 2 or command[1] != "run":
+        # Not a `docker run` argv we recognise — return unchanged rather than
+        # risk corrupting it.
+        return list(command)
+    desired = hardened_run_flags(
+        network_enabled=network_enabled,
+        run_as_uid=run_as_uid,
+        run_as_gid=run_as_gid,
+        memory_mb=memory_mb,
+        cpus=cpus,
+    )
+    # Drop any (flag, value) pair whose flag already appears in the base
+    # command so we never contradict a stricter kernel-set value.
+    additions: List[str] = []
+    i = 0
+    while i < len(desired):
+        token = desired[i]
+        if token.startswith("--"):
+            takes_value = (i + 1 < len(desired)) and not desired[i + 1].startswith("--")
+            if _flag_present(command, token):
+                i += 2 if takes_value else 1
+                continue
+            additions.append(token)
+            if takes_value:
+                additions.append(desired[i + 1])
+                i += 2
+            else:
+                i += 1
+        else:
+            additions.append(token)
+            i += 1
+    return [command[0], command[1], *additions, *command[2:]]
+
+
+def build_hardened_docker_command(
+    *,
+    image: str,
+    inner_args: List[str],
+    sandbox_root: Optional[str] = None,
+    network_enabled: bool = False,
+    run_as_uid: Optional[int] = None,
+    run_as_gid: Optional[int] = None,
+    memory_mb: int = 512,
+    cpus: float = 1.0,
+    read_only: bool = True,
+) -> List[str]:
+    """Self-contained hardened ``docker run`` argv (used as a fallback when the
+    Rust kernel command builder is unavailable, and by the Phase 3A verifier).
+    """
+    cmd: List[str] = ["docker", "run", "--rm"]
+    if read_only:
+        cmd.append("--read-only")
+    cmd += hardened_run_flags(
+        network_enabled=network_enabled,
+        run_as_uid=run_as_uid,
+        run_as_gid=run_as_gid,
+        memory_mb=memory_mb,
+        cpus=cpus,
+    )
+    if sandbox_root:
+        cmd += ["-v", f"{sandbox_root}:{DOCKER_WORKSPACE}:rw", "-w", DOCKER_WORKSPACE]
+    cmd.append(image)
+    cmd += list(inner_args)
+    return cmd
+
+
 def docker_sandbox_command(
     *,
     sandbox_root: str,
@@ -81,7 +228,18 @@ def docker_sandbox_command(
     command = decision.get("command")
     if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
         raise RuntimeError("Rust sandbox command builder returned an invalid command.")
-    return list(command)
+    # Phase 3A: layer the Hermes-derived hardening over the kernel-built
+    # command (defense in depth — only adds stricter flags, never loosens;
+    # deduplicates against anything the kernel already set).
+    cpus = max(0.25, round(max(2, int(cpu_shares)) / 1024.0, 2))
+    return inject_hardening(
+        list(command),
+        network_enabled=bool(network_enabled),
+        run_as_uid=uid,
+        run_as_gid=gid,
+        memory_mb=max(32, int(memory_mb)),
+        cpus=cpus,
+    )
 
 
 def run_docker_worker(

@@ -11,6 +11,7 @@ from server_modules import secret_redaction_service
 from server_modules import provider_profiles as provider_profiles_service
 from server_modules import rust_runtime_kernel_client
 from server_modules.model_router import list_model_aliases
+from server_modules.vault_store import upsert_credential, rotate_credential_secrets
 
 globals().update({key: value for key, value in vars(config).items() if not key.startswith("__")})
 globals().update({key: value for key, value in vars(shared).items() if not key.startswith("__")})
@@ -637,19 +638,22 @@ async def rotate_vault_key(body: VaultRotateKeyRequest):
     if not isinstance(items, list):
         items = []
 
-    rotated = 0
-    now = datetime.utcnow().isoformat() + "Z"
+    # Re-encrypt every secret in memory first (decrypt-old → encrypt-new). If any
+    # secret fails to decrypt, we raise here BEFORE writing anything — the vault
+    # is left untouched under the old key.
+    rotated_pairs: list = []
     for entry in items:
         encrypted = entry.get("encrypted_secret")
         if not isinstance(encrypted, str) or not encrypted:
             continue
         plain = _openssl_decrypt_with_passphrase(encrypted, old_passphrase)
         entry["encrypted_secret"] = _openssl_encrypt_with_passphrase(plain, new_passphrase)
-        entry["updated_at"] = now
-        rotated += 1
+        rotated_pairs.append((entry.get("id"), entry["encrypted_secret"]))
 
-    vault["credentials"] = items
-    save_vault(vault)
+    # Persist ALL re-encrypted secrets in a SINGLE transaction (all-or-nothing).
+    # A partial rotation would leave some secrets under the old key and some under
+    # the new — unrecoverable — so this must be atomic, not per-row.
+    rotated = rotate_credential_secrets(rotated_pairs)
     _set_vault_passphrase(new_passphrase)
     return {"status": "ok", "rotated": rotated}
 
@@ -784,10 +788,13 @@ async def import_vault_credentials(body: VaultImportRequest):
                 "updated_at": now,
                 "encrypted_secret": encrypted_secret,
             }
+            # Persist this overwritten row as a single-row upsert instead of a
+            # whole-vault save (save_vault is removed under the Postgres vault).
+            upsert_credential(existing[existing_idx])
             overwritten += 1
             continue
 
-        existing.append({
+        new_entry = {
             "id": str(uuid.uuid4()),
             "label": label,
             "provider": provider,
@@ -797,12 +804,14 @@ async def import_vault_credentials(body: VaultImportRequest):
             "created_at": now,
             "updated_at": now,
             "encrypted_secret": encrypted_secret,
-        })
+        }
+        existing.append(new_entry)
+        # Persist this imported row as a single-row upsert instead of a
+        # whole-vault save (save_vault is removed under the Postgres vault).
+        upsert_credential(new_entry)
         index_by_identity[identity] = len(existing) - 1
         imported += 1
 
-    vault["credentials"] = existing
-    save_vault(vault)
     return {
         "status": "ok",
         "imported": imported,

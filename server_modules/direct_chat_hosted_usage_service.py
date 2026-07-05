@@ -332,6 +332,27 @@ def _record_direct_chat_transparency_usage(
     }
     row = usage_accounting_service.usage_row_from_snapshot(snapshot) if usage else None
     payer = _non_platform_direct_chat_payer(availability, provider)
+
+    # Phase 5A: normalized per-call usage_events row (all payers). Best-effort;
+    # attribution (agent_install_id/project_id) comes from the turn contextvar.
+    try:
+        from server_modules import usage_events_repository as _uev
+        import asyncio as _aio_uev
+
+        _ti = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        _to = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        _mode_map = {"platform": "platform_credits", "platform_credits": "platform_credits",
+                     "byok": "byok", "local": "local", "subscription_passthrough": "no_provider"}
+        _coro = _uev.record_usage_from_context(
+            provider=provider, model=model, tokens_in=_ti, tokens_out=_to,
+            run_id=request_id, mode=_mode_map.get(payer, payer),
+        )
+        try:
+            _aio_uev.get_running_loop().create_task(_coro)
+        except RuntimeError:
+            _aio_uev.run(_coro)
+    except Exception:
+        pass
     unified_ledger_event = credit_ledger_contract.build_unified_credit_ledger_event(
         surface="sage",
         source_surface="sage_direct_chat",

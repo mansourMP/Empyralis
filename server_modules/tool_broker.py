@@ -678,6 +678,25 @@ async def _enforce_fleet_tool_role(
         except Exception:
             pass
 
+        # Phase 4: a specialist reaching for an operator tool is an out-of-scope
+        # decision — escalate to the owner/operator instead of silently blocking.
+        try:
+            from server_modules import specialist_escalation_service
+
+            _install_meta = install.get("metadata") if isinstance(install, dict) else {}
+            _tenant = str((_install_meta or {}).get("tenant_id") or "system").strip() or "system"
+            await specialist_escalation_service.escalate_out_of_scope(
+                tenant_id=_tenant,
+                workspace_id=workspace_id,
+                agent_install_id=agent_install_id,
+                agent_label=str((install or {}).get("label") or "").strip(),
+                reason=f"attempted operator-only fleet tool '{skill_id}'",
+                detail="Specialists cannot manage the fleet; routed to the operator for a decision.",
+                metadata={"skill_id": skill_id, "agent_role": role, "required_role": OPERATOR_ROLE},
+            )
+        except Exception:
+            pass
+
         raise ToolExecutionDeniedError(
             "fleet_tool_requires_operator",
             f"The {skill_id} tool is restricted to operator agents. "

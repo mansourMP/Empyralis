@@ -6,16 +6,44 @@ All function signatures and behaviour are unchanged.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import os
 import secrets
+import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 _server = None  # populated by _init()
 _LOCAL_ENV_TOKENS = {"", "dev", "development", "local", "test", "testing"}
+
+# ── Phase 3C: sync facade over the async Postgres vault repository ────────────
+# The vault's public API is synchronous and called from BOTH sync and async
+# contexts. Postgres access (asyncpg) is async, so we run vault coroutines on a
+# dedicated background event-loop thread and block on the result. This keeps the
+# sync API intact (no async ripple through every caller) while every write is a
+# single-row Postgres op (concurrency-safe — the JSON file's clobber race is gone).
+_VAULT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_VAULT_LOOP_LOCK = threading.Lock()
+
+
+def _vault_loop() -> asyncio.AbstractEventLoop:
+    global _VAULT_LOOP
+    if _VAULT_LOOP is None:
+        with _VAULT_LOOP_LOCK:
+            if _VAULT_LOOP is None:
+                loop = asyncio.new_event_loop()
+                threading.Thread(target=loop.run_forever, daemon=True, name="vault-pg-loop").start()
+                _VAULT_LOOP = loop
+    return _VAULT_LOOP
+
+
+def _run_vault(coro: Any) -> Any:
+    """Run a vault-repository coroutine on the background loop and return its
+    result synchronously. Safe from within an async caller (different loop)."""
+    return asyncio.run_coroutine_threadsafe(coro, _vault_loop()).result(timeout=30)
 
 
 def _kernel_client():
@@ -307,22 +335,69 @@ def _openssl_decrypt(ciphertext: str) -> str:
 
 
 def load_vault() -> Dict[str, Any]:
-    _init()
-    vault_file = _server.VAULT_FILE
-    if not vault_file.exists():
-        return {"version": 1, "credentials": []}
-    try:
-        raw = vault_file.read_text(encoding="utf-8")
-        data = json.loads(raw) if raw else {}
-        if not isinstance(data, dict):
-            return {"version": 1, "credentials": []}
-        creds = data.get("credentials")
-        if not isinstance(creds, list):
-            creds = []
-        return {"version": data.get("version", 1), "credentials": creds}
-    except Exception as exc:
-        LOGGER.warning("Failed to load credential vault from configured path: %s", exc)
-        return {"version": 1, "credentials": []}
+    """Phase 3C: read every credential row from Postgres and return the same
+    ``{"version", "credentials":[...]}`` shape the JSON file returned, so all
+    existing readers keep working unchanged. There is NO file fallback — if
+    Postgres is unavailable this raises VaultStorageUnavailable (secrets fail
+    loudly rather than silently reading/writing a file)."""
+    from server_modules import vault_repository as _vr
+    return {"version": 1, "credentials": _run_vault(_vr.list_all())}
+
+
+# ── Phase 3C: single-row write API (replaces whole-file save_vault) ──────────
+
+def add_credential(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Insert one credential row (single-row INSERT). Raises on id collision."""
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.insert(entry))
+
+
+def upsert_credential(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Insert or replace one credential row by id (single-row upsert)."""
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.upsert(entry))
+
+
+def get_credential(credential_id: str) -> Optional[Dict[str, Any]]:
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.get(credential_id))
+
+
+def list_credentials() -> List[Dict[str, Any]]:
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.list_all())
+
+
+def update_credential_metadata(credential_id: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Replace one row's metadata (single-row UPDATE)."""
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.update_metadata(credential_id, metadata))
+
+
+def update_credential_secret(
+    credential_id: str, *, encrypted_secret: str, metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Rotate one row's ciphertext (single-row UPDATE) — OAuth refresh / key rotation."""
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.update_secret(credential_id, encrypted_secret=encrypted_secret, metadata=metadata))
+
+
+def delete_credential(credential_id: str) -> bool:
+    """Delete one credential row by id (single-row DELETE)."""
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.delete(credential_id))
+
+
+def rotate_credential_secrets(pairs: List[Any]) -> int:
+    """Atomically re-write many rows' ciphertext in one transaction (vault key
+    rotation). `pairs` is a list of (credential_id, new_encrypted_secret)."""
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.rotate_secrets(pairs))
+
+
+def vault_credential_count() -> int:
+    from server_modules import vault_repository as _vr
+    return _run_vault(_vr.count())
 
 
 def get_vault_key() -> Dict[str, Any]:
@@ -732,20 +807,13 @@ def reconcile_cloud_backups() -> Dict[str, Any]:
 
 
 def save_vault(vault: Dict[str, Any]):
-    _init()
-    vault_file = _server.VAULT_FILE
-    safe_vault = {
-        "version": vault.get("version", 1),
-        "credentials": vault.get("credentials", []),
-    }
-    _safe_write_json(vault_file, safe_vault)
-    try:
-        os.chmod(vault_file, 0o600)
-    except Exception:
-        pass
-
-    # ── Cloud backup: sync encrypted vault blob so box loss ≠ account loss ──
-    try:
-        _backup_vault_to_cloud(vault_file)
-    except Exception:
-        pass  # fire-and-forget — local save succeeded
+    """Phase 3C: REMOVED. The whole-file load-modify-save pattern is exactly what
+    lost a credential under concurrent writes in Phase 3B. Secrets now live in
+    Postgres and every write must be a single-row op. Use add_credential /
+    upsert_credential / update_credential_metadata / update_credential_secret /
+    delete_credential instead."""
+    raise RuntimeError(
+        "save_vault() is removed in Phase 3C — the JSON credential vault is gone. "
+        "Use the single-row API: add_credential / upsert_credential / "
+        "update_credential_metadata / update_credential_secret / delete_credential."
+    )

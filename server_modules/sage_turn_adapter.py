@@ -53,6 +53,8 @@ async def execute_sage_turn(
     attachments: Optional[List[dict]] = None,
     thread_id: str = "",
     request_id: str = "",
+    # Phase 4: when set, the turn runs as this specialist (persona/model/memory).
+    specialist_context: Any = None,
     # ── Option 2: Pre-built task (data-structure handoff for Option B) ──
     task: Optional[NormalizedSageTurn] = None,
 ) -> SageTurnResult:
@@ -125,12 +127,17 @@ async def execute_sage_turn(
         resolved_thread_id = str(thread_id or "").strip()
 
     # ── Tenant resolution ──
+    # Use the canonical, deterministic resolver (workspaces row → oldest-install
+    # fallback). get_workspace_by_id alone returns None for legacy installs-only
+    # workspaces (e.g. ws-1) and, in mixed-store runtimes, can surface a
+    # polluting tenant binding — either of which mis-attributes the turn (the
+    # master-install lookup then misses and usage records with a null agent).
     if not resolved_tenant_id or resolved_tenant_id == "default":
         try:
-            from server_modules.control_plane_repository import get_workspace_by_id
-            ws_record = await get_workspace_by_id(resolved_workspace_id)
-            if isinstance(ws_record, dict):
-                resolved_tenant_id = str(ws_record.get("tenant_id") or "").strip() or resolved_tenant_id
+            from server_modules.control_plane_repository import resolve_tenant_id_for_workspace
+            resolved_tenant_id = await resolve_tenant_id_for_workspace(
+                resolved_workspace_id, default=resolved_tenant_id or "default"
+            )
         except Exception:
             pass
 
@@ -247,6 +254,7 @@ async def execute_sage_turn(
         sender_id=turn.channel_sender_id or None,
         thread_id=resolved_thread_id,
         request_id=request_id,
+        specialist_context=specialist_context,
     )
 
     # Build canonical AI & Setup link — backend is the single source of truth

@@ -54,11 +54,27 @@ def list_vault_credentials(
     return out
 
 
+def credential_agent_scope(entry: Dict[str, Any]) -> str:
+    """The install id this credential is scoped to, or "" if unassigned
+    (workspace/global-scoped legacy credential). Prefers the Phase 2 canonical
+    field `agent_install_id`, falling back to the Stage 4B legacy `agent_id`."""
+    return str(entry.get("agent_install_id") or entry.get("agent_id") or "").strip()
+
+
 def list_vault_connectors(
     load_vault_fn: LoadVaultFn,
     connector_catalog: Dict[str, Any],
     workspace_id: Optional[str] = None,
+    agent_install_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
+    """List connector credentials in the workspace.
+
+    When `agent_install_id` is provided, returns ONLY credentials scoped to that
+    agent — workspace/global-scoped (unassigned legacy) credentials are excluded.
+    When it is None, returns every connector credential in the workspace (the
+    workspace-aggregate view), each carrying its agent scope for the caller.
+    """
+    want_agent = str(agent_install_id or "").strip()
     out: List[Dict[str, Any]] = []
     for entry in load_vault_fn().get("credentials", []):
         if not workspace_visible(entry.get("workspace_id"), workspace_id):
@@ -66,12 +82,16 @@ def list_vault_connectors(
         provider = entry.get("provider")
         if not isinstance(provider, str) or provider not in connector_catalog:
             continue
+        entry_agent = credential_agent_scope(entry)
+        if want_agent and entry_agent != want_agent:
+            continue
         out.append(
             {
                 "id": entry.get("id"),
                 "label": entry.get("label"),
                 "connector": provider,
                 "workspace_id": entry.get("workspace_id"),
+                "agent_install_id": entry_agent or None,
                 "metadata": secret_redaction_service.sanitize_mapping(entry.get("metadata")),
                 "created_at": entry.get("created_at"),
                 "updated_at": entry.get("updated_at"),
@@ -219,7 +239,11 @@ def resolve_agent_credential(
             continue
 
         entry_ws = normalize_workspace_id(entry.get("workspace_id"))
-        entry_agent = str(entry.get("agent_id") or "").strip()
+        # Phase 2: match the canonical agent_install_id (falling back to the
+        # Stage 4B legacy agent_id) so credentials connected in an agent's
+        # Connectors tab resolve for that agent — and are NOT treated as a
+        # workspace-default that any other agent could pick up.
+        entry_agent = credential_agent_scope(entry)
         entry_label = str(entry.get("account_label") or "default").strip()
 
         score = 0

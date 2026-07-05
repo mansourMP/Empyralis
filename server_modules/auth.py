@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.asymmetric import padding as asymmetric_padd
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Header, HTTPException, Request, Response
 from server_modules import control_plane_repository
+from server_modules import auth_store_repository
 from server_modules import entitlements_service
 from server_modules import client_identity_service, quota_policy_service, quota_response_service
 from server_modules import security_audit_service
@@ -163,6 +164,38 @@ def _control_plane_call(coro: Any) -> Any:
         return run_async_tool_call(coro)
     except Exception:
         return None
+
+
+_AUTH_STORE_CHOICE_LOGGED = False
+_PG_NA = auth_store_repository.PG_NA
+
+
+def _auth_store_pg(coro: Any) -> Any:
+    """Bridge auth.py's sync functions to the async, Postgres-first auth-store
+    ops. Returns auth_store_repository.PG_NA when the pool is unavailable (so
+    the caller runs its unchanged SQLite fallback), the real result otherwise.
+
+    Unlike _control_plane_call, this does NOT swallow errors: a genuine
+    Postgres failure surfaces rather than silently diverging to SQLite.
+    Emits a one-time loud line naming which store auth is actually using.
+    """
+    global _AUTH_STORE_CHOICE_LOGGED
+    result = run_async_tool_call(coro)
+    if not _AUTH_STORE_CHOICE_LOGGED:
+        _AUTH_STORE_CHOICE_LOGGED = True
+        if result is _PG_NA:
+            LOGGER.warning(
+                "AUTH STORE: SQLite fallback at %s — DATABASE_URL not set or "
+                "Postgres unreachable; sessions, devices, policies, auth methods "
+                "read/write SQLite only.",
+                AUTH_DB_FILE,
+            )
+        else:
+            LOGGER.warning(
+                "AUTH STORE: Postgres (DATABASE_URL configured) — sessions, "
+                "devices, policies, and auth methods read/write Postgres and are durable."
+            )
+    return result
 
 
 def public_registration_enabled() -> bool:
@@ -1598,6 +1631,9 @@ def load_user_identity_versions(user_id: str) -> dict[str, Any]:
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         return _identity_versions_from_row(None, "")
+    pg = _auth_store_pg(auth_store_repository.ensure_user_identity_versions(clean_user_id))
+    if pg is not _PG_NA:
+        return _identity_versions_from_row(pg, clean_user_id)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             record = _ensure_user_identity_versions_locked(connection, clean_user_id)
@@ -1615,6 +1651,13 @@ def _bump_user_identity_versions(
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         return _identity_versions_from_row(None, "")
+    pg = _auth_store_pg(
+        auth_store_repository.bump_user_identity_versions(
+            clean_user_id, membership=membership, auth=auth, provider_scope=provider_scope
+        )
+    )
+    if pg is not _PG_NA:
+        return _identity_versions_from_row(pg, clean_user_id)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             existing = _ensure_user_identity_versions_locked(connection, clean_user_id)
@@ -1843,6 +1886,17 @@ def issue_auth_session_refresh_token(
     secret = secrets.token_urlsafe(48)
     token_hash = _hash_auth_session_refresh_secret(clean_session_id, secret)
     refresh_token = _encode_auth_session_refresh_token(clean_session_id, secret)
+    pg = _auth_store_pg(
+        auth_store_repository.issue_refresh_token(
+            session_id=clean_session_id, user_id=user_id, token_hash=token_hash, ttl_seconds=resolved_ttl
+        )
+    )
+    if pg is not _PG_NA:
+        if pg.get("session_missing"):
+            raise HTTPException(status_code=404, detail="Auth session not found.")
+        if pg.get("session_inactive"):
+            raise HTTPException(status_code=401, detail="Auth session is no longer active.")
+        return {**_auth_session_recovery_from_row(pg.get("row")), "refresh_token": refresh_token}
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             session_row = connection.execute(
@@ -1875,6 +1929,9 @@ def get_auth_session_recovery(session_id: str) -> dict[str, Any]:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return {}
+    pg = _auth_store_pg(auth_store_repository.fetch_refresh_token(clean_session_id))
+    if pg is not _PG_NA:
+        return _auth_session_recovery_from_row(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             return _get_auth_session_refresh_token_locked(connection, clean_session_id)
@@ -1959,6 +2016,39 @@ def _upsert_auth_session_locked(
     return _auth_session_from_row(row)
 
 
+_LAST_SESSION_GC_TS = 0.0
+_SESSION_GC_INTERVAL_SECONDS = 600
+
+
+def _maybe_gc_expired_sessions() -> None:
+    """Throttled sweep that deletes sessions past expires_at (refresh tokens
+    cascade). Runs at most once per _SESSION_GC_INTERVAL_SECONDS, triggered on
+    session creation (login / register), so dead sessions never accumulate the
+    way they did under the old SQLite-only store. Postgres-first; SQLite when
+    the pool is absent. Best-effort: failures never block auth."""
+    global _LAST_SESSION_GC_TS
+    now = time.time()
+    if now - _LAST_SESSION_GC_TS < _SESSION_GC_INTERVAL_SECONDS:
+        return
+    _LAST_SESSION_GC_TS = now
+    try:
+        pg = _auth_store_pg(auth_store_repository.gc_expired_sessions(now_ts=int(now)))
+        if pg is not _PG_NA:
+            if pg:
+                LOGGER.info("Session GC (Postgres): deleted %d expired session(s).", int(pg))
+            return
+        cutoff = int(now)
+        with AUTH_LOCK:
+            with _connect_auth_db() as connection:
+                cursor = connection.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (cutoff,))
+                connection.execute("DELETE FROM auth_session_refresh_tokens WHERE expires_at <= ?", (cutoff,))
+                connection.commit()
+        if cursor.rowcount:
+            LOGGER.info("Session GC (SQLite): deleted %d expired session(s).", int(cursor.rowcount or 0))
+    except Exception:
+        LOGGER.debug("Session GC sweep failed (non-fatal).", exc_info=True)
+
+
 def create_auth_session(
     user_id: str,
     *,
@@ -1974,6 +2064,30 @@ def create_auth_session(
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         raise HTTPException(status_code=400, detail="user_id is required.")
+    _maybe_gc_expired_sessions()
+    clean_session_id = str(session_id or "").strip() or f"as_{uuid.uuid4().hex}"
+    clean_device_id = str(device_id or "").strip() or None
+    ts = int(time.time())
+    pg_row = {
+        "session_id": clean_session_id,
+        "user_id": clean_user_id,
+        "channel": _normalize_auth_session_channel(channel),
+        "device_id": clean_device_id,
+        "runtime_id": str(runtime_id or "").strip() or None,
+        "trust_state": _normalize_device_trust_state(trust_state, default="verified" if clean_device_id else "unbound"),
+        "status": _normalize_auth_session_status("active"),
+        "session_family_id": str(session_family_id or "").strip() or None,
+        "metadata_json": json.dumps(metadata or {}),
+        "created_at": ts,
+        "updated_at": ts,
+        "last_seen_at": ts,
+        "expires_at": ts + max(int(ttl_seconds or JWT_EXP_SECONDS), 60),
+        "revoked_at": None,
+        "revoked_reason": None,
+    }
+    pg = _auth_store_pg(auth_store_repository.create_auth_session(row=pg_row))
+    if pg is not _PG_NA:
+        return _auth_session_from_row(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             _ensure_user_identity_versions_locked(connection, clean_user_id)
@@ -1997,6 +2111,9 @@ def get_auth_session(session_id: str) -> dict[str, Any]:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return {}
+    pg = _auth_store_pg(auth_store_repository.fetch_one("auth_sessions", session_id=clean_session_id))
+    if pg is not _PG_NA:
+        return _auth_session_from_row(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             row = connection.execute(
@@ -2010,6 +2127,9 @@ def touch_auth_session(session_id: str) -> dict[str, Any]:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return {}
+    pg = _auth_store_pg(auth_store_repository.touch_auth_session(clean_session_id))
+    if pg is not _PG_NA:
+        return _auth_session_from_row(pg) if pg else {}
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             existing = connection.execute(
@@ -2035,6 +2155,11 @@ def revoke_auth_session(session_id: str, *, reason: Optional[str] = None) -> dic
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return {}
+    pg = _auth_store_pg(
+        auth_store_repository.revoke_auth_session(clean_session_id, reason=str(reason or "").strip() or "Session revoked.")
+    )
+    if pg is not _PG_NA:
+        return _auth_session_from_row(pg) if pg else {}
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             existing = connection.execute(
@@ -2080,6 +2205,13 @@ def revoke_user_auth_sessions(
     if not clean_user_id:
         return 0
     clean_device_id = str(device_id or "").strip() or None
+    pg = _auth_store_pg(
+        auth_store_repository.revoke_user_auth_sessions(
+            clean_user_id, device_id=clean_device_id, reason=str(reason or "").strip() or "User sessions revoked."
+        )
+    )
+    if pg is not _PG_NA:
+        return int(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             ts = int(time.time())
@@ -2120,6 +2252,9 @@ def list_user_auth_sessions(user_id: str, *, include_inactive: bool = False) -> 
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         return []
+    pg = _auth_store_pg(auth_store_repository.list_auth_sessions(clean_user_id, include_inactive=include_inactive))
+    if pg is not _PG_NA:
+        return [_auth_session_from_row(row) for row in pg]
     query = "SELECT * FROM auth_sessions WHERE user_id = ?"
     params: list[Any] = [clean_user_id]
     if not include_inactive:
@@ -2220,6 +2355,27 @@ def upsert_user_device_link(
         raise HTTPException(status_code=400, detail="user_id is required.")
     if not clean_device_id:
         raise HTTPException(status_code=400, detail="device_id is required.")
+    ts = int(time.time())
+    pg_row = {
+        "device_id": clean_device_id,
+        "user_id": clean_user_id,
+        "workspace_id": _normalize_workspace_token(workspace_id, default="") if str(workspace_id or "").strip() else None,
+        "channel": _normalize_auth_session_channel(channel, default="mobile"),
+        "display_name": str(display_name or "").strip() or None,
+        "platform": str(platform or "").strip().lower() or None,
+        "trust_state": _normalize_device_trust_state(trust_state),
+        "status": _normalize_device_link_status(status),
+        "session_binding_required": 1 if session_binding_required else 0,
+        "metadata_json": json.dumps(metadata or {}),
+        "linked_at": ts,
+        "updated_at": ts,
+        "last_seen_at": ts,
+        "revoked_at": None,
+        "revoked_reason": None,
+    }
+    pg = _auth_store_pg(auth_store_repository.upsert_device(row=pg_row))
+    if pg is not _PG_NA:
+        return _device_link_from_row(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             _ensure_user_identity_versions_locked(connection, clean_user_id)
@@ -2244,6 +2400,9 @@ def get_user_device_link(device_id: str) -> dict[str, Any]:
     clean_device_id = str(device_id or "").strip()
     if not clean_device_id:
         return {}
+    pg = _auth_store_pg(auth_store_repository.fetch_one("user_devices", device_id=clean_device_id))
+    if pg is not _PG_NA:
+        return _device_link_from_row(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             row = connection.execute(
@@ -2346,6 +2505,9 @@ def list_user_device_links(user_id: str, *, include_inactive: bool = True) -> li
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         return []
+    pg = _auth_store_pg(auth_store_repository.list_devices(clean_user_id, include_inactive=include_inactive))
+    if pg is not _PG_NA:
+        return [_device_link_from_row(row) for row in pg]
     query = "SELECT * FROM user_devices WHERE user_id = ?"
     params: list[Any] = [clean_user_id]
     if not include_inactive:
@@ -2362,6 +2524,16 @@ def revoke_user_device_link(user_id: str, device_id: str, *, reason: Optional[st
     clean_device_id = str(device_id or "").strip()
     if not clean_user_id or not clean_device_id:
         return {}
+    pg = _auth_store_pg(
+        auth_store_repository.revoke_device(
+            clean_user_id, clean_device_id, reason=str(reason or "").strip() or "Device link revoked."
+        )
+    )
+    if pg is not _PG_NA:
+        if not pg:
+            return {}
+        revoke_user_auth_sessions(clean_user_id, device_id=clean_device_id, reason=reason or "Device link revoked.")
+        return _device_link_from_row(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             existing = connection.execute(
@@ -2397,6 +2569,9 @@ def _touch_user_device_link(device_id: str) -> dict[str, Any]:
     clean_device_id = str(device_id or "").strip()
     if not clean_device_id:
         return {}
+    pg = _auth_store_pg(auth_store_repository.touch_device(clean_device_id))
+    if pg is not _PG_NA:
+        return _device_link_from_row(pg) if pg else {}
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             existing = connection.execute(
@@ -2716,6 +2891,11 @@ def load_workspace_policy(workspace_id: str) -> dict[str, Any]:
     if isinstance(cached_policy, dict):
         return cached_policy
     resolved_tenant_id = tenant_id_for_workspace(clean_workspace_id)
+    pg = _auth_store_pg(auth_store_repository.fetch_one("workspace_policies", workspace_id=clean_workspace_id))
+    if pg is not _PG_NA:
+        policy = _workspace_policy_from_row(pg, clean_workspace_id, tenant_id=resolved_tenant_id)
+        _auth_hot_cache_put(WORKSPACE_POLICY_CACHE, clean_workspace_id, policy)
+        return policy
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             row = connection.execute(
@@ -2776,6 +2956,11 @@ def load_tenant_policy(tenant_id: str) -> dict[str, Any]:
     cached_policy = _auth_hot_cache_get(TENANT_POLICY_CACHE, clean_tenant_id)
     if isinstance(cached_policy, dict):
         return cached_policy
+    pg = _auth_store_pg(auth_store_repository.fetch_one("tenant_policies", tenant_id=clean_tenant_id))
+    if pg is not _PG_NA:
+        policy = _tenant_policy_from_row(pg, clean_tenant_id)
+        _auth_hot_cache_put(TENANT_POLICY_CACHE, clean_tenant_id, policy)
+        return policy
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             row = connection.execute(
@@ -2813,6 +2998,25 @@ def upsert_tenant_policy(
 ) -> dict[str, Any]:
     clean_tenant_id = _normalize_tenant_token(tenant_id)
     ts = int(time.time())
+    _pg_existing = load_tenant_policy(clean_tenant_id)
+    _pg_row = {
+        "tenant_id": clean_tenant_id,
+        "capability_allow_json": json.dumps(_normalize_distinct_tokens(capability_allow if capability_allow is not None else _pg_existing["capabilities"]["allow"])),
+        "capability_deny_json": json.dumps(_normalize_distinct_tokens(capability_deny if capability_deny is not None else _pg_existing["capabilities"]["deny"])),
+        "dangerous_allow_json": json.dumps(_normalize_distinct_tokens(dangerous_allow if dangerous_allow is not None else _pg_existing["dangerous_action_classes"]["allow"])),
+        "dangerous_deny_json": json.dumps(_normalize_distinct_tokens(dangerous_deny if dangerous_deny is not None else _pg_existing["dangerous_action_classes"]["deny"])),
+        "connector_allow_json": json.dumps(_normalize_distinct_tokens(connector_allow if connector_allow is not None else _pg_existing["connectors"]["allow"])),
+        "connector_deny_json": json.dumps(_normalize_distinct_tokens(connector_deny if connector_deny is not None else _pg_existing["connectors"]["deny"])),
+        "machine_enrollment_scope": _normalize_machine_enrollment_scope(
+            machine_enrollment_scope if machine_enrollment_scope is not None else _pg_existing.get("machine_enrollment_scope"),
+            default="workspace",
+        ),
+        "updated_at": ts,
+    }
+    pg = _auth_store_pg(auth_store_repository.upsert_row("tenant_policies", _pg_row))
+    if pg is not _PG_NA:
+        _invalidate_workspace_auth_caches(tenant_id=clean_tenant_id)
+        return load_tenant_policy(clean_tenant_id)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             existing_row = connection.execute(
@@ -2881,6 +3085,26 @@ def upsert_workspace_policy(
 ) -> dict[str, Any]:
     clean_workspace_id = _normalize_workspace_token(workspace_id)
     resolved_tenant_id = tenant_id_for_workspace(clean_workspace_id)
+    _pg_existing = load_workspace_policy(clean_workspace_id)
+    _pg_row = {
+        "workspace_id": clean_workspace_id,
+        "capability_allow_json": json.dumps(_normalize_distinct_tokens(capability_allow if capability_allow is not None else list(_pg_existing["capabilities"]["allow"]))),
+        "capability_deny_json": json.dumps(_normalize_distinct_tokens(capability_deny if capability_deny is not None else list(_pg_existing["capabilities"]["deny"]))),
+        "dangerous_allow_json": json.dumps(_normalize_distinct_tokens(dangerous_allow if dangerous_allow is not None else list(_pg_existing["dangerous_action_classes"]["allow"]))),
+        "dangerous_deny_json": json.dumps(_normalize_distinct_tokens(dangerous_deny if dangerous_deny is not None else list(_pg_existing["dangerous_action_classes"]["deny"]))),
+        "connector_allow_json": json.dumps(_normalize_distinct_tokens(connector_allow if connector_allow is not None else list(_pg_existing["connectors"]["allow"]))),
+        "connector_deny_json": json.dumps(_normalize_distinct_tokens(connector_deny if connector_deny is not None else list(_pg_existing["connectors"]["deny"]))),
+        "machine_enrollment_scope": _normalize_machine_enrollment_scope(
+            machine_enrollment_scope if machine_enrollment_scope is not None else str(_pg_existing.get("machine_enrollment_scope") or "workspace"),
+            default="workspace",
+        ),
+        "trusted_owner_machine_ids_json": json.dumps(_normalize_distinct_tokens(trusted_owner_machine_ids if trusted_owner_machine_ids is not None else list(_pg_existing["trusted_owner_machine_ids"]))),
+        "updated_at": int(time.time()),
+    }
+    pg = _auth_store_pg(auth_store_repository.upsert_row("workspace_policies", _pg_row))
+    if pg is not _PG_NA:
+        _invalidate_workspace_auth_caches(workspace_id=clean_workspace_id, tenant_id=resolved_tenant_id)
+        return load_workspace_policy(clean_workspace_id)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             existing_row = connection.execute(
@@ -3017,6 +3241,9 @@ def _tenant_enterprise_settings_from_row(row: Any, tenant_id: str) -> dict[str, 
 
 def load_tenant_enterprise_settings(tenant_id: str) -> dict[str, Any]:
     clean_tenant_id = _normalize_tenant_token(tenant_id)
+    pg = _auth_store_pg(auth_store_repository.fetch_one("tenant_enterprise_settings", tenant_id=clean_tenant_id))
+    if pg is not _PG_NA:
+        return _tenant_enterprise_settings_from_row(pg, clean_tenant_id)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             row = connection.execute(
@@ -3063,6 +3290,28 @@ def upsert_tenant_enterprise_settings(
     next_scim = dict(existing.get("scim") or {})
     next_scim.update(dict(scim or {}))
     ts = int(time.time())
+    _pg_row = {
+        "tenant_id": clean_tenant_id,
+        "sso_enabled": 1 if bool(next_sso.get("enabled")) else 0,
+        "sso_provider": _normalize_sso_provider(next_sso.get("provider"), default=str(existing.get("sso", {}).get("provider") or "oidc")),
+        "sso_issuer_url": str(next_sso.get("issuer_url") or "").strip() or None,
+        "sso_metadata_url": str(next_sso.get("metadata_url") or "").strip() or None,
+        "sso_client_id": str(next_sso.get("client_id") or "").strip() or None,
+        "sso_audience": str(next_sso.get("audience") or "").strip() or None,
+        "sso_domains_json": json.dumps(_normalize_distinct_tokens(next_sso.get("domains"))),
+        "sso_scopes_json": json.dumps(_normalize_distinct_tokens(next_sso.get("scopes"))),
+        "mfa_required": 1 if bool(next_mfa.get("required")) else 0,
+        "mfa_methods_json": json.dumps(_normalize_mfa_methods(next_mfa.get("methods"))),
+        "mfa_grace_period_hours": int(next_mfa.get("grace_period_hours")) if next_mfa.get("grace_period_hours") not in {None, ""} else None,
+        "scim_enabled": 1 if bool(next_scim.get("enabled")) else 0,
+        "scim_base_url": str(next_scim.get("base_url") or "").strip() or None,
+        "scim_provisioning_mode": _normalize_scim_provisioning_mode(next_scim.get("provisioning_mode"), default=str(existing.get("scim", {}).get("provisioning_mode") or "admin_api")),
+        "scim_last_token_rotation_at": int(next_scim.get("last_token_rotation_at")) if next_scim.get("last_token_rotation_at") not in {None, ""} else None,
+        "updated_at": ts,
+    }
+    pg = _auth_store_pg(auth_store_repository.upsert_row("tenant_enterprise_settings", _pg_row))
+    if pg is not _PG_NA:
+        return load_tenant_enterprise_settings(clean_tenant_id)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             connection.execute(
@@ -3145,6 +3394,9 @@ def load_user_enterprise_security(user_id: str) -> dict[str, Any]:
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         return _user_enterprise_security_from_row(None, "")
+    pg = _auth_store_pg(auth_store_repository.fetch_one("user_enterprise_security", user_id=clean_user_id))
+    if pg is not _PG_NA:
+        return _user_enterprise_security_from_row(pg, clean_user_id)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             row = connection.execute(
@@ -3191,6 +3443,23 @@ def upsert_user_enterprise_security(
     resolved_enrolled_at = existing["mfa_enrolled_at"] if mfa_enrolled_at is None else int(mfa_enrolled_at)
     resolved_verified_at = existing["mfa_last_verified_at"] if mfa_last_verified_at is None else int(mfa_last_verified_at)
     ts = int(time.time())
+    pg_row = {
+        "user_id": clean_user_id,
+        "mfa_enrolled": 1 if resolved_mfa_enrolled else 0,
+        "mfa_method": resolved_mfa_method,
+        "mfa_enrolled_at": resolved_enrolled_at,
+        "mfa_last_verified_at": resolved_verified_at,
+        "auth_provider": existing["auth_provider"] if auth_provider is None else (str(auth_provider or "").strip() or None),
+        "sso_subject": existing["sso_subject"] if sso_subject is None else (str(sso_subject or "").strip() or None),
+        "provisioning_source": existing["provisioning_source"] if provisioning_source is None else (str(provisioning_source or "").strip() or None),
+        "external_id": existing["external_id"] if external_id is None else (str(external_id or "").strip() or None),
+        "last_provisioned_at": existing["last_provisioned_at"] if last_provisioned_at is None else int(last_provisioned_at),
+        "updated_at": ts,
+    }
+    pg = _auth_store_pg(auth_store_repository.upsert_row("user_enterprise_security", pg_row))
+    if pg is not _PG_NA:
+        _bump_user_identity_versions(clean_user_id, auth=True)
+        return load_user_enterprise_security(clean_user_id)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             _ensure_user_identity_versions_locked(connection, clean_user_id)
@@ -3456,6 +3725,62 @@ def _upsert_user_provider_connection_locked(
     return _provider_connection_from_row(row)
 
 
+def _ensure_identity_boundary_records_pg(
+    user_id: str, email: Optional[str], password_hash: str, ts: int
+) -> None:
+    """Postgres-first re-implementation of the boundary reconciliation below,
+    using the PG-first primitives (fetch_one/fetch_all + upsert_user_auth_method).
+    Mirrors the SQLite branch's decision logic exactly."""
+    load_user_identity_versions(user_id)  # ensures the identity-versions row (PG-first)
+    methods = _auth_store_pg(
+        auth_store_repository.fetch_all("user_auth_methods", order_by="created_at ASC", user_id=user_id)
+    )
+    if methods is _PG_NA or not isinstance(methods, list):
+        methods = []
+    has_auth_methods = len(methods) > 0
+    security_row = _auth_store_pg(auth_store_repository.fetch_one("user_enterprise_security", user_id=user_id))
+    if security_row is _PG_NA:
+        return
+    if security_row is not None:
+        auth_provider = str(security_row.get("auth_provider") or "").strip().lower()
+        sso_subject = str(security_row.get("sso_subject") or "").strip() or None
+        external_id = str(security_row.get("external_id") or "").strip() or None
+        provisioning_source = str(security_row.get("provisioning_source") or "").strip() or None
+        has_external_identity = bool(auth_provider or sso_subject or external_id)
+        password_sources = {"", "local_password", "password", "email_password"}
+        has_password_method = any(
+            str(m.get("method_type") or "") == "password" and str(m.get("provider") or "") == "empyralis_password"
+            for m in methods
+        )
+        if password_hash and (not has_external_identity or str(provisioning_source or "").strip().lower() in password_sources) and not has_password_method:
+            upsert_user_auth_method(
+                user_id, method_type="password", provider="empyralis_password", subject=email,
+                label="Email and password", is_primary=not has_auth_methods, can_recover=True,
+                metadata={"email": email, "identity_role": "account_access"},
+            )
+            has_auth_methods = True
+        if auth_provider or sso_subject or external_id:
+            sso_provider = auth_provider or "external_identity"
+            sso_subj = sso_subject or external_id or email
+            has_sso_method = any(
+                str(m.get("method_type") or "") == "sso" and str(m.get("provider") or "") == sso_provider and str(m.get("subject") or "") == str(sso_subj or "")
+                for m in methods
+            )
+            if not has_sso_method:
+                upsert_user_auth_method(
+                    user_id, method_type="sso", provider=sso_provider, subject=sso_subj,
+                    label=f"{(auth_provider or 'External').replace('_', ' ').title()} sign-in",
+                    is_primary=not has_auth_methods, can_recover=False,
+                    metadata={"email": email, "external_id": external_id, "provisioning_source": provisioning_source, "identity_role": "account_access"},
+                )
+    elif password_hash:
+        upsert_user_auth_method(
+            user_id, method_type="password", provider="empyralis_password", subject=email,
+            label="Email and password", is_primary=not has_auth_methods, can_recover=True,
+            metadata={"email": email, "identity_role": "account_access"},
+        )
+
+
 def _ensure_user_identity_boundary_records(user_id: str) -> None:
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
@@ -3471,6 +3796,9 @@ def _ensure_user_identity_boundary_records(user_id: str) -> None:
         else None
     )
     password_hash = str((identity or {}).get("password_hash") or "").strip()
+    if _auth_store_pg(auth_store_repository.ensure_user_identity_versions(clean_user_id)) is not _PG_NA:
+        _ensure_identity_boundary_records_pg(clean_user_id, email, password_hash, ts)
+        return
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             _ensure_user_identity_versions_locked(connection, clean_user_id)
@@ -3630,6 +3958,13 @@ def list_user_auth_methods(user_id: str) -> list[dict[str, Any]]:
     if not clean_user_id:
         return []
     _ensure_user_identity_boundary_records(clean_user_id)
+    pg = _auth_store_pg(
+        auth_store_repository.fetch_all(
+            "user_auth_methods", order_by="is_primary DESC, created_at ASC, provider ASC", user_id=clean_user_id
+        )
+    )
+    if pg is not _PG_NA:
+        return [_auth_method_from_row(row) for row in pg]
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             rows = connection.execute(
@@ -3659,6 +3994,29 @@ def upsert_user_auth_method(
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         raise HTTPException(status_code=400, detail="user_id is required.")
+    clean_provider = str(provider or "").strip().lower() or "unknown"
+    clean_subject = str(subject or "").strip() or None
+    clean_label = str(label or "").strip() or None
+    method_id = _stable_identity_row_id("auth_method", clean_user_id, method_type, clean_provider, clean_subject or clean_label or "")
+    ts = int(time.time())
+    pg_row = {
+        "id": method_id,
+        "user_id": clean_user_id,
+        "method_type": _normalize_auth_method_type(method_type),
+        "provider": clean_provider,
+        "subject": clean_subject,
+        "label": clean_label,
+        "status": _normalize_auth_method_status(status),
+        "is_primary": 1 if is_primary else 0,
+        "can_recover": 1 if can_recover else 0,
+        "metadata_json": json.dumps(metadata or {}),
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    pg = _auth_store_pg(auth_store_repository.upsert_auth_method(row=pg_row, unset_other_primary=bool(is_primary)))
+    if pg is not _PG_NA:
+        _bump_user_identity_versions(clean_user_id, auth=True)
+        return _auth_method_from_row(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             _ensure_user_identity_versions_locked(connection, clean_user_id)
@@ -3683,6 +4041,13 @@ def list_user_provider_connections(user_id: str) -> list[dict[str, Any]]:
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         return []
+    pg = _auth_store_pg(
+        auth_store_repository.fetch_all(
+            "user_provider_connections", order_by="provider ASC, workspace_id ASC, created_at ASC", user_id=clean_user_id
+        )
+    )
+    if pg is not _PG_NA:
+        return [_provider_connection_from_row(row) for row in pg]
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             rows = connection.execute(
@@ -3710,6 +4075,29 @@ def upsert_user_provider_connection(
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         raise HTTPException(status_code=400, detail="user_id is required.")
+    clean_provider = str(provider or "").strip().lower() or "unknown"
+    clean_workspace_id = _normalize_workspace_token(workspace_id, default="") if str(workspace_id or "").strip() else None
+    clean_external_account_id = str(external_account_id or "").strip() or None
+    connection_id = _stable_identity_row_id(
+        "provider_connection", clean_user_id, clean_provider, clean_workspace_id or "global", clean_external_account_id or ""
+    )
+    ts = int(time.time())
+    pg_row = {
+        "id": connection_id,
+        "user_id": clean_user_id,
+        "provider": clean_provider,
+        "workspace_id": clean_workspace_id,
+        "status": _normalize_provider_connection_status(status),
+        "label": str(label or "").strip() or None,
+        "external_account_id": clean_external_account_id,
+        "metadata_json": json.dumps(metadata or {}),
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    pg = _auth_store_pg(auth_store_repository.upsert_row("user_provider_connections", pg_row))
+    if pg is not _PG_NA:
+        _bump_user_identity_versions(clean_user_id, provider_scope=True)
+        return _provider_connection_from_row(pg)
     with AUTH_LOCK:
         with _connect_auth_db() as connection:
             _ensure_user_identity_versions_locked(connection, clean_user_id)
@@ -4978,43 +5366,77 @@ def register_user(
         workspace_roles = {bootstrap_workspace_id: "owner"}
         tenant_ids = {bootstrap_tenant_id}
     workspace_ids = list(workspace_roles.keys())
-    with AUTH_LOCK:
-        with _connect_auth_db() as connection:
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO user_enterprise_security (
-                    user_id,
-                    mfa_enrolled,
-                    mfa_method,
-                    mfa_enrolled_at,
-                    mfa_last_verified_at,
-                    auth_provider,
-                    sso_subject,
-                    provisioning_source,
-                    external_id,
-                    last_provisioned_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (user_id, 0, None, None, None, None, None, "local_password", None, None, created_at),
-            )
-            _upsert_user_auth_method_locked(
-                connection,
-                user_id=user_id,
-                method_type="password",
-                provider="empyralis_password",
-                subject=email_token,
-                label="Email and password",
-                is_primary=True,
-                can_recover=True,
-                metadata={
-                    "email": email_token,
-                    "identity_role": "account_access",
-                },
-                now_ts=created_at,
-            )
-            _ensure_user_identity_versions_locked(connection, user_id, now_ts=created_at)
-            connection.commit()
+    auth_method_id = _stable_identity_row_id("auth_method", user_id, "password", "empyralis_password", email_token)
+    pg = _auth_store_pg(
+        auth_store_repository.upsert_many(
+            [
+                (
+                    "user_enterprise_security",
+                    {
+                        "user_id": user_id, "mfa_enrolled": 0, "mfa_method": None, "mfa_enrolled_at": None,
+                        "mfa_last_verified_at": None, "auth_provider": None, "sso_subject": None,
+                        "provisioning_source": "local_password", "external_id": None, "last_provisioned_at": None,
+                        "updated_at": created_at,
+                    },
+                ),
+                (
+                    "user_auth_methods",
+                    {
+                        "id": auth_method_id, "user_id": user_id, "method_type": "password",
+                        "provider": "empyralis_password", "subject": email_token, "label": "Email and password",
+                        "status": "active", "is_primary": 1, "can_recover": 1,
+                        "metadata_json": json.dumps({"email": email_token, "identity_role": "account_access"}),
+                        "created_at": created_at, "updated_at": created_at,
+                    },
+                ),
+                (
+                    "user_identity_versions",
+                    {
+                        "user_id": user_id, "membership_version": 1, "auth_version": 1,
+                        "provider_scope_version": 1, "updated_at": created_at,
+                    },
+                ),
+            ]
+        )
+    )
+    if pg is _PG_NA:
+        with AUTH_LOCK:
+            with _connect_auth_db() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO user_enterprise_security (
+                        user_id,
+                        mfa_enrolled,
+                        mfa_method,
+                        mfa_enrolled_at,
+                        mfa_last_verified_at,
+                        auth_provider,
+                        sso_subject,
+                        provisioning_source,
+                        external_id,
+                        last_provisioned_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, 0, None, None, None, None, None, "local_password", None, None, created_at),
+                )
+                _upsert_user_auth_method_locked(
+                    connection,
+                    user_id=user_id,
+                    method_type="password",
+                    provider="empyralis_password",
+                    subject=email_token,
+                    label="Email and password",
+                    is_primary=True,
+                    can_recover=True,
+                    metadata={
+                        "email": email_token,
+                        "identity_role": "account_access",
+                    },
+                    now_ts=created_at,
+                )
+                _ensure_user_identity_versions_locked(connection, user_id, now_ts=created_at)
+                connection.commit()
     user = _find_user_by_id(user_id)
     if user is None:
         raise HTTPException(status_code=500, detail="Registered user was not persisted.")

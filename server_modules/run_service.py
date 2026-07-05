@@ -73,6 +73,62 @@ def assert_workflow_turn_depth_allowed(metadata: Any) -> int:
     return depth
 
 
+# ── Phase 4: specialist subagent depth + parallelism caps ───────────────────
+# A specialist may spawn bounded subagents for parallel chunks, but only ONE
+# level deep (a subagent may NOT spawn further subagents) and only up to a
+# configurable fan-out. depth 0 = the operator/root turn; depth 1 = its
+# subagents; depth 2+ is denied by default.
+MAX_SUBAGENT_DEPTH_DEFAULT = 1
+MAX_PARALLEL_SUBAGENTS_DEFAULT = 3
+SUBAGENT_DEPTH_METADATA_KEY = "subagent_depth"
+
+
+class SubagentDepthError(RuntimeError):
+    """Raised when subagent delegation would exceed the configured depth cap."""
+
+
+def max_subagent_depth() -> int:
+    raw = str(os.getenv("EMPYRALIS_MAX_SUBAGENT_DEPTH") or "").strip()
+    if not raw:
+        return MAX_SUBAGENT_DEPTH_DEFAULT
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return MAX_SUBAGENT_DEPTH_DEFAULT
+
+
+def max_parallel_subagents() -> int:
+    raw = str(os.getenv("EMPYRALIS_MAX_PARALLEL_SUBAGENTS") or "").strip()
+    if not raw:
+        return MAX_PARALLEL_SUBAGENTS_DEFAULT
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return MAX_PARALLEL_SUBAGENTS_DEFAULT
+
+
+def subagent_depth_from_metadata(metadata: Any) -> int:
+    payload = metadata if isinstance(metadata, dict) else {}
+    try:
+        return max(0, int(payload.get(SUBAGENT_DEPTH_METADATA_KEY) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def assert_subagent_spawn_allowed(parent_metadata: Any) -> int:
+    """Called before a parent spawns subagents. The parent at depth D produces
+    children at depth D+1; deny if that would exceed max_subagent_depth().
+    Returns the child depth."""
+    parent_depth = subagent_depth_from_metadata(parent_metadata)
+    child_depth = parent_depth + 1
+    limit = max_subagent_depth()
+    if child_depth > limit:
+        raise SubagentDepthError(
+            f"Subagent depth limit reached (max depth {limit}); a subagent may not spawn further subagents."
+        )
+    return child_depth
+
+
 def build_workflow_child_metadata(
     context: Dict[str, Any],
     *,
@@ -5253,6 +5309,9 @@ def build_delegated_child_run_request(
     child_metadata["delegation_root_run_id"] = root_run_id
     child_metadata["delegated_by_run_id"] = parent_run_id
     child_metadata["delegated_by_role"] = delegated_by_role
+    # Phase 4: stamp the child's depth (parent_depth + 1). A subagent inherits
+    # this and the gate denies it spawning further (default max depth 1).
+    child_metadata[SUBAGENT_DEPTH_METADATA_KEY] = subagent_depth_from_metadata(parent_metadata) + 1
     if note:
         child_metadata["delegation_note"] = note
     if "owner_user_id" not in child_metadata:

@@ -1188,9 +1188,17 @@ def _selected_gateway(
     return None, public_registrations, None
 
 
-def _vault_connector_ids(workspace_id: str) -> set[str]:
+def _vault_connector_ids(workspace_id: str, agent_install_id: Optional[str] = None) -> set[str]:
+    """Provider/connector tokens that have a vault credential in the workspace.
+
+    When `agent_install_id` is given, only credentials scoped to THAT agent are
+    counted — workspace/global-scoped (unassigned legacy) credentials, like the
+    ws-1 GitHub credential, are excluded from every agent's set."""
     try:
-        rows = runtime_common.list_vault_connectors(workspace_id=workspace_id)
+        rows = runtime_common.list_vault_connectors(
+            workspace_id=workspace_id,
+            agent_install_id=agent_install_id,
+        )
     except Exception:
         return set()
     out: set[str] = set()
@@ -1202,6 +1210,20 @@ def _vault_connector_ids(workspace_id: str) -> set[str]:
             if token:
                 out.add(token)
     return out
+
+
+def _connector_aliases(item: Dict[str, Any]) -> set[str]:
+    """The set of tokens (item id + connector/provider aliases) used to match a
+    catalog item against vault credential provider tokens and binding keys."""
+    item_id = _text(item.get("id"))
+    aliases = {_token(alias) for alias in item.get("connector_ids", []) if _text(alias)}
+    aliases.add(_token(item_id))
+    for key in ("connector_id", "account_provider", "vault_provider", "provider", "runtime_provider"):
+        token = _token(item.get(key))
+        if token:
+            aliases.add(token)
+    aliases.discard("")
+    return aliases
 
 
 def _personal_channel_state(connection_id: str, gateway_id: str) -> Optional[Dict[str, Any]]:
@@ -1373,12 +1395,7 @@ def status_items(
                 health_status = "healthy" if connected else state_status or health_status
                 last_error = (state or {}).get("last_error")
         elif lane in {LANE_WORK_APP_CONNECTOR, LANE_STUDIO_BUSINESS_CHANNEL}:
-            aliases = {_token(alias) for alias in item.get("connector_ids", []) if _text(alias)}
-            aliases.add(item_id)
-            for key in ("connector_id", "account_provider", "vault_provider", "provider", "runtime_provider"):
-                token = _token(item.get(key))
-                if token:
-                    aliases.add(token)
+            aliases = _connector_aliases(item)
             connected = bool(aliases & vault_connector_ids)
             configured = connected
             health_status = "healthy" if connected else "not_configured"
@@ -1435,6 +1452,109 @@ def status_items(
         payload = connection_readiness_service.decorate_status_item(payload)
         out.append(payload)
     return out
+
+
+async def agent_status_items(
+    *,
+    workspace_id: str,
+    agent_id: str,
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    surface: Optional[str] = None,
+    selected_gateway_id: Optional[str] = None,
+) -> list[Dict[str, Any]]:
+    """Agent-scoped connection status. `agent_id` (an agent install id) is
+    REQUIRED — there is no workspace-wide fallback here; for the workspace view
+    use status_items()/workspace_connection_summary() instead.
+
+    Truth for connectors and channels:
+
+        connected(agent, X) == (a vault credential scoped to agent exists)
+                               AND (an enabled binding row exists)
+
+    Both conditions must hold. A workspace/global-scoped ("unassigned legacy")
+    credential with no agent binding is therefore NOT connected for any agent.
+    """
+    resolved_agent = str(agent_id or "").strip()
+    if not resolved_agent:
+        raise ValueError("agent_id is required for agent-scoped connection status.")
+    resolved_tenant = str(tenant_id or "").strip() or "default"
+
+    # Base items carry the catalog + gateway/display state (workspace view).
+    base = status_items(
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        surface=surface,
+        selected_gateway_id=selected_gateway_id,
+    )
+
+    # Condition 1: vault credentials scoped to THIS agent (legacy/unassigned excluded).
+    agent_vault_ids = _vault_connector_ids(workspace_id, agent_install_id=resolved_agent)
+
+    # Condition 2: enabled binding rows for this agent.
+    from server_modules import agent_bindings_repository as bindings
+    connector_binding_rows = await bindings.list_agent_connector_bindings(
+        tenant_id=resolved_tenant, workspace_id=workspace_id,
+        agent_install_id=resolved_agent, enabled_only=True,
+    )
+    channel_binding_rows = await bindings.list_agent_channel_bindings(
+        tenant_id=resolved_tenant, workspace_id=workspace_id,
+        agent_install_id=resolved_agent, enabled_only=True,
+    )
+    enabled_connector_keys = {_token(b.get("key")) for b in connector_binding_rows}
+    enabled_channel_keys = {_token(b.get("key")) for b in channel_binding_rows}
+
+    for item in base:
+        lane = _token(item.get("lane"))
+        aliases = _connector_aliases(item)
+        if lane == LANE_WORK_APP_CONNECTOR:
+            has_credential = bool(aliases & agent_vault_ids)
+            has_binding = bool(aliases & enabled_connector_keys)
+            item["connected"] = has_credential and has_binding
+            item["configured"] = item["connected"]
+            item["health_status"] = "healthy" if item["connected"] else "not_configured"
+        elif lane in {LANE_SAGE_PERSONAL_CHANNEL, LANE_STUDIO_BUSINESS_CHANNEL}:
+            # Channel truth is gated by the agent's own enabled channel binding
+            # on top of the underlying workspace channel/pairing state.
+            has_binding = bool(aliases & enabled_channel_keys)
+            item["connected"] = bool(item.get("connected")) and has_binding
+            item["configured"] = bool(item.get("configured")) and has_binding
+        item["agent_id"] = resolved_agent
+    return base
+
+
+async def workspace_connection_summary(
+    *,
+    workspace_id: str,
+    tenant_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Honest workspace-aggregate counters for the Fleet Home strip.
+
+    numerator = sum of ENABLED bindings across the workspace's agents;
+    denominator = catalog size for that lane. (Computers are counted separately
+    on the client from gateway registrations.)
+    """
+    resolved_tenant = str(tenant_id or "").strip() or "default"
+    from server_modules import agent_bindings_repository as bindings
+    connector_bindings = await bindings.list_workspace_connector_bindings(
+        tenant_id=resolved_tenant, workspace_id=workspace_id, enabled_only=True,
+    )
+    channel_bindings = await bindings.list_workspace_channel_bindings(
+        tenant_id=resolved_tenant, workspace_id=workspace_id, enabled_only=True,
+    )
+    connector_total = sum(
+        1 for item in catalog_items(surface="apps")
+        if _token(item.get("lane")) == LANE_WORK_APP_CONNECTOR
+    )
+    channel_total = sum(
+        1 for item in catalog_items(surface="sage")
+        if _token(item.get("lane")) in {LANE_SAGE_PERSONAL_CHANNEL, LANE_STUDIO_BUSINESS_CHANNEL}
+    )
+    return {
+        "connectors": {"connected": len(connector_bindings), "total": connector_total},
+        "channels": {"connected": len(channel_bindings), "total": channel_total},
+    }
 
 
 def list_catalog_payload(*, surface: Optional[str] = None) -> Dict[str, Any]:

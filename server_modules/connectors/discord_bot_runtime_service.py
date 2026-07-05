@@ -123,6 +123,10 @@ class DiscordBotRuntimeService:
         self.resolve_tenant = resolve_tenant
         self._listeners: List[Any] = []
         self._threads: List[threading.Thread] = []
+        # Phase 3A: machine-local credential locks held for the lifetime of each
+        # bot listener, so two gateway processes on one host can't consume the
+        # same Discord bot token's inbound stream. Released in stop().
+        self._locked_credentials: List[tuple] = []
         self._statuses: List[DiscordBotRuntimeStatus] = []
 
     def connector_rows(self) -> List[Dict[str, Any]]:
@@ -216,11 +220,29 @@ class DiscordBotRuntimeService:
                     DiscordBotRuntimeStatus(connector_id, workspace_id, "failed", f"credential_resolution_failed: {exc}")
                 )
                 continue
-            if not str((credentials or {}).get("bot_token") or "").strip():
+            bot_token = str((credentials or {}).get("bot_token") or "").strip()
+            if not bot_token:
                 self._statuses.append(
                     DiscordBotRuntimeStatus(connector_id, workspace_id, "failed", "missing_bot_token")
                 )
                 continue
+            # Phase 3A: on-prem single-process guarantee — one host process per
+            # bot token. The Postgres inbound-owner unique index is the cloud-side
+            # guarantee; both layers run together.
+            from server_modules import gateway_credential_lock as _cred_lock
+            _acquired, _existing = _cred_lock.acquire_scoped_lock(
+                "discord_bot", bot_token, metadata={"connector_id": connector_id, "workspace_id": workspace_id}
+            )
+            if not _acquired:
+                _owner_pid = _existing.get("pid") if isinstance(_existing, dict) else None
+                self._statuses.append(
+                    DiscordBotRuntimeStatus(
+                        connector_id, workspace_id, "failed",
+                        f"credential_in_use_on_host{f' (PID {_owner_pid})' if _owner_pid else ''}",
+                    )
+                )
+                continue
+            self._locked_credentials.append(("discord_bot", bot_token))
             allowed_channel_ids = self._allowed_channel_ids(row, credentials)
             listener = self.listener_factory(
                 credentials,
@@ -276,6 +298,15 @@ class DiscordBotRuntimeService:
         stopped = len(self._listeners)
         self._listeners.clear()
         self._threads.clear()
+        # Phase 3A: release the per-bot-token credential locks we hold.
+        if self._locked_credentials:
+            from server_modules import gateway_credential_lock as _cred_lock
+            for scope, identity in self._locked_credentials:
+                try:
+                    _cred_lock.release_scoped_lock(scope, identity)
+                except Exception:
+                    pass
+            self._locked_credentials.clear()
         self._statuses = [
             DiscordBotRuntimeStatus("", "default", "offline", "stopped")
         ]

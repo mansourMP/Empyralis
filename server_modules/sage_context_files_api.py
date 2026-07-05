@@ -20,19 +20,27 @@ def register_sage_context_file_routes(app) -> None:
     @app.get("/api/sage-context-files", dependencies=[Depends(require_viewer_api_key)])
     async def list_workspace_sage_context_files(
         workspace_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
         current_user=Depends(require_viewer_api_key),
     ):
+        """List SOUL.md/MEMORY.md/GOALS.md/etc. When agent_id is passed, scopes
+        to that agent's own context directory (fleet agent modal's Memory tab)
+        instead of the workspace root (legacy workspace-wide Memory pane)."""
         resolved_workspace_id = enforce_workspace_access(
             current_user,
             workspace_id,
             minimum_role="viewer",
         )
         tenant_id = workspace_tenant_id(current_user, resolved_workspace_id)
-        files = read_workspace_context_files(workspace_id=resolved_workspace_id)
+        files = read_workspace_context_files(
+            workspace_id=resolved_workspace_id,
+            agent_install_id=agent_id,
+        )
         return {
             "ok": True,
             "workspace_id": resolved_workspace_id,
             "tenant_id": tenant_id,
+            "agent_id": agent_id,
             "files": [
                 {
                     "filename": filename,
@@ -59,6 +67,7 @@ def register_sage_context_file_routes(app) -> None:
                 filename,
                 body.content,
                 workspace_id=resolved_workspace_id,
+                agent_install_id=body.agent_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -66,6 +75,7 @@ def register_sage_context_file_routes(app) -> None:
             "ok": True,
             "workspace_id": resolved_workspace_id,
             "tenant_id": tenant_id,
+            "agent_id": body.agent_id,
             "filename": saved["filename"],
             "content": saved["content"],
         }

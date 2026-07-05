@@ -107,6 +107,7 @@ class SageMemoryWipeRequest(BaseModel):
 class SageContextFileUpdateRequest(BaseModel):
     workspace_id: str
     content: str
+    agent_id: Optional[str] = None
 
 
 class SageProfileUpdateRequest(BaseModel):

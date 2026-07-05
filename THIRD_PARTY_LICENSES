@@ -1,0 +1,50 @@
+Third-Party Licenses
+====================
+
+This file records the licenses of third-party source that has been adapted
+into the Empyralis codebase. Each entry lists what was adapted, where it now
+lives, and the upstream license text in full.
+
+--------------------------------------------------------------------------
+hermes-agent — Nous Research
+--------------------------------------------------------------------------
+Upstream:   https://github.com/NousResearch/hermes-agent
+License:     MIT
+Version referenced: 0.15.2
+
+Adapted into Empyralis:
+  - server_modules/docker_execution_sandbox.py
+      Hardened-container security posture (cap-drop ALL + minimal selective
+      re-adds, --security-opt no-new-privileges, --pids-limit, nosuid/noexec
+      size-capped tmpfs mounts, non-root --user, --init) derived from
+      hermes-agent tools/environments/docker.py `_BASE_SECURITY_ARGS` /
+      `_PRIVDROP_CAP_ARGS`.
+  - server_modules/gateway_credential_lock.py
+      Machine-local scoped credential lock (atomic O_CREAT|O_EXCL lock file
+      keyed by scope + hash(identity); PID + process-start-time staleness to
+      survive PID reuse) derived from hermes-agent gateway/status.py
+      `acquire_scoped_lock` / `release_scoped_lock`.
+
+Upstream license text:
+
+MIT License
+
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

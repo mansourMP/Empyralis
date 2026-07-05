@@ -186,6 +186,41 @@ async def telegram_webhook(request: Request) -> dict:
     return {"ok": True}
 
 
+@router.post("/sage/telegram-hosted/webhook/{pool_bot_id}")
+async def telegram_pool_webhook(pool_bot_id: str, request: Request) -> dict:
+    """Phase 3B: per-bot webhook. An update delivered here came from exactly one
+    pool bot, which is assigned to exactly one agent — so inbound routes to that
+    agent with no chat→workspace pairing ambiguity."""
+    from server_modules import hosted_bot_provisioning_service as prov
+    from server_modules import hosted_bot_pool_repository as pool_repo
+
+    bot = await pool_repo.get_bot(pool_bot_id)
+    if bot is None:
+        raise HTTPException(status_code=404, detail="Unknown bot")
+
+    header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    expected = str(bot.get("webhook_secret") or "")
+    if expected and not secrets.compare_digest(header_secret, expected):
+        raise HTTPException(status_code=403, detail="Invalid webhook secret")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    parsed = hosted.parse_telegram_update(body)
+    if parsed is None:
+        return {"ok": True}
+
+    result = await prov.route_hosted_inbound(
+        pool_bot_id=pool_bot_id,
+        chat_id=parsed["chat_id"],
+        message=parsed["text"],
+        reply_to_message_id=parsed.get("message_id"),
+    )
+    return {"ok": True, "routing": result}
+
+
 @router.post("/sage/telegram-hosted/dev-poll")
 async def dev_poll_once() -> dict:
     """Dev-only: manually poll Telegram for updates (no webhook needed)."""

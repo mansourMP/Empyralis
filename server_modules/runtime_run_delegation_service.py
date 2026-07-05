@@ -463,6 +463,12 @@ def delegate_run_children(
             status_code=403,
             detail="Sub-agent delegation is disabled for this agent. An operator can enable it via fleet_configure_agent.",
         )
+    # ── Phase 4: subagent depth cap (a subagent may not spawn further) ──
+    from server_modules import run_service as _rs_depth
+    try:
+        _rs_depth.assert_subagent_spawn_allowed(parent_metadata)
+    except _rs_depth.SubagentDepthError as _depth_err:
+        raise HTTPException(status_code=403, detail=str(_depth_err))
     note = str(body.note or "").strip() or None
     created = []
     trace_context = _resume_parent_trace_context(parent_snapshot)
@@ -590,7 +596,16 @@ def auto_delegate_run_children(
             status_code=403,
             detail="Sub-agent delegation is disabled for this agent. An operator can enable it via fleet_configure_agent.",
         )
-    plan = build_auto_delegation_plan(parent_snapshot, max_children=int(request_payload.max_children or 3))
+    # ── Phase 4: subagent depth cap ──
+    from server_modules import run_service as _rs_depth2
+    try:
+        _rs_depth2.assert_subagent_spawn_allowed(parent_metadata)
+    except _rs_depth2.SubagentDepthError as _depth_err2:
+        raise HTTPException(status_code=403, detail=str(_depth_err2))
+    # Phase 4: clamp fan-out to the configurable parallel cap (default 3).
+    _requested_children = int(request_payload.max_children or _rs_depth2.max_parallel_subagents())
+    _capped_children = min(_requested_children, _rs_depth2.max_parallel_subagents())
+    plan = build_auto_delegation_plan(parent_snapshot, max_children=_capped_children)
     if not plan:
         raise HTTPException(status_code=400, detail="No specialist delegation rules matched this run.")
     routing_source = str((((plan[0].get("metadata") if isinstance(plan[0], dict) else {}) or {}).get("auto_delegation_source") or "keyword")).strip()

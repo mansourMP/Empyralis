@@ -1321,6 +1321,32 @@ def start_background_polling() -> None:
     if _polling_task is not None and not _polling_task.done():
         LOGGER.info("Sage Telegram hosted: background polling already running (skipping duplicate start)")
         return
+
+    # Phase 3A: on-host single-poller guarantee. Telegram getUpdates long-polling
+    # is single-consumer — two gateway processes on one box polling the same bot
+    # token steal each other's updates (confirmed-offset races). The in-process
+    # guard above only covers this process; this machine-local credential lock is
+    # the cross-process counterpart, mirroring discord_bot_runtime_service. Held
+    # for process lifetime; a dead owner's lock is auto-reclaimed via PID
+    # staleness detection.
+    _token = _bot_token()
+    if _token:
+        from server_modules import gateway_credential_lock as _cred_lock
+        _acquired, _existing = _cred_lock.acquire_scoped_lock(
+            "telegram_hosted_poll", _token,
+            metadata={"component": "sage_telegram_hosted_polling"},
+        )
+        if not _acquired:
+            _owner_pid = _existing.get("pid") if isinstance(_existing, dict) else None
+            LOGGER.warning(
+                "Sage Telegram hosted: another live process%s already polls this bot "
+                "on this host — not starting a second poller.",
+                f" (PID {_owner_pid})" if _owner_pid else "",
+            )
+            return
+        import atexit as _atexit
+        _atexit.register(_cred_lock.release_scoped_lock, "telegram_hosted_poll", _token)
+
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:

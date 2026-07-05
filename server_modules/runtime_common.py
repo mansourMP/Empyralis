@@ -559,7 +559,7 @@ _openai_bearer_from_credentials = _openai_bearer_from_credentials_impl
 # are treated as "connectors"; everything else is a "credential".
 _VAULT_CONNECTOR_CATALOG = {**CONNECTOR_CATALOG, **CHANNEL_REGISTRY}
 list_vault_credentials = lambda workspace_id=None: _list_vault_credentials_impl(load_vault, _VAULT_CONNECTOR_CATALOG, workspace_id)
-list_vault_connectors = lambda workspace_id=None: _list_vault_connectors_impl(load_vault, _VAULT_CONNECTOR_CATALOG, workspace_id)
+list_vault_connectors = lambda workspace_id=None, agent_install_id=None: _list_vault_connectors_impl(load_vault, _VAULT_CONNECTOR_CATALOG, workspace_id, agent_install_id)
 
 
 def resolve_vault_credential(credential_id, workspace_id=None, **scope):
