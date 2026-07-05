@@ -203,13 +203,15 @@ async def _assert_unique_inbound_channel_owners(
 
 
 def _is_channel_ownership_unique_violation(error: Exception) -> bool:
-    constraint_name = str(getattr(error, "constraint_name", "") or "").strip()
-    if constraint_name == "uq_agent_channel_bindings_active_inbound_owner":
+    # Match by substring so this survives index-name revisions (the Phase 3D
+    # rebuild renamed the index to ..._inbound_owner_v2).
+    constraint_name = str(getattr(error, "constraint_name", "") or "").strip().lower()
+    if "inbound_owner" in constraint_name:
         return True
     unique_error = getattr(asyncpg, "UniqueViolationError", None)
     if unique_error and isinstance(error, unique_error):
-        return constraint_name == "uq_agent_channel_bindings_active_inbound_owner"
-    return "uq_agent_channel_bindings_active_inbound_owner" in str(error).lower()
+        return "inbound_owner" in constraint_name
+    return "inbound_owner" in str(error).lower()
 
 
 def _manifest_category(manifest: AgentManifest) -> str:

@@ -12,20 +12,27 @@ Two MCP surfaces in Empyralis:
 
 Both surfaces are cloud-to-cloud.  No user hardware needed for either.
 
-Tools (Phase U2)
+Tools (Phase 3D)
 ----------------
 Read + chat (always live):
-  - ``empyralis_list_agents`` → fleet_list_agents
+  - ``empyralis_list_projects`` → projects_repository.list_projects
+  - ``empyralis_list_agents`` → fleet_list_agents (+ project, channel, connector status)
   - ``empyralis_get_agent_activity`` → fleet_get_agent_activity
+  - ``empyralis_get_agent_conversations`` → deployed_agent_service.list_deployed_agent_conversations
   - ``empyralis_memory_read`` → memory_read
   - ``empyralis_memory_list`` → memory_list
   - ``empyralis_chat`` → full turn through normal chat path (triage, ledger, AI)
 
-Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true``):
-  - ``empyralis_create_agent`` → fleet_create_agent
+Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true`` + per-key writes_enabled):
+  - ``empyralis_create_project`` → projects_repository.create_project
+  - ``empyralis_create_agent`` → fleet_create_agent (+ projects_repository.assign_install_to_project)
   - ``empyralis_configure_agent`` → fleet_configure_agent
   - ``empyralis_message_agent`` → fleet_message_agent
   - ``empyralis_memory_write`` → memory_write
+  - ``empyralis_assign_channel_bot`` → hosted_bot_provisioning_service / discord_bot_provisioning_service
+  - ``empyralis_release_channel_bot`` → hosted_bot_provisioning_service / discord_bot_provisioning_service
+  - ``empyralis_connect_connector`` → connection_oauth_service.start_oauth (returns authorization_url)
+  - ``empyralis_trigger_test_turn`` → deployed_agent_test_turn_service.execute_test_turn
 
 All calls are ledgered with ``event_class="mcp_inbound"`` and
 ``actor="external_mcp_client"``.  Workspace is resolved from the API
@@ -53,15 +60,24 @@ EMPYRALIST_MCP_PATH = "/mcp"
 EMPYRALIST_MCP_NAME = "empyralist"
 EMPYRALIST_MCP_ENDPOINT = "http://127.0.0.1:8001/mcp"
 EMPYRALIST_MCP_TOOLS = [
+    # Read (always live)
+    "empyralis_list_projects",
     "empyralis_list_agents",
     "empyralis_get_agent_activity",
+    "empyralis_get_agent_conversations",
     "empyralis_memory_read",
     "empyralis_memory_list",
     "empyralis_chat",
+    # Write (gated behind EMPYRALIS_MCP_WRITE_ENABLED + per-key writes_enabled)
+    "empyralis_create_project",
     "empyralis_create_agent",
     "empyralis_configure_agent",
     "empyralis_message_agent",
     "empyralis_memory_write",
+    "empyralis_assign_channel_bot",
+    "empyralis_release_channel_bot",
+    "empyralis_connect_connector",
+    "empyralis_trigger_test_turn",
 ]
 
 _WRITE_ENABLED_GLOBAL = os.getenv("EMPYRALIS_MCP_WRITE_ENABLED", "").strip().lower() in {
@@ -156,16 +172,54 @@ if empyralist_mcp is not None:
                 "Create a new key with writes_enabled=true at POST /api/connections/mcp-keys."
             )
 
+    async def _tenant(ws: str) -> str:
+        """Resolve the tenant for a workspace — same derivation the fleet routes use."""
+        from server_modules import control_plane_repository as cpr
+        return await cpr.resolve_tenant_id_for_workspace(ws, default="default")
+
     # ── Read + chat tools (always live) ──────────────────────────────
 
     @empyralist_mcp.tool()
+    async def empyralis_list_projects(ctx: Context) -> Dict[str, Any]:
+        """List the projects (client/company groupings of agents) in your workspace."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import projects_repository as _p
+        projects = await _p.list_projects(tenant_id=tenant, workspace_id=ws)
+        counts = await _p.count_agents_by_project(tenant_id=tenant, workspace_id=ws)
+        for p in projects:
+            p["agent_count"] = int(counts.get(p.get("id"), 0))
+        await _ledger_mcp_call(ws, "empyralis_list_projects", True, project_count=len(projects))
+        return {"ok": True, "projects": projects}
+
+    @empyralist_mcp.tool()
     async def empyralis_list_agents(ctx: Context) -> Dict[str, Any]:
-        """List all agents in your Empyralis workspace."""
-        r = await _resolve(ctx); ws = _ws(r)
+        """List agents in your workspace, each enriched with its project name,
+        connected channels, and connected connectors."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules.fleet_tools import fleet_list_agents
-        result = await fleet_list_agents(workspace_id=ws, actor_id="external_mcp_client")
-        await _ledger_mcp_call(ws, "empyralis_list_agents", True, agent_count=len(result.get("agents", [])))
-        return {"ok": True, **result}
+        from server_modules import agent_bindings_repository as _b
+        from server_modules import projects_repository as _p
+
+        result = await fleet_list_agents(workspace_id=ws, tenant_id=tenant, actor_id="external_mcp_client")
+        agents = result.get("agents", []) if result.get("ok") else []
+
+        chan = await _b.list_workspace_channel_bindings(tenant_id=tenant, workspace_id=ws, enabled_only=True)
+        conn = await _b.list_workspace_connector_bindings(tenant_id=tenant, workspace_id=ws, enabled_only=True)
+        chan_by_agent: Dict[str, list] = {}
+        for row in chan:
+            chan_by_agent.setdefault(str(row.get("agent_install_id")), []).append(str(row.get("key")))
+        conn_by_agent: Dict[str, list] = {}
+        for row in conn:
+            conn_by_agent.setdefault(str(row.get("agent_install_id")), []).append(str(row.get("key")))
+        projects = {p.get("id"): p for p in await _p.list_projects(tenant_id=tenant, workspace_id=ws)}
+
+        for a in agents:
+            aid = str(a.get("agent_id"))
+            a["channels"] = sorted(set(chan_by_agent.get(aid, [])))
+            a["connectors"] = sorted(set(conn_by_agent.get(aid, [])))
+            a["project_name"] = (projects.get(str(a.get("project_id") or "")) or {}).get("name", "")
+        await _ledger_mcp_call(ws, "empyralis_list_agents", True, agent_count=len(agents))
+        return {"ok": True, "agents": agents}
 
     @empyralist_mcp.tool()
     async def empyralis_get_agent_activity(
@@ -175,10 +229,35 @@ if empyralist_mcp is not None:
         r = await _resolve(ctx); ws = _ws(r)
         from server_modules.fleet_tools import fleet_get_agent_activity
         result = await fleet_get_agent_activity(
-            workspace_id=ws, agent_id=agent_id, limit=limit, actor_id="external_mcp_client",
+            workspace_id=ws, agent_id=agent_id, actor_id="external_mcp_client",
         )
+        if isinstance(result, dict) and isinstance(result.get("events"), list) and limit and limit > 0:
+            result = {**result, "events": result["events"][: int(limit)]}
         await _ledger_mcp_call(ws, "empyralis_get_agent_activity", True, agent_id=agent_id)
         return {"ok": True, **result}
+
+    @empyralist_mcp.tool()
+    async def empyralis_get_agent_conversations(
+        agent_id: str, limit: int = 20, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """List a deployed agent's recent conversations with its end customers.
+
+        ``agent_id`` is a deployed-agent id. Returns ``ok: False`` with a clear
+        reason when the agent is not a customer-facing deployed agent.
+        """
+        r = await _resolve(ctx); ws = _ws(r)
+        from server_modules import deployed_agent_service
+        current_user = {"user_id": "external_mcp_client", "email": "", "mcp_workspace_id": ws}
+        try:
+            payload = await deployed_agent_service.list_deployed_agent_conversations(
+                deployed_agent_id=agent_id, current_user=current_user,
+                owner_workspace_id=ws, limit=limit, offset=0,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface a clean reason to the client
+            await _ledger_mcp_call(ws, "empyralis_get_agent_conversations", False, agent_id=agent_id)
+            return {"ok": False, "error": str(exc), "agent_id": agent_id}
+        await _ledger_mcp_call(ws, "empyralis_get_agent_conversations", True, agent_id=agent_id)
+        return {"ok": True, "agent_id": agent_id, **(payload if isinstance(payload, dict) else {})}
 
     @empyralist_mcp.tool()
     async def empyralis_memory_read(key: str, ctx: Context = None) -> Dict[str, Any]:
@@ -219,12 +298,50 @@ if empyralist_mcp is not None:
     # ── Write tools (gated per-key + global off-switch) ──────────────
 
     @empyralist_mcp.tool()
-    async def empyralis_create_agent(name: str, ctx: Context = None) -> Dict[str, Any]:
-        """Create a new specialist agent. Requires writes_enabled on the API key."""
-        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
+    async def empyralis_create_project(
+        name: str, description: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Create a project (a client/company grouping of agents). Requires writes_enabled."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import projects_repository as _p
+        try:
+            project = await _p.create_project(
+                tenant_id=tenant, workspace_id=ws, name=name, description=description,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(ws, "empyralis_create_project", False, name=name)
+            return {"ok": False, "error": str(exc)}
+        await _ledger_mcp_call(ws, "empyralis_create_project", True, project_id=project.get("id"))
+        return {"ok": True, "project": project}
+
+    @empyralist_mcp.tool()
+    async def empyralis_create_agent(
+        name: str, project_id: str = "", instructions: str = "",
+        purpose_preset: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Create a new specialist agent, optionally inside a project.
+        Requires writes_enabled on the API key."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules.fleet_tools import fleet_create_agent
-        result = await fleet_create_agent(workspace_id=ws, agent_label=name, actor_id="external_mcp_client")
-        await _ledger_mcp_call(ws, "empyralis_create_agent", result.get("ok", False), agent_label=name)
+        from server_modules import projects_repository as _p
+
+        result = await fleet_create_agent(
+            actor_id="external_mcp_client", workspace_id=ws, tenant_id=tenant,
+            name=name, instructions=instructions, purpose_preset=purpose_preset,
+        )
+        agent_id = str(result.get("agent_id") or "").strip()
+        assigned_project = ""
+        if result.get("ok") and agent_id and str(project_id or "").strip():
+            try:
+                if await _p.assign_install_to_project(
+                    tenant_id=tenant, workspace_id=ws,
+                    install_id=agent_id, project_id=str(project_id).strip(),
+                ):
+                    assigned_project = str(project_id).strip()
+            except Exception as exc:  # noqa: BLE001 — agent still created; report the linkage failure
+                result["project_assignment_error"] = str(exc)
+        result["project_id"] = assigned_project
+        await _ledger_mcp_call(ws, "empyralis_create_agent", result.get("ok", False), agent_id=agent_id, project_id=assigned_project)
         return result
 
     @empyralist_mcp.tool()
@@ -261,6 +378,108 @@ if empyralist_mcp is not None:
         result = await memory_write(workspace_id=ws, key=key, value=value)
         await _ledger_mcp_call(ws, "empyralis_memory_write", True, key=key)
         return {"ok": True, "key": key, "result": result}
+
+    @empyralist_mcp.tool()
+    async def empyralis_assign_channel_bot(
+        agent_id: str, channel: str, token: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Bind a BYO bot to an agent so it owns that channel. ``channel`` is
+        'telegram' or 'discord'. One bot binds to exactly one agent. Requires writes_enabled."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r); tenant = await _tenant(ws)
+        ch = str(channel or "").strip().lower()
+        try:
+            if ch in ("discord", "discord_bot"):
+                from server_modules import discord_bot_provisioning_service as prov
+                result = await prov.assign_agent_discord(
+                    agent_install_id=agent_id, workspace_id=ws, tenant_id=tenant, token=token,
+                )
+            elif ch in ("telegram", "telegram_bot"):
+                from server_modules import hosted_bot_provisioning_service as prov
+                result = await prov.assign_byo_bot(
+                    agent_install_id=agent_id, workspace_id=ws, tenant_id=tenant, token=token,
+                )
+            else:
+                return {"ok": False, "error": f"Unsupported channel '{channel}'. Use 'telegram' or 'discord'."}
+        except Exception as exc:  # noqa: BLE001 — includes the one-bot-one-agent guarantee
+            await _ledger_mcp_call(ws, "empyralis_assign_channel_bot", False, agent_id=agent_id, channel=ch)
+            return {"ok": False, "error": str(exc), "channel": ch}
+        await _ledger_mcp_call(ws, "empyralis_assign_channel_bot", True, agent_id=agent_id, channel=ch)
+        return {"ok": True, "channel": ch, "binding": result}
+
+    @empyralist_mcp.tool()
+    async def empyralis_release_channel_bot(
+        agent_id: str, channel: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Release an agent's bot for a channel ('telegram' or 'discord'). Requires writes_enabled."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r); tenant = await _tenant(ws)
+        ch = str(channel or "").strip().lower()
+        try:
+            if ch in ("discord", "discord_bot"):
+                from server_modules import discord_bot_provisioning_service as prov
+                result = await prov.release_agent_discord(
+                    agent_install_id=agent_id, workspace_id=ws, tenant_id=tenant,
+                )
+            elif ch in ("telegram", "telegram_bot"):
+                from server_modules import hosted_bot_provisioning_service as prov
+                result = await prov.release_agent_telegram(
+                    agent_install_id=agent_id, workspace_id=ws, tenant_id=tenant,
+                )
+            else:
+                return {"ok": False, "error": f"Unsupported channel '{channel}'. Use 'telegram' or 'discord'."}
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(ws, "empyralis_release_channel_bot", False, agent_id=agent_id, channel=ch)
+            return {"ok": False, "error": str(exc), "channel": ch}
+        await _ledger_mcp_call(ws, "empyralis_release_channel_bot", True, agent_id=agent_id, channel=ch)
+        return {"ok": True, "channel": ch, **(result if isinstance(result, dict) else {})}
+
+    @empyralist_mcp.tool()
+    async def empyralis_connect_connector(
+        provider: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Begin connecting an OAuth connector (e.g. 'gmail', 'github', 'slack').
+        Returns an ``authorization_url`` the human opens to grant access. Requires writes_enabled."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
+        from types import SimpleNamespace
+        from server_modules import connection_oauth_service
+        base = ""
+        for key in ("EMPYRALIS_PUBLIC_BASE_URL", "PUBLIC_BASE_URL"):
+            base = str(os.getenv(key) or "").strip().rstrip("/")
+            if base:
+                break
+        shim_request = SimpleNamespace(base_url=(base + "/") if base else "http://localhost:8001/")
+        try:
+            started = connection_oauth_service.start_oauth(
+                provider=str(provider or "").strip().lower(),
+                workspace_id=ws, surface="sage", request=shim_request, user_id="external_mcp_client",
+            )
+        except Exception as exc:  # noqa: BLE001 — e.g. provider not OAuth-configured on this server
+            await _ledger_mcp_call(ws, "empyralis_connect_connector", False, provider=provider)
+            return {"ok": False, "error": str(exc), "provider": provider}
+        url = started.get("authorization_url") if isinstance(started, dict) else None
+        await _ledger_mcp_call(ws, "empyralis_connect_connector", True, provider=provider)
+        return {"ok": True, "provider": provider, "authorization_url": url,
+                "instructions": "Open authorization_url in a browser to grant access."}
+
+    @empyralist_mcp.tool()
+    async def empyralis_trigger_test_turn(
+        agent_id: str, message: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Send a test message to a deployed agent and get its reply, without a
+        real customer. ``agent_id`` is a deployed-agent id. Requires writes_enabled."""
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
+        from types import SimpleNamespace
+        from server_modules import deployed_agent_test_turn_service
+        current_user = {"user_id": "external_mcp_client", "email": "", "mcp_workspace_id": ws}
+        request = SimpleNamespace(message=message, channel="test")
+        try:
+            result = await deployed_agent_test_turn_service.execute_test_turn(
+                deployed_agent_id=agent_id, workspace_id=ws, request=request, current_user=current_user,
+            )
+        except Exception as exc:  # noqa: BLE001 — readiness / not-a-deployed-agent surfaces cleanly
+            await _ledger_mcp_call(ws, "empyralis_trigger_test_turn", False, agent_id=agent_id)
+            return {"ok": False, "error": str(exc), "agent_id": agent_id}
+        await _ledger_mcp_call(ws, "empyralis_trigger_test_turn", True, agent_id=agent_id)
+        return {"ok": True, "agent_id": agent_id, **(result if isinstance(result, dict) else {"result": result})}
 
 
 # ── Mount + lifespan ─────────────────────────────────────────────────────
