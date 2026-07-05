@@ -691,6 +691,7 @@ async def fleet_create_agent(
     instructions: str = "",
     purpose_preset: str = "",
     capability_preset: str = "standard",
+    project_id: str = "",
     enabled_tools: Optional[List[str]] = None,
     connectors: Optional[List[str]] = None,
     channel_bindings: Optional[Dict[str, Any]] = None,
@@ -782,6 +783,21 @@ async def fleet_create_agent(
             return {"ok": False, "error": "Failed to create agent install — check agent definition exists"}
 
         agent_id = str(result.get("id") or "").strip()
+
+        # Assign to the chosen project (agents otherwise land in the default
+        # project). Best-effort: a bad project id shouldn't fail creation.
+        _project_id = str(project_id or "").strip()
+        if agent_id and _project_id:
+            try:
+                from server_modules import projects_repository as _projects
+                await _projects.assign_install_to_project(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    install_id=agent_id,
+                    project_id=_project_id,
+                )
+            except Exception:
+                pass
     except Exception as exc:
         await _ledger_fleet_action(
             action="create_agent_failed",

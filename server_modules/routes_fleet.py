@@ -180,6 +180,7 @@ class FleetCreateAgentRequest(BaseModel):
     instructions: str = ""
     purpose_preset: str = ""
     capability_preset: str = "standard"  # Phase 5B: knowledge | standard
+    project_id: str = ""  # Phase 7B: assign to a project at creation
 
 
 @router.post("/api/w/{workspace_id}/fleet/agents")
@@ -200,6 +201,7 @@ async def fleet_create_agent_route(
             instructions=body.instructions,
             purpose_preset=body.purpose_preset,
             capability_preset=body.capability_preset,
+            project_id=body.project_id,
         )
         return result
     except Exception as exc:
