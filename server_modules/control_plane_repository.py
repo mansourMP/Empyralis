@@ -261,6 +261,7 @@ def _enforce_control_plane_record_decision(
 
 _SCHEMA_READY = False
 _SCHEMA_LOCK: asyncio.Lock = asyncio.Lock()
+_STORE_CHOICE_LOGGED = False
 EMPYRALIS_STATE_HOME = Path(
     os.getenv("EMPYRALIS_STATE_HOME", str(Path.home() / ".empyralis" / "state"))
 ).expanduser()
@@ -608,6 +609,24 @@ CREATE TABLE IF NOT EXISTS agent_definition_versions (
     UNIQUE(agent_definition_id, version_number)
 );
 
+-- Phase 2: Projects — a client/company/purpose grouping. Workspace > Projects
+-- > Agents. Every agent install belongs to exactly one project; a default
+-- ("General") project exists per workspace for ungrouped agents.
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    archived BOOLEAN NOT NULL DEFAULT FALSE,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(tenant_id, workspace_id, slug)
+);
+
 CREATE TABLE IF NOT EXISTS workspace_agent_installs (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -733,6 +752,54 @@ CREATE TABLE IF NOT EXISTS agent_runtime_profiles (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(agent_install_id)
+);
+
+-- Phase 3B: Hosted bot pool — platform-owned Telegram bots, pre-provisioned and
+-- assignable to a single agent each. The encrypted token lives in the vault
+-- (platform-scoped, workspace_id NULL); credential_id references it. status is
+-- free | assigned | quarantined. One bot serves exactly one agent (partial
+-- unique index on assigned_agent_install_id); the per-bot channel binding
+-- (endpoint_key = bot_username) is the cloud-side one-binding-per-bot guarantee.
+CREATE TABLE IF NOT EXISTS hosted_bot_pool (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL DEFAULT 'telegram',
+    bot_username TEXT NOT NULL,
+    bot_id TEXT NULL,
+    credential_id TEXT NOT NULL,
+    webhook_secret TEXT NULL,
+    status TEXT NOT NULL DEFAULT 'free'
+        CHECK (status IN ('free', 'assigned', 'quarantined')),
+    assigned_agent_install_id TEXT NULL REFERENCES workspace_agent_installs(id) ON DELETE SET NULL,
+    assigned_workspace_id TEXT NULL,
+    assigned_tenant_id TEXT NULL,
+    assigned_at TIMESTAMPTZ NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(provider, bot_username)
+);
+
+-- Phase 3C: Vault credentials — the encrypted secret store, moved out of the
+-- lock-free JSON file (~/.empyralis/state/vault/credentials.json) that lost a
+-- credential under concurrent writes in Phase 3B. Storage only: the AES
+-- encryption is unchanged; encrypted_secret holds the exact same ciphertext the
+-- JSON file held. All writes are single-row INSERT/UPDATE/DELETE — no whole-file
+-- load-modify-save — so concurrent writers can never clobber each other's rows.
+-- workspace_id NULL + platform_scoped = a platform-owned secret (e.g. hosted
+-- bot pool tokens); agent_install_id = a Phase 2 agent-scoped credential.
+CREATE TABLE IF NOT EXISTS vault_credentials (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    workspace_id TEXT NULL,
+    agent_install_id TEXT NULL,
+    account_label TEXT NULL,
+    platform_scoped BOOLEAN NOT NULL DEFAULT FALSE,
+    label TEXT NULL,
+    mode TEXT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    encrypted_secret TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS deployed_agents (
@@ -1501,10 +1568,20 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_retrieval_events_thread ON knowledge_re
 CREATE INDEX IF NOT EXISTS idx_governance_holds_scope ON governance_holds(tenant_id, workspace_id, scope_type, status, updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_channel_execution_leases_active_thread
     ON agent_channel_execution_leases(tenant_id, workspace_id, thread_id);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_channel_bindings_active_inbound_owner
+-- Phase 3D: the inbound-owner guarantee originally only covered personal
+-- channels ('telegram','whatsapp',...) and never the per-agent BOT channels
+-- ('telegram_bot','discord_bot') — so one-bot-one-agent was structurally
+-- unenforced for them. The predicate changed, and CREATE ... IF NOT EXISTS
+-- cannot alter an existing index's predicate, so the index is rebuilt under a
+-- new name and the stale one dropped. (Rebuild is safe: is_inbound_owner was
+-- never written as true for the bot channels before this phase, so no existing
+-- rows collide. A DB dirtied during testing must de-dupe first.)
+DROP INDEX IF EXISTS uq_agent_channel_bindings_active_inbound_owner;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_channel_bindings_inbound_owner_v2
     ON agent_channel_bindings(tenant_id, workspace_id, channel_key, lower((binding->>'endpoint_key')))
     WHERE enabled = TRUE
-      AND channel_key IN ('telegram', 'whatsapp', 'email', 'phone', 'web_chat')
+      AND channel_key IN ('telegram', 'telegram_bot', 'discord', 'discord_bot',
+                          'whatsapp', 'email', 'phone', 'web_chat')
       AND lower(COALESCE(binding->>'is_inbound_owner', 'false')) = 'true'
       AND NULLIF(lower(COALESCE(binding->>'endpoint_key', '')), '') IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_turns_request_role
@@ -1594,6 +1671,180 @@ BEGIN
     END IF;
 END
 $$;
+"""
+
+
+# ── Auth-store schema (Phase 1C) ────────────────────────────────────────────
+# Postgres mirrors of the 11 auth tables that until now lived only in the
+# ~/.empyralis/state/auth/users.db SQLite file. Columns mirror the SQLite
+# schema 1:1 (SQLite INTEGER epoch seconds -> BIGINT; TEXT/JSON-as-text ->
+# TEXT), so values move across without conversion. FKs are added only on
+# user_id (-> users.id, ON DELETE CASCADE) where the data reliably supports
+# it; tenant_id / workspace_id on the policy + registry tables are left
+# unconstrained because a policy/registry row can legitimately exist for a
+# tenant/workspace that has no row yet, and a hard FK there would reject
+# valid writes. Lookup indexes cover user_id / expires_at / status.
+AUTH_STORE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS workspace_registry (
+    workspace_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    name TEXT NULL,
+    workspace_type TEXT NOT NULL DEFAULT 'personal',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_registry_tenant ON workspace_registry(tenant_id);
+
+CREATE TABLE IF NOT EXISTS workspace_policies (
+    workspace_id TEXT PRIMARY KEY,
+    capability_allow_json TEXT,
+    capability_deny_json TEXT,
+    dangerous_allow_json TEXT,
+    dangerous_deny_json TEXT,
+    connector_allow_json TEXT,
+    connector_deny_json TEXT,
+    machine_enrollment_scope TEXT,
+    trusted_owner_machine_ids_json TEXT,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tenant_policies (
+    tenant_id TEXT PRIMARY KEY,
+    capability_allow_json TEXT,
+    capability_deny_json TEXT,
+    dangerous_allow_json TEXT,
+    dangerous_deny_json TEXT,
+    connector_allow_json TEXT,
+    connector_deny_json TEXT,
+    machine_enrollment_scope TEXT,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tenant_enterprise_settings (
+    tenant_id TEXT PRIMARY KEY,
+    sso_enabled BIGINT NOT NULL DEFAULT 0,
+    sso_provider TEXT,
+    sso_issuer_url TEXT,
+    sso_metadata_url TEXT,
+    sso_client_id TEXT,
+    sso_audience TEXT,
+    sso_domains_json TEXT,
+    sso_scopes_json TEXT,
+    mfa_required BIGINT NOT NULL DEFAULT 0,
+    mfa_methods_json TEXT,
+    mfa_grace_period_hours BIGINT,
+    scim_enabled BIGINT NOT NULL DEFAULT 0,
+    scim_base_url TEXT,
+    scim_provisioning_mode TEXT,
+    scim_last_token_rotation_at BIGINT,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_enterprise_security (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    mfa_enrolled BIGINT NOT NULL DEFAULT 0,
+    mfa_method TEXT,
+    mfa_enrolled_at BIGINT,
+    mfa_last_verified_at BIGINT,
+    auth_provider TEXT,
+    sso_subject TEXT,
+    provisioning_source TEXT,
+    external_id TEXT,
+    last_provisioned_at BIGINT,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_auth_methods (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    method_type TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    subject TEXT,
+    label TEXT,
+    status TEXT NOT NULL,
+    is_primary BIGINT NOT NULL DEFAULT 0,
+    can_recover BIGINT NOT NULL DEFAULT 1,
+    metadata_json TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_auth_methods_user ON user_auth_methods(user_id, is_primary DESC, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS user_provider_connections (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    workspace_id TEXT,
+    status TEXT NOT NULL,
+    label TEXT,
+    external_account_id TEXT,
+    metadata_json TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_provider_connections_user ON user_provider_connections(user_id, provider, workspace_id);
+
+CREATE TABLE IF NOT EXISTS user_identity_versions (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    membership_version BIGINT NOT NULL DEFAULT 1,
+    auth_version BIGINT NOT NULL DEFAULT 1,
+    provider_scope_version BIGINT NOT NULL DEFAULT 1,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    session_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    device_id TEXT,
+    runtime_id TEXT,
+    trust_state TEXT NOT NULL,
+    status TEXT NOT NULL,
+    session_family_id TEXT,
+    metadata_json TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    last_seen_at BIGINT,
+    expires_at BIGINT NOT NULL,
+    revoked_at BIGINT,
+    revoked_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, status, channel, expires_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS user_devices (
+    device_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    workspace_id TEXT,
+    channel TEXT NOT NULL,
+    display_name TEXT,
+    platform TEXT,
+    trust_state TEXT NOT NULL,
+    status TEXT NOT NULL,
+    session_binding_required BIGINT NOT NULL DEFAULT 1,
+    metadata_json TEXT NOT NULL,
+    linked_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    last_seen_at BIGINT,
+    revoked_at BIGINT,
+    revoked_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_user_devices_user ON user_devices(user_id, status, channel, workspace_id);
+
+CREATE TABLE IF NOT EXISTS auth_session_refresh_tokens (
+    session_id TEXT PRIMARY KEY REFERENCES auth_sessions(session_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    rotated_at BIGINT,
+    revoked_at BIGINT,
+    revoked_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_refresh_tokens_user ON auth_session_refresh_tokens(user_id, expires_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_refresh_tokens_expires ON auth_session_refresh_tokens(expires_at);
 """
 
 
@@ -3430,8 +3681,24 @@ def _workspace_invite_record_from_row(row: Any) -> Optional[Dict[str, Any]]:
 
 
 async def ensure_control_plane_schema() -> Any:
-    global _SCHEMA_READY
+    global _SCHEMA_READY, _STORE_CHOICE_LOGGED
     pool = await runtime_db.get_pool()
+    if not _STORE_CHOICE_LOGGED:
+        _STORE_CHOICE_LOGGED = True
+        if pool is not None:
+            LOGGER.warning(
+                "CONTROL PLANE STORE: Postgres (DATABASE_URL is configured) — "
+                "workspace_agent_installs, deployed_agents, and other control-plane "
+                "tables read/write Postgres and are durable."
+            )
+        else:
+            LOGGER.warning(
+                "CONTROL PLANE STORE: SQLite fallback at %s — DATABASE_URL is not set "
+                "or Postgres is unreachable. Control-plane data (agent installs, "
+                "deployed agents, etc.) will NOT appear in Postgres until DATABASE_URL "
+                "is configured and the process is restarted.",
+                LOCAL_CONTROL_PLANE_DB_FILE,
+            )
     if pool is None:
         return None
     if _SCHEMA_READY:
@@ -3449,6 +3716,69 @@ async def ensure_control_plane_schema() -> Any:
             "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS "
             "slack_team_id VARCHAR(64)"
         )
+        # ── Phase 2: Projects entity — link each agent install to a project. ──
+        await pool.execute(
+            "ALTER TABLE workspace_agent_installs ADD COLUMN IF NOT EXISTS "
+            "project_id TEXT REFERENCES projects(id) ON DELETE SET NULL"
+        )
+        await pool.execute(
+            "CREATE INDEX IF NOT EXISTS idx_projects_workspace "
+            "ON projects(tenant_id, workspace_id, archived)"
+        )
+        await pool.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workspace_agent_installs_project "
+            "ON workspace_agent_installs(project_id)"
+        )
+        # ── Phase 3B: one hosted pool bot serves at most one agent. ──
+        await pool.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_hosted_bot_pool_assignment "
+            "ON hosted_bot_pool(assigned_agent_install_id) "
+            "WHERE assigned_agent_install_id IS NOT NULL"
+        )
+        await pool.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hosted_bot_pool_status "
+            "ON hosted_bot_pool(provider, status)"
+        )
+        # ── Phase 3C: vault credential lookups (workspace + agent scoped). ──
+        await pool.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vault_credentials_ws "
+            "ON vault_credentials(workspace_id, provider)"
+        )
+        await pool.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vault_credentials_agent "
+            "ON vault_credentials(agent_install_id) WHERE agent_install_id IS NOT NULL"
+        )
+        # ── Phase 5B: ONE TENANT PER WORKSPACE is the law. A workspace's installs
+        # may never span tenants. Enforced by a Postgres EXCLUSION constraint —
+        # the only constraint type that can express "no two rows share a
+        # workspace_id but differ on tenant_id" (a UNIQUE or CHECK cannot).
+        # Needs btree_gist (CREATE EXTENSION → superuser); guarded so a
+        # locked-down prod role degrades to the app-level tenant-scoped
+        # idempotent seed rather than crashing bootstrap. The hard guarantee
+        # holds wherever the DB permits the constraint.
+        try:
+            await pool.execute("CREATE EXTENSION IF NOT EXISTS btree_gist")
+            await pool.execute(
+                """
+                DO $$ BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'excl_one_tenant_per_workspace'
+                  ) THEN
+                    ALTER TABLE workspace_agent_installs
+                      ADD CONSTRAINT excl_one_tenant_per_workspace
+                      EXCLUDE USING gist (workspace_id WITH =, tenant_id WITH <>);
+                  END IF;
+                END $$;
+                """
+            )
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.warning(
+                "one-tenant-per-workspace EXCLUSION constraint not applied (%s); "
+                "relying on the app-level tenant-scoped idempotent seed instead.",
+                exc,
+            )
+        # ── Phase 1C: auth-store tables (sessions, devices, policies, etc.) ──
+        await pool.execute(AUTH_STORE_SCHEMA_SQL)
         _SCHEMA_READY = True
     return pool
 
@@ -10197,6 +10527,76 @@ async def tenant_id_for_workspace(workspace_id: str) -> Optional[str]:
     if row is None:
         return None
     return str(row["tenant_id"] or "").strip() or None
+
+
+# ── Tenant resolution for fleet routes (Phase 3A) ───────────────────────────
+# tenant_id_for_workspace() only knows the workspaces / workspace_registry
+# tables, so legacy workspaces that exist solely in workspace_agent_installs
+# (e.g. ws-1) resolve to None. resolve_tenant_id_for_workspace() adds an
+# installs fallback and a caller-supplied last-resort default, with a short
+# TTL cache so fleet endpoints don't re-query on every request.
+_TENANT_RESOLVE_CACHE: Dict[str, tuple[float, str]] = {}
+_TENANT_RESOLVE_TTL_SECONDS = 300.0
+_TENANT_RESOLVE_LOCK = threading.Lock()
+
+
+async def _tenant_id_from_installs(workspace_id: str) -> Optional[str]:
+    ws = str(workspace_id or "").strip()
+    if not ws:
+        return None
+    # Deterministic: the OLDEST install's tenant is the workspace's original
+    # owner. Without ORDER BY, a workspace whose installs span more than one
+    # tenant (e.g. a shared ws polluted by another tenant's test rows) returns
+    # an arbitrary tenant, which then mis-seeds the registry under the wrong
+    # tenant and collides on the workspace-scoped master-definition id.
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_control_plane_db() as fallback:
+                    row = fallback.execute(
+                        "SELECT tenant_id FROM workspace_agent_installs WHERE workspace_id = ? ORDER BY created_at ASC LIMIT 1",
+                        (ws,),
+                    ).fetchone()
+            return (str(row["tenant_id"]).strip() or None) if row is not None else None
+        row = await connection.fetchrow(
+            "SELECT tenant_id FROM workspace_agent_installs WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT 1",
+            ws,
+        )
+    return (str(row["tenant_id"]).strip() or None) if row is not None else None
+
+
+def _tenant_resolve_cache_get(workspace_id: str) -> Optional[str]:
+    now = time.time()
+    with _TENANT_RESOLVE_LOCK:
+        hit = _TENANT_RESOLVE_CACHE.get(workspace_id)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+        if hit is not None:
+            _TENANT_RESOLVE_CACHE.pop(workspace_id, None)
+    return None
+
+
+def _tenant_resolve_cache_put(workspace_id: str, tenant_id: str) -> None:
+    with _TENANT_RESOLVE_LOCK:
+        _TENANT_RESOLVE_CACHE[workspace_id] = (time.time() + _TENANT_RESOLVE_TTL_SECONDS, tenant_id)
+
+
+async def resolve_tenant_id_for_workspace(workspace_id: str, *, default: str = "default") -> str:
+    """Derive a workspace's tenant_id: workspaces/registry first, then the
+    workspace_agent_installs fallback, then the caller's last-resort default.
+    Cached for _TENANT_RESOLVE_TTL_SECONDS. Never returns None."""
+    ws = str(workspace_id or "").strip()
+    if not ws:
+        return default
+    cached = _tenant_resolve_cache_get(ws)
+    if cached is not None:
+        return cached
+    tenant_id = await tenant_id_for_workspace(ws)
+    if not tenant_id:
+        tenant_id = await _tenant_id_from_installs(ws)
+    resolved = str(tenant_id or "").strip() or default
+    _tenant_resolve_cache_put(ws, resolved)
+    return resolved
 
 
 async def ensure_workspace_tenant_binding(

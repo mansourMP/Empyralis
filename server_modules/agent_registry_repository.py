@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import hashlib
 import hmac
@@ -10,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from server_modules import control_plane_repository, run_state_repository
+
+LOGGER = logging.getLogger(__name__)
 
 
 CAPTAIN_AGENT_KIND = "master"
@@ -414,6 +417,7 @@ def _row_to_install_summary(row: Any) -> Optional[Dict[str, Any]]:
         "label": label,
         "status": str(payload.get("status") or "").strip() or "active",
         "enabled": bool(payload.get("enabled")),
+        "project_id": _normalize_token(payload.get("project_id")),
         "runtime_profile_id": _normalize_token(payload.get("runtime_profile_id")),
         "runtime_mode": str(payload.get("runtime_mode") or "").strip() or "hosted_secure",
         "compiled_workflow_version_id": _normalize_token(payload.get("compiled_workflow_version_id")),
@@ -617,6 +621,9 @@ async def ensure_workspace_agent_registry_seeded(
 ) -> None:
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
+        # Phase Fix-1: SQLite fallback — seed definitions into the local
+        # control-plane DB so fleet_create_agent works without Postgres.
+        _ensure_agent_registry_seeded_local(tenant_id=tenant_id, workspace_id=workspace_id)
         return
     tenant_token = str(tenant_id or "").strip() or "default"
     from server_modules import workspace_scope as _ws
@@ -651,6 +658,7 @@ async def ensure_workspace_agent_registry_seeded(
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, NULL, NULL, $8, $9::jsonb, NULL, '[]'::jsonb, $10, NULL, $11::jsonb, NOW(), NOW()
                     )
+                    ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
                     """,
                     profile_id,
                     tenant_token,
@@ -690,6 +698,7 @@ async def ensure_workspace_agent_registry_seeded(
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, NULL, NULL, NULL, '{}'::jsonb, NOW(), NOW()
                         )
+                        ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
                         """,
                         agent_definition_id,
                         tenant_token,
@@ -726,6 +735,7 @@ async def ensure_workspace_agent_registry_seeded(
                             $1, $2, $3, $4, 1, 'published', $5::jsonb, NULL, $6::jsonb, '{}'::jsonb, $7::jsonb,
                             $8::jsonb, '{}'::jsonb, '{}'::jsonb, $9, NOW()
                         )
+                        ON CONFLICT (agent_definition_id, version_number) DO NOTHING
                         """,
                         version_id,
                         tenant_token,
@@ -777,6 +787,7 @@ async def ensure_workspace_agent_registry_seeded(
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, NULL, NULL, NULL, '{"system_agent":true,"hidden_from_catalog":true}'::jsonb, NOW(), NOW()
                     )
+                    ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
                     """,
                     master_definition_id,
                     tenant_token,
@@ -813,6 +824,7 @@ async def ensure_workspace_agent_registry_seeded(
                         $1, $2, $3, $4, 1, 'published', $5::jsonb, NULL, $6::jsonb, '{}'::jsonb, $7::jsonb,
                         $8::jsonb, '{}'::jsonb, '{"system_agent":true,"hidden_from_catalog":true}'::jsonb, $9, NOW()
                     )
+                    ON CONFLICT (agent_definition_id, version_number) DO NOTHING
                     """,
                     master_version_id,
                     tenant_token,
@@ -1726,7 +1738,7 @@ async def list_agent_definitions(
     await ensure_workspace_agent_registry_seeded(tenant_id=tenant_id, workspace_id=workspace_id)
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
-        return []
+        return _list_agent_definitions_local(tenant_id=tenant_id, workspace_id=workspace_id)
     rows = await pool.fetch(
         """
         SELECT
@@ -1766,6 +1778,9 @@ async def get_agent_definition(
     await ensure_workspace_agent_registry_seeded(tenant_id=tenant_id, workspace_id=workspace_id)
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
+        for definition in _list_agent_definitions_local(tenant_id=tenant_id, workspace_id=workspace_id):
+            if definition.get("id") == definition_id:
+                return definition
         return None
     row = await pool.fetchrow(
         """
@@ -1849,6 +1864,353 @@ def _list_workspace_agent_installs_local(
             return [item for item in (_row_to_install_summary(dict(r)) for r in rows) if item]
     except Exception:
         return []
+
+
+# ── Phase Fix-1: SQLite fallbacks for definition seeding / lookup / install
+# creation — these mirror the existing _list_workspace_agent_installs_local
+# pattern so the create-agent wizard works without Postgres. ──────────────
+
+
+def _ensure_agent_registry_seeded_local(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+) -> None:
+    """SQLite fallback: insert DEFAULT_AGENT_DEFINITIONS and DEFAULT_RUNTIME_PROFILES
+    into the local control-plane DB when Postgres is unavailable."""
+    import json as _json
+    from server_modules.control_plane_repository import _connect_local_control_plane_db
+
+    try:
+        with _connect_local_control_plane_db() as connection:
+            for profile in DEFAULT_RUNTIME_PROFILES:
+                cur = connection.execute(
+                    "SELECT id FROM runtime_profiles WHERE tenant_id = ? AND workspace_id = ? AND slug = ? LIMIT 1",
+                    (str(tenant_id or "").strip(), str(workspace_id or "").strip(), profile["slug"]),
+                )
+                if cur.fetchone() is not None:
+                    continue
+                # Include tenant_id — see the fleet-specialist id comment
+                # below for why a tenant-agnostic id collides on PRIMARY KEY.
+                profile_id = f"rprof_{str(tenant_id or '').strip()}_{str(workspace_id or '').strip()}_{profile['slug']}"
+                # NOTE: the local SQLite runtime_profiles table has no
+                # supported_capabilities column (that's Postgres-only —
+                # see CREATE TABLE in _connect_local_control_plane_db).
+                connection.execute(
+                    """INSERT INTO runtime_profiles (
+                        id, tenant_id, workspace_id, slug, label, runtime_class, placement_mode,
+                        default_execution_target, status, metadata, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        profile_id,
+                        str(tenant_id or "").strip(),
+                        str(workspace_id or "").strip(),
+                        profile["slug"],
+                        profile["label"],
+                        profile["runtime_class"],
+                        profile["placement_mode"],
+                        profile["default_execution_target"],
+                        profile["status"],
+                        _json.dumps(profile.get("metadata") or {}),
+                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+
+            for definition in DEFAULT_AGENT_DEFINITIONS:
+                cur = connection.execute(
+                    "SELECT id FROM agent_definitions WHERE tenant_id = ? AND workspace_id = ? AND slug = ? LIMIT 1",
+                    (str(tenant_id or "").strip(), str(workspace_id or "").strip(), definition["slug"]),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    agent_definition_id = str(row[0] or "").strip()
+                else:
+                    # Include tenant_id in the id — this app has seen both
+                    # "system" and "default" tenant_id values used for the
+                    # same workspace by different callers (routes_fleet.py
+                    # passes "default"; other paths default to "system").
+                    # A tenant-agnostic id would collide on the PRIMARY KEY
+                    # the second time a different tenant seeds the same
+                    # workspace+slug.
+                    agent_definition_id = f"agentdef_{str(tenant_id or '').strip()}_{str(workspace_id or '').strip()}_{definition['slug']}"
+                    connection.execute(
+                        """INSERT INTO agent_definitions (
+                            id, tenant_id, workspace_id, slug, name, description, agent_kind, visibility,
+                            status, category, icon, metadata, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?)""",
+                        (
+                            agent_definition_id,
+                            str(tenant_id or "").strip(),
+                            str(workspace_id or "").strip(),
+                            definition["slug"],
+                            definition["name"],
+                            definition["description"],
+                            definition["agent_kind"],
+                            definition["visibility"],
+                            definition["category"],
+                            definition["icon"],
+                            _json.dumps({}),
+                            datetime.now(timezone.utc).isoformat(),
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+
+                ver_cur = connection.execute(
+                    "SELECT id FROM agent_definition_versions WHERE agent_definition_id = ? AND version_number = 1 LIMIT 1",
+                    (agent_definition_id,),
+                )
+                if ver_cur.fetchone() is None:
+                    version_id = f"{agent_definition_id}_v1"
+                    manifest = definition.get("manifest") or {}
+                    cap_manifest = definition.get("capability_manifest") or {}
+                    policy_manifest = definition.get("policy_manifest") or {}
+                    placement_manifest = definition.get("placement_manifest") or {}
+                    connection.execute(
+                        """INSERT INTO agent_definition_versions (
+                            id, tenant_id, workspace_id, agent_definition_id, version_number, status,
+                            manifest, capability_manifest, policy_manifest, placement_manifest,
+                            metadata, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 1, 'published', ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            version_id,
+                            str(tenant_id or "").strip(),
+                            str(workspace_id or "").strip(),
+                            agent_definition_id,
+                            _json.dumps(manifest),
+                            _json.dumps(cap_manifest),
+                            _json.dumps(policy_manifest),
+                            _json.dumps(placement_manifest),
+                            _json.dumps({}),
+                            datetime.now(timezone.utc).isoformat(),
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+    except Exception:
+        LOGGER.exception(
+            "SQLite fallback registry seeding failed (tenant_id=%s, workspace_id=%s) — "
+            "fleet_create_agent will report 'definition not found' until this is fixed.",
+            tenant_id, workspace_id,
+        )
+
+
+def _list_agent_definitions_local(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+) -> List[Dict[str, Any]]:
+    """SQLite fallback for list_agent_definitions when Postgres is unavailable."""
+    from server_modules.control_plane_repository import _connect_local_control_plane_db
+    try:
+        with _connect_local_control_plane_db() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    ad.*,
+                    adv.id AS version_id,
+                    adv.version_number,
+                    adv.status AS version_status,
+                    adv.manifest,
+                    adv.capability_manifest,
+                    adv.policy_manifest,
+                    adv.placement_manifest,
+                    adv.metadata AS version_metadata
+                FROM agent_definitions ad
+                LEFT JOIN agent_definition_versions adv
+                    ON adv.agent_definition_id = ad.id AND adv.version_number = 1
+                WHERE ad.tenant_id = ?
+                  AND ad.workspace_id = ?
+                ORDER BY ad.updated_at DESC, ad.name ASC
+                """,
+                (str(tenant_id or "").strip(), str(workspace_id or "").strip()),
+            ).fetchall()
+            return [item for item in (_row_to_agent_definition(dict(r)) for r in rows) if item]
+    except Exception:
+        LOGGER.exception(
+            "SQLite fallback list_agent_definitions failed (tenant_id=%s, workspace_id=%s).",
+            tenant_id, workspace_id,
+        )
+        return []
+
+
+def _create_workspace_agent_install_local(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_definition_id: str,
+    agent_definition_version_id: Optional[str] = None,
+    label: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """SQLite fallback for create_workspace_agent_install when Postgres is unavailable."""
+    import json as _json
+    from server_modules.control_plane_repository import _connect_local_control_plane_db
+
+    definitions = _list_agent_definitions_local(tenant_id=tenant_id, workspace_id=workspace_id)
+    definition = None
+    for d in definitions:
+        if d.get("id") == agent_definition_id:
+            definition = d
+            break
+    if definition is None:
+        return None
+
+    version_id = agent_definition_version_id or definition.get("published_version_id") or definition.get("current_version_id") or ""
+    if not version_id:
+        # fallback: use the version we just seeded
+        version_id = f"{agent_definition_id}_v1"
+
+    install_id = f"ainstall_{uuid.uuid4().hex[:16]}"
+    resolved_label = str(label or "").strip() or str(definition.get("name") or "").strip() or "Installed Agent"
+
+    normalized_metadata = dict(metadata or {})
+    normalized_metadata.setdefault("role", "specialist")
+
+    try:
+        with _connect_local_control_plane_db() as connection:
+            connection.execute(
+                """INSERT INTO workspace_agent_installs (
+                    id, tenant_id, workspace_id, agent_definition_id, agent_definition_version_id,
+                    install_scope, label, status, enabled, tool_toggles, folder_grants,
+                    connector_bindings, memory_scope_overrides, policy_context_overrides,
+                    metadata, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'workspace', ?, 'active', 1, '{}', '[]', '{}', '{}', '{}', ?, ?, ?)""",
+                (
+                    install_id,
+                    str(tenant_id or "").strip(),
+                    str(workspace_id or "").strip(),
+                    str(agent_definition_id or "").strip(),
+                    version_id,
+                    resolved_label,
+                    _json.dumps(normalized_metadata),
+                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        # Re-read from the local DB to return the bundle
+        return _get_workspace_agent_install_bundle_local(
+            install_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+    except Exception:
+        LOGGER.exception(
+            "SQLite fallback create_workspace_agent_install failed (tenant_id=%s, workspace_id=%s, agent_definition_id=%s).",
+            tenant_id, workspace_id, agent_definition_id,
+        )
+        return None
+
+
+def _get_workspace_agent_install_bundle_local(
+    install_id: str,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+) -> Optional[Dict[str, Any]]:
+    """SQLite fallback for get_workspace_agent_install_bundle.
+
+    Mirrors the Postgres path's projected shape (agent_registry_repository.py
+    get_workspace_agent_install_bundle) for the fields fleet_tools.py's
+    fleet_configure_agent / fleet_create_agent actually read: id, and
+    metadata/tool_toggles/etc. decoded from their raw JSON-string storage
+    into real dicts/lists — the SQLite columns are TEXT, not jsonb, so
+    callers doing dict(bundle.get("metadata")) would otherwise get a raw
+    JSON string and blow up with "dictionary update sequence" errors.
+    """
+    from server_modules.control_plane_repository import _connect_local_control_plane_db
+    try:
+        with _connect_local_control_plane_db() as connection:
+            row = connection.execute(
+                "SELECT * FROM workspace_agent_installs WHERE id = ? AND tenant_id = ? AND workspace_id = ? LIMIT 1",
+                (str(install_id or "").strip(), str(tenant_id or "").strip(), str(workspace_id or "").strip()),
+            ).fetchone()
+            if row is None:
+                return None
+            payload = dict(row)
+            return {
+                "id": str(payload.get("id") or "").strip(),
+                "tenant_id": str(payload.get("tenant_id") or "").strip() or None,
+                "workspace_id": str(payload.get("workspace_id") or "").strip() or None,
+                "agent_definition_id": str(payload.get("agent_definition_id") or "").strip() or None,
+                "agent_definition_version_id": str(payload.get("agent_definition_version_id") or "").strip() or None,
+                "installed_by_user_id": _normalize_token(payload.get("installed_by_user_id")),
+                "install_scope": str(payload.get("install_scope") or "").strip() or "workspace",
+                "owner_user_id": _normalize_token(payload.get("owner_user_id")),
+                "thread_id": _normalize_token(payload.get("thread_id")),
+                "label": _normalize_token(payload.get("label")),
+                "status": str(payload.get("status") or "").strip() or "active",
+                "enabled": bool(payload.get("enabled")),
+                "runtime_profile_id": _normalize_token(payload.get("runtime_profile_id")),
+                "compiled_workflow_version_id": _normalize_token(payload.get("compiled_workflow_version_id")),
+                "root_folder_uri": _normalize_token(payload.get("root_folder_uri")),
+                "tool_toggles": _dict_json(payload.get("tool_toggles")),
+                "folder_grants": _list_json(payload.get("folder_grants")),
+                "connector_bindings": _dict_json(payload.get("connector_bindings")),
+                "memory_scope_overrides": _dict_json(payload.get("memory_scope_overrides")),
+                "policy_context_overrides": _dict_json(payload.get("policy_context_overrides")),
+                "metadata": _dict_json(payload.get("metadata")),
+                "created_at": _iso(payload.get("created_at")),
+                "updated_at": _iso(payload.get("updated_at")),
+            }
+    except Exception:
+        LOGGER.exception(
+            "SQLite fallback get_workspace_agent_install_bundle failed (install_id=%s).",
+            install_id,
+        )
+        return None
+
+
+def _update_workspace_agent_install_local(
+    install_id: str,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    label: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    enabled: Optional[bool] = None,
+    status: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """SQLite fallback for update_workspace_agent_install."""
+    import json as _json
+    from server_modules.control_plane_repository import _connect_local_control_plane_db
+
+    try:
+        with _connect_local_control_plane_db() as connection:
+            existing_row = connection.execute(
+                "SELECT * FROM workspace_agent_installs WHERE id = ? AND tenant_id = ? AND workspace_id = ? LIMIT 1",
+                (str(install_id or "").strip(), str(tenant_id or "").strip(), str(workspace_id or "").strip()),
+            ).fetchone()
+            if existing_row is None:
+                return None
+            existing = dict(existing_row)
+            next_metadata = {**_json.loads(str(existing.get("metadata") or "{}")), **dict(metadata or {})}
+            next_label = str(label or "").strip() or str(existing.get("label") or "").strip()
+            next_enabled = 1 if enabled is True else (0 if enabled is False else int(existing.get("enabled") or 1))
+            next_status = str(status or "").strip() or str(existing.get("status") or "active").strip()
+            connection.execute(
+                """UPDATE workspace_agent_installs
+                   SET label = ?, metadata = ?, enabled = ?, status = ?, updated_at = ?
+                   WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                (
+                    next_label,
+                    _json.dumps(next_metadata),
+                    next_enabled,
+                    next_status,
+                    datetime.now(timezone.utc).isoformat(),
+                    str(install_id or "").strip(),
+                    str(tenant_id or "").strip(),
+                    str(workspace_id or "").strip(),
+                ),
+            )
+        return _get_workspace_agent_install_bundle_local(
+            install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+        )
+    except Exception:
+        LOGGER.exception(
+            "SQLite fallback update_workspace_agent_install failed (install_id=%s).",
+            install_id,
+        )
+        return None
 
 
 async def list_workspace_agent_installs(
@@ -2020,7 +2382,14 @@ async def create_workspace_agent_install(
     )
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
-        return None
+        return _create_workspace_agent_install_local(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            agent_definition_id=agent_definition_id,
+            agent_definition_version_id=agent_definition_version_id,
+            label=label,
+            metadata=metadata,
+        )
     resolved_version_id = _pick_definition_version_id(definition, agent_definition_version_id)
     await pool.execute(
         """
@@ -2088,7 +2457,15 @@ async def update_workspace_agent_install(
     agent_kind = str(_dict_json(existing.get("agent_definition")).get("agent_kind") or "").strip().lower() or SPECIALIST_AGENT_KIND
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
-        return None
+        return _update_workspace_agent_install_local(
+            install_id=install_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            label=label,
+            metadata=metadata,
+            enabled=enabled,
+            status=status,
+        )
     next_tool_toggles = {**_dict_json(existing.get("tool_toggles")), **_dict_json(tool_toggles)}
     next_policy = {**_dict_json(existing.get("policy_context_overrides")), **_dict_json(policy_context_overrides)}
     next_metadata = {**_dict_json(existing.get("metadata")), **_dict_json(metadata)}
@@ -2239,12 +2616,16 @@ async def get_workspace_agent_install_bundle(
             workspace_id=workspace_id,
         ) as connection:
             if connection is None:
-                return None
+                return _get_workspace_agent_install_bundle_local(
+                    install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+                )
             row = await connection.fetchrow(query, *params)
     else:
         pool = await control_plane_repository.ensure_control_plane_schema()
         if pool is None:
-            return None
+            return _get_workspace_agent_install_bundle_local(
+                install_id, tenant_id=tenant_id or "", workspace_id=workspace_id or "",
+            )
         row = await pool.fetchrow(query, *params)
     if row is None:
         return None
@@ -2290,6 +2671,7 @@ async def get_workspace_agent_install_bundle(
         "label": label,
         "status": str(payload.get("status") or "").strip() or "active",
         "enabled": bool(payload.get("enabled")),
+        "project_id": _normalize_token(payload.get("project_id")),
         "runtime_profile_id": _normalize_token(payload.get("runtime_profile_id")),
         "runtime_mode": str(payload.get("runtime_mode") or "").strip() or "hosted_secure",
         "compiled_workflow_version_id": _normalize_token(payload.get("compiled_workflow_version_id")),

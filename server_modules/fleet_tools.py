@@ -27,8 +27,24 @@ FLEET_TOOL_PREFIX = "fleet_"
 _ALLOWED_CONFIGURE_KEYS = {
     "enabled_tools", "connectors", "channel_bindings",
     "subagents_enabled", "hardware_access", "model_config", "display_name",
+    "purpose_preset",
 }
 _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local"}
+_VALID_PURPOSE_PRESETS = {"customer_facing", "internal_assistant", "operator"}
+_PURPOSE_PRESET_INSTRUCTIONS = {
+    "customer_facing": (
+        "You represent the business directly to its customers. Be professional, "
+        "accurate, and helpful in every reply — customers will judge the business "
+        "by how you speak to them."
+    ),
+    "internal_assistant": (
+        "You help the team internally. Be concise and direct — you are talking "
+        "to people who already know the business context."
+    ),
+    "operator": (
+        "You help manage and coordinate other agents in this workspace."
+    ),
+}
 
 
 # ── Metadata helpers ────────────────────────────────────────────────────────
@@ -51,6 +67,18 @@ def resolve_agent_role(install: Optional[Dict[str, Any]]) -> str:
     return role if role in VALID_ROLES else SPECIALIST_ROLE
 
 
+def resolve_purpose_preset(install: Optional[Dict[str, Any]]) -> str:
+    """Resolve the purpose preset set at creation time (create-agent wizard step 2).
+
+    Falls back to "operator" for the operator role and "internal_assistant"
+    for any specialist created before this field existed.
+    """
+    preset = str(_meta(install).get("purpose_preset") or "").strip().lower()
+    if preset in _VALID_PURPOSE_PRESETS:
+        return preset
+    return OPERATOR_ROLE if resolve_agent_role(install) == OPERATOR_ROLE else "internal_assistant"
+
+
 def resolve_subagents_enabled(install: Optional[Dict[str, Any]]) -> bool:
     """Check if sub-agent delegation is enabled for this agent."""
     m = _meta(install)
@@ -63,12 +91,29 @@ def resolve_subagents_enabled(install: Optional[Dict[str, Any]]) -> bool:
 def resolve_model_config(install: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Resolve the per-agent model_config.
 
-    Returns {mode, provider, model, credential_ref?}.
-    Defaults to platform_credits mode with no provider override.
+    Returns {mode, provider, model, credential_ref?}. When mode is
+    platform_credits and no provider/model override is set, also fills
+    resolved_provider_label/resolved_model — the actual provider+model the
+    platform runs today — so the fleet UI's Model tab can show what's
+    really in effect instead of the opaque literal "Platform default".
     """
     mc = dict(_meta(install).get("model_config") or {})
     if not mc.get("mode"):
         mc["mode"] = "platform_credits"
+    if mc["mode"] == "platform_credits" and not mc.get("provider") and not mc.get("model"):
+        try:
+            from server_modules.empyralis_model_tier_contract import MODEL_TIER_CONTRACTS
+            from server_modules.provider_profiles import PROVIDER_CATALOG
+
+            default_tier = MODEL_TIER_CONTRACTS.get("light")
+            if default_tier and default_tier.internal_provider and default_tier.internal_model:
+                mc["resolved_provider_label"] = str(
+                    PROVIDER_CATALOG.get(default_tier.internal_provider, {}).get("label")
+                    or default_tier.internal_provider
+                )
+                mc["resolved_model"] = default_tier.internal_model
+        except Exception:
+            pass
     return mc
 
 
@@ -109,6 +154,10 @@ async def _ledger_fleet_action(
             workspace_id=workspace_id,
             actor_type="agent",
             actor_id=str(actor_id or "").strip() or "unknown",
+            # Phase 5B: the target install is the subject of the action — populate
+            # the ledger install_id column (was left empty for hardware_grant_denied
+            # and every other fleet_control event with a target).
+            install_id=str(target_agent_id or "").strip() or None,
             event_class="fleet_control",
             detail_level="audit_reference",
             action=str(action or "").strip().lower(),
@@ -281,6 +330,8 @@ async def fleet_list_agents(
             "agent_id": str(inst_dict.get("id") or "").strip(),
             "label": str(inst_dict.get("label") or "").strip(),
             "role": role,
+            "purpose_preset": resolve_purpose_preset(inst_dict),
+            "project_id": str(inst_dict.get("project_id") or "").strip(),
             "status": str(inst_dict.get("status") or "active").strip(),
             "enabled": bool(inst_dict.get("enabled", True)),
             "subagents_enabled": resolve_subagents_enabled(inst_dict),
@@ -494,6 +545,32 @@ async def fleet_configure_agent(
         if "subagents_enabled" in clean_patch:
             meta["subagents_enabled"] = bool(clean_patch["subagents_enabled"])
         if "hardware_access" in clean_patch:
+            # Phase 5B: a knowledge agent's hardware access is policy-locked. It
+            # can only be granted by changing the capability preset — a direct
+            # grant here is refused and ledgered.
+            from server_modules import capability_presets as _caps_cfg
+
+            _granting_hw = bool(clean_patch["hardware_access"]) and str(clean_patch["hardware_access"]).strip().lower() not in {"none", "false", "0"}
+            if _granting_hw and _caps_cfg.hardware_is_locked(bundle_dict):
+                await _ledger_fleet_action(
+                    action="hardware_grant_denied",
+                    actor_id=actor_id,
+                    workspace_id=workspace_id,
+                    target_agent_id=agent_id,
+                    status="blocked",
+                    metadata={
+                        "reason": "knowledge_agent_hardware_locked",
+                        "capability_preset": "knowledge",
+                        "requested_hardware_access": clean_patch["hardware_access"],
+                    },
+                )
+                return {
+                    "ok": False,
+                    "error": (
+                        "This is a knowledge agent — hardware access is policy-locked. "
+                        "Change its capability preset (not just this field) to grant hardware."
+                    ),
+                }
             meta["hardware_access"] = bool(clean_patch["hardware_access"])
         if "model_config" in clean_patch:
             meta["model_config"] = dict(clean_patch["model_config"] or {})
@@ -603,6 +680,8 @@ async def fleet_create_agent(
     tenant_id: str = "system",
     name: str = "",
     instructions: str = "",
+    purpose_preset: str = "",
+    capability_preset: str = "standard",
     enabled_tools: Optional[List[str]] = None,
     connectors: Optional[List[str]] = None,
     channel_bindings: Optional[Dict[str, Any]] = None,
@@ -611,15 +690,47 @@ async def fleet_create_agent(
 
     Only callable by operator-role agents.
     The new agent is seeded with role="specialist" and subagents_enabled=False.
+    `purpose_preset` (customer_facing | internal_assistant | operator) shapes
+    the default instructions. `capability_preset` (knowledge | standard) seeds
+    hardware/tools/model/subagents/context DEFAULTS; 'operator' is reserved
+    (Sage-class) and not creatable via this flow. All fields remain overridable
+    afterward except a knowledge agent's policy-locked hardware access.
     """
     from server_modules import agent_registry_repository as repo
+    from server_modules import capability_presets as _caps
+
+    # Phase 5B: capability preset — reject the reserved operator preset.
+    if not _caps.is_creatable(capability_preset):
+        return {
+            "ok": False,
+            "error": (
+                f"capability_preset '{capability_preset}' is reserved (Sage-class operator) "
+                "and cannot be created through the normal flow. Use 'knowledge' or 'standard'."
+            ),
+        }
+    _preset_defaults = _caps.build_install_defaults(capability_preset)
 
     agent_label = str(name or "").strip() or "Fleet Specialist"
     meta = seed_specialist_metadata()
     meta["fleet_created_by"] = actor_id
     meta["fleet_created_at"] = datetime.now(timezone.utc).isoformat()
-    if instructions:
-        meta["instructions"] = str(instructions).strip()
+    # Apply capability-preset defaults into metadata (capability_preset,
+    # model_tier, context_policy, hardware lock flag, subagents default).
+    meta.update(dict(_preset_defaults.get("metadata") or {}))
+    meta["subagents_enabled"] = bool(_preset_defaults.get("subagents_enabled"))
+    meta["hardware_access"] = str(_preset_defaults.get("hardware_access") or "none")
+    if _preset_defaults.get("enabled_tools") is not None:
+        meta["enabled_tools"] = list(_preset_defaults["enabled_tools"])
+
+    clean_preset = str(purpose_preset or "").strip().lower()
+    if clean_preset in _VALID_PURPOSE_PRESETS:
+        meta["purpose_preset"] = clean_preset
+
+    clean_instructions = str(instructions or "").strip()
+    if not clean_instructions and clean_preset in _PURPOSE_PRESET_INSTRUCTIONS:
+        clean_instructions = _PURPOSE_PRESET_INSTRUCTIONS[clean_preset]
+    if clean_instructions:
+        meta["instructions"] = clean_instructions
     if enabled_tools:
         meta["enabled_tools"] = [str(t).strip() for t in enabled_tools if str(t).strip()]
     if connectors:
@@ -633,10 +744,14 @@ async def fleet_create_agent(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
         )
-        # Look up the fleet-specialist definition by slug
+        # Look up the fleet-specialist definition by slug. It is seeded with
+        # visibility='private' (an internal template, not a workspace-listed
+        # agent), so include_private=True is required or the lookup finds
+        # nothing and agent creation always fails.
         definitions = await repo.list_agent_definitions(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
+            include_private=True,
         )
         fleet_def_id = ""
         for d in (definitions or []):
@@ -652,6 +767,7 @@ async def fleet_create_agent(
             agent_definition_id=fleet_def_id,
             label=agent_label,
             metadata=meta,
+            policy_context_overrides=dict(_preset_defaults.get("policy_context_overrides") or {}),
         )
         if not result:
             return {"ok": False, "error": "Failed to create agent install — check agent definition exists"}
