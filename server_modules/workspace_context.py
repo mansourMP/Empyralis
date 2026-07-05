@@ -41,7 +41,11 @@ DREAM_STAGING_TTL_DAYS = 7
 _DATE_SEGMENT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DAILY_NOTE_RE = re.compile(r"^memory/(\d{4}-\d{2}-\d{2})\.md$")
 DREAMS_NOTE_RE = re.compile(r"^memory/\.dreams/([A-Za-z0-9][A-Za-z0-9._-]*)\.md$")
-USER_MEMORY_FILE_RE = re.compile(r"^memory/files/([A-Za-z0-9][A-Za-z0-9._-]*)\.md$")
+# Topic files live under memory/files/, optionally one category subdir deep
+# (e.g. memory/files/acme.md or memory/files/customers/acme.md). Phase 6.
+USER_MEMORY_FILE_RE = re.compile(
+    r"^memory/files/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*\.md$"
+)
 
 DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
     "SOUL.md": (
@@ -83,14 +87,19 @@ DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
     ),
     "MEMORY.md": (
         "---\n"
-        "Purpose: Curated long-term facts about the user — preferences, relationships,\n"
-        "projects, important context. This is your primary memory store.\n"
-        "Edit after conversations where important facts emerge.\n"
-        "Delete outdated facts when they change.\n"
-        "Loaded every turn — keep it dense and factual, no filler.\n"
+        "Purpose: This agent's memory index. Loaded every turn — keep it dense, no filler.\n"
+        "Sections: Summary (identity + owner/customer context + stable facts), Learned\n"
+        "rules (behaviours learned from experience), Topic files (links to detail files).\n"
+        "Create a topic file (e.g. customers/acme.md) only when a topic earns its own file;\n"
+        "link it under Topic files. Retrieval pulls relevant topic files in on demand.\n"
         "---\n\n"
-        "# Curated Memory\n\n"
-        "Store stable long-term facts that should remain visible across future sessions.\n"
+        "## Summary\n\n"
+        "Identity, owner/customer context, and the most important stable facts.\n\n"
+        "## Learned rules\n\n"
+        "Rules learned from experience (e.g. \"Be pragmatic, skip pleasantries.\").\n"
+        "These ride into every future turn — add one when you learn how the owner wants you to work.\n\n"
+        "## Topic files\n\n"
+        "Links to topic files as they are created (e.g. customers/acme.md, procedures/refunds.md).\n"
     ),
     "USER.md": (
         "---\n"
@@ -249,6 +258,19 @@ def _validate_context_path(filename: str) -> str:
     if ".." in segments or any(part == "." for part in segments):
         raise ValueError(f"Path traversal is not allowed: {normalized}")
 
+    # Phase 6: friendly topic paths (e.g. "customers/acme.md", "notes.md") map into
+    # the agent's memory/files tree. Known root files and existing memory/ paths are
+    # left unchanged. Traversal is already rejected above, so this can only ever
+    # produce a path *inside* memory/files.
+    if (
+        normalized not in ALLOWED_CONTEXT_FILENAMES
+        and not normalized.startswith("memory/")
+        and normalized.lower().endswith(".md")
+        and 1 <= len(segments) <= 2
+    ):
+        normalized = "memory/files/" + normalized
+        segments = [part for part in normalized.split("/") if part]
+
     if normalized not in ALLOWED_CONTEXT_FILENAMES:
         if (
             not DAILY_NOTE_RE.fullmatch(normalized)
@@ -283,6 +305,14 @@ def _validate_context_path(filename: str) -> str:
             if not USER_MEMORY_FILE_RE.fullmatch(normalized):
                 raise ValueError(f"Unsupported context filename: {normalized}")
         else:
+            raise ValueError(f"Unsupported context filename: {normalized}")
+        if not normalized.lower().endswith(".md"):
+            raise ValueError(f"Only markdown files are allowed: {normalized}")
+        return normalized
+
+    # Phase 6: topic files one category subdir deep — memory/files/<cat>/<name>.md
+    if len(segments) == 4 and segments[0] == "memory" and segments[1] == "files":
+        if not USER_MEMORY_FILE_RE.fullmatch(normalized):
             raise ValueError(f"Unsupported context filename: {normalized}")
         if not normalized.lower().endswith(".md"):
             raise ValueError(f"Only markdown files are allowed: {normalized}")
@@ -491,6 +521,29 @@ def read_workspace_context_file(
         return path.read_text(encoding="utf-8")
     except Exception:
         return ""
+
+
+def delete_workspace_context_file(
+    filename: str,
+    *,
+    workspace_id: str | None = None,
+    agent_install_id: str | None = None,
+) -> bool:
+    """Phase 6: delete a topic file from the namespace's memory tree. Only
+    topic files (memory/files/**) may be deleted; core root files (MEMORY.md,
+    SOUL.md, …) are reset via write, never removed. Returns True if a file was
+    deleted. Hardened: the resolved path must stay inside the namespace root."""
+    normalized = normalize_workspace_context_filename(filename)
+    if normalized in ALLOWED_CONTEXT_FILENAMES or not normalized.startswith("memory/files/"):
+        raise ValueError(f"Only topic files may be deleted, not: {normalized}")
+    root = agent_workspace_context_dir(workspace_id=workspace_id, agent_install_id=agent_install_id).resolve()
+    path = _resolve_context_file_path(root, normalized).resolve()
+    if root not in path.parents and path != root:
+        raise ValueError("Refusing to delete outside the memory namespace.")
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
 
 
 def write_workspace_context_file(

@@ -276,6 +276,93 @@ async def fleet_agent_memory(
         return {"ok": False, "error": str(exc), "files": [], "count": 0}
 
 
+# ── Phase 6: per-agent memory tree (owner API for the Phase 7B Memory tab) ────
+
+
+async def _resolve_memory_namespace(workspace_id: str, agent_id: str) -> Optional[str]:
+    """Sage (the workspace master install) owns the workspace-scoped memory tree
+    (namespace = None, cross-project awareness); every other install owns its own
+    isolated tree."""
+    aid = str(agent_id or "").strip()
+    if not aid:
+        return None
+    try:
+        from server_modules import agent_registry_repository as reg
+        tenant_id = await _resolve_tenant(workspace_id)
+        master = await reg.get_workspace_master_agent_install(tenant_id=tenant_id, workspace_id=workspace_id)
+        if str((master or {}).get("id") or "").strip() == aid:
+            return None
+    except Exception:
+        pass
+    return aid
+
+
+class FleetMemoryFileWriteRequest(BaseModel):
+    content: str = ""
+    mode: str = "replace"
+
+
+@router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/tree")
+async def fleet_agent_memory_tree(request: Request, workspace_id: str, agent_id: str) -> Dict[str, Any]:
+    """The agent's memory tree: MEMORY.md index + topic files."""
+    from server_modules import agent_memory_tree_service as tree
+
+    try:
+        ns = await _resolve_memory_namespace(workspace_id, agent_id)
+        return {
+            "ok": True, "agent_id": agent_id,
+            "scope": "workspace" if ns is None else "install",
+            **tree.list_tree(workspace_id, agent_install_id=ns),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/file")
+async def fleet_agent_memory_file_read(
+    request: Request, workspace_id: str, agent_id: str,
+    path: str = Query(..., description="Tree path, e.g. MEMORY.md or customers/acme.md"),
+) -> Dict[str, Any]:
+    from server_modules import agent_memory_tree_service as tree
+
+    try:
+        ns = await _resolve_memory_namespace(workspace_id, agent_id)
+        return {"ok": True, **tree.read_file(workspace_id, path, agent_install_id=ns)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.put("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/file")
+async def fleet_agent_memory_file_write(
+    request: Request, workspace_id: str, agent_id: str, body: FleetMemoryFileWriteRequest,
+    path: str = Query(..., description="Tree path to write"),
+) -> Dict[str, Any]:
+    from server_modules import agent_memory_tree_service as tree
+
+    try:
+        ns = await _resolve_memory_namespace(workspace_id, agent_id)
+        return {"ok": True, **tree.write_file(
+            workspace_id, path, body.content or "", mode=body.mode or "replace",
+            agent_install_id=ns, actor="owner",
+        )}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/file")
+async def fleet_agent_memory_file_delete(
+    request: Request, workspace_id: str, agent_id: str,
+    path: str = Query(..., description="Tree path to delete (topic files only)"),
+) -> Dict[str, Any]:
+    from server_modules import agent_memory_tree_service as tree
+
+    try:
+        ns = await _resolve_memory_namespace(workspace_id, agent_id)
+        return {"ok": True, "deleted": tree.delete_file(workspace_id, path, agent_install_id=ns), "path": path}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/api/w/{workspace_id}/fleet/agent-channels")
 async def fleet_agent_channels(
     request: Request,

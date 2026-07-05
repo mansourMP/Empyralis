@@ -260,6 +260,29 @@ def load_workspace_context_payload(
                 target_sections = retrieved_sections if semantic_hits else stable_sections
                 target_sections.append(f"{memory_heading}\n{sanitized_memory_facts}")
 
+    # Phase 6: selectively inject the agent's own topic files (memory/files/**.md)
+    # that match this turn — keyword/phrase relevance, budgeted by the profile so a
+    # tight preset (e.g. knowledge) pulls in little, and an empty query pulls none.
+    # Gated only on a non-empty query: relevance scoring decides presence/absence.
+    if normalized_query:
+        try:
+            from server_modules import agent_memory_tree_service
+
+            _topic_budget = min(4000, max(400, int(policy_profile.max_prompt_tokens or 2000) * 2))
+            topic_hits = agent_memory_tree_service.retrieve_relevant_topics(
+                workspace_id,
+                normalized_query,
+                agent_install_id=agent_install_id,
+                max_files=max(1, int(policy_profile.semantic_retrieval_k or 3)),
+                char_budget=_topic_budget,
+            )
+        except Exception:
+            topic_hits = []
+        for hit in topic_hits:
+            excerpt = strip_red_facts_from_external_context(str(hit.get("content") or ""))
+            if excerpt.strip():
+                retrieved_sections.append(f"Memory topic: {hit.get('path')}\n{excerpt}")
+
     if resolved_include_memory_context and normalized_query:
         try:
             from server_modules import unified_memory_service
