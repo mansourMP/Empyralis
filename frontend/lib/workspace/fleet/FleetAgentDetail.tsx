@@ -207,12 +207,16 @@ export function FleetAgentDetail({
 // ── Overview ────────────────────────────────────────────────────────────────
 
 function OverviewTab({
+  workspaceId,
+  agentId,
   agent,
   statusLabel,
   events,
   loading,
   onChat,
 }: {
+  workspaceId: string;
+  agentId: string;
   agent: FleetAgent | null;
   statusLabel: string;
   events: any[];
@@ -221,6 +225,20 @@ function OverviewTab({
 }) {
   const deployed = statusLabel !== "Not deployed";
   const placement = derivePlacement(agent?.runtime_target || "unknown", deployed);
+  const { channels } = useFleetAgentChannels(workspaceId, agentId);
+  const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
+  const [costToday, setCostToday] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled && d?.totals) setCostToday(Number(d.totals.usd_cost || 0)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [workspaceId, agentId]);
+  const connectedChannels = channels.filter((c: any) => c?.connected).length;
+  const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
+  const preset = agent?.capability_preset || "standard";
   const rows: [string, string][] = [
     ["Status", statusLabel],
     ["Placement", placement],
@@ -229,6 +247,12 @@ function OverviewTab({
 
   return (
     <div className="fleet-detail-overview">
+      <div className="fleet-stat-grid" style={{ marginTop: 0 }}>
+        <div className="fleet-stat-card"><div className="fleet-stat-value">{connectedChannels}</div><div className="fleet-stat-label">Channels</div></div>
+        <div className="fleet-stat-card"><div className="fleet-stat-value">{connectedConnectors}</div><div className="fleet-stat-label">Connectors</div></div>
+        <div className="fleet-stat-card"><div className="fleet-stat-value">{costToday === null ? "…" : `$${costToday.toFixed(4)}`}</div><div className="fleet-stat-label">Cost today</div></div>
+        <div className="fleet-stat-card"><div className="fleet-stat-value" style={{ textTransform: "capitalize" }}>{preset}</div><div className="fleet-stat-label">Preset</div></div>
+      </div>
       <div className="fleet-config">
         {rows.map(([label, value]) => (
           <div key={label} className="fleet-config-row">
