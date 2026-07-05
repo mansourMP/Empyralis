@@ -867,6 +867,54 @@ def execute_single_direct_tool_call(
     ).strip() or None
     app_id = str(session_metadata.get("app_id") or "").strip() or None
     trace_id = str(session_metadata.get("trace_id") or "").strip() or None
+    # ── Phase 4B: per-install tool whitelist enforcement ──────────────────────
+    # When the turn runs as a specialist, session_ctx carries a specialist_guard
+    # (acting install + its bound core/connectors/tools). A call to any tool the
+    # specialist isn't bound to is denied cleanly here — before execution — and
+    # recorded as an escalation event, so the operator (Sage) picks it up instead
+    # of the specialist acting out of scope. Absent for the master/Sage path, so
+    # that path is unchanged.
+    _spec_guard = session_metadata.get("specialist_guard")
+    if isinstance(_spec_guard, dict) and tool_name:
+        _guard_core = set(_spec_guard.get("core") or [])
+        _guard_tools = set(_spec_guard.get("tools") or [])
+        _guard_connectors = set(_spec_guard.get("connectors") or [])
+        _tool_connector = str(connector_id or "").strip().lower()
+        _guard_allowed = (
+            tool_name in _guard_core
+            or tool_name in _guard_tools
+            or (bool(_tool_connector) and _tool_connector in _guard_connectors)
+        )
+        if not _guard_allowed:
+            _acting = str(_spec_guard.get("agent_install_id") or "").strip() or None
+            try:
+                security_audit_service.emit_security_audit_event(
+                    action="specialist.tool_denied",
+                    status="escalated",
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    detail=(
+                        f"Specialist {_acting} attempted unbound tool '{tool_name}'; "
+                        "denied and escalated to the operator."
+                    ),
+                    metadata={
+                        "acting_agent_install_id": _acting,
+                        "tool_name": tool_name,
+                        "connector_id": _tool_connector or None,
+                        "escalation": True,
+                        "reason": "tool_not_bound_to_specialist",
+                    },
+                    idempotency_key=(
+                        f"specialist.tool_denied:{workspace_id}:{run_id or thread_id}:{index}:{tool_name}"
+                    ),
+                )
+            except Exception:
+                pass  # escalation audit is best-effort; the denial below is authoritative
+            raise RuntimeError(
+                f"Tool '{tool_name}' is not enabled for this specialist agent. "
+                "Escalate to the operator (Sage) instead of calling it."
+            )
     governance_metadata = _direct_tool_governance_metadata(connector_id, action_id, argument_payload)
     audit_metadata = {
         "tool_name": tool_name or None,

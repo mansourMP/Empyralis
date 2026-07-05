@@ -1226,7 +1226,104 @@ def _sage_agent_computer_browser_status(availability_payload: dict[str, Any]) ->
     return "not_selected"
 
 
-def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str = "owner") -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], str]:
+# ── Phase 4B: per-install (specialist) tool whitelist ───────────────────────
+# A specialist's toolset = the core always-on tools + exactly the connectors
+# and tools its Phase 2 bindings enable. Resolved once per turn and used to
+# (a) filter the on-demand tool registry so the specialist only *discovers* its
+# own tools, and (b) hard-deny a call to any unbound tool at the executor.
+
+
+def _core_direct_tool_names() -> set[str]:
+    """The always-on core tools — always available to every agent, specialist
+    or master (memory, web search, query_tool_registry, task_complete, ...)."""
+    try:
+        return {
+            str(tool.get("name") or "").strip()
+            for tool in direct_chat_tool_catalog_service.build_always_on_direct_chat_tools()
+            if str(tool.get("name") or "").strip()
+        }
+    except Exception:
+        return set()
+
+
+async def _resolve_specialist_toolset(
+    *, workspace_id: str, tenant_id: str, agent_install_id: str
+) -> dict[str, Any] | None:
+    """Return the tool whitelist for a specialist install, or None for the
+    master/Sage path (no per-install restriction).
+
+    Sources of truth are the Phase 2 binding tables: enabled connectors from
+    ``agent_connector_bindings`` and explicit tool toggles from the install.
+    Fail-safe: on any lookup error the specialist is restricted to CORE tools
+    only (deny-more, never allow-more) so isolation holds even when the
+    control plane is briefly unavailable.
+    """
+    aid = str(agent_install_id or "").strip()
+    if not aid:
+        return None
+    connectors: set[str] = set()
+    tools: set[str] = set()
+    try:
+        from server_modules import agent_bindings_repository as _bind
+        rows = await _bind.list_agent_connector_bindings(
+            tenant_id=tenant_id or "default", workspace_id=workspace_id,
+            agent_install_id=aid, enabled_only=True,
+        )
+        for row in rows or []:
+            key = str((row or {}).get("key") or "").strip().lower()
+            if key:
+                connectors.add(key)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "specialist toolset: connector binding load failed for %s — core-only", aid, exc_info=True
+        )
+    try:
+        from server_modules import agent_registry_repository as _reg
+        bundle = await _reg.get_workspace_agent_install_bundle(
+            aid, tenant_id=tenant_id or "default", workspace_id=workspace_id
+        )
+        toggles = bundle.get("tool_toggles") if isinstance(bundle, dict) else None
+        if isinstance(toggles, dict):
+            for name, enabled in toggles.items():
+                if enabled and str(name or "").strip():
+                    tools.add(str(name).strip())
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "specialist toolset: install bundle load failed for %s — core-only", aid, exc_info=True
+        )
+    return {"core": _core_direct_tool_names(), "connectors": connectors, "tools": tools}
+
+
+def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
+    """True when a specialist bound to ``toolset`` may call ``tool_name``.
+
+    Allowed = a core tool, an explicitly-toggled tool, or a connector tool
+    (``{connector}__{action}``) whose connector is bound.
+    """
+    name = str(tool_name or "").strip()
+    if not name:
+        return False
+    if name in toolset.get("core", set()) or name in toolset.get("tools", set()):
+        return True
+    connector = name.split("__", 1)[0].strip().lower() if "__" in name else ""
+    return bool(connector and connector in toolset.get("connectors", set()))
+
+
+def _filter_registry_for_specialist(registry: Any, toolset: dict[str, Any]) -> list[Any]:
+    """Keep only registry entries the specialist is bound to (core tools are not
+    in the registry, so they are unaffected)."""
+    kept: list[Any] = []
+    for entry in registry or []:
+        name = str(getattr(entry, "tool_name", "") or "").strip()
+        connector = str(getattr(entry, "connector_id", "") or "").strip().lower()
+        if name in toolset.get("core", set()) or name in toolset.get("tools", set()):
+            kept.append(entry)
+        elif connector and connector in toolset.get("connectors", set()):
+            kept.append(entry)
+    return kept
+
+
+def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str = "owner", specialist_toolset: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], str]:
     try:
         tool_capabilities = direct_chat_runtime_exports.resolve_workspace_tool_capabilities(workspace_id)
     except Exception:
@@ -1244,6 +1341,13 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
     # Tier 2: registry — everything else, loaded on demand via query_tool_registry.
     tools: list[dict[str, Any]] = list(direct_chat_tool_catalog_service.build_always_on_direct_chat_tools())
     _registry = direct_chat_tool_catalog_service.build_registry_entries(tool_capabilities, availability)
+    # Phase 4B: a specialist only discovers the connectors/tools it is bound to.
+    # Core tools (the `tools` list above) are untouched. None → master/Sage,
+    # no filtering (byte-for-byte unchanged).
+    if specialist_toolset is not None:
+        _before_reg = len(_registry)
+        _registry = _filter_registry_for_specialist(_registry, specialist_toolset)
+        print(f"[TOOL_FILTER] specialist_registry before={_before_reg} after={len(_registry)}", flush=True)
     availability["_tool_registry"] = _registry
 
     browser_status = _sage_agent_computer_browser_status(availability)
@@ -1639,8 +1743,21 @@ async def _run_sage_action_loop_v3(
     attachments: list | None = None,
     sender_id: str | None = None,
     sender_class: str = "owner",
+    agent_install_id: str = "",
 ) -> dict[str, Any] | None:
-    tools, tool_capabilities, availability, blocked_notes = _direct_tool_bundle(workspace_id=workspace_id, provider=provider, sender_class=sender_class)
+    # Phase 4B: when agent_install_id is set this turn runs as that specialist —
+    # its tool whitelist, tool-call executor identity, and mid-turn memory
+    # namespace all key off the install. Empty → master/Sage, unchanged.
+    _acting_install_id = str(agent_install_id or "").strip()
+    _specialist_toolset = None
+    if _acting_install_id:
+        _specialist_toolset = await _resolve_specialist_toolset(
+            workspace_id=workspace_id, tenant_id=tenant_id, agent_install_id=_acting_install_id,
+        )
+    tools, tool_capabilities, availability, blocked_notes = _direct_tool_bundle(
+        workspace_id=workspace_id, provider=provider, sender_class=sender_class,
+        specialist_toolset=_specialist_toolset,
+    )
     from server_modules import runtime_config as _rc
     if _rc.AGENT_MACHINE_MODE == "agent":
         blocked = None  # agent machine mode: hardware tools always available
@@ -1718,6 +1835,19 @@ async def _run_sage_action_loop_v3(
             },
         },
     }
+    # Phase 4B: when running as a specialist, stamp the acting install onto the
+    # tool-execution context. The executor keys the mid-turn memory namespace
+    # AND the per-install tool-denial guard off this. Absent → the executor
+    # defaults to the Sage namespace exactly as before (byte-for-byte).
+    if _acting_install_id:
+        session_ctx["active_agent_install_id"] = _acting_install_id
+        if _specialist_toolset is not None:
+            session_ctx["specialist_guard"] = {
+                "agent_install_id": _acting_install_id,
+                "core": sorted(_specialist_toolset.get("core", set())),
+                "connectors": sorted(_specialist_toolset.get("connectors", set())),
+                "tools": sorted(_specialist_toolset.get("tools", set())),
+            }
     import asyncio as _asyncio
 
     daily_operator_result = await _asyncio.to_thread(
@@ -2374,6 +2504,72 @@ def resolve_canonical_sender(
     return None, []
 
 
+async def _apply_fresh_session_context_policy(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    thread_id: str,
+    current_session_id: str,
+    provider: str,
+    model: str,
+) -> dict:
+    """Phase 5C 'fresh_session' action: summarize the conversation, close the
+    current session, and open a new one carrying that summary. The thread
+    persists across sessions, so continuity is preserved. Returns the carried
+    summary as prior_messages for the current turn."""
+    from server_modules.compaction_service import compact_turns as _ct
+    from server_modules import session_service
+
+    _thread_rec = await thread_service.get_thread(
+        thread_id, tenant_id=tenant_id, workspace_id=workspace_id, include_turns=True
+    )
+    _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
+    summary = ""
+    try:
+        # Forward the turn's provider/model so compaction summarizes with the
+        # SAME provider the agent runs on — otherwise it defaults to deepseek and
+        # produces an empty summary (continuity loss) on any non-deepseek agent.
+        summary = str(
+            await _ct(
+                turns=_raw_turns, workspace_id=workspace_id, tenant_id=tenant_id,
+                thread_id=thread_id, provider=provider, model=model,
+            ) or ""
+        ).strip()
+    except Exception:
+        summary = ""
+
+    new_session_id = ""
+    try:
+        if current_session_id:
+            try:
+                await session_service.terminate_session(current_session_id)
+            except Exception:
+                pass
+        new_session_id = await session_service.create_session(
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            actor={"id": "sage", "display_name": "Sage"},
+            channel="sage",
+            metadata={
+                "thread_id": thread_id,
+                "parent_session_id": current_session_id or None,
+                "carried_summary": summary[:4000],
+                "context_policy_action": "fresh_session",
+                "source": "context_policy_fresh_session",
+            },
+        )
+    except Exception:
+        new_session_id = ""
+
+    prior_messages: list = []
+    if summary:
+        prior_messages = [{"role": "system", "content": f"[Carried summary from previous session]\n{summary}"}]
+    logging.getLogger(__name__).warning(
+        "context_policy fresh_session: thread=%s new_session=%s summary_chars=%d",
+        thread_id, new_session_id, len(summary),
+    )
+    return {"prior_messages": prior_messages, "new_session_id": new_session_id, "summary": summary}
+
 
 async def handle_sage_chat(
     *,
@@ -2389,7 +2585,54 @@ async def handle_sage_chat(
     sender_id: str | None = None,
     thread_id: str = "sage-main",
     request_id: str = "",
+    specialist_context: Any = None,
 ) -> dict:
+    # Phase 4: when specialist_context is set, this turn runs as a specialist
+    # (its persona, model/provider binding, and memory namespace) instead of the
+    # shared Sage runtime. When None, every override below is skipped and Sage's
+    # path is byte-for-byte unchanged.
+    _spec = specialist_context
+    _spec_install_id = str(getattr(_spec, "agent_install_id", "") or "").strip() if _spec is not None else ""
+    # Phase 5A: set per-turn usage attribution (agent_install_id + project_id) so
+    # every LLM call in this turn records a usage_event. Specialist → its own
+    # install/project; master (Sage) → the workspace master install/project.
+    # Phase 5C: also resolve the acting install's context policy (threshold +
+    # action on hit).
+    _ctx_policy_max = 0
+    _ctx_policy_action = "compact"
+    try:
+        from server_modules import usage_events_repository as _usage_repo
+
+        _acting_install_id = _spec_install_id
+        _acting_project_id = str(getattr(_spec, "project_id", "") or "").strip() if _spec is not None else ""
+        _acting_ctx_policy: dict = dict(getattr(_spec, "context_policy", {}) or {}) if _spec is not None else {}
+        if not _acting_install_id:
+            from server_modules import agent_registry_repository as _reg_usage
+
+            _master = await _reg_usage.get_workspace_master_agent_install(
+                tenant_id=str(tenant_id or "default").strip() or "default", workspace_id=str(workspace_id or "").strip()
+            )
+            _acting_install_id = str((_master or {}).get("id") or "").strip()
+            _acting_project_id = str((_master or {}).get("project_id") or "").strip()
+            _mm = (_master or {}).get("metadata") if isinstance((_master or {}).get("metadata"), dict) else {}
+            if isinstance(_mm.get("context_policy"), dict):
+                _acting_ctx_policy = dict(_mm["context_policy"])
+        try:
+            _ctx_policy_max = max(0, int(_acting_ctx_policy.get("max_context_tokens") or 0))
+        except (TypeError, ValueError):
+            _ctx_policy_max = 0
+        _act = str(_acting_ctx_policy.get("on_context_full") or "compact").strip().lower()
+        _ctx_policy_action = _act if _act in {"compact", "fresh_session"} else "compact"
+        _usage_repo.set_usage_attribution(
+            tenant_id=str(tenant_id or "default").strip() or "default",
+            workspace_id=str(workspace_id or "").strip(),
+            agent_install_id=_acting_install_id or None,
+            project_id=_acting_project_id or None,
+            mode=None,
+            surface="sage_chat",
+        )
+    except Exception:
+        pass
     normalized_workspace_id = _coerce_text(workspace_id)
     normalized_message = _coerce_text(message)
     normalized_mode = normalize_sage_mode(mode)  # NOTE: currently single-valued ("owner_sage"); unused in this function. Future multi-mode work should wire this in.
@@ -2495,7 +2738,16 @@ async def handle_sage_chat(
 
     context_files_payload = _read_context_files_payload(workspace_id=normalized_workspace_id)
 
-    memory_context = _load_memory_context(workspace_id=normalized_workspace_id)
+    if _spec_install_id:
+        # Specialist turn: load the memory brief from THIS install's isolated
+        # namespace (agent_memory keys by install id), never Sage's/workspace-wide.
+        try:
+            from server_modules import memory_service as _mem_spec
+            memory_context = _mem_spec.get_memory(normalized_workspace_id, agent_install_id=_spec_install_id)
+        except Exception:
+            memory_context = ""
+    else:
+        memory_context = _load_memory_context(workspace_id=normalized_workspace_id)
     if memory_context:
         used_context.append("sage_memory")
 
@@ -2529,6 +2781,11 @@ async def handle_sage_chat(
 
     # --- Call provider ---
     provider, credentials = await _resolve_cloud_provider(normalized_workspace_id)
+    # Phase 4: specialist provider binding override (falls back to workspace provider).
+    if _spec is not None:
+        _spec_provider = str(getattr(_spec, "provider", "") or "").strip()
+        if _spec_provider and _spec_provider != provider:
+            provider = _spec_provider
 
     context: dict = {
         "workspace_id": normalized_workspace_id,
@@ -2556,6 +2813,11 @@ async def handle_sage_chat(
         requested_model = _persisted_model
         import sys as _sys_model
         print(f"[TRACE_MODEL_PERSISTED] ws={normalized_workspace_id} model={requested_model}", flush=True, file=_sys_model.stderr)
+    # Phase 4: specialist model binding wins over the workspace preference.
+    if _spec is not None:
+        _spec_model = str(getattr(_spec, "model", "") or "").strip()
+        if _spec_model:
+            requested_model = _spec_model
 
     # --- Build Sage prompt/context before any model-backed action loop ---
     # --- Load recent conversation turns from shared thread store ---
@@ -2744,11 +3006,32 @@ async def handle_sage_chat(
         from server_modules.audience_tool_filter import audience_behavior_instructions
         _audience_instructions = audience_behavior_instructions()
 
-    envelope = _build_prompt_envelope(
-        workspace_id=normalized_workspace_id,
-        message=normalized_message,
-        system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{attachment_context}{mcp_tool_inventory}",
-    )
+    if _spec is not None:
+        # Phase 4: specialist identity replaces the Sage kernel/guardrails. Keep
+        # the operational context (attachments, MCP inventory) and the memory
+        # brief, but the persona and the "do not act as operator" rule are the
+        # specialist's own — never "You're Sage".
+        _spec_persona = str(getattr(_spec, "persona", "") or "").strip()
+        _spec_scope_rule = (
+            "\n\n## Scope\n"
+            "You are a specialist agent. You do NOT manage the fleet, create or "
+            "reconfigure other agents, or take workspace-operator actions — those "
+            "belong to the operator (Sage). If a request falls outside your scope, "
+            "say so and escalate to the operator instead of acting."
+        )
+        _spec_memory_block = f"\n\n## Your memory\n{memory_context}" if memory_context else ""
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        envelope = _build_prompt_envelope(
+            workspace_id=normalized_workspace_id,
+            message=normalized_message,
+            system_prompt=_specialist_system_prompt,
+        )
+    else:
+        envelope = _build_prompt_envelope(
+            workspace_id=normalized_workspace_id,
+            message=normalized_message,
+            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{attachment_context}{mcp_tool_inventory}",
+        )
 
     action_loop_message = _normalized_sage_action_loop_message(normalized_message, prior_messages)
     # Always run the action loop — the LLM decides whether tools are needed.
@@ -2769,6 +3052,8 @@ async def handle_sage_chat(
         attachments=attachments,
         prior_messages=prior_messages,
         sender_id=sender_id,
+        # Phase 4B: run the tool loop as the resolved specialist (empty for Sage).
+        agent_install_id=_spec_install_id,
     )
     if action_result is not None:
         if "sage_action_loop" not in used_context:
@@ -3048,6 +3333,11 @@ async def handle_sage_chat(
             "trace_events": trace_events,
             "provider": provider,
             "model": requested_model or None,
+            # Phase 4: which agent actually ran this turn (specialist vs Sage).
+            "acting_agent_install_id": _spec_install_id or None,
+            "acting_agent_label": (str(getattr(_spec, "agent_label", "") or "").strip() or None) if _spec is not None else None,
+            "runtime_specialization": "specialist" if _spec is not None else "master",
+            "memory_scope": _spec_install_id or f"workspace:{normalized_workspace_id}",
             "transparency_events": transparency_events,
             "action_loop_version": _coerce_text(action_result.get("action_loop_version")) or _SAGE_OPERATOR_LOOP_VERSION,
             "loop_budget": action_result.get("loop_budget") if isinstance(action_result.get("loop_budget"), dict) else {},
@@ -3073,13 +3363,38 @@ async def handle_sage_chat(
         compact_turns as _compact_now_proactive,
     )
     _proactive_ctx_window = _resolve_ctx_window(provider, requested_model or None)
+    # Phase 5C: a per-install context policy can set a smaller threshold than the
+    # model window (e.g. knowledge agents compact early). The policy's action
+    # (compact | fresh_session) decides what happens when it's crossed.
+    if _ctx_policy_max and _ctx_policy_max > 0:
+        _proactive_ctx_window = min(_proactive_ctx_window, _ctx_policy_max)
     _proactive_input_text = str(envelope.get("system_prompt") or "")
     _proactive_input_text += str(envelope.get("user_message") or "")
     for _pm in (prior_messages or []):
         if isinstance(_pm, dict):
             _proactive_input_text += str(_pm.get("content") or "")
     _proactive_estimated = estimate_tokens(_proactive_input_text) + COMPACTION_RESERVE_TOKENS
-    if _proactive_estimated > _proactive_ctx_window:
+    if _proactive_estimated > _proactive_ctx_window and _ctx_policy_action == "fresh_session":
+        # Phase 5C: fresh_session — close the current session and open a new one
+        # carrying a summary, instead of compacting in place. The thread persists
+        # across sessions, so the conversation stays coherent.
+        try:
+            _fresh = await _apply_fresh_session_context_policy(
+                workspace_id=normalized_workspace_id,
+                tenant_id=effective_tenant_id,
+                thread_id=thread_id,
+                current_session_id=str(request_id or "").strip(),
+                provider=provider,
+                model=requested_model,
+            )
+            if isinstance(_fresh, dict) and _fresh.get("prior_messages") is not None:
+                prior_messages = _fresh["prior_messages"]
+                used_context.append("context_policy_fresh_session")
+        except Exception:
+            import logging as _lg_fs
+            _lg_fs.getLogger(__name__).warning("fresh_session context policy failed; falling back to compaction", exc_info=True)
+            _ctx_policy_action = "compact"  # fall back to compaction below
+    if _proactive_estimated > _proactive_ctx_window and _ctx_policy_action != "fresh_session":
         import logging as _logging
         _log = _logging.getLogger(__name__)
         _log.warning(
@@ -3387,9 +3702,17 @@ async def handle_sage_chat(
         _thid = thread_id
         _prov = provider
         _mod = requested_model
+        # Phase 5C: carry the per-install context policy into the background job.
+        _cp_max = _ctx_policy_max
+        _cp_action = _ctx_policy_action
+        _cp_session_id = str(request_id or "").strip()
         async def _auto_compact_background():
             try:
                 _ctx_window = _resolve_ctx_window(_prov, _mod)
+                # Phase 5C: honor a per-install threshold (e.g. knowledge agents
+                # compact early) — take the smaller of the model window and policy.
+                if _cp_max and _cp_max > 0:
+                    _ctx_window = min(_ctx_window, _cp_max)
                 # Reload turns from DB for accurate token count
                 _thread_rec = await thread_service.get_thread(
                     thread_id,
@@ -3399,6 +3722,14 @@ async def handle_sage_chat(
                 )
                 _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
                 if _should_compact(_raw_turns, context_window=_ctx_window):
+                    # Phase 5C: fresh_session action closes + reopens the session
+                    # carrying a summary, instead of in-place compaction.
+                    if _cp_action == "fresh_session":
+                        await _apply_fresh_session_context_policy(
+                            workspace_id=_ws, tenant_id=_tid, thread_id=_thid,
+                            current_session_id=_cp_session_id, provider=_prov, model=_mod,
+                        )
+                        return
                     # B3: Memory flush before compaction
                     _flush_ok = await _run_memory_flush_before_compaction(
                         workspace_id=_ws,
