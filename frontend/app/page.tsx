@@ -11,9 +11,9 @@ import { LandingClient } from './landing-client';
 import './landing.css';
 
 export const metadata: Metadata = {
-  title: 'Empyralis | AI workspace for governed agents',
+  title: 'Empyralis — Agents that do the work',
   description:
-    'A workspace for Sage, native agents, connected external agents, governed workflows, and approved computer access.',
+    'Managed cloud agents that do real work. Create a specialized agent in minutes — it gets its own Telegram bot, its own memory, and its own tools, and handles your customers and tasks end to end.',
 };
 
 export default async function LandingPage() {
@@ -33,8 +33,7 @@ export default async function LandingPage() {
       accountHref="/login"
       accountLabel="Log in"
       primaryHref="/signup"
-      primaryLabel="Create account"
-      finalCtaLabel="Start with your main agent"
+      primaryLabel="Get started"
     />
   );
 }

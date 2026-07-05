@@ -1,8 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { type ReactNode } from 'react';
-import { motion, useReducedMotion, type Variants } from 'motion/react';
+import { type ReactNode, useEffect, useRef } from 'react';
 import { Bot, Eye, DollarSign, Terminal, ShieldCheck } from 'lucide-react';
 
 type LandingClientProps = {
@@ -12,26 +11,52 @@ type LandingClientProps = {
   primaryLabel: string;     // Get started
 };
 
-// ── Scroll reveal — transform+opacity only, disabled under reduced motion ─────
+// ── Scroll reveal — CSS + IntersectionObserver, transform/opacity only.
+// Content is visible by default (SSR / no-JS / reduced-motion safe); JS only
+// *arms* the entrance (adds .lp-reveal), then reveals on scroll. This keeps the
+// text in the first paint + accessibility tree instead of hiding it behind JS. ─
 
-function Reveal({ children, delay = 0, className }: { children: ReactNode; delay?: number; className?: string }) {
-  const reduce = useReducedMotion();
-  const variants: Variants = reduce
-    ? { hidden: { opacity: 1 }, shown: { opacity: 1 } }
-    : {
-        hidden: { opacity: 0, y: 12 },
-        shown: { opacity: 1, y: 0, transition: { duration: 0.4, delay, ease: [0.22, 1, 0.36, 1] } },
-      };
+function Reveal({
+  children,
+  delay = 0,
+  className,
+  immediate = false,
+}: {
+  children: ReactNode;
+  delay?: number;
+  className?: string;
+  immediate?: boolean; // above-the-fold: reveal on mount, never scroll-gated
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return; // stay visible
+    el.classList.add('lp-reveal');
+    if (delay) el.style.transitionDelay = `${delay}s`;
+    // setTimeout (not rAF) so the reveal still fires in a hidden/background tab.
+    if (immediate) {
+      const id = window.setTimeout(() => el.classList.add('lp-reveal--in'), 30);
+      return () => window.clearTimeout(id);
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            el.classList.add('lp-reveal--in');
+            io.unobserve(el);
+          }
+        }
+      },
+      { threshold: 0.15, rootMargin: '0px 0px -8% 0px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [delay, immediate]);
   return (
-    <motion.div
-      className={className}
-      variants={variants}
-      initial="hidden"
-      whileInView="shown"
-      viewport={{ once: true, margin: '-8% 0px' }}
-    >
+    <div ref={ref} className={className}>
       {children}
-    </motion.div>
+    </div>
   );
 }
 
@@ -133,7 +158,7 @@ export function LandingClient({ accountHref, accountLabel, primaryHref, primaryL
       <main className="lp-main">
         {/* ── Hero ── */}
         <section className="lp-hero" aria-labelledby="lp-title">
-          <Reveal className="lp-hero-copy">
+          <Reveal className="lp-hero-copy" immediate>
             <p className="lp-eyebrow">Managed cloud agents</p>
             <h1 id="lp-title" className="lp-h1">Agents that do the work.</h1>
             <p className="lp-lede">
@@ -146,7 +171,7 @@ export function LandingClient({ accountHref, accountLabel, primaryHref, primaryL
               <a className="lp-btn lp-btn--ghost lp-btn--lg" href="#how" onClick={scrollToHow}>See how it works</a>
             </div>
           </Reveal>
-          <Reveal className="lp-hero-visual" delay={0.08}>
+          <Reveal className="lp-hero-visual" delay={0.08} immediate>
             <AgentMock />
           </Reveal>
         </section>
