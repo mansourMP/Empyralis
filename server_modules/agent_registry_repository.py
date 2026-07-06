@@ -619,12 +619,6 @@ async def ensure_workspace_agent_registry_seeded(
     workspace_id: str,
     created_by_user_id: Optional[str] = None,
 ) -> None:
-    pool = await control_plane_repository.ensure_control_plane_schema()
-    if pool is None:
-        # Phase Fix-1: SQLite fallback — seed definitions into the local
-        # control-plane DB so fleet_create_agent works without Postgres.
-        _ensure_agent_registry_seeded_local(tenant_id=tenant_id, workspace_id=workspace_id)
-        return
     tenant_token = str(tenant_id or "").strip() or "default"
     from server_modules import workspace_scope as _ws
     workspace_token = _ws.resolve_workspace(
@@ -632,138 +626,60 @@ async def ensure_workspace_agent_registry_seeded(
     )
     workspace_slug = _slugify(workspace_token, fallback="workspace")
 
-    async with pool.acquire() as connection:
-        async with connection.transaction():
-            for profile in DEFAULT_RUNTIME_PROFILES:
-                existing = await connection.fetchrow(
-                    """
-                    SELECT id
-                    FROM runtime_profiles
-                    WHERE tenant_id = $1 AND workspace_id = $2 AND slug = $3
-                    LIMIT 1
-                    """,
-                    tenant_token,
-                    workspace_token,
-                    profile["slug"],
+    # Scoped connection sets app.current_tenant_id/app.current_workspace_id for
+    # the duration of the transaction, so the INSERTs below satisfy the RLS
+    # WITH CHECK on every tenant-scoped table they touch (runtime_profiles,
+    # agent_definitions, agent_definition_versions, workspace_agent_installs).
+    async with control_plane_repository._scoped_connection(
+        tenant_id=tenant_token,
+        workspace_id=workspace_token,
+    ) as connection:
+        if connection is None:
+            # Phase Fix-1: SQLite fallback — seed definitions into the local
+            # control-plane DB so fleet_create_agent works without Postgres.
+            _ensure_agent_registry_seeded_local(tenant_id=tenant_id, workspace_id=workspace_id)
+            return
+        for profile in DEFAULT_RUNTIME_PROFILES:
+            existing = await connection.fetchrow(
+                """
+                SELECT id
+                FROM runtime_profiles
+                WHERE tenant_id = $1 AND workspace_id = $2 AND slug = $3
+                LIMIT 1
+                """,
+                tenant_token,
+                workspace_token,
+                profile["slug"],
+            )
+            if existing is not None:
+                continue
+            profile_id = f"rprof_{workspace_slug}_{_slugify(profile['slug'], fallback='profile')}"
+            await connection.execute(
+                """
+                INSERT INTO runtime_profiles (
+                    id, tenant_id, workspace_id, slug, label, runtime_class, placement_mode, runtime_id, machine_id,
+                    default_execution_target, supported_capabilities, root_folder_uri, allowed_connector_scopes, status,
+                    last_seen_at, metadata, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, NULL, NULL, $8, $9::jsonb, NULL, '[]'::jsonb, $10, NULL, $11::jsonb, NOW(), NOW()
                 )
-                if existing is not None:
-                    continue
-                profile_id = f"rprof_{workspace_slug}_{_slugify(profile['slug'], fallback='profile')}"
-                await connection.execute(
-                    """
-                    INSERT INTO runtime_profiles (
-                        id, tenant_id, workspace_id, slug, label, runtime_class, placement_mode, runtime_id, machine_id,
-                        default_execution_target, supported_capabilities, root_folder_uri, allowed_connector_scopes, status,
-                        last_seen_at, metadata, created_at, updated_at
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, NULL, NULL, $8, $9::jsonb, NULL, '[]'::jsonb, $10, NULL, $11::jsonb, NOW(), NOW()
-                    )
-                    ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
-                    """,
-                    profile_id,
-                    tenant_token,
-                    workspace_token,
-                    profile["slug"],
-                    profile["label"],
-                    profile["runtime_class"],
-                    profile["placement_mode"],
-                    profile["default_execution_target"],
-                    _to_json(profile.get("supported_capabilities"), default=[]),
-                    profile["status"],
-                    _to_json(profile.get("metadata"), default={}),
-                )
+                ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
+                """,
+                profile_id,
+                tenant_token,
+                workspace_token,
+                profile["slug"],
+                profile["label"],
+                profile["runtime_class"],
+                profile["placement_mode"],
+                profile["default_execution_target"],
+                _to_json(profile.get("supported_capabilities"), default=[]),
+                profile["status"],
+                _to_json(profile.get("metadata"), default={}),
+            )
 
-            for definition in DEFAULT_AGENT_DEFINITIONS:
-                existing = await connection.fetchrow(
-                    """
-                    SELECT id, current_version_id, published_version_id
-                    FROM agent_definitions
-                    WHERE tenant_id = $1 AND workspace_id = $2 AND slug = $3
-                    LIMIT 1
-                    """,
-                    tenant_token,
-                    workspace_token,
-                    definition["slug"],
-                )
-                if existing is not None:
-                    agent_definition_id = str(existing.get("id") or "").strip()
-                else:
-                    agent_definition_id = f"agentdef_{workspace_slug}_{_slugify(definition['slug'], fallback='agent')}"
-                    await connection.execute(
-                        """
-                        INSERT INTO agent_definitions (
-                            id, tenant_id, workspace_id, slug, name, description, agent_kind, visibility, status,
-                            category, icon, created_by_user_id, current_version_id, published_version_id,
-                            source_workflow_definition_id, metadata, created_at, updated_at
-                        ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, NULL, NULL, NULL, '{}'::jsonb, NOW(), NOW()
-                        )
-                        ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
-                        """,
-                        agent_definition_id,
-                        tenant_token,
-                        workspace_token,
-                        definition["slug"],
-                        definition["name"],
-                        definition["description"],
-                        definition["agent_kind"],
-                        definition["visibility"],
-                        definition["category"],
-                        definition["icon"],
-                        _normalize_token(created_by_user_id),
-                    )
-                version_existing = await connection.fetchrow(
-                    """
-                    SELECT id
-                    FROM agent_definition_versions
-                    WHERE tenant_id = $1 AND workspace_id = $2 AND agent_definition_id = $3 AND version_number = 1
-                    LIMIT 1
-                    """,
-                    tenant_token,
-                    workspace_token,
-                    agent_definition_id,
-                )
-                version_id = str(version_existing.get("id") or "").strip() if version_existing is not None else f"{agent_definition_id}_v1"
-                if version_existing is None:
-                    await connection.execute(
-                        """
-                        INSERT INTO agent_definition_versions (
-                            id, tenant_id, workspace_id, agent_definition_id, version_number, status, manifest,
-                            compiled_workflow_version_id, capability_manifest, memory_scope_manifest, policy_manifest,
-                            placement_manifest, template_inputs_schema, metadata, created_by_user_id, created_at
-                        ) VALUES (
-                            $1, $2, $3, $4, 1, 'published', $5::jsonb, NULL, $6::jsonb, '{}'::jsonb, $7::jsonb,
-                            $8::jsonb, '{}'::jsonb, '{}'::jsonb, $9, NOW()
-                        )
-                        ON CONFLICT (agent_definition_id, version_number) DO NOTHING
-                        """,
-                        version_id,
-                        tenant_token,
-                        workspace_token,
-                        agent_definition_id,
-                        _to_json(definition.get("manifest"), default={}),
-                        _to_json(definition.get("capability_manifest"), default={}),
-                        _to_json(definition.get("policy_manifest"), default={}),
-                        _to_json(definition.get("placement_manifest"), default={}),
-                        _normalize_token(created_by_user_id),
-                    )
-                await connection.execute(
-                    """
-                    UPDATE agent_definitions
-                    SET
-                        current_version_id = COALESCE(current_version_id, $4),
-                        published_version_id = COALESCE(published_version_id, $4),
-                        updated_at = NOW()
-                    WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
-                    """,
-                    agent_definition_id,
-                    tenant_token,
-                    workspace_token,
-                    version_id,
-                )
-
-            master_definition = DEFAULT_MASTER_AGENT_DEFINITION
-            master_existing = await connection.fetchrow(
+        for definition in DEFAULT_AGENT_DEFINITIONS:
+            existing = await connection.fetchrow(
                 """
                 SELECT id, current_version_id, published_version_id
                 FROM agent_definitions
@@ -772,12 +688,12 @@ async def ensure_workspace_agent_registry_seeded(
                 """,
                 tenant_token,
                 workspace_token,
-                master_definition["slug"],
+                definition["slug"],
             )
-            if master_existing is not None:
-                master_definition_id = str(master_existing.get("id") or "").strip()
+            if existing is not None:
+                agent_definition_id = str(existing.get("id") or "").strip()
             else:
-                master_definition_id = f"agentdef_{workspace_slug}_{_slugify(master_definition['slug'], fallback='sage')}"
+                agent_definition_id = f"agentdef_{workspace_slug}_{_slugify(definition['slug'], fallback='agent')}"
                 await connection.execute(
                     """
                     INSERT INTO agent_definitions (
@@ -785,23 +701,23 @@ async def ensure_workspace_agent_registry_seeded(
                         category, icon, created_by_user_id, current_version_id, published_version_id,
                         source_workflow_definition_id, metadata, created_at, updated_at
                     ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, NULL, NULL, NULL, '{"system_agent":true,"hidden_from_catalog":true}'::jsonb, NOW(), NOW()
+                        $1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, NULL, NULL, NULL, '{}'::jsonb, NOW(), NOW()
                     )
                     ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
                     """,
-                    master_definition_id,
+                    agent_definition_id,
                     tenant_token,
                     workspace_token,
-                    master_definition["slug"],
-                    master_definition["name"],
-                    master_definition["description"],
-                    master_definition["agent_kind"],
-                    master_definition["visibility"],
-                    master_definition["category"],
-                    master_definition["icon"],
+                    definition["slug"],
+                    definition["name"],
+                    definition["description"],
+                    definition["agent_kind"],
+                    definition["visibility"],
+                    definition["category"],
+                    definition["icon"],
                     _normalize_token(created_by_user_id),
                 )
-            master_version_existing = await connection.fetchrow(
+            version_existing = await connection.fetchrow(
                 """
                 SELECT id
                 FROM agent_definition_versions
@@ -810,10 +726,10 @@ async def ensure_workspace_agent_registry_seeded(
                 """,
                 tenant_token,
                 workspace_token,
-                master_definition_id,
+                agent_definition_id,
             )
-            master_version_id = str(master_version_existing.get("id") or "").strip() if master_version_existing is not None else f"{master_definition_id}_v1"
-            if master_version_existing is None:
+            version_id = str(version_existing.get("id") or "").strip() if version_existing is not None else f"{agent_definition_id}_v1"
+            if version_existing is None:
                 await connection.execute(
                     """
                     INSERT INTO agent_definition_versions (
@@ -822,18 +738,18 @@ async def ensure_workspace_agent_registry_seeded(
                         placement_manifest, template_inputs_schema, metadata, created_by_user_id, created_at
                     ) VALUES (
                         $1, $2, $3, $4, 1, 'published', $5::jsonb, NULL, $6::jsonb, '{}'::jsonb, $7::jsonb,
-                        $8::jsonb, '{}'::jsonb, '{"system_agent":true,"hidden_from_catalog":true}'::jsonb, $9, NOW()
+                        $8::jsonb, '{}'::jsonb, '{}'::jsonb, $9, NOW()
                     )
                     ON CONFLICT (agent_definition_id, version_number) DO NOTHING
                     """,
-                    master_version_id,
+                    version_id,
                     tenant_token,
                     workspace_token,
-                    master_definition_id,
-                    _to_json(master_definition.get("manifest"), default={}),
-                    _to_json(master_definition.get("capability_manifest"), default={}),
-                    _to_json(master_definition.get("policy_manifest"), default={}),
-                    _to_json(master_definition.get("placement_manifest"), default={}),
+                    agent_definition_id,
+                    _to_json(definition.get("manifest"), default={}),
+                    _to_json(definition.get("capability_manifest"), default={}),
+                    _to_json(definition.get("policy_manifest"), default={}),
+                    _to_json(definition.get("placement_manifest"), default={}),
                     _normalize_token(created_by_user_id),
                 )
             await connection.execute(
@@ -845,50 +761,139 @@ async def ensure_workspace_agent_registry_seeded(
                     updated_at = NOW()
                 WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
                 """,
+                agent_definition_id,
+                tenant_token,
+                workspace_token,
+                version_id,
+            )
+
+        master_definition = DEFAULT_MASTER_AGENT_DEFINITION
+        master_existing = await connection.fetchrow(
+            """
+            SELECT id, current_version_id, published_version_id
+            FROM agent_definitions
+            WHERE tenant_id = $1 AND workspace_id = $2 AND slug = $3
+            LIMIT 1
+            """,
+            tenant_token,
+            workspace_token,
+            master_definition["slug"],
+        )
+        if master_existing is not None:
+            master_definition_id = str(master_existing.get("id") or "").strip()
+        else:
+            master_definition_id = f"agentdef_{workspace_slug}_{_slugify(master_definition['slug'], fallback='sage')}"
+            await connection.execute(
+                """
+                INSERT INTO agent_definitions (
+                    id, tenant_id, workspace_id, slug, name, description, agent_kind, visibility, status,
+                    category, icon, created_by_user_id, current_version_id, published_version_id,
+                    source_workflow_definition_id, metadata, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, NULL, NULL, NULL, '{"system_agent":true,"hidden_from_catalog":true}'::jsonb, NOW(), NOW()
+                )
+                ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
+                """,
                 master_definition_id,
                 tenant_token,
                 workspace_token,
-                master_version_id,
+                master_definition["slug"],
+                master_definition["name"],
+                master_definition["description"],
+                master_definition["agent_kind"],
+                master_definition["visibility"],
+                master_definition["category"],
+                master_definition["icon"],
+                _normalize_token(created_by_user_id),
             )
-
-            master_install_existing = await connection.fetchrow(
+        master_version_existing = await connection.fetchrow(
+            """
+            SELECT id
+            FROM agent_definition_versions
+            WHERE tenant_id = $1 AND workspace_id = $2 AND agent_definition_id = $3 AND version_number = 1
+            LIMIT 1
+            """,
+            tenant_token,
+            workspace_token,
+            master_definition_id,
+        )
+        master_version_id = str(master_version_existing.get("id") or "").strip() if master_version_existing is not None else f"{master_definition_id}_v1"
+        if master_version_existing is None:
+            await connection.execute(
                 """
-                SELECT wai.id
-                FROM workspace_agent_installs wai
-                INNER JOIN agent_definitions ad
-                    ON ad.id = wai.agent_definition_id
-                WHERE wai.tenant_id = $1
-                  AND wai.workspace_id = $2
-                  AND ad.agent_kind = 'master'
-                LIMIT 1
+                INSERT INTO agent_definition_versions (
+                    id, tenant_id, workspace_id, agent_definition_id, version_number, status, manifest,
+                    compiled_workflow_version_id, capability_manifest, memory_scope_manifest, policy_manifest,
+                    placement_manifest, template_inputs_schema, metadata, created_by_user_id, created_at
+                ) VALUES (
+                    $1, $2, $3, $4, 1, 'published', $5::jsonb, NULL, $6::jsonb, '{}'::jsonb, $7::jsonb,
+                    $8::jsonb, '{}'::jsonb, '{"system_agent":true,"hidden_from_catalog":true}'::jsonb, $9, NOW()
+                )
+                ON CONFLICT (agent_definition_id, version_number) DO NOTHING
                 """,
+                master_version_id,
                 tenant_token,
                 workspace_token,
+                master_definition_id,
+                _to_json(master_definition.get("manifest"), default={}),
+                _to_json(master_definition.get("capability_manifest"), default={}),
+                _to_json(master_definition.get("policy_manifest"), default={}),
+                _to_json(master_definition.get("placement_manifest"), default={}),
+                _normalize_token(created_by_user_id),
             )
-            if master_install_existing is None:
-                await connection.execute(
-                    """
-                    INSERT INTO workspace_agent_installs (
-                        id, tenant_id, workspace_id, agent_definition_id, agent_definition_version_id, installed_by_user_id,
-                        install_scope, owner_user_id, thread_id, label, status, enabled, runtime_profile_id, compiled_workflow_version_id,
-                        root_folder_uri, tool_toggles, folder_grants, connector_bindings, memory_scope_overrides,
-                        policy_context_overrides, metadata, created_at, updated_at
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6,
-                        'workspace', NULL, NULL, $7, 'active', TRUE, $8, NULL,
-                        NULL, '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
-                        '{"trust_mode":"guarded","session_mode":"copilot"}'::jsonb, '{"system_agent":true,"hidden_from_agents_dashboard":true}'::jsonb, NOW(), NOW()
-                    )
-                    """,
-                    f"ainstall_{workspace_slug}_sage",
-                    tenant_token,
-                    workspace_token,
-                    master_definition_id,
-                    master_version_id,
-                    _normalize_token(created_by_user_id),
-                    master_definition["name"],
-                    f"rprof_{workspace_slug}_empyralis-cloud",
+        await connection.execute(
+            """
+            UPDATE agent_definitions
+            SET
+                current_version_id = COALESCE(current_version_id, $4),
+                published_version_id = COALESCE(published_version_id, $4),
+                updated_at = NOW()
+            WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
+            """,
+            master_definition_id,
+            tenant_token,
+            workspace_token,
+            master_version_id,
+        )
+
+        master_install_existing = await connection.fetchrow(
+            """
+            SELECT wai.id
+            FROM workspace_agent_installs wai
+            INNER JOIN agent_definitions ad
+                ON ad.id = wai.agent_definition_id
+            WHERE wai.tenant_id = $1
+              AND wai.workspace_id = $2
+              AND ad.agent_kind = 'master'
+            LIMIT 1
+            """,
+            tenant_token,
+            workspace_token,
+        )
+        if master_install_existing is None:
+            await connection.execute(
+                """
+                INSERT INTO workspace_agent_installs (
+                    id, tenant_id, workspace_id, agent_definition_id, agent_definition_version_id, installed_by_user_id,
+                    install_scope, owner_user_id, thread_id, label, status, enabled, runtime_profile_id, compiled_workflow_version_id,
+                    root_folder_uri, tool_toggles, folder_grants, connector_bindings, memory_scope_overrides,
+                    policy_context_overrides, metadata, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    'workspace', NULL, NULL, $7, 'active', TRUE, $8, NULL,
+                    NULL, '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                    '{"trust_mode":"guarded","session_mode":"copilot"}'::jsonb, '{"system_agent":true,"hidden_from_agents_dashboard":true}'::jsonb, NOW(), NOW()
                 )
+                """,
+                f"ainstall_{workspace_slug}_sage",
+                tenant_token,
+                workspace_token,
+                master_definition_id,
+                master_version_id,
+                _normalize_token(created_by_user_id),
+                master_definition["name"],
+                f"rprof_{workspace_slug}_empyralis-cloud",
+            )
 
 
 async def list_runtime_profiles(
