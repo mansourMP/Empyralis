@@ -776,6 +776,7 @@ def start_oauth(
     surface: str | None,
     request: Request,
     user_id: str = "",
+    extra_state: dict | None = None,
 ) -> Dict[str, Any]:
     config = _provider_config(provider)
     client_id, _client_secret = ensure_oauth_configured(provider)
@@ -786,6 +787,12 @@ def start_oauth(
         "surface": str(surface or "sage").strip() or "sage",
         "user_id": str(user_id or "").strip(),
     }
+    if extra_state:
+        # Fleet agent-connectors: thread agent_install_id through the redirect
+        # round-trip so the callback can file the credential at the agent's
+        # project scope instead of bare workspace scope. Optional — every other
+        # caller of this shared OAuth pipeline is unaffected.
+        state_payload.update({k: str(v) for k, v in extra_state.items() if v})
     code_verifier = ""
     if config.auth_method == "pkce":
         state_payload["pkce_nonce"] = _new_pkce_nonce()
@@ -1684,11 +1691,23 @@ async def complete_oauth_callback(
             raise HTTPException(status_code=409, detail="This connection does not have a one-click OAuth setup yet.")
         # Map OAuth provider → vault connector name (Discord OAuth == discord_bot connector).
         vault_connector = "discord_bot" if normalized_provider == "discord" else normalized_provider
-        result = await connectors_actions.create_connector_vault(
-            ConnectorCreate(
-                label=_connector_label(normalized_provider),
-                connector=vault_connector,
+
+        # Fleet agent-connectors: when the OAuth start carried an agent_install_id
+        # (state_payload, threaded through the redirect round-trip), file the
+        # credential at that agent's project scope and subscribe the agent —
+        # same two-part truth (project credential + enabled binding) as the
+        # manual-fields connect path. Otherwise unchanged: a bare workspace
+        # credential, as every other caller of this shared pipeline expects.
+        agent_install_id = str(payload.get("agent_install_id") or "").strip()
+        if agent_install_id:
+            from server_modules import control_plane_repository
+            tenant_id = await control_plane_repository.resolve_tenant_id_for_workspace(workspace_id, default="default")
+            result = await connectors_actions.store_agent_connector_credential(
                 workspace_id=workspace_id,
+                agent_install_id=agent_install_id,
+                tenant_id=tenant_id,
+                provider=vault_connector,
+                label=_connector_label(normalized_provider),
                 credentials=credentials,
                 metadata={
                     "source": "connection_oauth",
@@ -1696,7 +1715,20 @@ async def complete_oauth_callback(
                     "surface": str(payload.get("surface") or "sage").strip() or "sage",
                 },
             )
-        )
+        else:
+            result = await connectors_actions.create_connector_vault(
+                ConnectorCreate(
+                    label=_connector_label(normalized_provider),
+                    connector=vault_connector,
+                    workspace_id=workspace_id,
+                    credentials=credentials,
+                    metadata={
+                        "source": "connection_oauth",
+                        "oauth_provider": normalized_provider,
+                        "surface": str(payload.get("surface") or "sage").strip() or "sage",
+                    },
+                )
+            )
         # ── Phase U: Auto-register MCP servers after OAuth credential is stored ──
         credential_id = str(result.get("id") or "").strip()
         mcp_result = await _register_mcp_servers_for_provider(
@@ -1711,6 +1743,7 @@ async def complete_oauth_callback(
             "workspace_id": workspace_id,
             "connector": result,
             "mcp": mcp_result,
+            "agent_install_id": agent_install_id or None,
         }
     except HTTPException:
         raise

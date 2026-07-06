@@ -780,6 +780,155 @@ a.fleet-breadcrumb:hover {
   margin-top: 8px;
 }
 
+/* ── Connector picker: project-scoped reuse-or-separate (UI Phase 1) ─────── */
+
+.fleet-connector-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fleet-connector-picker-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+
+.fleet-connector-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fleet-connector-picker-icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-inset);
+  flex-shrink: 0;
+}
+
+.fleet-connector-picker-icon img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.fleet-connector-picker-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.fleet-connector-picker-summary {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.fleet-connector-picker-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-left: 34px;
+}
+
+.fleet-connector-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-rail);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease-out, background 150ms ease-out;
+}
+
+.fleet-connector-picker-row:hover {
+  border-color: var(--border-strong); /* accent border is reserved for selected */
+  background: var(--bg-card-hover);
+}
+
+.fleet-connector-picker-row.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fleet-connector-picker-row:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.fleet-connector-picker-radio {
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  border: 1.5px solid var(--border-strong);
+  flex-shrink: 0;
+  position: relative;
+}
+
+.fleet-connector-picker-row.is-selected .fleet-connector-picker-radio {
+  border-color: var(--accent);
+}
+
+.fleet-connector-picker-row.is-selected .fleet-connector-picker-radio::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.fleet-connector-picker-account {
+  flex: 1;
+  color: var(--text-primary);
+}
+
+.fleet-connector-picker-tag {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.fleet-connector-picker-connect-different {
+  align-self: flex-start;
+  margin-left: 34px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
+}
+
+.fleet-connector-picker-connect-different:hover {
+  color: var(--text-primary);
+}
+
+.fleet-connector-picker-connect-btn {
+  align-self: flex-start;
+  margin-left: 34px;
+}
+
 /* ── Sage operator row (the ONE accent fill on the page) ─────────────────── */
 
 .fleet-sage {

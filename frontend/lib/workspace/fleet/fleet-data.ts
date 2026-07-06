@@ -193,25 +193,60 @@ export function useFleetAgentConnectors(workspaceId: string, agentId: string | n
   const [connectors, setConnectors] = useState<FleetConnector[]>([]);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
+  const refresh = useCallback(async () => {
     if (!agentId) { setConnectors([]); return; }
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const res = await fetch(
-          `/api/w/${workspaceId}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}`
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) setConnectors(data.connectors || []);
-      } catch { if (!cancelled) setConnectors([]); }
-      finally { if (!cancelled) setLoading(false); }
-    })();
-    return () => { cancelled = true; };
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/w/${workspaceId}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setConnectors(data.connectors || []);
+    } catch { setConnectors([]); }
+    finally { setLoading(false); }
   }, [workspaceId, agentId]);
 
-  return { connectors, loading };
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { connectors, loading, refresh };
+}
+
+export type ProjectConnector = {
+  id: string;
+  provider: string;
+  label: string | null;
+  account_label: string | null;
+  created_at: string | null;
+  subscribed_agent_ids: string[];
+};
+
+export function useFleetProjectConnectors(workspaceId: string, projectId: string | null) {
+  const [projectConnectors, setProjectConnectors] = useState<ProjectConnector[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!projectId) { setProjectConnectors([]); return; }
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}/connectors`,
+        { credentials: "include" }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setProjectConnectors(Array.isArray(data.connectors) ? data.connectors : []);
+    } catch { setProjectConnectors([]); }
+    finally { setLoading(false); }
+  }, [workspaceId, projectId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { projectConnectors, loading, refresh };
 }
 
 export function useFleetAgentTools(workspaceId: string, agentId: string | null) {

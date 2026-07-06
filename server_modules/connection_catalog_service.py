@@ -1212,6 +1212,28 @@ def _vault_connector_ids(workspace_id: str, agent_install_id: Optional[str] = No
     return out
 
 
+def _vault_credential_provider_tokens(workspace_id: str) -> Dict[str, str]:
+    """credential_id -> provider/connector token, for every vault credential
+    that actually exists in the workspace (regardless of which agent owns it).
+    Used to verify a binding's binding.credential_id still points at a live
+    credential — under the project-scoped reuse model (UI Phase 1), a binding
+    can legitimately reference a credential owned by a DIFFERENT agent, so
+    checking "this agent's own vault rows" is no longer sufficient (or correct)."""
+    try:
+        rows = runtime_common.list_vault_connectors(workspace_id=workspace_id)
+    except Exception:
+        return {}
+    out: Dict[str, str] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        cid = _text(row.get("id"))
+        token = _token(row.get("connector") or row.get("provider"))
+        if cid and token:
+            out[cid] = token
+    return out
+
+
 def _connector_aliases(item: Dict[str, Any]) -> set[str]:
     """The set of tokens (item id + connector/provider aliases) used to match a
     catalog item against vault credential provider tokens and binding keys."""
@@ -1469,10 +1491,15 @@ async def agent_status_items(
 
     Truth for connectors and channels:
 
-        connected(agent, X) == (a vault credential scoped to agent exists)
-                               AND (an enabled binding row exists)
+        connected(agent, X) == (an enabled binding row exists)
+                               AND (its binding.credential_id points at a
+                                    credential that actually exists)
 
-    Both conditions must hold. A workspace/global-scoped ("unassigned legacy")
+    UI Phase 1: a credential lives at PROJECT scope and agents SUBSCRIBE to it
+    via the binding — the binding is the one source of truth for "is this
+    agent using this connector," not whether the credential's own
+    agent_install_id happens to match (it may be owned by a different agent in
+    the same project). A workspace/global-scoped ("unassigned legacy")
     credential with no agent binding is therefore NOT connected for any agent.
     """
     resolved_agent = str(agent_id or "").strip()
@@ -1489,10 +1516,11 @@ async def agent_status_items(
         selected_gateway_id=selected_gateway_id,
     )
 
-    # Condition 1: vault credentials scoped to THIS agent (legacy/unassigned excluded).
-    agent_vault_ids = _vault_connector_ids(workspace_id, agent_install_id=resolved_agent)
+    # Every vault credential that actually exists in the workspace, by id —
+    # guards against a binding whose credential_id points at something deleted.
+    credential_tokens_by_id = _vault_credential_provider_tokens(workspace_id)
 
-    # Condition 2: enabled binding rows for this agent.
+    # Enabled binding rows for this agent — the subscription itself.
     from server_modules import agent_bindings_repository as bindings
     connector_binding_rows = await bindings.list_agent_connector_bindings(
         tenant_id=resolved_tenant, workspace_id=workspace_id,
@@ -1504,14 +1532,20 @@ async def agent_status_items(
     )
     enabled_connector_keys = {_token(b.get("key")) for b in connector_binding_rows}
     enabled_channel_keys = {_token(b.get("key")) for b in channel_binding_rows}
+    # Connector keys whose binding still resolves to a live credential.
+    subscribed_live_keys = {
+        _token(b.get("key"))
+        for b in connector_binding_rows
+        if str((b.get("binding") or {}).get("credential_id") or "").strip() in credential_tokens_by_id
+    }
 
     for item in base:
         lane = _token(item.get("lane"))
         aliases = _connector_aliases(item)
         if lane == LANE_WORK_APP_CONNECTOR:
-            has_credential = bool(aliases & agent_vault_ids)
             has_binding = bool(aliases & enabled_connector_keys)
-            item["connected"] = has_credential and has_binding
+            has_live_credential = bool(aliases & subscribed_live_keys)
+            item["connected"] = has_binding and has_live_credential
             item["configured"] = item["connected"]
             item["health_status"] = "healthy" if item["connected"] else "not_configured"
         elif lane in {LANE_SAGE_PERSONAL_CHANNEL, LANE_STUDIO_BUSINESS_CHANNEL}:

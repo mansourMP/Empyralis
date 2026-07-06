@@ -211,14 +211,34 @@ def _raise_catalog_error(error: Exception) -> None:
     raise HTTPException(status_code=500, detail="Connection operation failed.") from error
 
 
-def _oauth_completion_url(request: Request, *, workspace_id: str, provider: str, error: Optional[str] = None, surface: Optional[str] = None) -> str:
-    # Map surface to frontend section: "sage" → channels, "studio" / None → apps
-    section = "channels" if str(surface or "").strip().lower() == "sage" else "apps"
-    query: Dict[str, str] = {"section": section}
+def _oauth_completion_url(
+    request: Request,
+    *,
+    workspace_id: str,
+    provider: str,
+    error: Optional[str] = None,
+    surface: Optional[str] = None,
+    agent_install_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> str:
+    query: Dict[str, str] = {}
     if error:
         query["connection_error"] = error
     else:
         query["connected"] = provider
+    # Fleet agent-connectors: send the browser back to the agent's own
+    # Connectors tab (not the generic workspace integrations page) when this
+    # OAuth round-trip was started from the wizard/tab picker.
+    if agent_install_id and project_id:
+        return (
+            f"{connection_oauth_service.request_origin(request)}"
+            f"/w/{urlparse.quote(str(workspace_id or 'ws-1').strip() or 'ws-1')}"
+            f"/projects/{urlparse.quote(str(project_id).strip())}"
+            f"/agents/{urlparse.quote(str(agent_install_id).strip())}/connectors?"
+            f"{urlparse.urlencode(query)}"
+        )
+    # Map surface to frontend section: "sage" → channels, "studio" / None → apps
+    query["section"] = "channels" if str(surface or "").strip().lower() == "sage" else "apps"
     return (
         f"{connection_oauth_service.request_origin(request)}"
         f"/w/{urlparse.quote(str(workspace_id or 'ws-1').strip() or 'ws-1')}/integrations?"
@@ -413,6 +433,11 @@ async def start_connection_setup(
             except HTTPException:
                 oauth_provider = ""
             if oauth_provider:
+                # Fleet agent-connectors: the wizard/Connectors-tab picker passes
+                # agent_install_id in metadata so the callback can file the
+                # credential at that agent's project scope. Absent for every
+                # other caller of this shared OAuth start.
+                agent_install_id = str((body.metadata or {}).get("agent_install_id") or "").strip()
                 # OAuth start — session already validated above; no extra role/capability gate needed.
                 return {
                     "connection": item,
@@ -422,6 +447,7 @@ async def start_connection_setup(
                         surface=body.surface,
                         request=request,
                         user_id=_user_id(current_user) or "",
+                        extra_state={"agent_install_id": agent_install_id} if agent_install_id else None,
                     ),
                 }
         return {
@@ -550,11 +576,26 @@ async def complete_connection_oauth_callback(
         )
         provider_id = str(payload.get("provider") or provider).strip() or provider
         surface = str(state_payload.get("surface") or "sage").strip() or "sage"
-        _logger.warning("OAUTH_CALLBACK_SUCCESS provider=%s redirect_to=%s", provider, _oauth_completion_url(request, workspace_id=workspace_id, provider=provider_id, surface=surface))
-        return RedirectResponse(
-            _oauth_completion_url(request, workspace_id=workspace_id, provider=provider_id, surface=surface),
-            status_code=303,
+
+        agent_install_id = str(payload.get("agent_install_id") or "").strip()
+        project_id = ""
+        if agent_install_id:
+            try:
+                from server_modules import agent_registry_repository, control_plane_repository
+                tenant_id = await control_plane_repository.resolve_tenant_id_for_workspace(workspace_id, default="default")
+                bundle = await agent_registry_repository.get_workspace_agent_install_bundle(
+                    agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+                )
+                project_id = str((bundle or {}).get("project_id") or "").strip()
+            except Exception:
+                project_id = ""
+
+        completion_url = _oauth_completion_url(
+            request, workspace_id=workspace_id, provider=provider_id, surface=surface,
+            agent_install_id=agent_install_id or None, project_id=project_id or None,
         )
+        _logger.warning("OAUTH_CALLBACK_SUCCESS provider=%s redirect_to=%s", provider, completion_url)
+        return RedirectResponse(completion_url, status_code=303)
     except HTTPException as exc:
         _logger.error(
             "OAUTH_CALLBACK_ERROR provider=%s status=%s detail=%s traceback=%s",

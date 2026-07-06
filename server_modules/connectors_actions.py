@@ -2412,11 +2412,32 @@ async def test_vault_credential(credential_id: str, workspace_id: Optional[str] 
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-# ── Phase 2: agent-scoped connector credentials ─────────────────────────────
-# A connector connected inside an agent's Connectors tab belongs to THAT agent
-# only. The credential carries the agent's install id, and an enabled binding
-# row is written so the two-part truth (scoped credential AND enabled binding)
-# holds. workspace_id is kept for tenant/workspace visibility.
+# ── UI Phase 1: project-scoped connector credentials ────────────────────────
+# A connector credential lives at PROJECT scope (project_id). Agents subscribe
+# to it via an agent_connector_bindings row rather than each holding a private
+# copy. An agent may still connect its OWN separate credential for the same
+# provider — that credential is project-scoped too, just subscribed to by only
+# that one agent (binding.credential_id points at it and nothing else does).
+# agent_install_id is kept on the credential row as "who connected it"
+# provenance only — it is NOT the access-control boundary. The boundary is:
+# an enabled agent_connector_bindings row whose binding.credential_id matches.
+
+async def _resolve_agent_project_id(
+    *, tenant_id: str, workspace_id: str, agent_install_id: str,
+) -> str:
+    """The project an agent belongs to — the scope a newly-connected credential
+    should be filed under. Empty string if the agent/project can't be resolved
+    (credential is then created with project_id=None, i.e. unscoped)."""
+    from server_modules import agent_registry_repository as agent_registry
+
+    try:
+        bundle = await agent_registry.get_workspace_agent_install_bundle(
+            agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+        )
+    except Exception:
+        return ""
+    return str((bundle or {}).get("project_id") or "").strip()
+
 
 async def store_agent_connector_credential(
     *,
@@ -2430,6 +2451,7 @@ async def store_agent_connector_credential(
     mode: str = "connector",
     metadata: Optional[Dict[str, Any]] = None,
     connector_key: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     provider = str(provider or "").strip().lower()
     agent_install_id = str(agent_install_id or "").strip()
@@ -2443,6 +2465,10 @@ async def store_agent_connector_credential(
     if not isinstance(credentials, dict) or not credentials:
         raise HTTPException(status_code=400, detail="credentials payload is required.")
 
+    resolved_project_id = str(project_id or "").strip() or await _resolve_agent_project_id(
+        tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_install_id,
+    )
+
     now = _utc_now_iso()
     entry_metadata = {
         **_provider_public_metadata(provider, credentials),
@@ -2453,7 +2479,8 @@ async def store_agent_connector_credential(
         "label": str(label or provider).strip(),
         "provider": provider,
         "workspace_id": workspace_id,
-        "agent_install_id": agent_install_id,   # Phase 2 canonical agent scope
+        "agent_install_id": agent_install_id,   # provenance only — see module note above
+        "project_id": resolved_project_id or None,
         "account_label": str(account_label or "default").strip(),
         "mode": mode,
         "metadata": entry_metadata,
@@ -2479,35 +2506,129 @@ async def store_agent_connector_credential(
         "label": entry["label"],
         "workspace_id": workspace_id,
         "agent_install_id": agent_install_id,
+        "project_id": resolved_project_id or None,
         "connector_key": str(connector_key or provider).strip(),
         "binding_enabled": bool(binding and binding.get("enabled")),
     }
 
 
-async def delete_agent_connector_credential(
+async def subscribe_agent_to_project_credential(
+    *,
+    workspace_id: str,
+    agent_install_id: str,
+    credential_id: str,
+    tenant_id: str = "default",
+    connector_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Reuse path: subscribe an agent to an EXISTING project-scoped credential —
+    one click, no re-auth. Writes only a binding row; the credential is
+    untouched. Refuses if the credential isn't in this agent's project (the
+    isolation boundary must hold even on the reuse path)."""
+    workspace_id = _normalize_workspace_id(workspace_id)
+    agent_install_id = str(agent_install_id or "").strip()
+    credential_id = str(credential_id or "").strip()
+    if not agent_install_id:
+        raise HTTPException(status_code=400, detail="agent_install_id is required.")
+    if not credential_id:
+        raise HTTPException(status_code=400, detail="credential_id is required.")
+
+    credential = get_credential(credential_id)
+    if not isinstance(credential, dict):
+        raise HTTPException(status_code=404, detail="Credential not found.")
+    if not _workspace_visible(credential.get("workspace_id"), workspace_id):
+        raise HTTPException(status_code=403, detail="Credential is not accessible for this workspace.")
+
+    agent_project_id = await _resolve_agent_project_id(
+        tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_install_id,
+    )
+    credential_project_id = str(credential.get("project_id") or "").strip()
+    if not agent_project_id or credential_project_id != agent_project_id:
+        raise HTTPException(status_code=403, detail="Credential does not belong to this agent's project.")
+
+    provider = str(credential.get("provider") or "").strip().lower()
+    from server_modules import agent_bindings_repository as bindings
+    binding = await bindings.upsert_connector_binding(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_install_id=agent_install_id,
+        connector_key=str(connector_key or provider).strip(),
+        enabled=True,
+        binding={"credential_id": credential_id},
+    )
+    return {
+        "id": credential_id,
+        "provider": provider,
+        "label": credential.get("label"),
+        "account_label": credential.get("account_label"),
+        "workspace_id": workspace_id,
+        "agent_install_id": agent_install_id,
+        "project_id": credential_project_id,
+        "connector_key": str(connector_key or provider).strip(),
+        "binding_enabled": bool(binding and binding.get("enabled")),
+    }
+
+
+async def list_project_connectors(
+    *,
+    workspace_id: str,
+    project_id: str,
+    tenant_id: str = "default",
+) -> List[Dict[str, Any]]:
+    """Every connector credential scoped to this project, each annotated with
+    the agent_install_ids currently subscribed to it (via an enabled
+    agent_connector_bindings row). Backs the reuse-or-separate picker."""
+    workspace_id = _normalize_workspace_id(workspace_id)
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        return []
+
+    from server_modules import agent_bindings_repository as bindings
+    all_bindings = await bindings.list_workspace_connector_bindings(
+        tenant_id=tenant_id, workspace_id=workspace_id, enabled_only=True,
+    )
+    subscribers_by_credential: Dict[str, List[str]] = {}
+    for b in all_bindings:
+        cred_id = str((b.get("binding") or {}).get("credential_id") or "").strip()
+        if cred_id:
+            subscribers_by_credential.setdefault(cred_id, []).append(str(b.get("agent_install_id") or ""))
+
+    items: List[Dict[str, Any]] = []
+    for item in list_credentials():
+        if str(item.get("project_id") or "").strip() != project_id:
+            continue
+        if not _workspace_visible(item.get("workspace_id"), workspace_id):
+            continue
+        cred_id = str(item.get("id") or "").strip()
+        items.append({
+            "id": cred_id,
+            "provider": str(item.get("provider") or "").strip().lower(),
+            "label": item.get("label"),
+            "account_label": item.get("account_label"),
+            "created_at": item.get("created_at"),
+            "subscribed_agent_ids": subscribers_by_credential.get(cred_id, []),
+        })
+    items.sort(key=lambda x: (str(x.get("provider") or ""), str(x.get("created_at") or "")))
+    return items
+
+
+async def unsubscribe_agent_connector(
     *,
     workspace_id: str,
     agent_install_id: str,
     connector_key: str,
     tenant_id: str = "default",
 ) -> Dict[str, Any]:
-    """Remove an agent's connector: delete the enabled binding and any vault
-    credentials for that provider scoped to this agent in this workspace."""
+    """Remove an agent's subscription to a connector: deletes ONLY the binding
+    row. The project-scoped credential is untouched — other agents (or this
+    one, later) may still be subscribed to it. This is a behavior change from
+    the old per-agent model, where disconnecting deleted the credential
+    outright; that was safe only because credentials used to be private to one
+    agent. There was no live caller of the old delete-the-credential behavior
+    (the fleet agent-connectors UI never called this endpoint), so nothing
+    that depended on hard-delete semantics is broken by this change."""
     workspace_id = _normalize_workspace_id(workspace_id)
     agent_install_id = str(agent_install_id or "").strip()
     connector_key = str(connector_key or "").strip().lower()
-
-    # This can match MORE than one credential — delete each matching row
-    # individually (single-row DELETEs), preserving the removed count.
-    removed = 0
-    for item in list_credentials():
-        item_agent = str(item.get("agent_install_id") or item.get("agent_id") or "").strip()
-        same_provider = str(item.get("provider") or "").strip().lower() == connector_key
-        same_agent = item_agent == agent_install_id
-        same_ws = _workspace_visible(item.get("workspace_id"), workspace_id)
-        if same_provider and same_agent and same_ws:
-            delete_credential(str(item.get("id") or "").strip())
-            removed += 1
 
     from server_modules import agent_bindings_repository as bindings
     binding_deleted = await bindings.delete_connector_binding(
@@ -2516,4 +2637,4 @@ async def delete_agent_connector_credential(
         agent_install_id=agent_install_id,
         connector_key=connector_key,
     )
-    return {"status": "ok", "credentials_removed": removed, "binding_deleted": binding_deleted}
+    return {"status": "ok", "binding_deleted": binding_deleted}

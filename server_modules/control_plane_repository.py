@@ -3748,6 +3748,17 @@ async def ensure_control_plane_schema() -> Any:
             "CREATE INDEX IF NOT EXISTS idx_vault_credentials_agent "
             "ON vault_credentials(agent_install_id) WHERE agent_install_id IS NOT NULL"
         )
+        # ── UI Phase 1: project-scoped connector credentials — a credential now
+        # lives at project scope; agents subscribe to it via agent_connector_bindings
+        # instead of each holding a private copy. ──
+        await pool.execute(
+            "ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS "
+            "project_id TEXT REFERENCES projects(id) ON DELETE SET NULL"
+        )
+        await pool.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vault_credentials_project "
+            "ON vault_credentials(project_id) WHERE project_id IS NOT NULL"
+        )
         # ── Phase 5B: ONE TENANT PER WORKSPACE is the law. A workspace's installs
         # may never span tenants. Enforced by a Postgres EXCLUSION constraint —
         # the only constraint type that can express "no two rows share a

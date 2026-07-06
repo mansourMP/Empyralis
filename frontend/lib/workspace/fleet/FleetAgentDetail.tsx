@@ -30,10 +30,10 @@ import {
   useFleetAgentTools,
   type FleetAgent,
   type FleetChannel,
-  type FleetConnector,
 } from "./fleet-data";
 import { deriveStatus, derivePlacement, statusClass } from "./fleet-presentation";
-import { CHANNEL_ICONS, CONNECTOR_ICONS } from "./fleet-icons";
+import { CHANNEL_ICONS } from "./fleet-icons";
+import { ConnectorPicker } from "./ConnectorPicker";
 import { GatewayPairPanel } from "../../gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
@@ -843,200 +843,23 @@ export function ChannelsTab({
 function ConnectorsTab({
   workspaceId, agentId, agent,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
-  const { connectors, loading } = useFleetAgentConnectors(workspaceId, agentId);
+  const projectId = agent?.project_id || "";
 
-  if (loading) {
+  if (!agent) {
     return <div className="fleet-activity-skeleton" aria-label="Loading connectors"><div className="fleet-skeleton-bar" style={{ width: "70%" }} /></div>;
   }
 
-  if (connectors.length === 0) {
+  if (!projectId) {
     return (
       <EmptyState
         icon={Plug}
-        title="No connectors available"
-        body="No MCP or OAuth connectors are registered for this workspace. Connect the first one from the workspace Connectors page."
-        action="Open connectors"
-        onAction={() => window.location.href = `/w/${encodeURIComponent(workspaceId)}/integrations`}
+        title="No project assigned"
+        body="This agent has no project — connectors are shared per project. Assign a project before connecting apps."
       />
     );
   }
 
-  return <ConnectorGrid workspaceId={workspaceId} connectors={connectors} />;
-}
-
-function connectorPill(c: FleetConnector): { label: string; tone: "connected" | "reconnect" | "setup" } {
-  if (c.connected && c.healthStatus && c.healthStatus !== "healthy" && c.healthStatus !== "unknown") {
-    return { label: "Reconnect", tone: "reconnect" };
-  }
-  if (c.connected) return { label: "Connected", tone: "connected" };
-  return { label: "Set up", tone: "setup" };
-}
-
-function fieldLabel(field: string): string {
-  return field.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-}
-
-function ConnectorGrid({ workspaceId, connectors }: { workspaceId: string; connectors: FleetConnector[] }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [fields, setFields] = useState<string[]>([]);
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [saved, setSaved] = useState<string | null>(null);
-
-  const startSetup = useCallback(async (c: FleetConnector) => {
-    setBusy(c.id);
-    setError(null);
-    setSaved(null);
-    try {
-      const res = await fetch(`/api/connections/${encodeURIComponent(c.id)}/setup/start`, {
-        method: "POST",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ workspace_id: workspaceId, surface: "apps" }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
-      }
-      if (data?.authorization_url) {
-        window.location.href = data.authorization_url;
-        return;
-      }
-      const requiredFields: string[] = data?.auth_required_fields?.length
-        ? data.auth_required_fields
-        : c.authRequiredFields;
-      if (requiredFields && requiredFields.length > 0) {
-        setFields(requiredFields);
-        setValues({});
-        setExpanded(c.id);
-        return;
-      }
-      throw new Error("This connector has no inline setup path yet — open the workspace Connectors page.");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not start setup.");
-      setExpanded(c.id);
-    } finally {
-      setBusy(null);
-    }
-  }, [workspaceId]);
-
-  const saveCredentials = useCallback(async (c: FleetConnector) => {
-    setBusy(c.id);
-    setError(null);
-    try {
-      const res = await fetch("/api/connectors/vault", {
-        method: "POST",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          connector: c.id,
-          label: c.label,
-          credentials: values,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
-      }
-      setSaved(c.id);
-      setExpanded(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save credentials.");
-    } finally {
-      setBusy(null);
-    }
-  }, [workspaceId, values]);
-
-  return (
-    <div>
-      <div className="fleet-connector-grid">
-        {connectors.map((c) => {
-          const pill = connectorPill(c);
-          const icon = CONNECTOR_ICONS[c.id];
-          const isExpanded = expanded === c.id;
-          return (
-            <button
-              key={c.id}
-              type="button"
-              className={`fleet-connector-card${isExpanded ? " fleet-connector-card--active" : ""}`}
-              onClick={() => {
-                if (pill.tone === "connected") {
-                  setExpanded(isExpanded ? null : c.id);
-                  return;
-                }
-                void startSetup(c);
-              }}
-              disabled={busy === c.id}
-            >
-              <span className="fleet-connector-card-icon">
-                {icon ? <img src={icon} alt="" width={28} height={28} /> : c.label.charAt(0)}
-              </span>
-              <span className="fleet-connector-card-label">{c.label}</span>
-              <span className="fleet-connector-card-summary">{c.summary}</span>
-              <span className={`fleet-connector-card-pill fleet-connector-card-pill--${pill.tone}`}>
-                {pill.tone === "connected" ? <span className="fleet-channel-card-dot" /> : null}
-                {busy === c.id ? "Working…" : pill.label}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {expanded && (() => {
-        const c = connectors.find((item) => item.id === expanded);
-        if (!c) return null;
-        if (c.connected) {
-          return (
-            <div className="fleet-channel-expand">
-              <p className="fleet-channel-expand-hint">
-                {c.label} is connected and healthy. Manage credentials from the workspace Connectors page.
-              </p>
-              <button
-                type="button"
-                className="fleet-btn"
-                onClick={() => window.location.href = `/w/${encodeURIComponent(workspaceId)}/integrations`}
-              >
-                Open Connectors
-              </button>
-            </div>
-          );
-        }
-        return (
-          <div className="fleet-channel-expand">
-            {fields.length > 0 ? (
-              <>
-                <p className="fleet-channel-expand-hint">Enter credentials for {c.label}.</p>
-                {fields.map((field) => (
-                  <label key={field} className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
-                    <span>{fieldLabel(field)}</span>
-                    <input
-                      type={/key|token|secret|password/i.test(field) ? "password" : "text"}
-                      value={values[field] || ""}
-                      onChange={(e) => setValues((cur) => ({ ...cur, [field]: e.currentTarget.value }))}
-                      autoComplete="off"
-                    />
-                  </label>
-                ))}
-                <button
-                  type="button"
-                  className="fleet-btn fleet-btn--accent"
-                  onClick={() => void saveCredentials(c)}
-                  disabled={busy === c.id}
-                >
-                  {busy === c.id ? "Saving…" : "Save"}
-                </button>
-              </>
-            ) : (
-              <p className="fleet-channel-expand-error">{error || "Setup could not start."}</p>
-            )}
-            {error && fields.length > 0 && <p className="fleet-channel-expand-error">{error}</p>}
-          </div>
-        );
-      })()}
-    </div>
-  );
+  return <ConnectorPicker workspaceId={workspaceId} projectId={projectId} agentId={agentId} />;
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────

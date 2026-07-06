@@ -6,12 +6,13 @@ import { Check, Loader2, Lock, X } from "lucide-react";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, providerLabel } from "./fleet-provider-constants";
 import { useFleetProjects } from "./fleet-data";
+import { ConnectorPicker } from "./ConnectorPicker";
 
 type CapabilityPreset = "standard" | "knowledge";
 type WizardProviderMode = "platform" | "byok" | "subscription";
 type ChannelChoice = "none" | "telegram_pool" | "byo";
 
-const STEP_LABELS = ["Name", "Project", "Type", "Model", "Channel"];
+const STEP_LABELS = ["Name", "Project", "Type", "Model", "Connectors", "Channel"];
 
 const PRESET_OPTIONS: { id: CapabilityPreset; label: string; body: string; note?: string }[] = [
   {
@@ -141,7 +142,7 @@ export function FleetCreateAgentWizard({
     }
   }
 
-  // Step 5 → finish. Channel BYO/pool setup continues in the Channels tab.
+  // Step 6 → finish. Channel BYO/pool setup continues in the Channels tab.
   function finish() {
     if (agentId) onCreated(agentId);
   }
@@ -251,6 +252,18 @@ export function FleetCreateAgentWizard({
 
           {step === 5 && (
             <div className="fleet-wizard-panel">
+              <div className="fleet-detail-section-title">Connect any apps it needs</div>
+              <p className="fleet-wizard-hint">
+                Reuse an account this project already has, connect a different one, or skip for now — you can always add connectors later from the agent's Connectors tab.
+              </p>
+              {agentId && projectId ? (
+                <ConnectorPicker workspaceId={workspaceId} projectId={projectId} agentId={agentId} />
+              ) : null}
+            </div>
+          )}
+
+          {step === 6 && (
+            <div className="fleet-wizard-panel">
               <div className="fleet-detail-section-title">How do people reach it?</div>
               <div className="fleet-wizard-options">
                 <button type="button" className={`fleet-wizard-option${channel === "none" ? " is-selected" : ""}`} onClick={() => setChannel("none")}>
@@ -293,6 +306,9 @@ export function FleetCreateAgentWizard({
             </button>
           )}
           {step === 5 && (
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setStep(6)} disabled={busy}>Next</button>
+          )}
+          {step === 6 && (
             <button type="button" className="fleet-btn fleet-btn--accent" onClick={finish} disabled={busy}>Done</button>
           )}
         </div>

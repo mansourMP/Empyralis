@@ -468,6 +468,10 @@ class FleetConnectAgentConnectorRequest(BaseModel):
     credentials: Dict[str, Any] = Field(default_factory=dict)
     connector_key: Optional[str] = None
     account_label: str = "default"
+    credential_id: Optional[str] = Field(
+        default=None,
+        description="Reuse path: subscribe to this EXISTING project-scoped credential instead of connecting a new one. When set, provider/credentials/account_label are ignored.",
+    )
 
 
 @router.post("/api/w/{workspace_id}/fleet/agent-connectors")
@@ -477,16 +481,41 @@ async def fleet_connect_agent_connector(
     body: FleetConnectAgentConnectorRequest,
     agent_id: str = Query(..., description="Agent install ID"),
 ) -> Dict[str, Any]:
-    """Connect a connector inside an agent's Connectors tab. The credential is
-    scoped to THIS agent (carries its install id) and an enabled binding row is
-    written, so it counts as connected for this agent only."""
-    from server_modules.connectors_actions import store_agent_connector_credential
+    """Connect a connector inside an agent's Connectors tab (or the create-agent
+    wizard's Connectors step). Two paths:
 
+    - Reuse (body.credential_id set): subscribe this agent to an existing
+      project-scoped credential — one click, no re-auth.
+    - Connect new (body.credential_id absent): store a new credential at this
+      agent's project scope and subscribe this agent to it. Use "Connect
+      different" when the agent needs its own separate account for the same
+      provider.
+
+    Either way, the binding row is the isolation boundary: an agent only
+    counts as connected if it holds an enabled binding pointing at the
+    credential."""
+    tenant_id = await _resolve_tenant(workspace_id)
+
+    if body.credential_id:
+        from server_modules.connectors_actions import subscribe_agent_to_project_credential
+        try:
+            result = await subscribe_agent_to_project_credential(
+                workspace_id=workspace_id,
+                agent_install_id=agent_id,
+                credential_id=body.credential_id,
+                tenant_id=tenant_id,
+                connector_key=body.connector_key,
+            )
+            return {"ok": True, "connector": result}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    from server_modules.connectors_actions import store_agent_connector_credential
     try:
         result = await store_agent_connector_credential(
             workspace_id=workspace_id,
             agent_install_id=agent_id,
-            tenant_id=await _resolve_tenant(workspace_id),
+            tenant_id=tenant_id,
             provider=body.provider,
             label=body.label or body.provider,
             credentials=body.credentials,
@@ -505,12 +534,13 @@ async def fleet_disconnect_agent_connector(
     agent_id: str = Query(..., description="Agent install ID"),
     connector_key: str = Query(..., description="Connector id/provider to disconnect"),
 ) -> Dict[str, Any]:
-    """Disconnect an agent's connector: removes its scoped vault credential(s)
-    and the binding row."""
-    from server_modules.connectors_actions import delete_agent_connector_credential
+    """Unsubscribe this agent from a connector: removes ONLY its binding row.
+    The project-scoped credential is untouched — other agents subscribed to it
+    (or this one, again later) are unaffected."""
+    from server_modules.connectors_actions import unsubscribe_agent_connector
 
     try:
-        result = await delete_agent_connector_credential(
+        result = await unsubscribe_agent_connector(
             workspace_id=workspace_id,
             agent_install_id=agent_id,
             tenant_id=await _resolve_tenant(workspace_id),
@@ -519,6 +549,29 @@ async def fleet_disconnect_agent_connector(
         return {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@router.get("/api/w/{workspace_id}/fleet/projects/{project_id}/connectors")
+async def fleet_project_connectors(
+    request: Request,
+    workspace_id: str,
+    project_id: str,
+) -> Dict[str, Any]:
+    """List a project's connector credentials (the reuse-or-separate picker's
+    data source). Each item carries the agent_install_ids currently subscribed
+    to it, so the picker can show "Use acme-support@gmail.com" for any
+    provider the project already has."""
+    from server_modules.connectors_actions import list_project_connectors
+
+    try:
+        items = await list_project_connectors(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            tenant_id=await _resolve_tenant(workspace_id),
+        )
+        return {"ok": True, "connectors": items}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "connectors": []}
 
 
 @router.get("/api/w/{workspace_id}/fleet/connection-summary")

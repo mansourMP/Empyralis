@@ -29,7 +29,7 @@ class VaultStorageUnavailable(RuntimeError):
 
 
 _COLS = (
-    "id, provider, workspace_id, agent_install_id, account_label, "
+    "id, provider, workspace_id, agent_install_id, project_id, account_label, "
     "platform_scoped, label, mode, metadata, encrypted_secret, created_at, updated_at"
 )
 
@@ -69,6 +69,7 @@ def _row_to_entry(row: Any) -> Dict[str, Any]:
         "provider": r.get("provider"),
         "workspace_id": r.get("workspace_id"),
         "agent_install_id": r.get("agent_install_id"),
+        "project_id": r.get("project_id"),
         "account_label": r.get("account_label"),
         "platform_scoped": bool(r.get("platform_scoped")),
         "label": r.get("label"),
@@ -129,13 +130,14 @@ async def upsert(entry: Dict[str, Any]) -> Dict[str, Any]:
     row = await pool.fetchrow(
         f"""
         INSERT INTO vault_credentials
-            (id, provider, workspace_id, agent_install_id, account_label,
+            (id, provider, workspace_id, agent_install_id, project_id, account_label,
              platform_scoped, label, mode, metadata, encrypted_secret, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10, COALESCE($11::text::timestamptz, NOW()), NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11, COALESCE($12::text::timestamptz, NOW()), NOW())
         ON CONFLICT (id) DO UPDATE SET
             provider = EXCLUDED.provider,
             workspace_id = EXCLUDED.workspace_id,
             agent_install_id = EXCLUDED.agent_install_id,
+            project_id = EXCLUDED.project_id,
             account_label = EXCLUDED.account_label,
             platform_scoped = EXCLUDED.platform_scoped,
             label = EXCLUDED.label,
@@ -149,6 +151,7 @@ async def upsert(entry: Dict[str, Any]) -> Dict[str, Any]:
         str(entry.get("provider") or "").strip(),
         _norm_ws(entry),
         (str(entry.get("agent_install_id")).strip() or None) if entry.get("agent_install_id") else None,
+        (str(entry.get("project_id")).strip() or None) if entry.get("project_id") else None,
         (str(entry.get("account_label")).strip() or None) if entry.get("account_label") else None,
         _derive_platform_scoped(entry),
         entry.get("label"),

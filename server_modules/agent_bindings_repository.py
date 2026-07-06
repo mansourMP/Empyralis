@@ -50,7 +50,8 @@ async def _upsert(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         INSERT INTO {table} (id, tenant_id, workspace_id, agent_install_id, {key_col}, enabled, binding)
         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
@@ -67,6 +68,8 @@ async def _upsert(
         str(key or "").strip(),
         bool(enabled),
         json.dumps(binding or {}),
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     if row is None:
         return None
@@ -87,7 +90,8 @@ async def _list(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    rows = await pool.fetch(
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         f"""
         SELECT id, tenant_id, workspace_id, agent_install_id, {key_col} AS key, enabled, binding
         FROM {table}
@@ -100,6 +104,8 @@ async def _list(
         str(workspace_id or "").strip(),
         str(agent_install_id).strip() if agent_install_id else None,
         bool(enabled_only),
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     out = []
     for row in rows or []:
@@ -113,12 +119,15 @@ async def _delete(*, table: str, key_col: str, tenant_id: str, workspace_id: str
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return False
-    result = await pool.execute(
+    result = await control_plane_repository.rls_execute(
+        pool,
         f"DELETE FROM {table} WHERE tenant_id=$1 AND workspace_id=$2 AND agent_install_id=$3 AND {key_col}=$4",
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
         str(agent_install_id or "").strip(),
         str(key or "").strip(),
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     return str(result or "").endswith("1")
 
