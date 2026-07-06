@@ -1,13 +1,27 @@
 # Empyralis — Complete Platform Map
 
-**Updated:** 2026-07-05  
-**Commit:** Phase Fix-1 (verify branch)  
-**Graph:** 28,619 nodes · 72,533 edges · 1,162 communities  
-**Test baseline:** 141 tests passing (50 pre-existing failures in unrelated fixtures)  
+**Updated:** 2026-07-06  
+**Commit:** Phase 8 (verify branch)  
+**Graph:** 28,619 nodes · 72,533 edges · 1,162 communities _(graph stats carried from Fix-1; not re-run this pass)_  
+**Test baseline:** ~1,319 pre-existing failures — compare failing sets in isolation, not counts  
 **Code:** ~275,000 lines Python (server_modules/) + TypeScript (frontend/, gateway/) + Rust (supervisor/, kernel/)  
 **For:** Outside engineers and agents — read this cold, understand the entire platform.
 
-> **Fix-1 changes (2026-07-05):** Provider system expanded to 4 modes + 17 providers. Create-agent wizard fully functional (all 5 steps). Interactive Model tab in agent detail. SQLite fallback for local dev (no DATABASE_URL needed). Fleet UI surface documented below.
+> **Phase 8 changes (2026-07-06):** The legacy workstation shell is gone. Every
+> workspace surface now renders **fleet-native** inside `FleetShell` — landing,
+> agents, projects, billing, inbox, hardware, settings — on the new
+> **floating-panel chrome** (flat `--bg-canvas` with a bordered `--bg-panel`
+> content column, Inter 13px). The `WorkspaceSurfacePage` surface router, the
+> workstation kernel/shell-frame, and ~40 `workstation-*` panes were deleted (a
+> 47-file grep-proven sweep); all legacy segment URLs 307-redirect to their
+> fleet homes in `next.config.ts`. New this phase: live Work tab (7s polling +
+> unread indicators), first-run onboarding (one action → the create-agent
+> wizard; post-signup lands in the wizard), human error states + loading
+> skeletons on every surface, and a CSRF fix so an expired session cookie no
+> longer blocks re-login. Frontend section (2.5) below reflects this; backend
+> sections carry forward from Fix-1 (owned separately).
+>
+> **Fix-1 changes (2026-07-05):** Provider system expanded to 4 modes + 17 providers. Create-agent wizard fully functional (all 5 steps). Interactive Model tab in agent detail. SQLite fallback for local dev (no DATABASE_URL needed).
 
 ---
 
@@ -538,44 +552,57 @@ HTTP server at `127.0.0.1:7788`. HMAC-SHA256 signature verification on all reque
 | `auth/complete/page.tsx` | `/auth/complete` | OAuth callback |
 | `onboarding/page.tsx` | `/onboarding` | Onboarding wizard |
 | `(account)/layout.tsx` | `/w/*` | Auth gate layout |
-| `(account)/w/[workspaceId]/page.tsx` | `/w/[workspaceId]` | Workspace root |
-| `(account)/w/[workspaceId]/WorkspaceSurfacePage.tsx` | — | Surface renderer |
-| `(account)/w/[workspaceId]/fleet/page.tsx` | `/w/[id]/fleet` | **Fleet Home** — agent grid + status strip |
+| `(account)/w/[workspaceId]/page.tsx` | `/w/[workspaceId]` | Workspace landing → **Fleet Home** (`FleetHome`) |
+| `(account)/w/[workspaceId]/layout.tsx` | `/w/[id]/*` | Bootstraps the workspace, mounts `FleetShell` (shellSlot now `null` — no workstation shell) |
+| `(account)/w/[workspaceId]/agents/page.tsx` | `/w/[id]/agents` | Agent list + "New agent" wizard host (honors `?new=1`) |
+| `(account)/w/[workspaceId]/projects/page.tsx` | `/w/[id]/projects` | Projects list |
+| `(account)/w/[workspaceId]/projects/[projectId]/…` | `/w/[id]/projects/[pid]/agents/[aid]/[tab]` | Project detail → routed, deep-linkable agent detail |
+| `(account)/w/[workspaceId]/billing/page.tsx` | `/w/[id]/billing` | Usage/cost by project → agent |
+| `(account)/w/[workspaceId]/inbox/page.tsx` | `/w/[id]/inbox` | Workspace activity + escalations feed (fleet-native, Phase 8) |
+| `(account)/w/[workspaceId]/hardware/page.tsx` | `/w/[id]/hardware` | Paired computers + `GatewayPairPanel` (fleet-native, Phase 8) |
+| `(account)/w/[workspaceId]/settings/page.tsx` | `/w/[id]/settings` | MCP API keys + billing link (fleet-native, Phase 8) |
+| `(account)/w/[workspaceId]/fleet/page.tsx` | `/w/[id]/fleet` | Alias of Fleet Home (redirects to `/agents`) |
 | `api/[...path]/route.ts` | `/api/*` | **Catch-all proxy** — forwards GET/POST/PATCH/DELETE to backend |
 | `api/w/[workspaceId]/fleet/agents/route.ts` | `GET/POST /api/w/[id]/fleet/agents` | Fleet agent list + create proxy |
 | `api/w/[workspaceId]/fleet/agent-activity/route.ts` | `GET /api/w/[id]/fleet/agent-activity` | Agent activity proxy |
 
 #### Fleet UI (`frontend/lib/workspace/fleet/`) — Post-Fix-1
 
-The fleet surface is a **separate UI shell** from the workstation. It renders via
-`FleetShellDecider.tsx` — fleet routes bypass the workstation shell entirely
-(no `useWorkspaceBoundary()` context). This is why the old memory pane can't be
-imported directly; fleet has its own implementations.
+As of **Phase 8 the fleet surface is the _only_ workspace UI** — the legacy
+workstation shell was deleted. `FleetShell` → `FleetShellDecider` →
+`FleetContentFrame` renders every route directly inside a floating panel; the
+old `shellSlot` fall-through is now `null` (see §2.5 "Legacy shell — removed").
+Fleet components own their own data (no `useWorkspaceBoundary()` context).
 
 | File | Purpose |
 |------|---------|
+| `FleetShell.tsx` / `FleetShellDecider.tsx` / `FleetContentFrame.tsx` | Themed root (canvas), segment router, and bordered content panel + breadcrumbs. |
+| `PrimaryRail.tsx` | Persistent left rail (Inbox, Projects, Agents, Hardware, Billing, Settings) with keyboard chords. |
 | `FleetHome.tsx` | Agent grid + status strip + "New agent" button. Opens wizard. |
-| `FleetAgentDetail.tsx` | Centered modal (~80vw) with left nav. 7 tabs: Overview, Chat, Memory, Channels, Connectors, Tools, **Model (editable)**. Exports `ChannelsTab` for wizard reuse. |
+| `FleetAgentDetail.tsx` | **Routed, deep-linkable** agent detail (not a modal) — `/projects/[pid]/agents/[aid]/[tab]`. 7 tabs: Overview, **Work**, Hardware, Memory, Channels, Connectors, Model (editable). Exports `ChannelsTab` for wizard reuse. |
+| `tabs/WorkTab.tsx` | End-customer conversations, split-view. **Live** — 7s polling of the list + open transcript, unread dots, "{n} new" count (Phase 8 Part A). |
+| `first-agent-empty.tsx` | Shared first-run empty state + create-agent wizard (`FirstAgentEmpty` / `CreateFirstAgentEmpty`) used by Agents/Projects/Inbox (Phase 8 Part B). |
+| `fleet-states.tsx` | Shared `FleetListSkeleton` + `FleetSurfaceError` — human error states + loading skeletons on every list/tab (Phase 8 Part C5). |
 | `FleetCreateAgentWizard.tsx` | 5-step wizard: Name → Purpose → Provider → Channels → Hardware. Agent exists at step 2, later steps are incremental PATCHes. Closing early = real agent, not lost work. |
 | `FleetCommandPalette.tsx` | Keyboard-driven command palette for switching agent tabs. |
-| `fleet-data.ts` | React hooks: `useFleetAgents`, `useFleetAgentActivity`, `useFleetAgentChannels`, `useFleetAgentConnectors`, `useFleetAgentTools`, `useWorkspaceStatusStrip`. |
+| `fleet-data.ts` | React hooks (each exposes `{ data, loading, error }` where relevant): `useFleetAgents`, `useFleetProjects`, `useFleetAgentActivity`, `useFleetAgentChannels`, `useFleetAgentConnectors`, `useFleetAgentTools`, `useWorkspaceActivity`, `useWorkspaceStatusStrip`. |
 | `fleet-presentation.ts` | Agent summary projection, status/placement derivation, tint colors. |
 | `fleet-preferences.ts` | Theme toggle — reads account-wide `globalTheme`, no separate fleet localStorage key. |
 | `fleet-icons.ts` | Channel + connector icon registry (maps backend IDs to icon assets). |
 | `fleet-provider-constants.ts` | **Shared provider catalog** — 4 modes, 17 providers, used by both wizard and Model tab. |
-| `fleet-theme.css` | Fleet-specific CSS: cards, grid, wizard, memory browser, modal, rail indicator. |
+| `fleet-theme.css` | Fleet CSS: the **floating-panel chrome** (`--bg-canvas`/`--bg-panel`, Inter 13px), cards, grid, lists, wizard, work split-view + unread dots, empty/error/skeleton states, rail. |
 
-#### Agent Detail — 7 Tabs
+#### Agent Detail — 7 Tabs (routed, deep-linkable: `/projects/[pid]/agents/[aid]/[tab]`)
 
-| Tab | Component | Data Source | Status |
-|-----|-----------|-------------|--------|
-| **Overview** | `OverviewTab` | `useFleetAgentActivity` → `GET /fleet/agent-activity` | Live — status, placement, role, recent activity feed |
-| **Chat** | `ChatTab` | None (navigation only) | "Open chat" button → workspace chat |
-| **Memory** | `MemoryTab` | `GET /api/sage-context-files?agent_id=` | Live — split-pane MD file browser with editable textarea + Save |
-| **Channels** | `ChannelsTab` (exported) | `GET /fleet/agent-channels` | Live — 7-platform grid with status pills. Telegram: 3-option sheet (hosted/BYO token/personal via Gateway). Slack/Discord: OAuth. WhatsApp/Signal/iMessage/WeChat: Gateway pair panel. |
-| **Connectors** | `ConnectorsTab` | `GET /fleet/agent-connectors` | Live — MCP/OAuth connector grid with inline credential setup |
-| **Tools** | `ToolsTab` | `GET /fleet/agent-tools` → skill registry | Live — enabled tools from agent manifest |
-| **Model** | `ModelTab` | Agent's `model_config` + `PATCH /fleet/agents/{id}` | **Interactive** — 4-mode selector (platform credits / BYOK / subscription / local), provider dropdown, API key field, Save button. Shows resolved provider+model at top. |
+| Tab | Data Source | Notes |
+|-----|-------------|-------|
+| **Overview** | `useFleetAgentActivity` → `GET /fleet/agent-activity` | Status, placement, role, recent activity feed |
+| **Work** | `GET /api/deployed-agents/{id}/conversations` (+ transcript) | End-customer conversations, split-view. **Live** — 7s polling + unread dots (Phase 8 Part A) |
+| **Channels** | `GET /fleet/agent-channels` | 7-platform grid. Telegram: hosted / BYO token / personal-via-Gateway. Slack/Discord: OAuth. WhatsApp/Signal/iMessage/WeChat: Gateway pair panel. Exports `ChannelsTab` for wizard reuse |
+| **Connectors** | `GET /fleet/agent-connectors` | MCP/OAuth connector grid with inline credential setup |
+| **Hardware** | agent `hardware_access` + gateway registrations | Cloud (default) vs a paired Gateway computer |
+| **Model** | agent `model_config` + `PATCH /fleet/agents/{id}` | **Interactive** — 4-mode selector (platform credits / BYOK / subscription / local), provider dropdown, API key, Save |
+| **Memory** | `GET /api/sage-context-files?agent_id=` | Split-pane MD file browser, editable + Save |
 
 #### Wizard — 5 Steps
 
@@ -600,19 +627,28 @@ Single `data-theme` attribute on `<html>` and `<body>`. One source of truth:
 | Fleet shell | `frontend/lib/workspace/fleet/fleet-theme.css` | Consumes same tokens |
 | Preference source | `empyralis.account-shell.v2` localStorage → `globalTheme` | Account-wide, stored by `AccountShellProvider` |
 
-#### Workspace Shell (`frontend/lib/workspace/`)
+#### Legacy workstation shell — **REMOVED (Phase 8)**
 
-| File | Purpose |
-|------|---------|
-| `workstation-kernel-shell.tsx` | Main shell: nav, routing, surface mounting |
-| `sage-chat-pane.tsx` | Main chat interface |
-| `sage-memory-pane.tsx` | Memory timeline view |
-| `workstation-sage-connectors-pane.tsx` | MCP connector catalog (now data-driven from `/api/connections/mcp-catalog`) |
-| `workspace-channel-pairing-surface.tsx` | ⚠️ Channel pairing — hardcoded `ChannelProvider` type `'telegram' \| 'whatsapp'` |
-| `workstation-billing-pane.tsx` | Billing management |
-| `workstation-runs-pane.tsx` | Durable runs/threads listing |
-| `cloud-vps-setup-panel.tsx` | VPS/node setup |
-| `codex-chat/` | ⚠️ Agent activity/tool-progress timeline — 4 files, not fully audited |
+The workstation shell that used to render workspace surfaces is gone. A
+grep-proven 47-file sweep deleted `WorkspaceSurfacePage.tsx`,
+`workstation-kernel-shell.tsx`, `workstation-shell-frame.tsx`,
+`desktop-startup-screen.tsx`, `AccountTenantSwitcher.tsx`, `WorkspaceHomeRedirect.tsx`,
+and ~40 `workstation-*` surface panes (activity, artifacts, chat, deployed-agents,
+sage-heartbeat/connectors/profile/tools, notifications, runs, settings,
+studio-integrations, gateway-operator, hardware, billing, platform-analytics,
+titlebar, hosted-mini-apps, discovery-pane, and their helpers). `layout.tsx`
+passes `shellSlot={null}`; every legacy segment URL 307-redirects to its fleet
+home in `next.config.ts`.
+
+**What still lives in `frontend/lib/workspace/`** (had live consumers outside the
+shell, so kept): `workspace-boundary.tsx` (16 importers), `workspace-shell.ts`,
+`server-workspace-bootstrap.ts`, `workspace-setup-form.tsx`,
+`workspace-channel-pairing-surface.tsx`, `hosted-mini-app-surface.tsx`,
+`cloud-vps-setup-panel.tsx`, the `sage-chat/` stack + `workstation-chat-pane-hooks/-model`,
+`workstation-deployed-agent-analytics-pane.tsx` / `-test-turn-pane.tsx`,
+`workstation-split-workbench.tsx`, `workstation-surface-primitives.tsx`,
+`workstation-stream-manager.ts`, `workstation-client.ts`. (`application-surface-tabs.ts`
+is a pre-existing orphan, unrelated to the sweep — left for separate cleanup.)
 
 ### 2.6 `shared/` (Cross-Project Contracts)
 
