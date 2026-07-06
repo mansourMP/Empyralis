@@ -544,8 +544,16 @@ def complete_local_run(
     set_run_status_fn(run_id, "completed")
     try:
         persist_run_memory_fn(run_id, run)
-    except Exception:
-        pass
+    except Exception as exc:
+        from server_modules import durability_signal  # noqa: PLC0415
+
+        durability_signal.capture_durability_failure(
+            f"run memory persistence for {run_id}",
+            exc,
+            workspace_id=str((run or {}).get("workspace_id") or "").strip() or None,
+            run_id=run_id,
+            event_class="run_memory_dead_letter",
+        )
     run["logs"].put(None)
     return {"status": "ok", "run_id": run_id}
 

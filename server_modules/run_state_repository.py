@@ -71,7 +71,13 @@ def dispatch_repository_call(awaitable: Awaitable[Any], *, operation: str) -> No
         try:
             done.result()
         except Exception as exc:  # pragma: no cover - background logging path
-            LOGGER.warning("Repository async operation failed during %s: %s", operation, exc)
+            from server_modules import durability_signal  # noqa: PLC0415
+
+            durability_signal.capture_durability_failure(
+                f"repository async operation {operation}",
+                exc,
+                event_class="repository_write_dead_letter",
+            )
 
     future.add_done_callback(_report_completion)
 

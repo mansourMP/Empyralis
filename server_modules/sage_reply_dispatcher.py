@@ -324,11 +324,17 @@ async def dispatch_sage_reply(
         # GUARANTEED RESPONSE: reply empty with no error
         await _send(_GUARANTEED_FALLBACK, reply_to_id=reply_to_id)
 
-    # ── If STILL nothing sent (send primitives all failed), log ──
+    # ── If STILL nothing sent (send primitives all failed after retries),
+    #    surface loudly: this is a channel-delivery dead-letter, not just a log ──
     if not sent_any:
-        _logger.error(
-            "dispatch_sage_reply: FAILED to send ANY message for workspace=%s channel=%s",
-            workspace_id, channel_origin,
+        from server_modules import durability_signal
+
+        durability_signal.capture_durability_failure(
+            f"channel reply delivery for workspace={workspace_id} channel={channel_origin}",
+            workspace_id=workspace_id,
+            channel=channel_origin,
+            event_class="channel_delivery_dead_letter",
+            summary="Reply generated but could not be delivered after bounded retries.",
         )
 
     return sent_any

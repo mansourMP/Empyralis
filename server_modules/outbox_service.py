@@ -191,7 +191,16 @@ def _persist_outbox_event(
             payload=dict(event.payload),
         )
     except Exception as exc:
-        LOGGER.warning("Failed to persist outbox event %s: %s", event.event_id, exc)
+        from server_modules import durability_signal  # noqa: PLC0415
+
+        durability_signal.capture_durability_failure(
+            f"outbox event persistence {event.event_id}",
+            exc,
+            workspace_id=str(getattr(event, "workspace_id", "") or "").strip() or None,
+            tenant_id=str(getattr(event, "tenant_id", "") or "").strip() or None,
+            run_id=str(getattr(event, "run_id", "") or "").strip() or None,
+            event_class="outbox_dead_letter",
+        )
 
 
 def emit_runtime_event(

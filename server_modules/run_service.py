@@ -757,14 +757,29 @@ _MAX_TERMINAL_PERSIST_ATTEMPTS = 4
 _TERMINAL_PERSIST_RETRY_BACKOFF_SECONDS = 0.2
 
 
-def _report_durability_failure(context: str, exc: BaseException) -> None:
-    """Single seam for durability failures — loud by default, never a debug log.
+def _report_durability_failure(
+    context: str,
+    exc: BaseException,
+    *,
+    run: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Single seam for run-persistence durability failures — loud, never silent.
 
-    Fix 5 wires Sentry capture + the activity-ledger dead-letter signal into this
-    one function so every durability swallow site becomes observable at once.
+    Delegates to durability_signal so the failure surfaces as an ERROR log, a
+    Sentry capture, and a best-effort activity-ledger dead-letter event.
     """
-    LOGGER.error(
-        "Durable persistence failure during %s: %s", context, exc, exc_info=True
+    from server_modules import durability_signal  # noqa: PLC0415
+
+    workspace_id = _run_workspace_id(run) if isinstance(run, dict) else None
+    tenant_id = _run_tenant_id(run) if isinstance(run, dict) else None
+    run_id = str(run.get("run_id") or "") if isinstance(run, dict) else None
+    durability_signal.capture_durability_failure(
+        context,
+        exc,
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        run_id=run_id or None,
+        event_class="run_persistence_dead_letter",
     )
 
 
@@ -854,6 +869,7 @@ def _persist_run_snapshot_confirmed(
         f"terminal run persistence for {run_id} (state={state}) after "
         f"{_MAX_TERMINAL_PERSIST_ATTEMPTS} attempts",
         last_error or RuntimeError("unresolved version conflict"),
+        run=run,
     )
 
 
@@ -905,7 +921,7 @@ def _persist_run_repository_snapshot(
             operation=f"update_live_run_if_version_matches:{run_id}:{state}:{expected_version}",
         )
     except Exception as exc:
-        _report_durability_failure(f"live run repository dispatch for {run_id}", exc)
+        _report_durability_failure(f"live run repository dispatch for {run_id}", exc, run=run)
 
 
 def _record_run_repository_transition(
@@ -930,7 +946,7 @@ def _record_run_repository_transition(
             operation=f"record_transition:{run_id}:{to_state}",
         )
     except Exception as exc:
-        LOGGER.warning("Failed to dispatch run transition repository write for %s: %s", run_id, exc)
+        _report_durability_failure(f"run transition repository write for {run_id}", exc)
 
 
 def _archive_run_repository_payload(
