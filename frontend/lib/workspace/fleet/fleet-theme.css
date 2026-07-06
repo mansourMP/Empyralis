@@ -1125,6 +1125,38 @@ a.fleet-breadcrumb:hover {
   to { opacity: 1; transform: none; }
 }
 
+/* Command palette drops a few px as it fades in (was referenced but never
+   defined, so the palette had no entrance animation at all). */
+@keyframes fleet-slide-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Content settles in on view / route change — Linear's quiet "the page arrives"
+   feel: a short fade with a few px of rise, ease-out, no bounce. */
+@keyframes fleet-view-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.fleet-content,
+.fleet-detail-pad {
+  animation: fleet-view-enter var(--motion-base) ease-out;
+}
+
+/* Respect the OS "reduce motion" setting — collapse entrance animations and
+   transitions to near-instant. Linear does this; it's basic polish + a11y. */
+@media (prefers-reduced-motion: reduce) {
+  .fleet-root *,
+  .fleet-root *::before,
+  .fleet-root *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* Left nav column */
 
 .fleet-detail-nav {
