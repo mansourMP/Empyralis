@@ -52,10 +52,10 @@ export default function InboxPage() {
         </div>
       ) : (
         <div className="fleet-list">
-          {events.map((event: any) => {
+          {events.map((event: any, i: number) => {
             const esc = isEscalation(event);
             return (
-              <div key={event.event_id || event.id || event.created_at} className="fleet-list-row" style={{ cursor: "default" }}>
+              <div key={event.id || `${event.created_at || "evt"}-${i}`} className="fleet-list-row" style={{ cursor: "default" }}>
                 {esc ? (
                   <AlertTriangle size={14} strokeWidth={1.75} style={{ color: "var(--accent)", flexShrink: 0 }} />
                 ) : (

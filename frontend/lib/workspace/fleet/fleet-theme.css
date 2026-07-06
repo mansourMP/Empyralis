@@ -613,8 +613,6 @@ a.fleet-breadcrumb:hover {
 .fleet-pair-code-label {
   font-size: 11px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--text-muted);
 }
 
@@ -1514,8 +1512,6 @@ a.fleet-breadcrumb:hover {
 .fleet-palette-item-hint {
   font-size: 11px;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .fleet-palette-empty {
@@ -1835,8 +1831,6 @@ a.fleet-breadcrumb:hover {
 .fleet-wizard-option-tag {
   font-size: 10px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
   color: var(--accent);
   border: 1px solid var(--accent);
   border-radius: 999px;
