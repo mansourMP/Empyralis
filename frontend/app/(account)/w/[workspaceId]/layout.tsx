@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import { notFound, redirect } from 'next/navigation';
 
-import { AccountTenantSwitcher } from '@/app/(account)/AccountTenantSwitcher';
 import { ShellRecoveryActions } from '@/app/(account)/ShellRecoveryActions';
 import { loadAccountShellSessionSafely } from '@/lib/server/load-account-shell-session';
 import { resolvePrimaryReadyWorkspaceId } from '@/lib/shell/workspace-membership-model';
@@ -9,11 +8,7 @@ import {
   WorkspaceBootstrapError,
   loadWorkspaceBootstrap,
 } from '@/lib/workspace/server-workspace-bootstrap';
-import { DesktopStartupScreen } from '@/lib/workspace/desktop-startup-screen';
 import { FleetShell } from '@/lib/workspace/fleet/FleetShell';
-import { WorkspaceBoundary } from '@/lib/workspace/workspace-boundary';
-import { WorkstationKernelShell } from '@/lib/workspace/workstation-kernel-shell';
-import { WorkstationShellFrame } from '@/lib/workspace/workstation-shell-frame';
 
 const RECOVERABLE_BOOTSTRAP_STATUSES = new Set([429, 500, 502, 503, 504]);
 
@@ -72,32 +67,15 @@ export default async function WorkspaceRouteLayout({
 
   const resolvedWorkspaceId = bootstrap.workspace.id;
 
-  // Phase UC: Fleet page gets its own layout (no workstation shell chrome).
-  // All other routes use the normal workstation shell.
-  const shellFragment = (
-    <>
-      <DesktopStartupScreen workspaceLabel={bootstrap.workspace.label} />
-      <WorkstationShellFrame
-        switcherPane={<AccountTenantSwitcher />}
-        kernelPane={(
-          <WorkspaceBoundary workspaceId={resolvedWorkspaceId} bootstrap={bootstrap}>
-            <WorkstationKernelShell>
-              {children}
-            </WorkstationKernelShell>
-          </WorkspaceBoundary>
-        )}
-      />
-    </>
-  );
-
-  // Phase UX-C / U4: Primary rail persists across all workspace sub-routes.
-  // FleetShell owns the themed root (light/dark + rail collapse) and picks the
-  // content area via FleetShellDecider: fleet children (no shell chrome) or the
-  // normal workstation shell. Landing page (null segment) = fleet.
+  // Phase 8: the legacy workstation shell is gone — every workspace surface now
+  // renders fleet-native inside FleetShell. The old fall-through `shellSlot`
+  // (DesktopStartupScreen → WorkstationShellFrame → WorkspaceBoundary →
+  // WorkstationKernelShell) drove only the legacy segments, which are all now
+  // 307-redirected to fleet routes, so nothing falls through. Pass null.
   return (
     <FleetShell
       workspaceId={resolvedWorkspaceId}
-      shellSlot={shellFragment}
+      shellSlot={null}
       ownerName={bootstrap.account.displayName || bootstrap.account.email}
       ownerEmail={bootstrap.account.email}
       ownerRole={bootstrap.membership.role}
