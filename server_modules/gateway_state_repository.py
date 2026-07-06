@@ -1499,17 +1499,24 @@ def dedupe_and_expire_workspace_gateway_registrations(
 ) -> Dict[str, Any]:
     """Collapse duplicate registrations for one physical box and revoke abandoned pairing attempts.
 
-    Two independent, conservative rules (neither depends on the other):
+    Three independent, conservative rules (none depends on the others):
       1. Registrations sharing the same non-empty metadata.vps_id are the same
          cloud-provisioned box (vps_provisioning_service threads vps_id through
          the pairing metadata) — keep whichever has the freshest heartbeat/update,
          revoke the rest as duplicates.
-      2. A registration that has never once received a heartbeat and is older
+      2. Registrations with no vps_id (pre-dating that metadata field, or a
+         personal-device pairing) that share the same non-empty metadata.hostname
+         within this workspace are treated the same way. hostname is a weaker
+         signal than vps_id — in principle two distinct personal devices could
+         share a default OS hostname — but this only ever groups within one
+         workspace's own registrations, never across tenants, and only applies
+         where no vps_id already grouped the row under rule 1.
+      3. A registration that has never once received a heartbeat and is older
          than the grace window never completed pairing (a real box heartbeats
          within the installer's own registration-confirmation window) — revoke
-         it as abandoned, regardless of vps_id.
+         it as abandoned, regardless of vps_id or hostname.
 
-    Both rules only ever revoke; they never delete rows or touch a registration
+    All rules only ever revoke; they never delete rows or touch a registration
     that is currently live, so this is safe to call on every read (e.g. before
     listing a workspace's gateways for the Hardware page).
     """
@@ -1529,33 +1536,52 @@ def dedupe_and_expire_workspace_gateway_registrations(
             str(registration.get("updated_at") or ""),
         )
 
-    groups: Dict[str, List[Dict[str, Any]]] = {}
+    def _collapse_groups(
+        groups: Dict[str, List[Dict[str, Any]]], *, reason: str
+    ) -> Dict[str, str]:
+        kept_by_key: Dict[str, str] = {}
+        for key, members in groups.items():
+            if len(members) <= 1:
+                continue
+            best = max(members, key=_freshness_key)
+            best_gateway_id = str(best.get("gateway_id") or "")
+            kept_by_key[key] = best_gateway_id
+            for member in members:
+                member_gateway_id = str(member.get("gateway_id") or "")
+                if member_gateway_id == best_gateway_id:
+                    continue
+                revoke_gateway_registration(
+                    gateway_id=member_gateway_id,
+                    tenant_id=member.get("tenant_id"),
+                    workspace_id=member.get("workspace_id"),
+                    user_id=member.get("user_id"),
+                    reason=reason,
+                    db_path=db_path,
+                )
+                revoked.append(member_gateway_id)
+        return kept_by_key
+
+    revoked: List[str] = []
+
+    vps_id_groups: Dict[str, List[Dict[str, Any]]] = {}
     for registration in registrations:
         vps_id = str((registration.get("metadata") or {}).get("vps_id") or "").strip()
         if vps_id:
-            groups.setdefault(vps_id, []).append(registration)
+            vps_id_groups.setdefault(vps_id, []).append(registration)
+    kept_by_vps_id = _collapse_groups(vps_id_groups, reason="duplicate_registration_same_box")
 
-    revoked: List[str] = []
-    kept_by_vps_id: Dict[str, str] = {}
-    for vps_id, members in groups.items():
-        if len(members) <= 1:
+    hostname_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for registration in registrations:
+        if str(registration.get("gateway_id") or "") in revoked:
             continue
-        best = max(members, key=_freshness_key)
-        best_gateway_id = str(best.get("gateway_id") or "")
-        kept_by_vps_id[vps_id] = best_gateway_id
-        for member in members:
-            member_gateway_id = str(member.get("gateway_id") or "")
-            if member_gateway_id == best_gateway_id:
-                continue
-            revoke_gateway_registration(
-                gateway_id=member_gateway_id,
-                tenant_id=member.get("tenant_id"),
-                workspace_id=member.get("workspace_id"),
-                user_id=member.get("user_id"),
-                reason="duplicate_registration_same_box",
-                db_path=db_path,
-            )
-            revoked.append(member_gateway_id)
+        metadata = registration.get("metadata") or {}
+        vps_id = str(metadata.get("vps_id") or "").strip()
+        if vps_id:
+            continue
+        hostname = str(metadata.get("hostname") or "").strip()
+        if hostname:
+            hostname_groups.setdefault(hostname, []).append(registration)
+    _collapse_groups(hostname_groups, reason="duplicate_registration_same_hostname")
 
     for registration in registrations:
         gateway_id = str(registration.get("gateway_id") or "")

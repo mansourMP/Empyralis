@@ -49,8 +49,10 @@ class GatewayRegistrationDedupeTests(unittest.TestCase):
         gateway_state_repository.init_gateway_state_db(self.db_path)
         self.workspace_id = "ws-dedupe-test"
 
-    def _register(self, *, vps_id: str = "", display_name: str = "Test Device") -> str:
+    def _register(self, *, vps_id: str = "", hostname: str = "", display_name: str = "Test Device") -> str:
         metadata = {"setup_source": "vps", "vps_id": vps_id, "provider": "digitalocean", "region": "sfo3"} if vps_id else {}
+        if hostname:
+            metadata = {**metadata, "hostname": hostname}
         pairing = gateway_state_repository.create_pairing_intent(
             tenant_id="tenant-1",
             workspace_id=self.workspace_id,
@@ -147,6 +149,47 @@ class GatewayRegistrationDedupeTests(unittest.TestCase):
 
         self.assertEqual(result["revoked_gateway_ids"], [])
         self.assertEqual(self._status(healthy), "active")
+
+    def test_three_registrations_same_hostname_no_vps_id_collapse_to_one(self) -> None:
+        # Mirrors the real ws_c4601e47c95a data found in production: three
+        # registrations pre-dating vps_id metadata tagging (so rule 1 can't
+        # group them), each with a distinct device_id from a crash-loop-era
+        # re-pairing, but all reporting the same DigitalOcean auto-hostname —
+        # the fallback signal that they're the same physical box.
+        stale_1 = self._register(hostname="ubuntu-s-1vcpu-2gb-sfo2")
+        stale_2 = self._register(hostname="ubuntu-s-1vcpu-2gb-sfo2")
+        live = self._register(hostname="ubuntu-s-1vcpu-2gb-sfo2")
+        for gw in (stale_1, stale_2, live):
+            self._set_heartbeat(gw, heartbeat_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        # live must be the freshest to be kept
+        self._set_heartbeat(
+            live, heartbeat_at=(datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+        )
+
+        result = gateway_state_repository.dedupe_and_expire_workspace_gateway_registrations(
+            self.workspace_id, db_path=self.db_path
+        )
+
+        self.assertEqual(sorted(result["revoked_gateway_ids"]), sorted([stale_1, stale_2]))
+        self.assertEqual(self._status(live), "active")
+        self.assertEqual(self._status(stale_1), "revoked")
+        self.assertEqual(self._status(stale_2), "revoked")
+
+    def test_hostname_fallback_does_not_touch_registrations_already_grouped_by_vps_id(self) -> None:
+        # A cloud box tagged with vps_id must be deduped by rule 1 only —
+        # even if two DIFFERENT vps_id boxes happened to share a hostname
+        # (extremely unlikely for cloud auto-hostnames, but the rule ordering
+        # must not double-process an already-grouped registration).
+        vps_stale = self._register(vps_id="vps_shared_box", hostname="shared-hostname")
+        vps_live = self._register(vps_id="vps_shared_box", hostname="shared-hostname")
+        self._set_heartbeat(vps_live, heartbeat_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+
+        result = gateway_state_repository.dedupe_and_expire_workspace_gateway_registrations(
+            self.workspace_id, db_path=self.db_path
+        )
+
+        self.assertEqual(result["revoked_gateway_ids"], [vps_stale])
+        self.assertEqual(result["kept_by_vps_id"]["vps_shared_box"], vps_live)
 
 
 class GatewayHardwareLabelTests(unittest.TestCase):
