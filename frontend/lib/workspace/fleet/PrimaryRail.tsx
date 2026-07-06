@@ -8,15 +8,14 @@ import {
   ChevronRight,
   Cpu,
   CreditCard,
-  FileText,
   FolderKanban,
-  HelpCircle,
   Inbox,
   LogOut,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
+  Sparkles,
   Sun,
   type LucideIcon,
 } from "lucide-react";
@@ -24,7 +23,7 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 
-import { useFleetProjects } from "./fleet-data";
+import { useFleetAgents, useFleetProjects } from "./fleet-data";
 import type { FleetTheme } from "./fleet-preferences";
 
 type RailNavItem = { key: string; label: string; segment: string; icon: LucideIcon; chord: string };
@@ -36,7 +35,6 @@ const RAIL_ITEMS: RailNavItem[] = [
   { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a" },
   { key: "hardware", label: "Hardware", segment: "hardware", icon: Cpu, chord: "h" },
   { key: "billing", label: "Billing", segment: "billing", icon: CreditCard, chord: "b" },
-  { key: "settings", label: "Settings", segment: "settings", icon: Settings, chord: "s" },
 ];
 
 const RAIL_ICON = 16;
@@ -73,7 +71,9 @@ export function PrimaryRail({
   const segment = useSelectedLayoutSegment();
   const params = useParams();
   const activeProjectId = String((params?.projectId as string) || "");
+  const activeAgentId = String((params?.agentId as string) || "");
   const { projects } = useFleetProjects(workspaceId);
+  const { agents } = useFleetAgents(workspaceId);
 
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [focusIdx, setFocusIdx] = useState(-1);
@@ -81,6 +81,28 @@ export function PrimaryRail({
   const gTimer = useRef<number | null>(null);
 
   const hrefFor = (seg: string) => `/w/${encodeURIComponent(workspaceId)}/${seg}`;
+
+  // Sage is the operator, not a normal nav destination — surfaced separately
+  // above the section list. role="operator" is the intended tag (ensured
+  // server-side for every Sage install), but falls back to matching the name
+  // directly — some installs predate that guarantee and still carry a plain
+  // "specialist" role, same gap isSageAgent() in fleet-presentation.ts
+  // already works around.
+  const sageAgent =
+    agents.find((a) => (a.role || "").toLowerCase() === "operator") ||
+    agents.find((a) => (a.label || "").toLowerCase().includes("sage")) ||
+    null;
+  // The agent-detail page resolves its agent by id from the workspace-wide
+  // agent list — the {projectId} URL segment only feeds the breadcrumb, it
+  // never filters which agent can load. Sage's own install often carries no
+  // project_id (it's the workspace operator, not project-scoped work), so
+  // any real project is a valid URL container; fall back to the first one.
+  const sageProjectId = sageAgent?.project_id || projects[0]?.id || "";
+  const sageHref =
+    sageAgent && sageProjectId
+      ? `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(sageProjectId)}/agents/${encodeURIComponent(sageAgent.agent_id)}/chat`
+      : null;
+  const sageActive = Boolean(sageAgent) && activeAgentId === sageAgent?.agent_id;
 
   // Keyboard navigation. Ignored while typing or when a modifier is held (so
   // ⌘K and browser shortcuts are untouched).
@@ -131,6 +153,20 @@ export function PrimaryRail({
         <div className="fleet-rail-brand-mark">E</div>
         {!collapsed && <span className="fleet-rail-brand-name">Empyralis</span>}
       </div>
+
+      {sageAgent && (
+        <button
+          type="button"
+          title={collapsed ? "Sage" : undefined}
+          className={`fleet-rail-sage${sageActive ? " fleet-rail-sage--active" : ""}`}
+          onClick={() => { if (sageHref) router.push(sageHref); }}
+        >
+          <span className="fleet-rail-sage-icon">
+            <Sparkles size={RAIL_ICON} strokeWidth={1.75} />
+          </span>
+          {!collapsed && <span className="fleet-rail-sage-label">Sage</span>}
+        </button>
+      )}
 
       <nav className="fleet-rail-nav">
         {RAIL_ITEMS.map((item, idx) => {
@@ -195,7 +231,6 @@ export function PrimaryRail({
       </nav>
 
       <div className="fleet-rail-controls">
-        <HelpMenu />
         <button
           type="button"
           className="fleet-rail-control-btn"
@@ -224,61 +259,6 @@ export function PrimaryRail({
         collapsed={collapsed}
       />
     </aside>
-  );
-}
-
-// ── Help menu (quiet "?" — docs-link placeholder; no "Ask", nothing behind it yet) ──
-// Renders as a direct child of .fleet-rail-controls (already position:relative)
-// so its popover stretches to the rail's width, matching the account popover
-// below it rather than being constrained to the button's own small box.
-
-function HelpMenu() {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (ref.current?.contains(event.target as Node)) return;
-      setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
-  return (
-    // display:contents keeps this out of the box tree entirely — it's here
-    // only to give the outside-click check a single ancestor spanning both
-    // the button and its popover, without becoming a new positioning context
-    // (the popover still positions against .fleet-rail-controls).
-    <div ref={ref} style={{ display: "contents" }}>
-      {open && (
-        <div className="fleet-rail-account-popover" role="menu" aria-label="Help menu">
-          <button type="button" className="fleet-rail-account-popover-row" role="menuitem" disabled title="Coming soon">
-            <FileText size={14} strokeWidth={1.75} />
-            Documentation
-          </button>
-        </div>
-      )}
-      <button
-        type="button"
-        className="fleet-rail-control-btn"
-        onClick={() => setOpen((v) => !v)}
-        title="Help"
-        aria-label="Help"
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <HelpCircle size={CONTROL_ICON} strokeWidth={1.75} />
-      </button>
-    </div>
   );
 }
 
@@ -338,6 +318,15 @@ function AccountMenu({
 
   return (
     <div className="fleet-rail-owner" ref={ref}>
+      {open && (
+        // The popover is taller than the gap above it and visually overlaps
+        // the theme/collapse controls row — without this backdrop, a click
+        // meant to dismiss the menu lands ON that row (or worse, on "Log
+        // out" underneath), firing its action instead of just closing.
+        // The backdrop absorbs that first click; the popover itself sits
+        // above it via z-index and stays clickable.
+        <div className="fleet-rail-popover-backdrop" onClick={() => setOpen(false)} />
+      )}
       {open && (
         <div className="fleet-rail-account-popover" role="menu" aria-label="Account menu">
           <Link className="fleet-rail-account-popover-row" href={settingsHref} role="menuitem" onClick={() => setOpen(false)}>

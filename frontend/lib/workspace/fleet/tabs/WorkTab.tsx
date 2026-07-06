@@ -78,6 +78,16 @@ export function WorkTab({
   const loadConversations = useCallback(async () => {
     try {
       const r = await fetch(`${base}?${q}`, { credentials: "include" });
+      if (r.status === 404) {
+        // No deployed-agent record for this install yet (true for every
+        // agent that's never gone through the legacy deploy path) — that's
+        // not an error, it's the same "no conversations" state as zero rows.
+        setError(null);
+        setConvos([]);
+        setSeen({});
+        firstLoadRef.current = false;
+        return;
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       const list = (d?.conversations || d?.sessions || d?.items || []) as Conversation[];

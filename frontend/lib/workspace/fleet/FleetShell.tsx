@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 
 import "./fleet-theme.css";
 import { FleetCommandPalette } from "./FleetCommandPalette";
+import { FleetHelpButton } from "./FleetHelpButton";
 import { FleetShellDecider } from "./FleetShellDecider";
 import { PrimaryRail } from "./PrimaryRail";
 import { useFleetPreferences } from "./fleet-preferences";
@@ -56,6 +57,7 @@ export function FleetShell({
         theme={theme}
         onToggleTheme={toggleTheme}
       />
+      <FleetHelpButton />
     </div>
   );
 }

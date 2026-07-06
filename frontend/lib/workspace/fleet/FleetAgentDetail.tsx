@@ -37,7 +37,7 @@ import { ConnectorPicker } from "./ConnectorPicker";
 import { GatewayPairPanel } from "../../gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
-type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory";
+type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "chat";
 
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
@@ -176,6 +176,7 @@ export function FleetAgentDetail({
           {activeTab === "memory" && (
             <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
           )}
+          {activeTab === "chat" && <ChatTab agent={agent} />}
         </div>
       </div>
     </>
@@ -310,14 +311,16 @@ function OverviewTab({
 
 // ── Chat ────────────────────────────────────────────────────────────────────
 
-function ChatTab({ agent, onChat }: { agent: FleetAgent | null; onChat: () => void }) {
+// Direct chat with a fleet agent isn't built yet — no turn-execution endpoint
+// scoped to agent_install_id exists. Land here honestly instead of looping
+// back through onChat into this same tab, or silently falling back to
+// Overview under a "Chat" breadcrumb (the previous, confusing behavior).
+function ChatTab({ agent }: { agent: FleetAgent | null }) {
   return (
     <EmptyState
       icon={MessageSquare}
-      title={`Chat with ${agent?.label || "this agent"}`}
-      body="Open the shared conversation thread and talk to this agent directly."
-      action="Open chat"
-      onAction={onChat}
+      title={`Chat with ${agent?.label || "this agent"} isn't available yet`}
+      body="Direct chat is on the roadmap. For now, configure this agent from its other tabs — Channels, Connectors, and Model."
     />
   );
 }

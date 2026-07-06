@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { Cpu, Server, X } from "lucide-react";
+import { Cpu, Server, Terminal, X } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -12,6 +12,7 @@ import {
   CloudVpsSetupPanel,
   type VpsProviderId,
 } from "@/lib/workspace/cloud-vps-setup-panel";
+import { SshServerConnectPanel } from "@/lib/workspace/ssh-server-connect-panel";
 
 type Registration = {
   gateway_id?: string;
@@ -33,6 +34,7 @@ export default function HardwarePage() {
   const [error, setError] = useState<string | null>(null);
   const [vpsPanelOpen, setVpsPanelOpen] = useState(false);
   const [vpsInitialProvider, setVpsInitialProvider] = useState<VpsProviderId | null>(null);
+  const [sshPanelOpen, setSshPanelOpen] = useState(false);
   const [showManualPairing, setShowManualPairing] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
 
@@ -159,13 +161,12 @@ export default function HardwarePage() {
             </button>
           );
         })}
-        <button type="button" className="fleet-provider-card" disabled>
+        <button type="button" className="fleet-provider-card" onClick={() => setSshPanelOpen(true)}>
           <span className="fleet-provider-card-top">
-            <Server size={26} strokeWidth={1.5} aria-hidden="true" />
-            <span className="fleet-provider-card-badge">Coming soon</span>
+            <Terminal size={26} strokeWidth={1.5} aria-hidden="true" />
           </span>
-          <span className="fleet-provider-card-title">AWS</span>
-          <span className="fleet-provider-card-desc">Not yet available</span>
+          <span className="fleet-provider-card-title">Your own server</span>
+          <span className="fleet-provider-card-desc">Connect over SSH — host, port, and a password or key.</span>
         </button>
       </div>
 
@@ -219,6 +220,16 @@ export default function HardwarePage() {
         onClose={() => setVpsPanelOpen(false)}
         onConnected={async () => {
           setVpsPanelOpen(false);
+          await loadRegistrations();
+        }}
+      />
+
+      <SshServerConnectPanel
+        open={sshPanelOpen}
+        workspaceId={workspaceId}
+        onClose={() => setSshPanelOpen(false)}
+        onConnected={async () => {
+          setSshPanelOpen(false);
           await loadRegistrations();
         }}
       />

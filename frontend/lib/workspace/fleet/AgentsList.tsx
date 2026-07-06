@@ -67,20 +67,24 @@ function AgentRow({
 }) {
   const st = deriveStatus(agent.hardware_status || "unknown");
   const preset = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
+  const initial = (agent.label || "A").charAt(0).toUpperCase();
   return (
     <button
       type="button"
       className="fleet-agent-row"
       onClick={() => onSelect(agent.agent_id, agent.project_id || "")}
     >
-      <span className={`fleet-detail-dot ${statusClass(st.tone)}`} />
+      <span className="fleet-agent-row-avatar">
+        {initial}
+        <span className={`fleet-agent-row-dot ${statusClass(st.tone)}`} />
+      </span>
       <span className="fleet-agent-row-main">
         <span className="fleet-agent-row-title">{agent.label || "Unnamed agent"}</span>
         {preset && <span className="fleet-badge fleet-badge--preset">{preset}</span>}
       </span>
       <span className="fleet-agent-row-tag">{agent.channel || "No channel"}</span>
-      <span className="fleet-agent-row-tag">{timeAgo(agent.last_activity)}</span>
       <span className="fleet-agent-row-cost">{cost > 0 ? money(cost) : "—"}</span>
+      <span className="fleet-agent-row-tag fleet-agent-row-tag--time">{timeAgo(agent.last_activity)}</span>
     </button>
   );
 }
