@@ -4257,6 +4257,13 @@ def provision_user_account(
     user_id = str((_find_user_by_email(email_token) or {}).get("id") or "").strip() or str(uuid.uuid4())
     _control_plane_workspace_roles = dict(normalized_workspace_roles)
     for workspace_id, role in _control_plane_workspace_roles.items():
+        # Bind the workspace to its tenant FIRST, via the shared idempotent
+        # binding, so the tenant/workspace rows and the workspace_registry
+        # binding always exist. ensure_workspace_membership only creates them on
+        # the Postgres path when the workspace is new (and never on the SQLite
+        # fallback), which left externally-provisioned/SSO workspaces unbound and
+        # 403'ing /auth/me. Binding here guarantees resolution in both stores.
+        ensure_workspace_tenant_binding(workspace_id, resolved_tenant_id)
         stored = _control_plane_call(
             control_plane_repository.ensure_workspace_membership(
                 user_id=user_id,
