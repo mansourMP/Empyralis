@@ -143,44 +143,15 @@ async def get_active_thread(
 ) -> str:
     """Return the active thread_id for this workspace+channel.
 
-    Reads workspace.channel_active_threads JSONB.
-    Returns "sage-main" if no active task thread is set.
-    Tries direct asyncpg first, falls back to server pool.
+    Reads workspace.channel_active_threads JSONB via the tenant-scoped
+    control-plane repository. Returns "sage-main" if no active task thread set.
     """
     if not channel_origin:
         return "sage-main"
 
-    query = "SELECT channel_active_threads FROM workspaces WHERE id = $1"
-
-    # 1) Direct asyncpg (works standalone + test)
-    import os as _os
-    _dsn = _os.environ.get("DATABASE_URL", "").strip()
-    if _dsn:
-        try:
-            import asyncpg as _apg
-            _conn = await _apg.connect(_dsn)
-            try:
-                row = await _conn.fetchrow(query, workspace_id)
-                if row:
-                    raw = row["channel_active_threads"]
-                    cat = {}
-                    if isinstance(raw, dict):
-                        cat = raw
-                    elif isinstance(raw, str) and raw.strip():
-                        import json as _json
-                        try:
-                            cat = _json.loads(raw)
-                        except Exception:
-                            pass
-                    active = cat.get(channel_origin) if isinstance(cat, dict) else None
-                    if active and isinstance(active, str) and active.strip():
-                        return active.strip()
-            finally:
-                await _conn.close()
-        except Exception:
-            pass
-
-    # 2) Server pool fallback
+    # get_workspace_by_id runs under the RLS scope (bypass, keyed by workspace_id);
+    # a raw asyncpg connection here would carry no tenant GUC and RLS would
+    # silently return no rows.
     try:
         from server_modules.control_plane_repository import get_workspace_by_id
         ws = await get_workspace_by_id(workspace_id)
@@ -202,16 +173,17 @@ async def _set_active_thread(
 ) -> None:
     """Store the active thread_id for this workspace+channel in DB.
 
-    Tries direct asyncpg connection first (works standalone), falls back
-    to server pool (production context).
+    Runs under the RLS scope: a raw asyncpg or unscoped pool connection carries
+    no tenant GUC, so under FORCE RLS the UPDATE would violate the workspaces
+    policy and never persist. bypass_rls matches how get_workspace_by_id reads
+    this same row by workspace id.
     """
     import json as _json
-    import os as _os
+    from server_modules import control_plane_repository as _cpr
 
     cat: dict = {}
     try:
-        from server_modules.control_plane_repository import get_workspace_by_id
-        ws = await get_workspace_by_id(workspace_id)
+        ws = await _cpr.get_workspace_by_id(workspace_id)
         if isinstance(ws, dict):
             raw = ws.get("channel_active_threads")
             if isinstance(raw, dict):
@@ -227,29 +199,12 @@ async def _set_active_thread(
     query = "UPDATE workspaces SET channel_active_threads = $1::jsonb WHERE id = $2"
     params = (_json.dumps(cat), workspace_id)
 
-    # 1) Direct asyncpg connection (works standalone + test)
-    _dsn = _os.environ.get("DATABASE_URL", "").strip()
-    if _dsn:
-        try:
-            import asyncpg as _apg
-            _conn = await _apg.connect(_dsn)
-            try:
-                await _conn.execute(query, *params)
-                return  # success
-            finally:
-                await _conn.close()
-        except Exception:
-            pass
-
-    # 2) Server pool fallback (production context)
     try:
-        from server_modules.control_plane_repository import ensure_control_plane_schema
-        pool = await ensure_control_plane_schema()
+        pool = await _cpr.ensure_control_plane_schema()
         if pool is not None:
-            async with pool.acquire() as conn:
-                await conn.execute(query, *params)
+            await _cpr.rls_execute(pool, query, *params, bypass_rls=True)
     except Exception as exc:
-        _logger.warning("_set_active_thread failed (pool path): %s", exc)
+        _logger.warning("_set_active_thread failed: %s", exc)
 
 
 # ── Main dispatcher ──
