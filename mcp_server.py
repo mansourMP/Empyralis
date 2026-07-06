@@ -19,8 +19,6 @@ Read + chat (always live):
   - ``empyralis_list_agents`` → fleet_list_agents (+ project, channel, connector status)
   - ``empyralis_get_agent_activity`` → fleet_get_agent_activity
   - ``empyralis_get_agent_conversations`` → deployed_agent_service.list_deployed_agent_conversations
-  - ``empyralis_memory_read`` → memory_read
-  - ``empyralis_memory_list`` → memory_list
   - ``empyralis_chat`` → full turn through normal chat path (triage, ledger, AI)
 
 Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true`` + per-key writes_enabled):
@@ -28,7 +26,6 @@ Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true`` + per-key writes_enable
   - ``empyralis_create_agent`` → fleet_create_agent (+ projects_repository.assign_install_to_project)
   - ``empyralis_configure_agent`` → fleet_configure_agent
   - ``empyralis_message_agent`` → fleet_message_agent
-  - ``empyralis_memory_write`` → memory_write
   - ``empyralis_assign_channel_bot`` → hosted_bot_provisioning_service / discord_bot_provisioning_service
   - ``empyralis_release_channel_bot`` → hosted_bot_provisioning_service / discord_bot_provisioning_service
   - ``empyralis_connect_connector`` → connection_oauth_service.start_oauth (returns authorization_url)
@@ -65,15 +62,12 @@ EMPYRALIST_MCP_TOOLS = [
     "empyralis_list_agents",
     "empyralis_get_agent_activity",
     "empyralis_get_agent_conversations",
-    "empyralis_memory_read",
-    "empyralis_memory_list",
     "empyralis_chat",
     # Write (gated behind EMPYRALIS_MCP_WRITE_ENABLED + per-key writes_enabled)
     "empyralis_create_project",
     "empyralis_create_agent",
     "empyralis_configure_agent",
     "empyralis_message_agent",
-    "empyralis_memory_write",
     "empyralis_assign_channel_bot",
     "empyralis_release_channel_bot",
     "empyralis_connect_connector",
@@ -119,14 +113,26 @@ async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
 
 
 async def _ledger_mcp_call(workspace_id: str, tool_name: str, ok: bool, **extra: Any) -> None:
-    """Write an mcp_inbound ledger event."""
+    """Write an mcp_inbound ledger event for an inbound external MCP call.
+
+    Previously called runs_core.emit_log with kwargs that don't exist on it, so
+    every call raised TypeError and was swallowed — the claimed mcp_inbound audit
+    trail did not exist. Routed through the real activity ledger.
+    """
     try:
-        from server_modules.runs_core import emit_log
-        emit_log(
+        from server_modules import activity_ledger_service
+        from server_modules import control_plane_repository as cpr
+
+        tenant_id = await cpr.resolve_tenant_id_for_workspace(workspace_id, default="default")
+        await activity_ledger_service.append_activity_event(
+            tenant_id=tenant_id,
             workspace_id=workspace_id,
+            actor_type="external_mcp_client",
+            actor_id="external_mcp_client",
             event_class="mcp_inbound",
             action=tool_name,
-            actor_id="external_mcp_client",
+            title=f"MCP {tool_name}",
+            summary=f"ok={ok}",
             metadata={"ok": ok, **extra},
         )
     except Exception:
@@ -259,23 +265,12 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_get_agent_conversations", True, agent_id=agent_id)
         return {"ok": True, "agent_id": agent_id, **(payload if isinstance(payload, dict) else {})}
 
-    @empyralist_mcp.tool()
-    async def empyralis_memory_read(key: str, ctx: Context = None) -> Dict[str, Any]:
-        """Read a memory entry by key from your workspace."""
-        r = await _resolve(ctx); ws = _ws(r)
-        from server_modules.agent_memory_tools import memory_read
-        result = await memory_read(workspace_id=ws, key=key)
-        await _ledger_mcp_call(ws, "empyralis_memory_read", True, key=key)
-        return {"ok": True, "key": key, "value": result}
-
-    @empyralist_mcp.tool()
-    async def empyralis_memory_list(ctx: Context = None) -> Dict[str, Any]:
-        """List all memory entries in your workspace."""
-        r = await _resolve(ctx); ws = _ws(r)
-        from server_modules.agent_memory_tools import memory_list
-        entries = await memory_list(workspace_id=ws)
-        await _ledger_mcp_call(ws, "empyralis_memory_list", True, entry_count=len(entries or []))
-        return {"ok": True, "entries": entries or []}
+    # NOTE: empyralis_memory_read / _list / _write were removed here. They called
+    # agent_memory_tools with a workspace-only signature the real functions do not
+    # accept (they are agent-scoped and require agent_install_id + path/content),
+    # so every call raised TypeError. Exposing agent-scoped memory over MCP needs
+    # a deliberate agent-selection design; until then the dead tools are gone
+    # rather than advertised-but-crashing.
 
     @empyralist_mcp.tool()
     async def empyralis_chat(message: str, agent_id: str = "", ctx: Context = None) -> Dict[str, Any]:
@@ -349,10 +344,10 @@ if empyralist_mcp is not None:
         agent_id: str, patch: Dict[str, Any], ctx: Context = None,
     ) -> Dict[str, Any]:
         """Configure agent settings. Requires writes_enabled on the API key."""
-        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules.fleet_tools import fleet_configure_agent
         result = await fleet_configure_agent(
-            workspace_id=ws, agent_id=agent_id, patch_dict=patch, actor_id="external_mcp_client",
+            workspace_id=ws, tenant_id=tenant, agent_id=agent_id, patch=patch, actor_id="external_mcp_client",
         )
         await _ledger_mcp_call(ws, "empyralis_configure_agent", result.get("ok", False), agent_id=agent_id)
         return result
@@ -369,15 +364,6 @@ if empyralist_mcp is not None:
         )
         await _ledger_mcp_call(ws, "empyralis_message_agent", result.get("ok", False), agent_id=agent_id)
         return result
-
-    @empyralist_mcp.tool()
-    async def empyralis_memory_write(key: str, value: str, ctx: Context = None) -> Dict[str, Any]:
-        """Write a memory entry. Requires writes_enabled on the API key."""
-        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
-        from server_modules.agent_memory_tools import memory_write
-        result = await memory_write(workspace_id=ws, key=key, value=value)
-        await _ledger_mcp_call(ws, "empyralis_memory_write", True, key=key)
-        return {"ok": True, "key": key, "result": result}
 
     @empyralist_mcp.tool()
     async def empyralis_assign_channel_bot(

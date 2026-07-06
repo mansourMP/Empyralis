@@ -136,12 +136,33 @@ async def create_workspace_mcp_api_key(
     }
 
 
-async def revoke_workspace_mcp_api_key(key_id: str) -> Dict[str, Any]:
-    """Revoke an MCP API key by its ID."""
+async def get_mcp_api_key_workspace(key_id: str) -> Optional[str]:
+    """Return the workspace that owns *key_id*, or None if the key is unknown.
+
+    Used by the revoke route to scope-check the caller before revoking, so a key
+    cannot be revoked cross-workspace.
+    """
+    data = _load_keys()
+    entry = data.get("keys", {}).get(key_id)
+    if not entry:
+        return None
+    return str(entry.get("workspace_id") or "").strip() or None
+
+
+async def revoke_workspace_mcp_api_key(
+    key_id: str, *, workspace_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Revoke an MCP API key by its ID.
+
+    When *workspace_id* is provided the key must belong to it — defense-in-depth
+    so a key is never revoked cross-workspace even if the caller check is missed.
+    """
     data = _load_keys()
     keys = data.get("keys", {})
     entry = keys.get(key_id)
     if not entry:
+        return {"ok": False, "error": f"Key '{key_id}' not found."}
+    if workspace_id is not None and str(entry.get("workspace_id") or "").strip() != str(workspace_id).strip():
         return {"ok": False, "error": f"Key '{key_id}' not found."}
     if entry.get("revoked"):
         return {"ok": False, "error": f"Key '{key_id}' is already revoked."}

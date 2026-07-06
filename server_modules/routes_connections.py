@@ -795,8 +795,19 @@ async def revoke_mcp_api_key(
     current_user=Depends(get_current_user),
 ):
     """Revoke an MCP API key."""
-    from server_modules.mcp_server_auth import revoke_workspace_mcp_api_key
-    result = await revoke_workspace_mcp_api_key(key_id)
+    from server_modules.mcp_server_auth import (
+        get_mcp_api_key_workspace,
+        revoke_workspace_mcp_api_key,
+    )
+
+    # Scope the revoke to the key's owning workspace so an authenticated user in
+    # one workspace cannot revoke another workspace's key (cross-tenant IDOR).
+    owner_workspace = await get_mcp_api_key_workspace(key_id)
+    if not owner_workspace:
+        raise HTTPException(status_code=404, detail="Key not found.")
+    _workspace_scope(current_user, owner_workspace, minimum_role="owner")
+
+    result = await revoke_workspace_mcp_api_key(key_id, workspace_id=owner_workspace)
     if not result.get("ok"):
         raise HTTPException(status_code=404, detail=result.get("error", "Key not found."))
     return result
