@@ -6,7 +6,7 @@ from server_modules import runtime_common as common
 def _approval_correlation_id(approval_id: str, run_id: str | None = None, event_id: str | None = None) -> str:
     return f"corr-{approval_id or run_id or event_id or 'unknown'}"
 
-def _append_approval_audit(**kwargs: Any) -> None:
+def _append_approval_audit(**kwargs) -> None:
     pass
 from server_modules.runs_output import _compact_event_text, _json_safe
 
