@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 
 import { useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
+import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 
 type ByAgent = { agent_install_id: string; events: number; total_tokens: number; usd_cost: number };
 type UsageRollup = {
@@ -74,8 +75,10 @@ export default function BillingPage() {
         </div>
       </div>
 
-      {loading && <div className="fleet-page-state-body">Loading usage…</div>}
-      {!loading && data && !data.ok && <div className="fleet-page-state-body">{data.error || "No usage data."}</div>}
+      {loading && <FleetListSkeleton rows={5} />}
+      {!loading && data && !data.ok && (
+        <FleetSurfaceError title="Couldn’t load usage" message={data.error || "No usage data."} />
+      )}
 
       {!loading && totals && (
         <>

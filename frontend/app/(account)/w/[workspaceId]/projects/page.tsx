@@ -6,6 +6,7 @@ import { FolderKanban } from "lucide-react";
 
 import { useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
 import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
+import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 
 export default function ProjectsPage() {
   const params = useParams();
@@ -24,33 +25,35 @@ export default function ProjectsPage() {
         </div>
       </div>
 
-      {error && <div className="fleet-page-state-body">{error}</div>}
-
-      {!loading && !error && projects.length === 0 && (
+      {loading && projects.length === 0 ? (
+        <FleetListSkeleton rows={4} />
+      ) : error && projects.length === 0 ? (
+        <FleetSurfaceError title="Couldn’t load projects" message={error} onRetry={refresh} />
+      ) : projects.length === 0 ? (
         <CreateFirstAgentEmpty
           workspaceId={workspaceId}
           onCreated={refresh}
           title="No projects yet"
           desc="Projects keep your agents organized. Create your first agent and its project is set up for you."
         />
+      ) : (
+        <div className="fleet-list">
+          {projects.map((p) => (
+            <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-list-row">
+              <span className="fleet-list-row-icon">
+                <FolderKanban size={16} strokeWidth={1.75} />
+              </span>
+              <span className="fleet-list-row-main">
+                <span className="fleet-list-row-title">{p.name || p.id}</span>
+                {p.description && <span className="fleet-list-row-desc">{p.description}</span>}
+              </span>
+              <span className="fleet-list-row-meta">
+                {p.agent_count ?? 0} {(p.agent_count ?? 0) === 1 ? "agent" : "agents"}
+              </span>
+            </Link>
+          ))}
+        </div>
       )}
-
-      <div className="fleet-list">
-        {projects.map((p) => (
-          <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-list-row">
-            <span className="fleet-list-row-icon">
-              <FolderKanban size={16} strokeWidth={1.75} />
-            </span>
-            <span className="fleet-list-row-main">
-              <span className="fleet-list-row-title">{p.name || p.id}</span>
-              {p.description && <span className="fleet-list-row-desc">{p.description}</span>}
-            </span>
-            <span className="fleet-list-row-meta">
-              {p.agent_count ?? 0} {(p.agent_count ?? 0) === 1 ? "agent" : "agents"}
-            </span>
-          </Link>
-        ))}
-      </div>
     </main>
   );
 }

@@ -5,6 +5,7 @@ import { AlertTriangle, Inbox as InboxIcon } from "lucide-react";
 
 import { useFleetAgents, useWorkspaceActivity } from "@/lib/workspace/fleet/fleet-data";
 import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
+import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 
 // One workspace-wide feed: activity ledger + escalations + notifications,
 // newest first. Replaces the old activity / tasks / notifications panes.
@@ -16,7 +17,7 @@ function isEscalation(e: any): boolean {
 export default function InboxPage() {
   const params = useParams();
   const workspaceId = String(params?.workspaceId || "");
-  const { events, loading } = useWorkspaceActivity(workspaceId, 50);
+  const { events, loading, error } = useWorkspaceActivity(workspaceId, 50);
   const { agents, loading: agentsLoading, refresh: refreshAgents } = useFleetAgents(workspaceId);
   const freshWorkspace = !agentsLoading && agents.length === 0;
 
@@ -30,11 +31,9 @@ export default function InboxPage() {
       </div>
 
       {loading && events.length === 0 ? (
-        <div className="fleet-list" aria-label="Loading activity">
-          {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div>
-          ))}
-        </div>
+        <FleetListSkeleton rows={6} />
+      ) : error && events.length === 0 ? (
+        <FleetSurfaceError title="Couldn’t load your inbox" message={error} />
       ) : events.length === 0 && freshWorkspace ? (
         <CreateFirstAgentEmpty
           workspaceId={workspaceId}

@@ -7,6 +7,7 @@ import { useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-da
 import { deriveStatus, statusClass } from "@/lib/workspace/fleet/fleet-presentation";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
+import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 
 const money = (n: number) => `$${n.toFixed(4)}`;
 
@@ -16,7 +17,7 @@ export default function AgentsPage() {
   const workspaceId = String(params?.workspaceId || "");
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
-  const { agents, loading, refresh } = useFleetAgents(workspaceId);
+  const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
   const [filter, setFilter] = useState<string>("all");
   const [cost, setCost] = useState<Map<string, number>>(new Map());
@@ -74,7 +75,11 @@ export default function AgentsPage() {
         </div>
       </div>
 
-      {!loading && agents.length === 0 ? (
+      {loading && agents.length === 0 ? (
+        <FleetListSkeleton rows={6} />
+      ) : error && agents.length === 0 ? (
+        <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
+      ) : agents.length === 0 ? (
         <FirstAgentEmpty
           title="No agents yet"
           desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."

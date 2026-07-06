@@ -252,6 +252,7 @@ export type WorkspaceActivityEvent = {
 export function useWorkspaceActivity(workspaceId: string, limit = 8) {
   const [events, setEvents] = useState<WorkspaceActivityEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -261,8 +262,10 @@ export function useWorkspaceActivity(workspaceId: string, limit = 8) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setEvents(Array.isArray(data.items) ? data.items : []);
-    } catch {
-      setEvents([]);
+      setError(null);
+    } catch (e) {
+      // Keep the last-good events on a poll failure; just surface the error.
+      setError(e instanceof Error ? e.message : "Could not load activity");
     } finally {
       setLoading(false);
     }
@@ -274,7 +277,7 @@ export function useWorkspaceActivity(workspaceId: string, limit = 8) {
     return () => clearInterval(interval);
   }, [refresh]);
 
-  return { events, loading };
+  return { events, loading, error };
 }
 
 export type WorkspaceStatusStrip = {
