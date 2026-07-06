@@ -746,6 +746,117 @@ def _elapsed_ms_between_iso(started_at: Any, ended_at: Any) -> Optional[float]:
     return max(0.0, (ended - started).total_seconds() * 1000.0)
 
 
+# Terminal run states are the run's durable source of truth. They are written
+# synchronously and confirmed (below) instead of fire-and-forget, so a transient
+# DB error cannot leave a run marked complete in memory but unwritten in
+# Postgres — which would rehydrate as a stuck/resultless run across a redeploy.
+_TERMINAL_DURABLE_STATES = frozenset(
+    {"completed", "failed", "timeout", "cancelled", "stopped"}
+)
+_MAX_TERMINAL_PERSIST_ATTEMPTS = 4
+_TERMINAL_PERSIST_RETRY_BACKOFF_SECONDS = 0.2
+
+
+def _report_durability_failure(context: str, exc: BaseException) -> None:
+    """Single seam for durability failures — loud by default, never a debug log.
+
+    Fix 5 wires Sentry capture + the activity-ledger dead-letter signal into this
+    one function so every durability swallow site becomes observable at once.
+    """
+    LOGGER.error(
+        "Durable persistence failure during %s: %s", context, exc, exc_info=True
+    )
+
+
+def _reconcile_durable_version(run_id: str, run: Dict[str, Any]) -> Optional[int]:
+    """Re-read the persisted run version and sync it into memory.
+
+    Called after a version conflict so a retry writes on top of the current DB
+    version instead of swallowing the terminal state.
+    """
+    try:
+        persisted = run_state_repository.sync_get_live_run(run_id)
+    except Exception as exc:
+        LOGGER.warning("Failed to re-read persisted run version for %s: %s", run_id, exc)
+        return None
+    if not isinstance(persisted, dict):
+        return None
+    try:
+        version = max(0, int(persisted.get("_durable_version") or 0))
+    except Exception:
+        return None
+    run["_durable_version"] = version
+    return version
+
+
+def _persist_run_snapshot_confirmed(
+    run_id: str,
+    run: Dict[str, Any],
+    *,
+    state: str,
+    trace_id: str,
+    payload: Dict[str, Any],
+    expected_version: int,
+) -> None:
+    """Persist a terminal snapshot synchronously with bounded retry + reconcile.
+
+    The in-memory ``_durable_version`` is advanced ONLY after the write is
+    confirmed. On a version conflict we reconcile against the persisted row and
+    retry; on a transient DB error we back off and retry. If bounded retries are
+    exhausted we surface loudly and leave the version untouched, so in-memory and
+    DB stay in agreement and a later write can repair the run.
+    """
+    attempt_version = expected_version
+    last_error: Optional[BaseException] = None
+    for attempt in range(1, _MAX_TERMINAL_PERSIST_ATTEMPTS + 1):
+        payload["_durable_version"] = attempt_version
+        try:
+            new_version = run_state_repository.sync_update_live_run_if_version_matches(
+                run_id,
+                _run_workspace_id(run),
+                _run_tenant_id(run),
+                state,
+                payload,
+                trace_id,
+                expected_version=attempt_version,
+            )
+        except Exception as exc:  # transient DB error — retry within bounds
+            last_error = exc
+            LOGGER.warning(
+                "Terminal run persistence attempt %d/%d failed for %s (%s): %s",
+                attempt,
+                _MAX_TERMINAL_PERSIST_ATTEMPTS,
+                run_id,
+                state,
+                exc,
+            )
+            time.sleep(_TERMINAL_PERSIST_RETRY_BACKOFF_SECONDS * attempt)
+            continue
+
+        if new_version is not None:
+            run["_durable_version"] = int(new_version)
+            return
+
+        # Version conflict: another writer advanced the row. Reconcile against
+        # the persisted version and retry the terminal write on top of it.
+        last_error = run_state_repository.RunStateVersionConflictError(
+            f"terminal snapshot conflict for {run_id} at version {attempt_version}"
+        )
+        reconciled = _reconcile_durable_version(run_id, run)
+        if reconciled is None:
+            time.sleep(_TERMINAL_PERSIST_RETRY_BACKOFF_SECONDS * attempt)
+        elif reconciled == attempt_version:
+            attempt_version = reconciled + 1
+        else:
+            attempt_version = reconciled
+
+    _report_durability_failure(
+        f"terminal run persistence for {run_id} (state={state}) after "
+        f"{_MAX_TERMINAL_PERSIST_ATTEMPTS} attempts",
+        last_error or RuntimeError("unresolved version conflict"),
+    )
+
+
 def _persist_run_repository_snapshot(
     run_id: str,
     run: Dict[str, Any],
@@ -756,6 +867,18 @@ def _persist_run_repository_snapshot(
     expected_version = _run_durable_version(run)
     payload = _serialize_run_for_durable_repository(run_id, run)
     payload["_durable_version"] = expected_version
+
+    if str(state or "").strip() in _TERMINAL_DURABLE_STATES:
+        _persist_run_snapshot_confirmed(
+            run_id,
+            run,
+            state=state,
+            trace_id=trace_id,
+            payload=payload,
+            expected_version=expected_version,
+        )
+        return
+
     async def _write_snapshot() -> int:
         result = await run_state_repository.update_live_run_if_version_matches(
             run_id=run_id,
@@ -770,15 +893,19 @@ def _persist_run_repository_snapshot(
             raise run_state_repository.RunStateVersionConflictError(
                 f"Durable snapshot conflict for {run_id} at version {expected_version}"
             )
+        # Advance the in-memory version ONLY after the write is confirmed, so a
+        # failed async write leaves memory and DB in agreement (self-heals on the
+        # next write) instead of desyncing the run permanently.
+        run["_durable_version"] = int(result)
         return int(result)
+
     try:
         run_state_repository.dispatch_repository_call(
             _write_snapshot(),
             operation=f"update_live_run_if_version_matches:{run_id}:{state}:{expected_version}",
         )
-        _set_run_field_quietly(run, "_durable_version", expected_version + 1)
     except Exception as exc:
-        LOGGER.warning("Failed to dispatch live run repository update for %s: %s", run_id, exc)
+        _report_durability_failure(f"live run repository dispatch for {run_id}", exc)
 
 
 def _record_run_repository_transition(
