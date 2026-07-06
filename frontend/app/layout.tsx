@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
 import localFont from 'next/font/local';
 import type { ReactNode } from 'react';
 
@@ -15,13 +14,17 @@ export const metadata: Metadata = {
   description: 'Empyralis browser shell',
 };
 
-// Variable Inter for the fleet UI (weights 100–900, incl. the 550 titles).
-// DM Sans stays loaded below for the landing page and legacy chrome.
-const inter = Inter({
-  subsets: ['latin'],
-  variable: '--font-inter',
-  display: 'swap',
-});
+// Fleet UI font: self-hosted Inter (Linear's typeface). next/font/google was
+// removed because it fetches from Google at build time and fails in offline
+// builds. To activate real Inter: drop InterVariable.woff2 into app/fonts, then
+// uncomment the block below AND add `${inter.variable}` to the <html> className.
+// No CSS change is needed — fleet-theme.css uses var(--font-inter, <system
+// stack>), so until the file is present the UI renders in the native system font.
+// const inter = localFont({
+//   src: [{ path: './fonts/InterVariable.woff2', weight: '100 900', style: 'normal' }],
+//   variable: '--font-inter',
+//   display: 'swap',
+// });
 
 const dmSans = localFont({
   src: [
@@ -89,7 +92,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
       lang="en"
       data-theme="light"
       suppressHydrationWarning
-      className={`${dmSans.variable} ${inter.variable}`}
+      className={dmSans.variable /* append ` ${inter.variable}` when InterVariable.woff2 is added */}
     >
       <body data-theme="light" suppressHydrationWarning>
         <script

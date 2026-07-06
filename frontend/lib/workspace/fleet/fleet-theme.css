@@ -22,7 +22,9 @@
   /* Color tokens (--bg-*, --text-*, --accent-*, --border, --online/offline-*)
      live in lib/ui/theme-tokens.css, keyed off [data-theme] on <html> — the
      one shared source consumed by both fleet and legacy chrome surfaces. */
-  --fleet-font: var(--font-inter), "Inter", -apple-system, "Segoe UI", sans-serif;
+  /* Self-hosted Inter when present (--font-inter), else the native system stack
+     (San Francisco on macOS) — so the build never depends on a font fetch. */
+  --fleet-font: var(--font-inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
 
   display: flex;
   height: 100vh;
