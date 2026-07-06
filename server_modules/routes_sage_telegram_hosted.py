@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import threading
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -8,11 +10,45 @@ from pydantic import BaseModel, Field
 import secrets
 
 from server_modules import auth as auth_module
+from server_modules import client_identity_service
+from server_modules import request_window_quota_adapter
 from server_modules import sage_telegram_hosted_service as hosted
 
 
 router = APIRouter()
 get_current_user = auth_module.get_current_user
+
+
+# The hosted Telegram webhooks are mounted directly under /api, so they bypass
+# _dispatch_public_studio_webhook (which throttles every other channel's
+# webhook). Reuse the same per-IP request-window limiter here so this is no
+# longer an unmetered ingress / forged-flood surface.
+_HOSTED_WEBHOOK_RATE_LIMIT_PER_MINUTE = int(
+    os.getenv("EMPYRALIS_PUBLIC_WEBHOOK_RATE_LIMIT_PER_MINUTE", "60")
+)
+_HOSTED_WEBHOOK_RATE_BUCKETS: Dict[str, list] = {}
+_HOSTED_WEBHOOK_RATE_LOCK = threading.Lock()
+
+
+def _enforce_hosted_webhook_rate_limit(request: Request, path: str) -> None:
+    client_ip = client_identity_service.resolve_client_ip(request)
+    decision = request_window_quota_adapter.evaluate_request_window(
+        buckets=_HOSTED_WEBHOOK_RATE_BUCKETS,
+        lock=_HOSTED_WEBHOOK_RATE_LOCK,
+        key=f"{client_ip}:{path}",
+        limit=max(1, _HOSTED_WEBHOOK_RATE_LIMIT_PER_MINUTE),
+    )
+    if not decision.get("allowed"):
+        retry_after = int(decision.get("retry_after_seconds") or 1)
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "public_webhook_rate_limited",
+                "message": "Telegram webhook ingress is receiving too many requests.",
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 class PairingStartRequest(BaseModel):
@@ -94,8 +130,13 @@ async def bot_info() -> dict:
 
 @router.post("/sage/telegram-hosted/webhook")
 async def telegram_webhook(request: Request) -> dict:
+    _enforce_hosted_webhook_rate_limit(request, "/sage/telegram-hosted/webhook")
     if not hosted.is_configured():
         raise HTTPException(status_code=503, detail="Not configured")
+    if not hosted.is_webhook_secret_configured():
+        # Fail closed: without a configured secret inbound updates cannot be
+        # authenticated, so refuse to process them rather than trusting any POST.
+        raise HTTPException(status_code=503, detail="Telegram webhook secret is not configured.")
 
     body_bytes = await request.body()
     header_signature = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -197,6 +238,7 @@ async def telegram_pool_webhook(pool_bot_id: str, request: Request) -> dict:
     """Phase 3B: per-bot webhook. An update delivered here came from exactly one
     pool bot, which is assigned to exactly one agent — so inbound routes to that
     agent with no chat→workspace pairing ambiguity."""
+    _enforce_hosted_webhook_rate_limit(request, "/sage/telegram-hosted/webhook/pool")
     from server_modules import hosted_bot_provisioning_service as prov
     from server_modules import hosted_bot_pool_repository as pool_repo
 
@@ -206,7 +248,10 @@ async def telegram_pool_webhook(pool_bot_id: str, request: Request) -> dict:
 
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     expected = str(bot.get("webhook_secret") or "")
-    if expected and not secrets.compare_digest(header_secret, expected):
+    if not expected:
+        # Fail closed: a pool bot with no webhook secret cannot be authenticated.
+        raise HTTPException(status_code=503, detail="Bot webhook secret is not configured.")
+    if not secrets.compare_digest(header_secret, expected):
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
 
     try:

@@ -86,6 +86,11 @@ def _webhook_secret() -> str:
     return _text(os.getenv("EMPYRALIS_TELEGRAM_HOSTED_WEBHOOK_SECRET"))
 
 
+def is_webhook_secret_configured() -> bool:
+    """True when the hosted webhook secret is set (inbound updates can be authenticated)."""
+    return bool(_webhook_secret())
+
+
 _CACHED_BOT_USERNAME: Optional[str] = None
 
 
@@ -637,7 +642,11 @@ async def ensure_bot_username_cached() -> str:
 def verify_webhook_signature(header_signature: str, body_bytes: bytes) -> bool:
     secret = _webhook_secret()
     if not secret:
-        return True
+        # Fail closed: without a configured secret the webhook cannot be
+        # authenticated, so any request could be forged — reject it. (The route
+        # also returns 503 when the secret is unset; this is defense-in-depth so
+        # verification never passes blind even if a caller skips that check.)
+        return False
     if not header_signature:
         return False
     computed = hmac.new(
