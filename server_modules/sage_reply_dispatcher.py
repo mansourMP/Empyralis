@@ -137,19 +137,47 @@ def _build_setup_hint(workspace_id: str) -> str:
     return f"\n\n{_setup_path}"
 
 
+# Bounded in-band retry for transient channel send failures (provider 5xx,
+# dropped socket). Without this, a single transient error dropped the reply
+# permanently — the turn completed but the user never received the answer.
+_SEND_MAX_ATTEMPTS = 3
+_SEND_RETRY_BACKOFF_SECONDS = 0.5
+
+
 async def _send_one_chunk(
     transport: ChannelTransport,
     text: str,
     *,
     reply_to_id: Optional[str] = None,
 ) -> bool:
-    """Send a single chunk — formatted first, plain-text on failure."""
+    """Send a single chunk — formatted first, plain-text on failure — with
+    bounded retry so a transient send failure (5xx / dropped socket) is retried
+    in-band instead of silently dropping the reply. Returns False only after all
+    attempts fail, so the caller can decline to ACK the webhook."""
     formatted = transport.format_text(text)
-    if formatted != text:
-        if await transport.send_message(formatted, reply_to_id=reply_to_id):
-            return True
-    # Plain-text fallback
-    return await transport.send_message(text, reply_to_id=reply_to_id)
+
+    async def _attempt_once() -> bool:
+        if formatted != text:
+            if await transport.send_message(formatted, reply_to_id=reply_to_id):
+                return True
+        # Plain-text fallback
+        return await transport.send_message(text, reply_to_id=reply_to_id)
+
+    for attempt in range(1, _SEND_MAX_ATTEMPTS + 1):
+        try:
+            if await _attempt_once():
+                return True
+        except Exception as exc:
+            _logger.warning(
+                "channel send attempt %d/%d raised (%s): %s",
+                attempt,
+                _SEND_MAX_ATTEMPTS,
+                type(exc).__name__,
+                exc,
+            )
+        if attempt < _SEND_MAX_ATTEMPTS:
+            await asyncio.sleep(_SEND_RETRY_BACKOFF_SECONDS * attempt)
+    return False
 
 
 async def dispatch_sage_reply(

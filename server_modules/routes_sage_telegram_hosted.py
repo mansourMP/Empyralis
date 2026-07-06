@@ -172,7 +172,7 @@ async def telegram_webhook(request: Request) -> dict:
     from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
 
     _transport = hosted.TelegramHostedTransport(str(chat_id))
-    await dispatch_sage_reply_safe(
+    delivered = await dispatch_sage_reply_safe(
         transport=_transport,
         workspace_id=workspace_id,
         message=message_text if message_text else "[Media]",
@@ -182,6 +182,12 @@ async def telegram_webhook(request: Request) -> dict:
         sender_name=str(parsed.get("from_first_name", "")).strip(),
         reply_to_id=str(parsed.get("message_id") or ""),
     )
+
+    if not delivered:
+        # The reply was generated but could not be delivered after bounded
+        # in-band retries. Do NOT ACK success — return 503 so Telegram
+        # redelivers the update instead of silently dropping the user's answer.
+        raise HTTPException(status_code=503, detail="reply_delivery_failed")
 
     return {"ok": True}
 
