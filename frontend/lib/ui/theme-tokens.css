@@ -72,8 +72,11 @@ html[data-theme="dark"] {
   --rail-active: rgba(255, 255, 255, 0.06);
 
   /* Floating-panel chrome (fleet shell): the app canvas the rail sits on,
-     and the raised content panel. Additive — legacy chrome.css ignores them. */
-  --bg-canvas: #0e0e10;
+     and the raised content panel. Additive — legacy chrome.css ignores them.
+     Dark: canvas recessed a clearer step below the rail+panel elevation
+     (rail already tracks panel's brightness — unchanged) so the floating
+     panel reads as deliberately raised, not a rounding error. */
+  --bg-canvas: #0a0a0c;
   --bg-panel: #151518;
   --panel-shadow: none;
 
@@ -105,7 +108,7 @@ html[data-theme="dark"] {
 html[data-theme="light"] {
   --bg-page: #ffffff;
   --bg-content: #ffffff;
-  --bg-rail: #f7f7f8;
+  --bg-rail: #f4f4f5;
   --bg-card: #ffffff;
   --bg-card-hover: #fafafa;
   --bg-surface-2: #f0f0f2;
@@ -114,11 +117,12 @@ html[data-theme="light"] {
   --border-strong: rgba(0, 0, 0, 0.16);
   --rail-active: rgba(0, 0, 0, 0.05);
 
-  /* Floating-panel chrome (fleet shell) — light: white panel on a gray canvas
-     with a whisper of elevation. */
-  --bg-canvas: #f8f8f8;
+  /* Floating-panel chrome (fleet shell) — light: pure-white panel floating on
+     a more clearly soft-grey canvas (rail matches canvas — same bare plane
+     the panel floats over) with a whisper of elevation. */
+  --bg-canvas: #f4f4f5;
   --bg-panel: #ffffff;
-  --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.03), 0 2px 8px rgba(0, 0, 0, 0.03);
+  --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.04);
 
   --text-primary: #18181b;
   --text-secondary: #52525b;

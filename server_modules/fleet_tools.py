@@ -287,6 +287,62 @@ async def _fetch_latest_heartbeats(workspace_id: str) -> Dict[str, dict]:
         return {}
 
 
+async def _fetch_latest_activity(workspace_id: str) -> Dict[str, str]:
+    """Latest activity_ledger_events timestamp per agent (actor_id) — one bulk
+    query for the whole workspace, not N+1. Backs the agents/project list's
+    "last active" column."""
+    try:
+        from server_modules import control_plane_repository as cpr
+
+        pool = await cpr.ensure_control_plane_schema()
+        if pool is None:
+            return {}
+        rows = await pool.fetch(
+            """
+            SELECT actor_id, MAX(created_at) AS last_active_at
+            FROM activity_ledger_events
+            WHERE workspace_id = $1
+            GROUP BY actor_id
+            """,
+            str(workspace_id or "").strip(),
+        )
+        out: Dict[str, str] = {}
+        for r in rows or []:
+            actor_id = str(r["actor_id"] or "").strip()
+            ts = r["last_active_at"]
+            if actor_id and ts is not None:
+                out[actor_id] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        return out
+    except Exception:
+        return {}
+
+
+async def _fetch_agent_channels(*, tenant_id: str, workspace_id: str) -> Dict[str, str]:
+    """Primary enabled channel key per agent — one bulk query for the whole
+    workspace via the RLS-scoped bindings repository. Backs the agents/project
+    list's "channel" column; an agent with more than one enabled channel shows
+    its first plus a "+N" suffix."""
+    try:
+        from server_modules import agent_bindings_repository as bindings
+
+        rows = await bindings.list_workspace_channel_bindings(
+            tenant_id=tenant_id, workspace_id=workspace_id, enabled_only=True,
+        )
+        by_agent: Dict[str, list] = {}
+        for r in rows or []:
+            agent_id = str(r.get("agent_install_id") or "").strip()
+            key = str(r.get("key") or "").strip()
+            if agent_id and key:
+                by_agent.setdefault(agent_id, []).append(key)
+        out: Dict[str, str] = {}
+        for agent_id, keys in by_agent.items():
+            extra = len(keys) - 1
+            out[agent_id] = keys[0] + (f" +{extra}" if extra > 0 else "")
+        return out
+    except Exception:
+        return {}
+
+
 # ── Fleet tool implementations ──────────────────────────────────────────────
 
 
@@ -314,6 +370,10 @@ async def fleet_list_agents(
         _heartbeats = await _fetch_latest_heartbeats(workspace_id)
     except Exception:
         pass
+
+    # ── Phase UI-2: last-active + channel, for the agents/project list density ──
+    _last_active = await _fetch_latest_activity(workspace_id)
+    _channels = await _fetch_agent_channels(tenant_id=tenant_id, workspace_id=workspace_id)
 
     agents = []
     for inst in (installs or []):
@@ -349,6 +409,8 @@ async def fleet_list_agents(
             "runtime_target": _runtime_target,
             "hardware_status": _hardware_status,
             "last_heartbeat": _last_heartbeat,
+            "last_activity": _last_active.get(str(inst_dict.get("id") or "").strip()),
+            "channel": _channels.get(str(inst_dict.get("id") or "").strip(), ""),
         })
 
     await _ledger_fleet_action(

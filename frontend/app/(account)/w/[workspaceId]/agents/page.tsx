@@ -3,13 +3,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
-import { deriveStatus, statusClass } from "@/lib/workspace/fleet/fleet-presentation";
+import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
+import { AgentsList } from "@/lib/workspace/fleet/AgentsList";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 
-const money = (n: number) => `$${n.toFixed(4)}`;
+type SortMode = "last_active" | "status" | "cost" | "name" | "group";
+
+const STATUS_RANK: Record<string, number> = { online: 0, unknown: 1, offline: 2 };
 
 export default function AgentsPage() {
   const params = useParams();
@@ -20,6 +22,7 @@ export default function AgentsPage() {
   const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
   const [filter, setFilter] = useState<string>("all");
+  const [sort, setSort] = useState<SortMode>("last_active");
   const [cost, setCost] = useState<Map<string, number>>(new Map());
   const [wizardOpen, setWizardOpen] = useState(false);
 
@@ -51,7 +54,8 @@ export default function AgentsPage() {
   }, [workspaceId]);
 
   const projName = useMemo(() => new Map(projects.map((p) => [p.id, p.name || p.id])), [projects]);
-  const shown = filter === "all" ? agents : agents.filter((a) => (a.project_id || "") === filter);
+  const filtered = filter === "all" ? agents : agents.filter((a) => (a.project_id || "") === filter);
+  const shown = useMemo(() => sortAgents(filtered, sort, cost), [filtered, sort, cost]);
 
   const goToAgent = (agentId: string, projectId: string) =>
     router.push(`${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/overview`);
@@ -63,10 +67,17 @@ export default function AgentsPage() {
           <h1 className="fleet-title">Agents</h1>
           <p className="fleet-subtitle">{loading ? "Loading…" : `${shown.length} of ${agents.length} agents`}</p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+        <div className="fleet-toolbar">
           <select className="fleet-select" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} aria-label="Filter by project">
             <option value="all">All projects</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
+          </select>
+          <select className="fleet-select" value={sort} onChange={(e) => setSort(e.currentTarget.value as SortMode)} aria-label="Sort or group">
+            <option value="last_active">Last active</option>
+            <option value="status">Status</option>
+            <option value="cost">Cost</option>
+            <option value="name">Name</option>
+            <option value="group">Group by project</option>
           </select>
           <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
             <span className="fleet-btn-plus">+</span>
@@ -85,31 +96,16 @@ export default function AgentsPage() {
           desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
           onCreate={() => setWizardOpen(true)}
         />
+      ) : shown.length === 0 ? (
+        <div className="fleet-page-state-body">No agents in this project.</div>
       ) : (
-        <div className="fleet-list">
-          {shown.map((a) => {
-            const st = deriveStatus(a.hardware_status || "unknown");
-            const preset = (a.capability_preset || "").toLowerCase();
-            const c = cost.get(a.agent_id) || 0;
-            return (
-              <button key={a.agent_id} type="button" className="fleet-list-row" onClick={() => goToAgent(a.agent_id, a.project_id || "")}>
-                <span className={`fleet-detail-dot ${statusClass(st.tone)}`} />
-                <span className="fleet-list-row-main">
-                  <span className="fleet-list-row-title">{a.label}</span>
-                  <span className="fleet-list-row-desc">
-                    {projName.get(a.project_id || "") || "Ungrouped"}
-                    {preset ? ` · ${preset}` : ""}
-                    {(a.role || "").toLowerCase() === "operator" ? " · operator" : ""}
-                  </span>
-                </span>
-                <span className="fleet-list-row-meta">{c > 0 ? money(c) : "—"}</span>
-              </button>
-            );
-          })}
-          {!loading && shown.length === 0 && agents.length > 0 && (
-            <div className="fleet-page-state-body">No agents in this project.</div>
-          )}
-        </div>
+        <AgentsList
+          agents={shown}
+          costByAgent={cost}
+          projectNameById={projName}
+          groupByProject={sort === "group"}
+          onSelect={goToAgent}
+        />
       )}
 
       {wizardOpen && (
@@ -124,4 +120,24 @@ export default function AgentsPage() {
       )}
     </main>
   );
+}
+
+function sortAgents(agents: FleetAgent[], sort: SortMode, cost: Map<string, number>): FleetAgent[] {
+  const list = [...agents];
+  if (sort === "name") {
+    list.sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  } else if (sort === "status") {
+    list.sort((a, b) => (STATUS_RANK[a.hardware_status] ?? 1) - (STATUS_RANK[b.hardware_status] ?? 1));
+  } else if (sort === "cost") {
+    list.sort((a, b) => (cost.get(b.agent_id) || 0) - (cost.get(a.agent_id) || 0));
+  } else if (sort === "last_active") {
+    list.sort((a, b) => {
+      const ta = a.last_activity ? new Date(a.last_activity).getTime() : 0;
+      const tb = b.last_activity ? new Date(b.last_activity).getTime() : 0;
+      return tb - ta;
+    });
+  } else if (sort === "group") {
+    list.sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  }
+  return list;
 }

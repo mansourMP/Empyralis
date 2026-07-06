@@ -2162,6 +2162,83 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   cursor: pointer;
 }
 
+.fleet-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ── UI Phase 2: dense agent list — Linear ~32px single-line rows ─────────── */
+.fleet-agents-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.fleet-agent-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: background var(--motion-base) ease-out;
+}
+.fleet-agents-list .fleet-agent-row:last-child { border-bottom: none; }
+.fleet-agent-row:hover { background: var(--bg-card-hover); } /* quiet — no accent border on hover */
+.fleet-agent-row.is-selected { background: var(--accent-soft); }
+.fleet-agent-row-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+.fleet-agent-row-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-agent-row-tag {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+  width: 108px;
+}
+.fleet-agent-row-cost {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  width: 64px;
+  text-align: right;
+}
+.fleet-agent-group {
+  display: flex;
+  flex-direction: column;
+}
+.fleet-agent-group + .fleet-agent-group { border-top: 1px solid var(--border); }
+.fleet-agent-group-title {
+  padding: 6px 12px;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--bg-inset);
+}
+
 .fleet-segmented {
   display: inline-flex;
   gap: 2px;

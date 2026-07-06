@@ -1,15 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
+import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
 import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
-import { FleetCard } from "@/lib/workspace/fleet/FleetCard";
+import { AgentsList } from "@/lib/workspace/fleet/AgentsList";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
-import { toAgentSummary } from "@/lib/workspace/fleet/fleet-presentation";
+import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
+import { FleetListSkeleton } from "@/lib/workspace/fleet/fleet-states";
 
 const money = (n: number | undefined) => `$${(n ?? 0).toFixed(4)}`;
+
+type SortMode = "last_active" | "status" | "cost" | "name";
+const STATUS_RANK: Record<string, number> = { online: 0, unknown: 1, offline: 2 };
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -23,8 +27,10 @@ export default function ProjectDetailPage() {
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
 
+  const [sort, setSort] = useState<SortMode>("last_active");
   const [wizardOpen, setWizardOpen] = useState(false);
   const [rollup, setRollup] = useState<{ usd_cost: number; total_tokens: number; events: number } | null>(null);
+  const [cost, setCost] = useState<Map<string, number>>(new Map());
 
   useEffect(() => {
     let cancelled = false;
@@ -35,14 +41,25 @@ export default function ProjectDetailPage() {
     return () => { cancelled = true; };
   }, [base, projectId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=workspace&period=day`, { credentials: "include" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        const m = new Map<string, number>();
+        for (const a of d?.by_agent || []) m.set(a.agent_install_id, a.usd_cost);
+        setCost(m);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
   const inProject = agents.filter((a) => (a.project_id || "").trim() === projectId);
-  const mapped = inProject.map((a, i) => toAgentSummary(a, i));
+  const shown = useMemo(() => sortAgents(inProject, sort, cost), [inProject, sort, cost]);
+
   const goToAgent = (agentId: string) =>
     router.push(`${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/overview`);
-  const openChat = () => {
-    const sage = inProject.find((a) => (a.role || "").toLowerCase() === "operator") || inProject[0];
-    if (sage) goToAgent(sage.agent_id);
-  };
 
   return (
     <main className="fleet-content">
@@ -50,13 +67,23 @@ export default function ProjectDetailPage() {
         <div>
           <h1 className="fleet-title">{project?.name || "Project"}</h1>
           <p className="fleet-subtitle">
-            {loading ? "Loading…" : `${mapped.length} ${mapped.length === 1 ? "agent" : "agents"}`}
+            {loading ? "Loading…" : `${shown.length} ${shown.length === 1 ? "agent" : "agents"}`}
             {project?.description ? ` · ${project.description}` : ""}
           </p>
         </div>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
-          <span className="fleet-btn-plus">+</span> New agent
-        </button>
+        <div className="fleet-toolbar">
+          {inProject.length > 0 && (
+            <select className="fleet-select" value={sort} onChange={(e) => setSort(e.currentTarget.value as SortMode)} aria-label="Sort">
+              <option value="last_active">Last active</option>
+              <option value="status">Status</option>
+              <option value="cost">Cost</option>
+              <option value="name">Name</option>
+            </select>
+          )}
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+            <span className="fleet-btn-plus">+</span> New agent
+          </button>
+        </div>
       </div>
 
       {rollup && (
@@ -67,17 +94,16 @@ export default function ProjectDetailPage() {
         </div>
       )}
 
-      {!loading && mapped.length === 0 ? (
-        <div className="fleet-empty">
-          <div className="fleet-empty-title">No agents in this project</div>
-          <div className="fleet-empty-desc">Create one — it’ll be assigned here.</div>
-        </div>
+      {loading && inProject.length === 0 ? (
+        <FleetListSkeleton rows={4} />
+      ) : shown.length === 0 ? (
+        <FirstAgentEmpty
+          title="No agents in this project"
+          desc="Create one — it’ll be assigned here."
+          onCreate={() => setWizardOpen(true)}
+        />
       ) : (
-        <div className="fleet-grid" style={{ marginTop: "var(--space-4)" }}>
-          {mapped.map((a) => (
-            <FleetCard key={a.id} agent={a} onSelect={goToAgent} onChat={openChat} />
-          ))}
-        </div>
+        <AgentsList agents={shown} costByAgent={cost} onSelect={goToAgent} />
       )}
 
       {wizardOpen && (
@@ -90,4 +116,22 @@ export default function ProjectDetailPage() {
       )}
     </main>
   );
+}
+
+function sortAgents(agents: FleetAgent[], sort: SortMode, cost: Map<string, number>): FleetAgent[] {
+  const list = [...agents];
+  if (sort === "name") {
+    list.sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  } else if (sort === "status") {
+    list.sort((a, b) => (STATUS_RANK[a.hardware_status] ?? 1) - (STATUS_RANK[b.hardware_status] ?? 1));
+  } else if (sort === "cost") {
+    list.sort((a, b) => (cost.get(b.agent_id) || 0) - (cost.get(a.agent_id) || 0));
+  } else {
+    list.sort((a, b) => {
+      const ta = a.last_activity ? new Date(a.last_activity).getTime() : 0;
+      const tb = b.last_activity ? new Date(b.last_activity).getTime() : 0;
+      return tb - ta;
+    });
+  }
+  return list;
 }

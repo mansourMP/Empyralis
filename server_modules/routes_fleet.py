@@ -55,6 +55,20 @@ async def fleet_usage(
         return {"ok": False, "error": str(exc)}
 
 
+@router.get("/api/w/{workspace_id}/fleet/workspace")
+async def fleet_workspace(request: Request, workspace_id: str) -> Dict[str, Any]:
+    """The workspace's own display name — the fleet shell's breadcrumb root
+    (not the platform brand, not "Home"; the actual workspace)."""
+    from server_modules import control_plane_repository
+
+    try:
+        ws = await control_plane_repository.get_workspace_by_id(workspace_id)
+        name = str((ws or {}).get("name") or "").strip() or workspace_id
+        return {"ok": True, "workspace": {"id": workspace_id, "name": name}}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "workspace": {"id": workspace_id, "name": workspace_id}}
+
+
 @router.get("/api/w/{workspace_id}/fleet/agents")
 async def fleet_agents(
     request: Request,

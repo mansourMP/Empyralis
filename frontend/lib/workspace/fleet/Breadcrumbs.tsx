@@ -13,6 +13,8 @@ import {
 } from "react";
 import { ChevronRight } from "lucide-react";
 
+import { useFleetWorkspace } from "./fleet-data";
+
 /**
  * Breadcrumbs read the URL segment chain under /w/{ws} and render one crumb per
  * segment, each linking to its cumulative path. Static segments (Projects,
@@ -81,6 +83,7 @@ type Crumb = { key: string; label: string; href: string; current: boolean };
 export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
   const pathname = usePathname() || "";
   const { labels } = useContext(BreadcrumbLabelContext);
+  const { workspace } = useFleetWorkspace(workspaceId);
 
   const crumbs = useMemo<Crumb[]>(() => {
     const base = `/w/${encodeURIComponent(workspaceId)}`;
@@ -88,10 +91,17 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     const rest = pathname.startsWith(base) ? pathname.slice(base.length) : "";
     const segments = rest.split("/").filter(Boolean);
 
-    // The "agents/{id}" pair inside a project is a routed agent detail — the
-    // bare "agents" segment there is structural, not a page, so we fold it into
-    // the agent crumb rather than rendering a dead "Agents" link mid-chain.
-    const items: Crumb[] = [{ key: "home", label: "Home", href: `${base}/inbox`, current: segments.length === 0 }];
+    // Root crumb: the WORKSPACE itself (its real name, not "Home" — this isn't
+    // the inbox), linking to the default landing (the flat agents list). The
+    // "agents/{id}" pair inside a project is a routed agent detail — the bare
+    // "agents" segment there is structural, not a page, so we fold it into the
+    // agent crumb rather than rendering a dead "Agents" link mid-chain.
+    const items: Crumb[] = [{
+      key: "workspace-root",
+      label: workspace?.name || "Workspace",
+      href: `${base}/agents`,
+      current: segments.length === 0,
+    }];
     let acc = base;
     segments.forEach((seg, i) => {
       acc += `/${seg}`;
@@ -110,12 +120,12 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       });
     });
     return items;
-  }, [pathname, workspaceId, labels]);
+  }, [pathname, workspaceId, labels, workspace?.name]);
 
   if (crumbs.length <= 1) {
     return (
       <nav className="fleet-breadcrumbs" aria-label="Breadcrumb">
-        <span className="fleet-breadcrumb fleet-breadcrumb--current">{crumbs[0]?.label ?? "Home"}</span>
+        <span className="fleet-breadcrumb fleet-breadcrumb--current">{crumbs[0]?.label ?? "Workspace"}</span>
       </nav>
     );
   }

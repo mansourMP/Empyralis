@@ -14,6 +14,7 @@ export type FleetAgent = {
   last_heartbeat: string | null;
   last_activity?: string | null;
   activity_preview?: string;
+  channel?: string;
   model_config?: Record<string, any>;
   project_id?: string;
   capability_preset?: string;
@@ -67,6 +68,35 @@ export function useFleetAgents(workspaceId: string) {
   }, [refresh]);
 
   return { agents, loading, error, refresh };
+}
+
+export type FleetWorkspace = { id: string; name: string };
+
+/** The workspace's own display name — used for the breadcrumb root (not the
+ *  platform brand, not "Home"). Fetched once per workspaceId. */
+export function useFleetWorkspace(workspaceId: string) {
+  const [workspace, setWorkspace] = useState<FleetWorkspace | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!workspaceId) { setLoading(false); return; }
+    (async () => {
+      try {
+        const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/workspace`, { credentials: "include" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!cancelled && data?.workspace) setWorkspace(data.workspace);
+      } catch {
+        if (!cancelled) setWorkspace(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  return { workspace, loading };
 }
 
 export function useFleetProjects(workspaceId: string) {
