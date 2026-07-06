@@ -3,7 +3,8 @@
 import { useParams } from "next/navigation";
 import { AlertTriangle, Inbox as InboxIcon } from "lucide-react";
 
-import { useWorkspaceActivity } from "@/lib/workspace/fleet/fleet-data";
+import { useFleetAgents, useWorkspaceActivity } from "@/lib/workspace/fleet/fleet-data";
+import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 
 // One workspace-wide feed: activity ledger + escalations + notifications,
 // newest first. Replaces the old activity / tasks / notifications panes.
@@ -16,6 +17,8 @@ export default function InboxPage() {
   const params = useParams();
   const workspaceId = String(params?.workspaceId || "");
   const { events, loading } = useWorkspaceActivity(workspaceId, 50);
+  const { agents, loading: agentsLoading, refresh: refreshAgents } = useFleetAgents(workspaceId);
+  const freshWorkspace = !agentsLoading && agents.length === 0;
 
   return (
     <main className="fleet-content">
@@ -32,6 +35,13 @@ export default function InboxPage() {
             <div key={i} className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div>
           ))}
         </div>
+      ) : events.length === 0 && freshWorkspace ? (
+        <CreateFirstAgentEmpty
+          workspaceId={workspaceId}
+          onCreated={refreshAgents}
+          title="Your inbox is empty"
+          desc="This is where your agents' activity and anything needing your attention shows up. Create your first agent to get started."
+        />
       ) : events.length === 0 ? (
         <div className="fleet-work-empty">
           <InboxIcon size={26} strokeWidth={1.5} />

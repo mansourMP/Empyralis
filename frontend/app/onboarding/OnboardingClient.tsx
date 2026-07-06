@@ -11,7 +11,6 @@ import {
 } from '@/lib/account/account-workspaces-client';
 import { useAccountShell } from '@/lib/shell/account-shell-context';
 import {
-  sanitizeWorkspaceRoute,
   type WorkspaceMembershipRecord,
 } from '@/lib/shell/workspace-membership-model';
 import {
@@ -73,18 +72,16 @@ export function OnboardingClient({
         defaultRoute: values.defaultRoute,
         setupCompleted: true,
       });
-      let nextRoute = sanitizeWorkspaceRoute(values.defaultRoute, membership.defaultRoute);
       try {
         const session = await loadAccountShellBootstrap();
         actions.replaceSession(session);
-        const nextMembership = session.workspaceMemberships.find(
-          (item) => item.workspace.id === membership.workspace.id,
-        );
-        nextRoute = nextMembership?.defaultRoute ?? nextRoute;
       } catch {
-        // Continue with a workspace-scoped route even if the session refresh is transiently unavailable.
+        // Continue even if the session refresh is transiently unavailable.
       }
-      router.replace(nextRoute);
+      // Fresh-workspace onboarding lands straight in the create-first-agent
+      // wizard (?new=1) — not a bare landing, and not the removed Sage chat
+      // route. The workspace already carries a name at this point.
+      router.replace(`/w/${encodeURIComponent(membership.workspace.id)}/agents?new=1`);
       router.refresh();
     } catch (error) {
       setErrorMessage(
@@ -133,7 +130,7 @@ export function OnboardingClient({
       name: membership.workspace.label || 'My Workspace',
       workspaceType: 'personal',
       preferredShellProfileId: 'personal_shell',
-      defaultRoute: membership.defaultRoute || `/w/${encodeURIComponent(membership.workspace.id)}/sage/chat`,
+      defaultRoute: membership.defaultRoute || `/w/${encodeURIComponent(membership.workspace.id)}`,
     }));
   }, []);
 

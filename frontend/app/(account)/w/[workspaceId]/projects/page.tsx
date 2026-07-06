@@ -5,11 +5,12 @@ import { useParams } from "next/navigation";
 import { FolderKanban } from "lucide-react";
 
 import { useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
+import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 
 export default function ProjectsPage() {
   const params = useParams();
   const workspaceId = String(params?.workspaceId || "");
-  const { projects, loading, error } = useFleetProjects(workspaceId);
+  const { projects, loading, error, refresh } = useFleetProjects(workspaceId);
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
   return (
@@ -25,11 +26,13 @@ export default function ProjectsPage() {
 
       {error && <div className="fleet-page-state-body">{error}</div>}
 
-      {!loading && projects.length === 0 && (
-        <div className="fleet-empty">
-          <div className="fleet-empty-title">No projects yet</div>
-          <div className="fleet-empty-desc">Agents you create are grouped into projects.</div>
-        </div>
+      {!loading && !error && projects.length === 0 && (
+        <CreateFirstAgentEmpty
+          workspaceId={workspaceId}
+          onCreated={refresh}
+          title="No projects yet"
+          desc="Projects keep your agents organized. Create your first agent and its project is set up for you."
+        />
       )}
 
       <div className="fleet-list">
