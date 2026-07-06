@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 
 import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
 import { AgentsList } from "@/lib/workspace/fleet/AgentsList";
+import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
@@ -12,6 +13,13 @@ import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/flee
 type SortMode = "last_active" | "status" | "cost" | "name" | "group";
 
 const STATUS_RANK: Record<string, number> = { online: 0, unknown: 1, offline: 2 };
+const SORT_OPTIONS = [
+  { value: "last_active", label: "Last active" },
+  { value: "status", label: "Status" },
+  { value: "cost", label: "Cost" },
+  { value: "name", label: "Name" },
+  { value: "group", label: "Group by project" },
+];
 
 export default function AgentsPage() {
   const params = useParams();
@@ -21,7 +29,9 @@ export default function AgentsPage() {
 
   const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
-  const [filter, setFilter] = useState<string>("all");
+  const [projectFilter, setProjectFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [channelFilter, setChannelFilter] = useState<string>("all");
   const [sort, setSort] = useState<SortMode>("last_active");
   const [cost, setCost] = useState<Map<string, number>>(new Map());
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -54,8 +64,41 @@ export default function AgentsPage() {
   }, [workspaceId]);
 
   const projName = useMemo(() => new Map(projects.map((p) => [p.id, p.name || p.id])), [projects]);
-  const filtered = filter === "all" ? agents : agents.filter((a) => (a.project_id || "") === filter);
+
+  const filtered = useMemo(() => {
+    return agents.filter((a) => {
+      if (projectFilter !== "all" && (a.project_id || "") !== projectFilter) return false;
+      if (statusFilter !== "all" && (a.hardware_status || "unknown") !== statusFilter) return false;
+      if (channelFilter === "connected" && !a.channel) return false;
+      if (channelFilter === "none" && a.channel) return false;
+      return true;
+    });
+  }, [agents, projectFilter, statusFilter, channelFilter]);
   const shown = useMemo(() => sortAgents(filtered, sort, cost), [filtered, sort, cost]);
+
+  const filters: ToolbarFilter[] = [
+    {
+      key: "project", label: "Project", value: projectFilter, onChange: setProjectFilter,
+      options: [{ value: "all", label: "All projects" }, ...projects.map((p) => ({ value: p.id, label: p.name || p.id }))],
+    },
+    {
+      key: "status", label: "Status", value: statusFilter, onChange: setStatusFilter,
+      options: [
+        { value: "all", label: "All statuses" },
+        { value: "online", label: "Online" },
+        { value: "offline", label: "Offline" },
+        { value: "unknown", label: "Not deployed" },
+      ],
+    },
+    {
+      key: "channel", label: "Channel", value: channelFilter, onChange: setChannelFilter,
+      options: [
+        { value: "all", label: "All channels" },
+        { value: "connected", label: "Connected" },
+        { value: "none", label: "No channel" },
+      ],
+    },
+  ];
 
   const goToAgent = (agentId: string, projectId: string) =>
     router.push(`${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/overview`);
@@ -67,24 +110,15 @@ export default function AgentsPage() {
           <h1 className="fleet-title">Agents</h1>
           <p className="fleet-subtitle">{loading ? "Loading…" : `${shown.length} of ${agents.length} agents`}</p>
         </div>
-        <div className="fleet-toolbar">
-          <select className="fleet-select" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} aria-label="Filter by project">
-            <option value="all">All projects</option>
-            {projects.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
-          </select>
-          <select className="fleet-select" value={sort} onChange={(e) => setSort(e.currentTarget.value as SortMode)} aria-label="Sort or group">
-            <option value="last_active">Last active</option>
-            <option value="status">Status</option>
-            <option value="cost">Cost</option>
-            <option value="name">Name</option>
-            <option value="group">Group by project</option>
-          </select>
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
-            <span className="fleet-btn-plus">+</span>
-            New agent
-          </button>
-        </div>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+          <span className="fleet-btn-plus">+</span>
+          New agent
+        </button>
       </div>
+
+      {agents.length > 0 && (
+        <FleetToolbar filters={filters} sortOptions={SORT_OPTIONS} sortValue={sort} sortDefault="last_active" onSortChange={(v) => setSort(v as SortMode)} />
+      )}
 
       {loading && agents.length === 0 ? (
         <FleetListSkeleton rows={6} />
@@ -97,7 +131,7 @@ export default function AgentsPage() {
           onCreate={() => setWizardOpen(true)}
         />
       ) : shown.length === 0 ? (
-        <div className="fleet-page-state-body">No agents in this project.</div>
+        <div className="fleet-page-state-body">No agents match these filters.</div>
       ) : (
         <AgentsList
           agents={shown}

@@ -482,6 +482,70 @@ async def fleet_get_agent_activity(
     return {"ok": True, "agent_id": agent_id, "events": events}
 
 
+async def fleet_get_project_activity(
+    *,
+    workspace_id: str,
+    tenant_id: str = "system",
+    project_id: str = "",
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """Read recent ledger activity across every agent in a project — backs the
+    project detail right panel's Activity section (panel-only, no separate
+    tab). Same activity_ledger_events source as fleet_get_agent_activity, just
+    scoped to a set of actor_ids instead of one."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules import control_plane_repository as cpr
+
+    if not str(project_id or "").strip():
+        return {"ok": False, "error": "project_id is required", "events": []}
+
+    try:
+        installs = await repo.list_workspace_agent_installs(
+            tenant_id=tenant_id, workspace_id=workspace_id, include_master=True,
+        )
+        agent_ids = [
+            str(dict(i).get("id") or "").strip()
+            for i in (installs or [])
+            if str(dict(i).get("project_id") or "").strip() == str(project_id).strip()
+        ]
+        agent_ids = [a for a in agent_ids if a]
+        if not agent_ids:
+            return {"ok": True, "project_id": project_id, "events": []}
+
+        pool = await cpr.ensure_control_plane_schema()
+        if pool is None:
+            return {"ok": False, "error": "Database unavailable", "events": []}
+
+        rows = await pool.fetch(
+            """
+            SELECT id, actor_id, action, event_class, title, status, created_at
+            FROM activity_ledger_events
+            WHERE workspace_id = $1
+              AND actor_id = ANY($2::text[])
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            str(workspace_id or "").strip(),
+            agent_ids,
+            max(1, min(int(limit or 20), 100)),
+        )
+        events = [
+            {
+                "event_id": str(r["id"]),
+                "actor_id": str(r["actor_id"] or ""),
+                "action": str(r["action"] or ""),
+                "event_class": str(r["event_class"] or ""),
+                "title": str(r["title"] or ""),
+                "status": str(r["status"] or ""),
+                "created_at": str(r["created_at"] or ""),
+            }
+            for r in (rows or [])
+        ]
+        return {"ok": True, "project_id": project_id, "events": events}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "events": []}
+
+
 async def fleet_get_agent_tools(
     *,
     workspace_id: str,

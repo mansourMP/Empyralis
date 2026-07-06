@@ -30,6 +30,7 @@ export type FleetProject = {
   description?: string;
   agent_count?: number;
   status?: string;
+  created_at?: string;
 };
 
 export type FleetAgentActivity = {

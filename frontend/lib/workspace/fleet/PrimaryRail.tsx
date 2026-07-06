@@ -8,7 +8,9 @@ import {
   ChevronRight,
   Cpu,
   CreditCard,
+  FileText,
   FolderKanban,
+  HelpCircle,
   Inbox,
   LogOut,
   Moon,
@@ -193,6 +195,7 @@ export function PrimaryRail({
       </nav>
 
       <div className="fleet-rail-controls">
+        <HelpMenu />
         <button
           type="button"
           className="fleet-rail-control-btn"
@@ -221,6 +224,61 @@ export function PrimaryRail({
         collapsed={collapsed}
       />
     </aside>
+  );
+}
+
+// ── Help menu (quiet "?" — docs-link placeholder; no "Ask", nothing behind it yet) ──
+// Renders as a direct child of .fleet-rail-controls (already position:relative)
+// so its popover stretches to the rail's width, matching the account popover
+// below it rather than being constrained to the button's own small box.
+
+function HelpMenu() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (ref.current?.contains(event.target as Node)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    // display:contents keeps this out of the box tree entirely — it's here
+    // only to give the outside-click check a single ancestor spanning both
+    // the button and its popover, without becoming a new positioning context
+    // (the popover still positions against .fleet-rail-controls).
+    <div ref={ref} style={{ display: "contents" }}>
+      {open && (
+        <div className="fleet-rail-account-popover" role="menu" aria-label="Help menu">
+          <button type="button" className="fleet-rail-account-popover-row" role="menuitem" disabled title="Coming soon">
+            <FileText size={14} strokeWidth={1.75} />
+            Documentation
+          </button>
+        </div>
+      )}
+      <button
+        type="button"
+        className="fleet-rail-control-btn"
+        onClick={() => setOpen((v) => !v)}
+        title="Help"
+        aria-label="Help"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <HelpCircle size={CONTROL_ICON} strokeWidth={1.75} />
+      </button>
+    </div>
   );
 }
 

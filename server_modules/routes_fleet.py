@@ -6,6 +6,7 @@ Serves the Fleet Home UI and the per-agent modal tabs with:
 - POST /api/w/{workspace_id}/fleet/agents
 - PATCH /api/w/{workspace_id}/fleet/agents/{agent_id}
 - GET /api/w/{workspace_id}/fleet/agent-activity?agent_id=
+- GET /api/w/{workspace_id}/fleet/project-activity?project_id=
 - GET /api/w/{workspace_id}/fleet/agent-memory?agent_id=
 - GET /api/w/{workspace_id}/fleet/agent-channels?agent_id=
 - GET /api/w/{workspace_id}/fleet/agent-connectors?agent_id=
@@ -266,6 +267,29 @@ async def fleet_agent_activity(
             workspace_id=workspace_id,
             agent_id=agent_id,
             since=since,
+        )
+        return result
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "events": []}
+
+
+@router.get("/api/w/{workspace_id}/fleet/project-activity")
+async def fleet_project_activity(
+    request: Request,
+    workspace_id: str,
+    project_id: str = Query(..., description="Project ID"),
+    limit: int = Query(20, description="Max events to return"),
+) -> Dict[str, Any]:
+    """Recent ledger events across a project's agents (project detail right
+    panel's Activity section — panel-only, no separate tab)."""
+    from server_modules.fleet_tools import fleet_get_project_activity
+
+    try:
+        result = await fleet_get_project_activity(
+            workspace_id=workspace_id,
+            tenant_id=await _resolve_tenant(workspace_id),
+            project_id=project_id,
+            limit=limit,
         )
         return result
     except Exception as exc:

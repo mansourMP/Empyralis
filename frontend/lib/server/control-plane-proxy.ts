@@ -58,10 +58,15 @@ function upstreamUnavailableResponse(error: unknown): NextResponse {
 }
 
 function hasBrowserSessionCookie(request: NextRequest): boolean {
+  // The CSRF cookie itself must not count as a "session" signal: it can
+  // outlive the access/refresh cookies it was issued alongside (e.g. after
+  // they expire or are cleared individually), and treating its mere presence
+  // as a live session would permanently 403 a returning browser out of
+  // logging back in. Mirrors the backend's own definition of a live session
+  // in validate_csrf() (access or refresh token, never the CSRF cookie).
   return Boolean(
     request.cookies.get(AUTH_ACCESS_COOKIE_NAME)
-    || request.cookies.get(AUTH_REFRESH_COOKIE_NAME)
-    || request.cookies.get(AUTH_CSRF_COOKIE_NAME),
+    || request.cookies.get(AUTH_REFRESH_COOKIE_NAME),
   );
 }
 
