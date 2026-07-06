@@ -91,6 +91,55 @@ def _gateway_connection_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_CLOUD_PROVIDER_LABELS: Dict[str, str] = {
+    "digitalocean": "DigitalOcean",
+    "hetzner": "Hetzner",
+    "vultr": "Vultr",
+}
+
+_CLOUD_PROVIDER_REGION_LABELS: Dict[str, Dict[str, str]] = {
+    "digitalocean": {
+        "nyc3": "New York 3",
+        "sfo3": "San Francisco 3",
+        "lon1": "London 1",
+        "fra1": "Frankfurt 1",
+        "sgp1": "Singapore 1",
+        "blr1": "Bangalore 1",
+    },
+    "hetzner": {
+        "nbg1": "Nuremberg, Germany",
+        "fsn1": "Falkenstein, Germany",
+        "hel1": "Helsinki, Finland",
+        "ash": "Ashburn, USA",
+        "hil": "Hillsboro, USA",
+    },
+    "vultr": {
+        "ewr": "New York / New Jersey",
+        "lhr": "London",
+        "fra": "Frankfurt",
+        "sgp": "Singapore",
+        "syd": "Sydney",
+    },
+}
+
+
+def _hardware_presentation(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    provider = str(metadata.get("provider") or "").strip().lower()
+    is_cloud_vps = str(metadata.get("setup_source") or "").strip().lower() == "vps" and bool(provider)
+    if not is_cloud_vps:
+        return {"hardware_kind": "personal_device", "hardware_label": "This Device"}
+    provider_label = _CLOUD_PROVIDER_LABELS.get(provider, provider.title() or "Cloud")
+    region = str(metadata.get("region") or "").strip()
+    region_label = _CLOUD_PROVIDER_REGION_LABELS.get(provider, {}).get(region, region)
+    label_parts = [provider_label] + ([region_label] if region_label else [])
+    return {
+        "hardware_kind": "cloud_vps",
+        "hardware_label": " · ".join(label_parts),
+        "hardware_provider": provider,
+        "hardware_region": region or None,
+    }
+
+
 def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
     metadata = dict(registration.get("metadata") or {})
     runtime_access_mode = execution_mode_policy.normalize_runtime_access_mode(
@@ -126,6 +175,7 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
         "revoked_at": registration.get("revoked_at"),
         "revoked_reason": registration.get("revoked_reason"),
         **_gateway_connection_payload(registration),
+        **_hardware_presentation(metadata),
     }
 
 
@@ -254,12 +304,16 @@ async def create_gateway_session(
 
 
 def list_workspace_gateways(*, workspace_id: str) -> Dict[str, Any]:
+    resolved_workspace_id = str(workspace_id or "").strip() or "default"
+    gateway_state_repository.dedupe_and_expire_workspace_gateway_registrations(resolved_workspace_id)
     items = [
         gateway_registration_public_payload(item)
-        for item in gateway_state_repository.list_workspace_gateway_registrations(workspace_id)
+        for item in gateway_state_repository.list_workspace_gateway_registrations(
+            resolved_workspace_id, include_revoked=False
+        )
     ]
     return {
-        "workspace_id": str(workspace_id or "").strip() or "default",
+        "workspace_id": resolved_workspace_id,
         "count": len(items),
         "items": items,
     }

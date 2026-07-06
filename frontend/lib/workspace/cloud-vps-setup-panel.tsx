@@ -4,7 +4,23 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Check, ExternalLink, X } from 'lucide-react';
 
 import { AppButton, joinClassNames } from '@/lib/ui/primitives';
-import { useWorkspaceServices } from '@/lib/workspace/workspace-services';
+import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
+
+// Fleet routes never mount WorkstationKernelProvider (the legacy workstation
+// shell it depends on is gone), so useWorkspaceServices() throws here. Talk to
+// the same /api/hardware/vps/* endpoints directly instead — same contract,
+// same CSRF handling, no dependency on a context fleet doesn't provide. See
+// FleetAgentDetail.tsx's LegacyMemoryTab comment for the same trade-off made
+// elsewhere in the fleet rewrite.
+async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const method = String(init.method || 'GET');
+  const headers = buildCookieAuthHeaders(method, { accept: 'application/json', ...(init.headers as Record<string, string> | undefined) });
+  const response = await fetch(path, { ...init, headers, credentials: 'include' });
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}.`);
+  }
+  return (await response.json()) as T;
+}
 
 export type VpsProviderId = 'digitalocean' | 'hetzner' | 'vultr';
 type VpsStep = 'provider' | 'access' | 'plans' | 'region' | 'progress';
@@ -223,7 +239,6 @@ function wait(ms: number): Promise<void> {
 }
 
 export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null, onClose, onConnected }: CloudVpsSetupPanelProps) {
-  const services = useWorkspaceServices();
   const [step, setStep] = useState<VpsStep>('provider');
   const [connections, setConnections] = useState<Partial<Record<VpsProviderId, VpsConnection>>>({});
   const [selectedProvider, setSelectedProvider] = useState<VpsProviderId | null>(null);
@@ -341,9 +356,9 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setLoadingRegions(true);
     setError(null);
     try {
-      const payload = await services.client.requestJson<VpsProviderRegionsPayload>({
-        path: `/api/hardware/vps/regions?provider=${encodeURIComponent(providerId)}`,
-      });
+      const payload = await requestJson<VpsProviderRegionsPayload>(
+        `/api/hardware/vps/regions?provider=${encodeURIComponent(providerId)}`,
+      );
       const nextRegions = normalizeRegions(payload);
       if (!nextRegions.length) {
         throw new Error('Regions are unavailable for this provider.');
@@ -365,9 +380,9 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setLoadingPlans(true);
     setError(null);
     try {
-      const payload = await services.client.requestJson<VpsProviderPlansPayload>({
-        path: `/api/hardware/vps/plans?provider=${encodeURIComponent(providerId)}&token_id=${encodeURIComponent(nextTokenId)}&workspace_id=${encodeURIComponent(workspaceId)}`,
-      });
+      const payload = await requestJson<VpsProviderPlansPayload>(
+        `/api/hardware/vps/plans?provider=${encodeURIComponent(providerId)}&token_id=${encodeURIComponent(nextTokenId)}&workspace_id=${encodeURIComponent(workspaceId)}`,
+      );
       const nextPlans = normalizePlans(payload);
       if (!nextPlans.length) {
         throw new Error('Plans are unavailable for this provider.');
@@ -422,9 +437,9 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setError(null);
     setBusy(true);
     try {
-      const payload = await services.client.requestJson<VpsOAuthStartResponse>({
-        path: `/api/hardware/vps/oauth/digitalocean/start?workspace_id=${encodeURIComponent(workspaceId)}`,
-      });
+      const payload = await requestJson<VpsOAuthStartResponse>(
+        `/api/hardware/vps/oauth/digitalocean/start?workspace_id=${encodeURIComponent(workspaceId)}`,
+      );
       const redirect = String(payload?.oauth_redirect || '').trim();
       if (!redirect) {
         throw new Error('DigitalOcean OAuth URL was not returned.');
@@ -454,20 +469,17 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setError(null);
     setBusy(true);
     try {
-      const payload = await services.client.requestJson<VpsTokenResponse>({
-        path: '/api/hardware/vps/tokens',
-        init: {
-          method: 'POST',
-          headers: {
-            accept: 'application/json',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            workspace_id: workspaceId,
-            provider: selectedProvider,
-            credentials: tokenPayload(selectedProvider, apiToken),
-          }),
+      const payload = await requestJson<VpsTokenResponse>('/api/hardware/vps/tokens', {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
         },
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          provider: selectedProvider,
+          credentials: tokenPayload(selectedProvider, apiToken),
+        }),
       });
       const nextTokenId = String(payload?.token_id || '').trim();
       if (!nextTokenId) {
@@ -522,27 +534,24 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setProgressStage('creating');
     setStep('progress');
     try {
-      const payload = await services.client.requestJson<VpsProvisionResponse>({
-        path: '/api/hardware/vps/provision',
-        init: {
-          method: 'POST',
-          headers: {
-            accept: 'application/json',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            workspace_id: workspaceId,
-            provider: selectedProvider,
-            token_id: tokenId,
-            region: selectedRegionId,
-            size: selectedPlanId,
-            runtime_access_mode: 'full_access',
-            autonomous_agent_setup_warning_acknowledged: true,
-            metadata: {
-              autonomous_agent_setup_warning_version: FULL_ACCESS_WARNING_VERSION,
-            },
-          }),
+      const payload = await requestJson<VpsProvisionResponse>('/api/hardware/vps/provision', {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
         },
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          provider: selectedProvider,
+          token_id: tokenId,
+          region: selectedRegionId,
+          size: selectedPlanId,
+          runtime_access_mode: 'full_access',
+          autonomous_agent_setup_warning_acknowledged: true,
+          metadata: {
+            autonomous_agent_setup_warning_version: FULL_ACCESS_WARNING_VERSION,
+          },
+        }),
       });
       const nextVpsId = String(payload?.vps_id || '').trim();
       if (!nextVpsId) {
@@ -565,9 +574,9 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     while (Date.now() < deadline) {
       await wait(5_000);
       try {
-        const payload = await services.client.requestJson<VpsProvisionStatusPayload>({
-          path: `/api/hardware/vps/${encodeURIComponent(nextVpsId)}/status`,
-        });
+        const payload = await requestJson<VpsProvisionStatusPayload>(
+          `/api/hardware/vps/${encodeURIComponent(nextVpsId)}/status`,
+        );
         const status = String(payload?.status || '').toLowerCase();
         if (status === 'connected') {
           setProgressStage('connected');
@@ -597,12 +606,9 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setCleanupBusy(true);
     setError(null);
     try {
-      await services.client.requestJson<Record<string, unknown>>({
-        path: `/api/hardware/vps/${encodeURIComponent(vpsId)}`,
-        init: {
-          method: 'DELETE',
-          headers: { accept: 'application/json' },
-        },
+      await requestJson<Record<string, unknown>>(`/api/hardware/vps/${encodeURIComponent(vpsId)}`, {
+        method: 'DELETE',
+        headers: { accept: 'application/json' },
       });
       setError('Server deleted.');
       setProviderResourceId(null);

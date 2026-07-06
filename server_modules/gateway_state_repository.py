@@ -1491,6 +1491,94 @@ def revoke_gateway_registration(
     return _registration_from_row(row)
 
 
+def dedupe_and_expire_workspace_gateway_registrations(
+    workspace_id: str,
+    *,
+    abandoned_grace_seconds: int = 1800,
+    db_path: Optional[Path | str] = None,
+) -> Dict[str, Any]:
+    """Collapse duplicate registrations for one physical box and revoke abandoned pairing attempts.
+
+    Two independent, conservative rules (neither depends on the other):
+      1. Registrations sharing the same non-empty metadata.vps_id are the same
+         cloud-provisioned box (vps_provisioning_service threads vps_id through
+         the pairing metadata) — keep whichever has the freshest heartbeat/update,
+         revoke the rest as duplicates.
+      2. A registration that has never once received a heartbeat and is older
+         than the grace window never completed pairing (a real box heartbeats
+         within the installer's own registration-confirmation window) — revoke
+         it as abandoned, regardless of vps_id.
+
+    Both rules only ever revoke; they never delete rows or touch a registration
+    that is currently live, so this is safe to call on every read (e.g. before
+    listing a workspace's gateways for the Hardware page).
+    """
+    resolved_workspace_id = str(workspace_id or "").strip() or "default"
+    registrations = list_workspace_gateway_registrations(
+        resolved_workspace_id, include_revoked=False, db_path=db_path
+    )
+    cutoff_iso = (
+        (_utc_now() - timedelta(seconds=max(int(abandoned_grace_seconds or 0), 0)))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+    def _freshness_key(registration: Dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(registration.get("last_heartbeat_at") or ""),
+            str(registration.get("updated_at") or ""),
+        )
+
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for registration in registrations:
+        vps_id = str((registration.get("metadata") or {}).get("vps_id") or "").strip()
+        if vps_id:
+            groups.setdefault(vps_id, []).append(registration)
+
+    revoked: List[str] = []
+    kept_by_vps_id: Dict[str, str] = {}
+    for vps_id, members in groups.items():
+        if len(members) <= 1:
+            continue
+        best = max(members, key=_freshness_key)
+        best_gateway_id = str(best.get("gateway_id") or "")
+        kept_by_vps_id[vps_id] = best_gateway_id
+        for member in members:
+            member_gateway_id = str(member.get("gateway_id") or "")
+            if member_gateway_id == best_gateway_id:
+                continue
+            revoke_gateway_registration(
+                gateway_id=member_gateway_id,
+                tenant_id=member.get("tenant_id"),
+                workspace_id=member.get("workspace_id"),
+                user_id=member.get("user_id"),
+                reason="duplicate_registration_same_box",
+                db_path=db_path,
+            )
+            revoked.append(member_gateway_id)
+
+    for registration in registrations:
+        gateway_id = str(registration.get("gateway_id") or "")
+        if gateway_id in revoked:
+            continue
+        if str(registration.get("last_heartbeat_at") or "").strip():
+            continue
+        created_at = str(registration.get("created_at") or "")
+        if not created_at or created_at >= cutoff_iso:
+            continue
+        revoke_gateway_registration(
+            gateway_id=gateway_id,
+            tenant_id=registration.get("tenant_id"),
+            workspace_id=registration.get("workspace_id"),
+            user_id=registration.get("user_id"),
+            reason="abandoned_pairing_attempt",
+            db_path=db_path,
+        )
+        revoked.append(gateway_id)
+
+    return {"revoked_gateway_ids": revoked, "kept_by_vps_id": kept_by_vps_id}
+
+
 def mark_gateway_session_connected(
     session_id: str,
     *,
