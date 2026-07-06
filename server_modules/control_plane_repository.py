@@ -3839,6 +3839,51 @@ async def _scoped_connection(
             yield connection
 
 
+# ── Tenant-scoped single-statement helpers ───────────────────────────────────
+# Drop-in replacements for pool.fetch/fetchrow/fetchval/execute that run the
+# statement inside a transaction with the RLS GUC context set, so RLS (FORCE, on
+# the non-superuser app role) sees the current tenant/workspace. The query and
+# its positional args pass through byte-identically. Callers keep their existing
+# `pool is None` guard for the SQLite fallback path (these are only reached with
+# a live pool). Pass bypass_rls=True only for system lookups whose row filter is
+# a bearer token/id (self-hosted node auth), matching how auth_store_repository
+# bypasses before a tenant is known.
+async def rls_fetch(pool, query, *args, tenant_id=None, workspace_id=None, bypass_rls=False):
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id, bypass_rls=bypass_rls)
+            return await connection.fetch(query, *args)
+
+
+async def rls_fetchrow(pool, query, *args, tenant_id=None, workspace_id=None, bypass_rls=False):
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id, bypass_rls=bypass_rls)
+            return await connection.fetchrow(query, *args)
+
+
+async def rls_fetchval(pool, query, *args, tenant_id=None, workspace_id=None, bypass_rls=False):
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id, bypass_rls=bypass_rls)
+            return await connection.fetchval(query, *args)
+
+
+async def rls_execute(pool, query, *args, tenant_id=None, workspace_id=None, bypass_rls=False):
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id, bypass_rls=bypass_rls)
+            return await connection.execute(query, *args)
+
+
+async def apply_connection_scope(connection, *, tenant_id=None, workspace_id=None, bypass_rls=False):
+    """Public entry point for setting the RLS GUC scope on a connection the
+    caller already holds (e.g. inside its own pool.acquire()/transaction() for a
+    multi-statement unit of work). Call it as the first statement of the
+    transaction, before any query on a tenant-scoped table."""
+    await _apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id, bypass_rls=bypass_rls)
+
+
 def _user_row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
     if row is None:
         return None
