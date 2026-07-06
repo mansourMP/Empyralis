@@ -37,7 +37,7 @@ const RAIL_ITEMS: RailNavItem[] = [
   { key: "settings", label: "Settings", segment: "settings", icon: Settings, chord: "s" },
 ];
 
-const RAIL_ICON = 18;
+const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
 
 /**

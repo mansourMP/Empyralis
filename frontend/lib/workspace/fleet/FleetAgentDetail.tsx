@@ -277,6 +277,7 @@ function OverviewTab({
         </div>
       ) : events.length === 0 ? (
         <EmptyState
+          icon={Inbox}
           title="No activity yet"
           body="Events appear here after this agent processes its first turn."
           action="Chat with this agent"
@@ -312,6 +313,7 @@ function OverviewTab({
 function ChatTab({ agent, onChat }: { agent: FleetAgent | null; onChat: () => void }) {
   return (
     <EmptyState
+      icon={MessageSquare}
       title={`Chat with ${agent?.label || "this agent"}`}
       body="Open the shared conversation thread and talk to this agent directly."
       action="Open chat"
@@ -417,6 +419,7 @@ function LegacyMemoryTab({
   if (files.length === 0) {
     return (
       <EmptyState
+        icon={Brain}
         title={error || "Nothing here yet"}
         body="Sage will write memories here as it learns about this agent's preferences, facts, and context."
         action="Chat with this agent"
@@ -849,6 +852,7 @@ function ConnectorsTab({
   if (connectors.length === 0) {
     return (
       <EmptyState
+        icon={Plug}
         title="No connectors available"
         body="No MCP or OAuth connectors are registered for this workspace. Connect the first one from the workspace Connectors page."
         action="Open connectors"
@@ -1049,6 +1053,7 @@ function ToolsTab({
   if (tools.length === 0) {
     return (
       <EmptyState
+        icon={Wrench}
         title="No tools enabled"
         body="This agent has no tools in its capability manifest. Chat with Sage to configure tools for this agent."
         action="Chat to configure"
@@ -1310,11 +1315,13 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
 // ── Shared empty state ──────────────────────────────────────────────────────
 
 function EmptyState({
+  icon: Icon,
   title,
   body,
   action,
   onAction,
 }: {
+  icon?: LucideIcon;
   title: string;
   body: string;
   action?: string;
@@ -1322,17 +1329,19 @@ function EmptyState({
 }) {
   return (
     <div className="fleet-tab-state">
+      {Icon && (
+        <div className="fleet-empty-icon">
+          <Icon size={20} strokeWidth={1.75} />
+        </div>
+      )}
       <div className="fleet-tab-state-title">{title}</div>
       <div className="fleet-tab-state-body">{body}</div>
       {action && onAction && (
-        <button
-          type="button"
-          className="fleet-btn fleet-btn--accent"
-          onClick={onAction}
-          style={{ marginTop: 16 }}
-        >
-          {action}
-        </button>
+        <div className="fleet-empty-actions">
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={onAction}>
+            {action}
+          </button>
+        </div>
       )}
     </div>
   );

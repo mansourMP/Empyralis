@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { Inter } from 'next/font/google';
 import localFont from 'next/font/local';
 import type { ReactNode } from 'react';
 
@@ -13,6 +14,14 @@ export const metadata: Metadata = {
   title: 'Empyralis',
   description: 'Empyralis browser shell',
 };
+
+// Variable Inter for the fleet UI (weights 100–900, incl. the 550 titles).
+// DM Sans stays loaded below for the landing page and legacy chrome.
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',
+});
 
 const dmSans = localFont({
   src: [
@@ -80,7 +89,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
       lang="en"
       data-theme="light"
       suppressHydrationWarning
-      className={dmSans.variable}
+      className={`${dmSans.variable} ${inter.variable}`}
     >
       <body data-theme="light" suppressHydrationWarning>
         <script

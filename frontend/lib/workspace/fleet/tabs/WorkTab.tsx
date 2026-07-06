@@ -94,7 +94,9 @@ export function WorkTab({
   if (convos.length === 0) {
     return (
       <div className="fleet-work-empty">
-        <InboxIcon size={26} strokeWidth={1.5} />
+        <div className="fleet-empty-icon">
+          <InboxIcon size={20} strokeWidth={1.75} />
+        </div>
         <div className="fleet-work-empty-title">No conversations yet</div>
         <div className="fleet-work-empty-desc">
           When {agent?.label || "this agent"} handles end-customer conversations,

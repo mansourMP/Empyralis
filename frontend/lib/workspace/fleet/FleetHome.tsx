@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { Radio, Plug, Cpu } from "lucide-react";
+import { Bot, Radio, Plug, Cpu } from "lucide-react";
 
 import { useFleetAgents, useWorkspaceActivity, useWorkspaceStatusStrip } from "./fleet-data";
 import { FleetCard } from "./FleetCard";
@@ -244,13 +244,18 @@ function ActivityFeed({ workspaceId }: { workspaceId: string }) {
 function EmptyFleet({ onChat }: { onChat: () => void }) {
   return (
     <div className="fleet-empty">
+      <div className="fleet-empty-icon">
+        <Bot size={20} strokeWidth={1.75} />
+      </div>
       <div className="fleet-empty-title">Start your first agent</div>
       <div className="fleet-empty-desc">
         Tell Sage what you need and it&apos;ll set one up for you.
       </div>
-      <button type="button" className="fleet-btn" onClick={onChat}>
-        Chat with Sage
-      </button>
+      <div className="fleet-empty-actions">
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={onChat}>
+          Chat with Sage
+        </button>
+      </div>
     </div>
   );
 }
