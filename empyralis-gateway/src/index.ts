@@ -5,6 +5,7 @@ import { loadGatewayConfig } from "./config";
 import { GatewayWsClient } from "./cloud/ws-client";
 import { resolveDeviceIdentity } from "./pairing/device-identity";
 import { GatewayTokenStore } from "./pairing/token-store";
+import type { GatewayTokenState } from "./pairing/token-store";
 import { GatewayStateDb } from "./state/db";
 import { GatewayJournal } from "./state/journal";
 import { GatewayOutbox } from "./state/outbox";
@@ -86,6 +87,20 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/**
+ * The installer writes EMPYRALIS_PAIRING_TOKEN into a systemd EnvironmentFile that
+ * survives every restart, and never clears it after a successful pairing (it can't —
+ * the gateway service only has read access to that config path). Without this check,
+ * every crash/reboot/redeploy re-attempts pairing with the now-consumed token, throws,
+ * and crash-loops forever instead of reconnecting with the credentials it already has.
+ */
+export function shouldAttemptPairing(
+  pairingToken: string | undefined,
+  storedGatewayToken: string | undefined,
+): boolean {
+  return Boolean(pairingToken) && !storedGatewayToken;
+}
+
 async function main(): Promise<void> {
   const config = loadGatewayConfig();
   const releaseLock = await acquireGatewayProcessLock(config.stateDir);
@@ -154,10 +169,16 @@ async function main(): Promise<void> {
   installSignalHandler("SIGTERM");
 
   try {
-    if (config.pairingToken) {
-      await client.registerFromPairing(config.pairingToken, identity, runtimeMetadata);
-    } else if (config.gatewayToken) {
+    const existingTokens: GatewayTokenState = await tokenStore.load();
+    if (shouldAttemptPairing(config.pairingToken, existingTokens.gatewayToken)) {
+      await client.registerFromPairing(config.pairingToken as string, identity, runtimeMetadata);
+    } else if (!existingTokens.gatewayToken && config.gatewayToken) {
       await tokenStore.save({ gatewayToken: config.gatewayToken });
+    } else if (config.pairingToken && existingTokens.gatewayToken) {
+      await journal.append("system", "gateway.pairing.skipped_already_registered", {
+        gatewayId: identity.gatewayId,
+        deviceId: identity.deviceId,
+      });
     }
 
     await journal.append("system", "gateway.process.start", {
