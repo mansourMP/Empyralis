@@ -25,6 +25,8 @@ src-tauri/target/
 .env.development.local
 .env.test.local
 .env.production.local
+# Vercel-pulled env files carry a short-lived VERCEL_OIDC_TOKEN — never commit.
+.env.vercel*
 
 # Logs
 logs
