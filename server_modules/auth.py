@@ -344,10 +344,56 @@ def clear_auth_cookies(response: Response, *, request: Request) -> None:
         )
 
 
-def validate_csrf(request: Request) -> bool:
+def _access_token_is_live(token: str) -> bool:
+    """True only when the access cookie is a validly-signed, unexpired token.
+
+    Used on the re-auth path to tell a real session apart from a stale cookie
+    the browser is still echoing back. A dead token grants no authority, so it
+    must not force CSRF and lock the user out of re-authenticating."""
+    raw = str(token or "").strip()
+    if not raw:
+        return False
+    try:
+        payload = _decode_token_payload(raw)
+    except Exception:
+        return False
+    try:
+        exp = int(payload.get("exp") or 0)
+    except (TypeError, ValueError):
+        return False
+    if exp and exp < int(time.time()):
+        return False
+    return True
+
+
+def _refresh_token_is_structurally_valid(token: str) -> bool:
+    """Cheap structural check for the opaque ``esr_<session>.<secret>`` refresh
+    token. A malformed/garbage value is treated as no session on the re-auth
+    path — its true (DB-backed) expiry is validated by the refresh handler
+    itself, which clears cookies on a dead token."""
+    try:
+        _decode_auth_session_refresh_token(token)
+        return True
+    except Exception:
+        return False
+
+
+def validate_csrf(request: Request, *, allow_expired_session: bool = False) -> bool:
     if request.method.upper() in {"GET", "HEAD", "OPTIONS"}:
         return True
-    if not (auth_cookie_access_token(request) or auth_cookie_refresh_token(request)):
+    access = auth_cookie_access_token(request)
+    refresh = auth_cookie_refresh_token(request)
+    if allow_expired_session:
+        # Login/refresh/logout path: a stale cookie the browser is still
+        # echoing back represents no live session. Treat a dead access token
+        # and a malformed refresh token as absent so CSRF can't lock a user out
+        # of recovering from an expired session. A *live* credential is still
+        # honored below, so CSRF stays fully enforced for real sessions.
+        if access and not _access_token_is_live(access):
+            access = None
+        if refresh and not _refresh_token_is_structurally_valid(refresh):
+            refresh = None
+    if not (access or refresh):
         return True
     csrf_cookie = str(request.cookies.get(AUTH_CSRF_COOKIE_NAME) or "").strip()
     csrf_header = str(request.headers.get(AUTH_CSRF_HEADER_NAME) or "").strip()

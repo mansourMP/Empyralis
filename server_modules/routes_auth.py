@@ -328,7 +328,9 @@ async def refresh_session(body: AuthRefreshRequest, request: Request, response: 
     elif requested_channel is not None:
         browser_session_request = browser_auth_session_channel(requested_channel)
     if browser_session_request:
-        validate_csrf(request)
+        # A stale/expired session cookie must not block re-establishing a
+        # session — treat a dead credential as absent on this re-auth path.
+        validate_csrf(request, allow_expired_session=True)
     refresh_token = str(
         body.refresh_token
         or (auth_cookie_refresh_token(request) if browser_session_request else "")
@@ -362,7 +364,10 @@ async def refresh_session(body: AuthRefreshRequest, request: Request, response: 
 
 @router.post("/auth/logout")
 async def logout(request: Request, response: Response):
-    validate_csrf(request)
+    # Logout must be able to clear a broken/stale browser session; a dead
+    # session cookie without a matching CSRF cookie must not 403 the user into
+    # a stuck state. Treat an expired/garbage credential as absent here.
+    validate_csrf(request, allow_expired_session=True)
     result: dict[str, Any] = {"ok": True, "session_revoked": False}
     try:
         current_user = get_current_user(
