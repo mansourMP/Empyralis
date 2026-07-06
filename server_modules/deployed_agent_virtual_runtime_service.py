@@ -461,7 +461,8 @@ async def _assert_self_hosted_runtime_gate(
         runtime_node_id = _text(attachment.get("runtime_node_id"))
         exclude_session_id = _text(runtime_session_id)
         if exclude_session_id:
-            active_sessions = await pool.fetchval(
+            active_sessions = await control_plane_repository.rls_fetchval(
+                pool,
                 """
                 SELECT COUNT(*)
                 FROM agent_sessions
@@ -478,9 +479,11 @@ async def _assert_self_hosted_runtime_gate(
                 _RUNTIME_BINDING_SELF_HOSTED,
                 runtime_node_id,
                 exclude_session_id,
+                tenant_id=tenant_id, workspace_id=workspace_id,
             )
         else:
-            active_sessions = await pool.fetchval(
+            active_sessions = await control_plane_repository.rls_fetchval(
+                pool,
                 """
                 SELECT COUNT(*)
                 FROM agent_sessions
@@ -495,6 +498,7 @@ async def _assert_self_hosted_runtime_gate(
                 workspace_token,
                 _RUNTIME_BINDING_SELF_HOSTED,
                 runtime_node_id,
+                tenant_id=tenant_id, workspace_id=workspace_id,
             )
         active_count = int(active_sessions or 0)
         phase_token = _text(phase).lower() or "session_init"

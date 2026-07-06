@@ -247,7 +247,8 @@ async def set_project_archived(
             raise ValueError("The default project cannot be archived.")
         # Reassign this project's agents back to the default project.
         default_project = await ensure_default_project(tenant_id=tenant_id, workspace_id=workspace_id)
-        await pool.execute(
+        await control_plane_repository.rls_execute(
+            pool,
             """
             UPDATE workspace_agent_installs
             SET project_id = $4, updated_at = NOW()
@@ -257,8 +258,10 @@ async def set_project_archived(
             workspace_id,
             project_id,
             default_project["id"],
+            tenant_id=tenant_id, workspace_id=workspace_id,
         )
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         UPDATE projects
         SET archived = $4, updated_at = NOW()
@@ -270,6 +273,7 @@ async def set_project_archived(
         workspace_id,
         project_id,
         bool(archived),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return _row_to_project(row)
 
@@ -291,7 +295,8 @@ async def assign_install_to_project(
     target = await get_project(tenant_id=tenant_id, workspace_id=workspace_id, project_id=project_id)
     if target is None:
         raise ValueError("Project not found in this workspace.")
-    result = await pool.execute(
+    result = await control_plane_repository.rls_execute(
+        pool,
         """
         UPDATE workspace_agent_installs
         SET project_id = $4, updated_at = NOW()
@@ -301,6 +306,7 @@ async def assign_install_to_project(
         workspace_id,
         str(install_id or "").strip(),
         str(project_id or "").strip(),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return str(result or "").endswith("1")
 
@@ -314,7 +320,8 @@ async def count_agents_by_project(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return {}
-    rows = await pool.fetch(
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT project_id, COUNT(*) AS n
         FROM workspace_agent_installs
@@ -323,5 +330,6 @@ async def count_agents_by_project(
         """,
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return {str(r["project_id"]): int(r["n"]) for r in (rows or [])}

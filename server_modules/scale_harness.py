@@ -408,7 +408,8 @@ async def run_control_plane_registry_benchmark(
     cleanup_seconds = 0.0
     if config.cleanup_after_run:
         cleanup_started = time.perf_counter()
-        command_tag = await pool.execute(
+        command_tag = await control_plane_repository.rls_execute(
+            pool,
             """
             DELETE FROM workspace_agent_installs
             WHERE tenant_id = $1
@@ -418,6 +419,7 @@ async def run_control_plane_registry_benchmark(
             tenant_id,
             workspace_id,
             run_token,
+            tenant_id=tenant_id, workspace_id=workspace_id,
         )
         cleanup_seconds = time.perf_counter() - cleanup_started
         cleanup_deleted = _command_rowcount(command_tag)

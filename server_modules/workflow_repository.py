@@ -73,7 +73,8 @@ async def list_workflows(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    rows = await pool.fetch(
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT
             wd.id,
@@ -104,6 +105,7 @@ async def list_workflows(
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
         max(1, int(limit or 200)),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     items: List[Dict[str, Any]] = []
     for row in rows:
@@ -137,7 +139,8 @@ async def get_workflow(
         version_join = f"LEFT JOIN workflow_versions wv ON wv.workflow_id = wd.id AND wv.id = ${len(params)}"
     else:
         version_join = "LEFT JOIN workflow_versions wv ON wv.id = wd.current_version_id"
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         SELECT
             wd.id,
@@ -163,6 +166,7 @@ async def get_workflow(
         LIMIT 1
         """,
         *params,
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return _row_to_workflow_record(row)
 
@@ -186,6 +190,7 @@ async def create_workflow(
     now_iso = _utc_now_iso()
     async with pool.acquire() as connection:
         async with connection.transaction():
+            await control_plane_repository.apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id)
             await connection.execute(
                 """
                 INSERT INTO workflow_definitions (
@@ -244,6 +249,7 @@ async def update_workflow(
     now_iso = _utc_now_iso()
     async with pool.acquire() as connection:
         async with connection.transaction():
+            await control_plane_repository.apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id)
             existing = await connection.fetchrow(
                 """
                 SELECT id, name, description, status, current_version_id
@@ -327,6 +333,7 @@ async def publish_workflow(
     version_id = f"wfver_{uuid.uuid4().hex[:16]}"
     async with pool.acquire() as connection:
         async with connection.transaction():
+            await control_plane_repository.apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id)
             existing = await connection.fetchrow(
                 """
                 SELECT id
@@ -394,7 +401,8 @@ async def delete_workflow(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return False
-    result = await pool.execute(
+    result = await control_plane_repository.rls_execute(
+        pool,
         """
         DELETE FROM workflow_definitions
         WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
@@ -402,6 +410,7 @@ async def delete_workflow(
         str(workflow_id or "").strip(),
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return str(result or "").strip().upper() == "DELETE 1"
 
