@@ -907,7 +907,8 @@ async def list_runtime_profiles(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    rows = await pool.fetch(
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT *
         FROM runtime_profiles
@@ -918,6 +919,7 @@ async def list_runtime_profiles(
         """,
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return [item for item in (_row_to_runtime_profile(row) for row in rows) if item]
 
@@ -989,7 +991,8 @@ async def create_self_hosted_runtime_profile_enrollment_intent(
         idempotency_key=runtime_profile_id,
         source="self_hosted_runtime",
     )
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         INSERT INTO runtime_profiles (
             id, tenant_id, workspace_id, slug, label, runtime_class, placement_mode, runtime_id, machine_id,
@@ -1009,6 +1012,7 @@ async def create_self_hosted_runtime_profile_enrollment_intent(
         runtime_node_id,
         _to_json(normalized_caps, default=[]),
         _to_json(metadata, default={}),
+        bypass_rls=True,
     )
     profile = await get_runtime_profile(
         runtime_profile_id,
@@ -1109,7 +1113,8 @@ async def enroll_self_hosted_runtime_profile(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         raise RuntimeError("Control-plane storage is unavailable.")
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         UPDATE runtime_profiles
         SET
@@ -1127,6 +1132,7 @@ async def enroll_self_hosted_runtime_profile(
         str(label or profile.get("label") or "Self-hosted Node").strip() or "Self-hosted Node",
         _to_json(normalized_caps, default=[]),
         _to_json(metadata, default={}),
+        bypass_rls=True,
     )
     enrolled_profile = await get_runtime_profile(
         str(profile.get("id") or runtime_profile_id).strip(),
@@ -1181,7 +1187,8 @@ async def approve_self_hosted_runtime_profile(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         raise RuntimeError("Control-plane storage is unavailable.")
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         UPDATE runtime_profiles
         SET
@@ -1194,6 +1201,7 @@ async def approve_self_hosted_runtime_profile(
         str(tenant_id or "").strip() or "default",
         str(workspace_id or "").strip() or "default",
         _to_json(metadata, default={}),
+        bypass_rls=True,
     )
     return await get_runtime_profile(
         runtime_profile_id,
@@ -1239,7 +1247,8 @@ async def resolve_self_hosted_runtime_heartbeat(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         raise RuntimeError("Control-plane storage is unavailable.")
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         UPDATE runtime_profiles
         SET
@@ -1252,6 +1261,7 @@ async def resolve_self_hosted_runtime_heartbeat(
         str(profile.get("tenant_id") or "default").strip() or "default",
         str(profile.get("workspace_id") or "default").strip() or "default",
         _to_json(metadata, default={}),
+        bypass_rls=True,
     )
     worker_caps = _normalize_self_hosted_capabilities(capabilities or profile.get("supported_capabilities") or [])
     await run_state_repository.upsert_fleet_worker(
@@ -1508,7 +1518,8 @@ async def enqueue_self_hosted_runtime_command(
     if pool is None:
         raise RuntimeError("Control-plane storage is unavailable.")
 
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         UPDATE runtime_profiles
         SET
@@ -1520,6 +1531,7 @@ async def enqueue_self_hosted_runtime_command(
         str(profile.get("tenant_id") or "default").strip() or "default",
         scoped_workspace_id,
         _to_json(metadata, default={}),
+        bypass_rls=True,
     )
     return {
         "ok": True,
@@ -1617,7 +1629,8 @@ async def claim_self_hosted_runtime_commands(
         pool = await control_plane_repository.ensure_control_plane_schema()
         if pool is None:
             raise RuntimeError("Control-plane storage is unavailable.")
-        await pool.execute(
+        await control_plane_repository.rls_execute(
+            pool,
             """
             UPDATE runtime_profiles
             SET
@@ -1629,6 +1642,7 @@ async def claim_self_hosted_runtime_commands(
             str(profile.get("tenant_id") or "default").strip() or "default",
             workspace_id,
             _to_json(metadata, default={}),
+            bypass_rls=True,
         )
 
     return {
@@ -1705,7 +1719,8 @@ async def complete_self_hosted_runtime_command(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         raise RuntimeError("Control-plane storage is unavailable.")
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         UPDATE runtime_profiles
         SET
@@ -1717,6 +1732,7 @@ async def complete_self_hosted_runtime_command(
         str(profile.get("tenant_id") or "default").strip() or "default",
         workspace_id,
         _to_json(metadata, default={}),
+        bypass_rls=True,
     )
     return {
         "ok": True,
@@ -1744,7 +1760,8 @@ async def list_agent_definitions(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return _list_agent_definitions_local(tenant_id=tenant_id, workspace_id=workspace_id)
-    rows = await pool.fetch(
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT
             ad.*,
@@ -1770,6 +1787,7 @@ async def list_agent_definitions(
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
         bool(include_private),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return [item for item in (_row_to_agent_definition(row) for row in rows) if item]
 
@@ -1787,7 +1805,8 @@ async def get_agent_definition(
             if definition.get("id") == definition_id:
                 return definition
         return None
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         SELECT
             ad.*,
@@ -1811,6 +1830,7 @@ async def get_agent_definition(
         str(definition_id or "").strip(),
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return _row_to_agent_definition(row)
 
@@ -2305,7 +2325,8 @@ async def get_workspace_master_agent_install(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         SELECT wai.id
         FROM workspace_agent_installs wai
@@ -2319,6 +2340,7 @@ async def get_workspace_master_agent_install(
         """,
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     install_id = str(row.get("id") or "").strip() if row is not None else ""
     if not install_id:
@@ -2403,7 +2425,8 @@ async def create_workspace_agent_install(
             metadata=metadata,
         )
     resolved_version_id = _pick_definition_version_id(definition, agent_definition_version_id)
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         INSERT INTO workspace_agent_installs (
             id, tenant_id, workspace_id, agent_definition_id, agent_definition_version_id, installed_by_user_id,
@@ -2434,6 +2457,7 @@ async def create_workspace_agent_install(
         _to_json(memory_scope_overrides, default={}),
         _to_json(merged_policy, default={}),
         _to_json(normalized_metadata, default={}),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return await get_workspace_agent_install_bundle(
         install_id,
@@ -2488,7 +2512,8 @@ async def update_workspace_agent_install(
         agent_kind=agent_kind,
         metadata=next_metadata,
     )
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         UPDATE workspace_agent_installs
         SET
@@ -2520,6 +2545,7 @@ async def update_workspace_agent_install(
         bool(enabled) if enabled is not None else bool(existing.get("enabled", True)),
         _normalize_token(status) or str(existing.get("status") or "active").strip() or "active",
         _to_json(normalized_metadata, default={}),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return await get_workspace_agent_install_bundle(
         install_id,
@@ -2545,7 +2571,8 @@ async def get_runtime_profile(
     if workspace_id:
         params.append(str(workspace_id or "").strip())
         clauses.append(f"workspace_id = ${len(params)}")
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         SELECT *
         FROM runtime_profiles
@@ -2553,6 +2580,7 @@ async def get_runtime_profile(
         LIMIT 1
         """,
         *params,
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return _row_to_runtime_profile(row)
 
@@ -2749,7 +2777,8 @@ async def fetch_workflow_snapshot(
     if workspace_id:
         params.append(str(workspace_id or "").strip())
         clauses.append(f"wd.workspace_id = ${len(params)}")
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         SELECT
             wd.id AS workflow_id,
@@ -2771,6 +2800,7 @@ async def fetch_workflow_snapshot(
         LIMIT 1
         """,
         *params,
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return _row_to_workflow_snapshot(row)
 
@@ -2804,6 +2834,7 @@ async def create_compiled_workflow_artifact(
     now = datetime.now(timezone.utc)
     async with pool.acquire() as connection:
         async with connection.transaction():
+            await control_plane_repository.apply_connection_scope(connection, tenant_id=tenant_id, workspace_id=workspace_id)
             await connection.execute(
                 """
                 INSERT INTO workflow_definitions (
@@ -2870,7 +2901,8 @@ async def update_workspace_agent_install_compiled_artifact(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         UPDATE workspace_agent_installs
         SET
@@ -2884,6 +2916,7 @@ async def update_workspace_agent_install_compiled_artifact(
         str(workspace_id or "").strip(),
         _normalize_token(compiled_workflow_version_id),
         _to_json(metadata, default={}),
+        tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return await get_workspace_agent_install_bundle(
         install_id,
