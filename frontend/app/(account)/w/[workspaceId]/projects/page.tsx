@@ -3,10 +3,14 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { FolderKanban, Loader2 } from "lucide-react";
+import { Bot, FolderKanban, Loader2 } from "lucide-react";
 
 import { useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
+import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
+import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "@/lib/workspace/fleet/FleetRightPanel";
+import { TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 
@@ -16,51 +20,65 @@ export default function ProjectsPage() {
   const { projects, loading, error, refresh } = useFleetProjects(workspaceId);
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [panelOpen, togglePanel] = usePanelOpenState("projects");
+
+  const totalAgents = projects.reduce((sum, p) => sum + (p.agent_count ?? 0), 0);
 
   return (
-    <main className="fleet-content">
-      <div className="fleet-header">
-        <div>
-          <h1 className="fleet-title">Projects</h1>
-          <p className="fleet-subtitle">
-            {loading ? "Loading…" : `${projects.length} ${projects.length === 1 ? "project" : "projects"}`}
-          </p>
-        </div>
+    <main className="fleet-content fleet-content--with-panel">
+      <HeaderAction>
         <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setDialogOpen(true)}>
           <span className="fleet-btn-plus">+</span>
           New project
         </button>
+      </HeaderAction>
+
+      <div className="fleet-content-toolbar">
+        {projects.length > 0 && <FleetToolbar panelOpen={panelOpen} onTogglePanel={togglePanel} />}
       </div>
 
-      {loading && projects.length === 0 ? (
-        <FleetListSkeleton rows={4} />
-      ) : error && projects.length === 0 ? (
-        <FleetSurfaceError title="Couldn’t load projects" message={error} onRetry={refresh} />
-      ) : projects.length === 0 ? (
-        <CreateFirstAgentEmpty
-          workspaceId={workspaceId}
-          onCreated={refresh}
-          title="No projects yet"
-          desc="Projects keep your agents organized. Create your first agent and its project is set up for you."
-        />
-      ) : (
-        <div className="fleet-list">
-          {projects.map((p) => (
-            <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-list-row">
-              <span className="fleet-list-row-icon">
-                <FolderKanban size={16} strokeWidth={1.75} />
-              </span>
-              <span className="fleet-list-row-main">
-                <span className="fleet-list-row-title">{p.name || p.id}</span>
-                {p.description && <span className="fleet-list-row-desc">{p.description}</span>}
-              </span>
-              <span className="fleet-list-row-meta">
-                {p.agent_count ?? 0} {(p.agent_count ?? 0) === 1 ? "agent" : "agents"}
-              </span>
-            </Link>
-          ))}
+      <div className="fleet-content-with-panel">
+        <div className="fleet-content-main">
+          {loading && projects.length === 0 ? (
+            <FleetListSkeleton rows={4} />
+          ) : error && projects.length === 0 ? (
+            <FleetSurfaceError title="Couldn’t load projects" message={error} onRetry={refresh} />
+          ) : projects.length === 0 ? (
+            <CreateFirstAgentEmpty
+              workspaceId={workspaceId}
+              onCreated={refresh}
+              title="No projects yet"
+              desc="Projects keep your agents organized. Create your first agent and its project is set up for you."
+            />
+          ) : (
+            <div className="fleet-list">
+              {projects.map((p) => (
+                <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-list-row">
+                  <TintTile accent>
+                    <FolderKanban size={15} strokeWidth={1.75} />
+                  </TintTile>
+                  <span className="fleet-list-row-main">
+                    <span className="fleet-list-row-title">{p.name || p.id}</span>
+                    {p.description && <span className="fleet-list-row-desc">{p.description}</span>}
+                  </span>
+                  <span className="fleet-list-row-meta fleet-list-row-meta--icon">
+                    <Bot size={13} strokeWidth={1.75} />
+                    <span className="fleet-list-row-meta-num">{p.agent_count ?? 0}</span>
+                    {(p.agent_count ?? 0) === 1 ? "agent" : "agents"}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          )}
         </div>
-      )}
+
+        <FleetRightPanel open={panelOpen}>
+          <PanelSection title="Properties">
+            <PanelRow label="Projects" value={projects.length} icon={<FolderKanban size={15} strokeWidth={1.75} />} />
+            <PanelRow label="Agents" value={totalAgents} icon={<Bot size={15} strokeWidth={1.75} />} />
+          </PanelSection>
+        </FleetRightPanel>
+      </div>
 
       {dialogOpen && (
         <NewProjectDialog

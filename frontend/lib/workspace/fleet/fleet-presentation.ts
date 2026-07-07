@@ -27,6 +27,12 @@ export const TINTS: Record<TintKey, { bg: string; fg: string }> = {
 
 const TINT_ORDER: TintKey[] = ["blue", "teal", "amber", "coral", "purple"];
 
+/** Spread-out identity tint purely from a list position — used where there's
+ *  no FleetAgent record to key off (e.g. the cost-by-agent panel pips). */
+export function tintKeyForIndex(index: number): TintKey {
+  return TINT_ORDER[((index % TINT_ORDER.length) + TINT_ORDER.length) % TINT_ORDER.length];
+}
+
 export function tintForAgent(agent: FleetAgent, index: number): TintKey {
   const r = (agent.role || "").toLowerCase();
   if (r === "customer_facing") return "teal";
@@ -60,6 +66,18 @@ export function toAgentSummary(agent: FleetAgent, index: number): AgentSummary {
 export function isSageAgent(agent: AgentSummary): boolean {
   const r = agent.role.toLowerCase();
   return r === "sage" || r === "operator" || agent.name.toLowerCase().includes("sage");
+}
+
+/** Same match as isSageAgent, over the raw FleetAgent list — used anywhere
+ *  that needs the actual agent record (id, project_id, …) rather than the
+ *  display-only AgentSummary. */
+export function findSageAgent(agents: FleetAgent[]): FleetAgent | null {
+  const r = (a: FleetAgent) => (a.role || "").toLowerCase();
+  return (
+    agents.find((a) => r(a) === "sage" || r(a) === "operator") ||
+    agents.find((a) => (a.label || "").toLowerCase().includes("sage")) ||
+    null
+  );
 }
 
 /** Status tone + label. Unknown is calm ("Not deployed"), never alarming. */

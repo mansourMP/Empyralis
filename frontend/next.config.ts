@@ -9,8 +9,7 @@ const LEGACY_REDIRECTS: { from: string; to: string }[] = [
   { from: W, to: `${W}/agents` },                     // workspace landing → fleet grid
   { from: `${W}/fleet`, to: `${W}/agents` },
   { from: `${W}/chat`, to: `${W}/agents` },
-  { from: `${W}/sage`, to: `${W}/agents` },
-  { from: `${W}/sage/chat`, to: `${W}/agents` },
+  // Sage now has a real workspace-level route (/sage/[tab]) — no redirect.
   { from: `${W}/deploy`, to: `${W}/agents` },
   { from: `${W}/studio`, to: `${W}/agents` },
   { from: `${W}/studio-integrations`, to: `${W}/agents` },

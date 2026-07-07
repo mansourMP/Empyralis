@@ -6,6 +6,9 @@ import { Cpu, Server, Terminal, X } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
+import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "@/lib/workspace/fleet/FleetRightPanel";
+import { StatusChip, StatusDot, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import {
   CLOUD_VPS_PROVIDERS,
   CLOUD_VPS_PROVIDER_IDS,
@@ -97,15 +100,18 @@ export default function HardwarePage() {
 
   const cloudServers = regs.filter((r) => r.hardware_kind === "cloud_vps");
   const devices = regs.filter((r) => r.hardware_kind !== "cloud_vps");
+  const onlineCount = regs.filter(isOnline).length;
+  const [panelOpen, togglePanel] = usePanelOpenState("hardware");
 
   const renderRow = (r: Registration) => {
     const gatewayId = String(r.gateway_id || r.id || "");
     const isCloud = r.hardware_kind === "cloud_vps";
+    const online = isOnline(r);
     return (
       <div key={gatewayId} className="fleet-list-row" style={{ cursor: "default" }}>
-        <span className="fleet-list-row-icon">
-          {isCloud ? <Server size={16} strokeWidth={1.75} /> : <Cpu size={16} strokeWidth={1.75} />}
-        </span>
+        <TintTile tint={isCloud ? "blue" : "teal"}>
+          {isCloud ? <Server size={15} strokeWidth={1.75} /> : <Cpu size={15} strokeWidth={1.75} />}
+        </TintTile>
         <span className="fleet-list-row-main">
           <span className="fleet-list-row-title">
             {isCloud ? r.hardware_label || "Cloud server" : r.display_name || r.platform || gatewayId || "Computer"}
@@ -115,9 +121,8 @@ export default function HardwarePage() {
             {r.last_seen_at ? ` · last seen ${new Date(r.last_seen_at).toLocaleString()}` : ""}
           </span>
         </span>
-        <span className="fleet-list-row-meta" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span className={`fleet-detail-dot ${isOnline(r) ? "is-online" : "is-offline"}`} />
-          {r.connection_status || r.status || "unknown"}
+        <span className="fleet-list-row-meta" style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+          <StatusChip tone={online ? "online" : "offline"} label={online ? "Online" : "Offline"} />
           <button
             type="button"
             className="fleet-list-row-remove"
@@ -133,84 +138,94 @@ export default function HardwarePage() {
   };
 
   return (
-    <main className="fleet-content">
-      <div className="fleet-header">
-        <div>
-          <h1 className="fleet-title">Hardware</h1>
-          <p className="fleet-subtitle">Computers and servers your agents can run on.</p>
-        </div>
+    <main className="fleet-content fleet-content--with-panel">
+      <div className="fleet-content-toolbar">
+        {regs.length > 0 && <FleetToolbar panelOpen={panelOpen} onTogglePanel={togglePanel} />}
       </div>
 
-      <div className="fleet-detail-section-title">Connect a cloud server</div>
-      <div className="fleet-provider-grid">
-        {CLOUD_VPS_PROVIDER_IDS.map((providerId) => {
-          const provider = CLOUD_VPS_PROVIDERS[providerId];
-          return (
-            <button
-              key={providerId}
-              type="button"
-              className="fleet-provider-card"
-              onClick={() => openProviderPanel(providerId)}
-            >
+      <div className="fleet-content-with-panel">
+        <div className="fleet-content-main">
+          <div className="fleet-detail-section-title">Connect a cloud server</div>
+          <div className="fleet-provider-grid">
+            {CLOUD_VPS_PROVIDER_IDS.map((providerId) => {
+              const provider = CLOUD_VPS_PROVIDERS[providerId];
+              return (
+                <button
+                  key={providerId}
+                  type="button"
+                  className="fleet-provider-card"
+                  onClick={() => openProviderPanel(providerId)}
+                >
+                  <span className="fleet-provider-card-top">
+                    <img src={provider.logoSrc} alt="" className="fleet-provider-card-logo" aria-hidden="true" />
+                    <span className="fleet-provider-card-badge">{provider.price}</span>
+                  </span>
+                  <span className="fleet-provider-card-title">{provider.label}</span>
+                  <span className="fleet-provider-card-desc">{provider.tagline}</span>
+                </button>
+              );
+            })}
+            <button type="button" className="fleet-provider-card" onClick={() => setSshPanelOpen(true)}>
               <span className="fleet-provider-card-top">
-                <img src={provider.logoSrc} alt="" className="fleet-provider-card-logo" aria-hidden="true" />
-                <span className="fleet-provider-card-badge">{provider.price}</span>
+                <Terminal size={26} strokeWidth={1.5} aria-hidden="true" />
               </span>
-              <span className="fleet-provider-card-title">{provider.label}</span>
-              <span className="fleet-provider-card-desc">{provider.tagline}</span>
+              <span className="fleet-provider-card-title">Your own server</span>
+              <span className="fleet-provider-card-desc">Connect over SSH — host, port, and a password or key.</span>
             </button>
-          );
-        })}
-        <button type="button" className="fleet-provider-card" onClick={() => setSshPanelOpen(true)}>
-          <span className="fleet-provider-card-top">
-            <Terminal size={26} strokeWidth={1.5} aria-hidden="true" />
-          </span>
-          <span className="fleet-provider-card-title">Your own server</span>
-          <span className="fleet-provider-card-desc">Connect over SSH — host, port, and a password or key.</span>
-        </button>
-      </div>
+          </div>
 
-      {loading ? (
-        <div className="fleet-list" style={{ marginTop: "var(--space-4)" }}>
-          <div className="fleet-list-row">
-            <div className="fleet-skeleton-bar" style={{ width: "35%", height: 12 }} />
+          {loading ? (
+            <div className="fleet-list" style={{ marginTop: "var(--space-4)" }}>
+              <div className="fleet-list-row">
+                <div className="fleet-skeleton-bar" style={{ width: "35%", height: 12 }} />
+              </div>
+            </div>
+          ) : error ? (
+            <div className="fleet-page-state-body">{error}</div>
+          ) : regs.length === 0 ? (
+            <div className="fleet-empty">
+              <div className="fleet-empty-title">No computers connected yet</div>
+              <div className="fleet-empty-desc">Connect a cloud server above to give agents hardware access.</div>
+            </div>
+          ) : (
+            <>
+              {cloudServers.length > 0 && (
+                <>
+                  <div className="fleet-hw-group-title">Cloud servers</div>
+                  <div className="fleet-list">{cloudServers.map(renderRow)}</div>
+                </>
+              )}
+              {devices.length > 0 && (
+                <>
+                  <div className="fleet-hw-group-title">Your devices</div>
+                  <div className="fleet-list">{devices.map(renderRow)}</div>
+                </>
+              )}
+            </>
+          )}
+
+          <div style={{ marginTop: "var(--space-6)" }}>
+            {showManualPairing ? (
+              <>
+                <div className="fleet-detail-section-title">Add your own computer</div>
+                <GatewayPairPanel workspaceId={workspaceId} compact onPaired={() => void loadRegistrations()} />
+              </>
+            ) : (
+              <button type="button" className="fleet-secondary-toggle" onClick={() => setShowManualPairing(true)}>
+                Or add your own computer instead
+              </button>
+            )}
           </div>
         </div>
-      ) : error ? (
-        <div className="fleet-page-state-body">{error}</div>
-      ) : regs.length === 0 ? (
-        <div className="fleet-empty">
-          <div className="fleet-empty-title">No computers connected yet</div>
-          <div className="fleet-empty-desc">Connect a cloud server above to give agents hardware access.</div>
-        </div>
-      ) : (
-        <>
-          {cloudServers.length > 0 && (
-            <>
-              <div className="fleet-hw-group-title">Cloud servers</div>
-              <div className="fleet-list">{cloudServers.map(renderRow)}</div>
-            </>
-          )}
-          {devices.length > 0 && (
-            <>
-              <div className="fleet-hw-group-title">Your devices</div>
-              <div className="fleet-list">{devices.map(renderRow)}</div>
-            </>
-          )}
-        </>
-      )}
 
-      <div style={{ marginTop: "var(--space-6)" }}>
-        {showManualPairing ? (
-          <>
-            <div className="fleet-detail-section-title">Add your own computer</div>
-            <GatewayPairPanel workspaceId={workspaceId} compact onPaired={() => void loadRegistrations()} />
-          </>
-        ) : (
-          <button type="button" className="fleet-secondary-toggle" onClick={() => setShowManualPairing(true)}>
-            Or add your own computer instead
-          </button>
-        )}
+        <FleetRightPanel open={panelOpen}>
+          <PanelSection title="Properties">
+            <PanelRow label="Computers" value={regs.length} icon={<Cpu size={15} strokeWidth={1.75} />} />
+            <PanelRow label="Online" value={onlineCount} icon={<StatusDot tone="online" />} tone="online" />
+            <PanelRow label="Cloud servers" value={cloudServers.length} icon={<Server size={15} strokeWidth={1.75} />} />
+            <PanelRow label="Your devices" value={devices.length} icon={<Cpu size={15} strokeWidth={1.75} />} />
+          </PanelSection>
+        </FleetRightPanel>
       </div>
 
       <CloudVpsSetupPanel

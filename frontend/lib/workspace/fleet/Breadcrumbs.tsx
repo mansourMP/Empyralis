@@ -11,6 +11,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { ChevronRight } from "lucide-react";
 
 import { useFleetWorkspace } from "./fleet-data";
@@ -55,9 +56,44 @@ export function useBreadcrumbLabel(
   }, [key, label, setLabel]);
 }
 
+/**
+ * A page's primary action (e.g. "New agent") renders on the breadcrumb line
+ * itself, top-right — not in a separate title block below. Implemented as a
+ * portal rather than page-driven context state: the routed page (a
+ * descendant of the provider) would otherwise re-render itself every time it
+ * registered a new action element, since a fresh JSX literal is a new object
+ * every render — an infinite update loop. Portaling into a slot DOM node
+ * (set once, on mount) sidesteps that entirely; nothing calls setState in a
+ * loop.
+ */
+const HeaderActionSlotContext = createContext<HTMLDivElement | null>(null);
+
+export function HeaderActionSlotProvider({
+  slotEl,
+  children,
+}: {
+  slotEl: HTMLDivElement | null;
+  children: ReactNode;
+}) {
+  return (
+    <HeaderActionSlotContext.Provider value={slotEl}>
+      {children}
+    </HeaderActionSlotContext.Provider>
+  );
+}
+
+/** Render a page's primary action button into the breadcrumb-line slot.
+ *  Renders nothing until the slot has mounted (or if a page doesn't use it). */
+export function HeaderAction({ children }: { children: ReactNode }) {
+  const slotEl = useContext(HeaderActionSlotContext);
+  if (!slotEl) return null;
+  return createPortal(children, slotEl);
+}
+
 const STATIC_LABELS: Record<string, string> = {
   fleet: "Home",
   inbox: "Inbox",
+  sage: "Sage",
   projects: "Projects",
   agents: "Agents",
   hardware: "Hardware",
@@ -96,9 +132,13 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     // "agents/{id}" pair inside a project is a routed agent detail — the bare
     // "agents" segment there is structural, not a page, so we fold it into the
     // agent crumb rather than rendering a dead "Agents" link mid-chain.
+    // The backend echoes the raw workspace id back as `name` for a workspace
+    // that was never given a real one (see fleet_workspace in routes_fleet.py)
+    // — treat that echo the same as "no name" rather than rendering the id.
+    const hasRealName = Boolean(workspace?.name) && workspace!.name !== workspaceId;
     const items: Crumb[] = [{
       key: "workspace-root",
-      label: workspace?.name || "Workspace",
+      label: hasRealName ? workspace!.name : "Workspace",
       href: `${base}/agents`,
       current: segments.length === 0,
     }];

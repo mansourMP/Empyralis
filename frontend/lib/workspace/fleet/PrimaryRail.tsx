@@ -2,10 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter, useSelectedLayoutSegment } from "next/navigation";
+import { useRouter, useSelectedLayoutSegment } from "next/navigation";
 import {
   Bot,
-  ChevronRight,
   Cpu,
   CreditCard,
   FolderKanban,
@@ -23,7 +22,8 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 
-import { useFleetAgents, useFleetProjects } from "./fleet-data";
+import { useFleetAgents } from "./fleet-data";
+import { findSageAgent } from "./fleet-presentation";
 import type { FleetTheme } from "./fleet-preferences";
 
 type RailNavItem = { key: string; label: string; segment: string; icon: LucideIcon; chord: string };
@@ -41,10 +41,11 @@ const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
 
 /**
- * Persistent primary rail — the app's spine. Six sections, Projects expands to
- * its live list. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then a
+ * Persistent primary rail — the app's spine. Five flat nav buttons (Projects
+ * included — it opens the project list/create view, it doesn't expand a tree
+ * here). Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then a
  * section key jumps directly (g i inbox, g p projects, g a agents, g h
- * hardware, g b billing, g s settings) — the Linear muscle-memory model.
+ * hardware, g b billing) — the Linear muscle-memory model.
  */
 export function PrimaryRail({
   workspaceId,
@@ -69,13 +70,8 @@ export function PrimaryRail({
 }) {
   const router = useRouter();
   const segment = useSelectedLayoutSegment();
-  const params = useParams();
-  const activeProjectId = String((params?.projectId as string) || "");
-  const activeAgentId = String((params?.agentId as string) || "");
-  const { projects } = useFleetProjects(workspaceId);
   const { agents } = useFleetAgents(workspaceId);
 
-  const [projectsOpen, setProjectsOpen] = useState(true);
   const [focusIdx, setFocusIdx] = useState(-1);
   const gPendingRef = useRef(false);
   const gTimer = useRef<number | null>(null);
@@ -83,26 +79,17 @@ export function PrimaryRail({
   const hrefFor = (seg: string) => `/w/${encodeURIComponent(workspaceId)}/${seg}`;
 
   // Sage is the operator, not a normal nav destination — surfaced separately
-  // above the section list. role="operator" is the intended tag (ensured
-  // server-side for every Sage install), but falls back to matching the name
-  // directly — some installs predate that guarantee and still carry a plain
-  // "specialist" role, same gap isSageAgent() in fleet-presentation.ts
-  // already works around.
-  const sageAgent =
-    agents.find((a) => (a.role || "").toLowerCase() === "operator") ||
-    agents.find((a) => (a.label || "").toLowerCase().includes("sage")) ||
-    null;
-  // The agent-detail page resolves its agent by id from the workspace-wide
-  // agent list — the {projectId} URL segment only feeds the breadcrumb, it
-  // never filters which agent can load. Sage's own install often carries no
-  // project_id (it's the workspace operator, not project-scoped work), so
-  // any real project is a valid URL container; fall back to the first one.
-  const sageProjectId = sageAgent?.project_id || projects[0]?.id || "";
-  const sageHref =
-    sageAgent && sageProjectId
-      ? `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(sageProjectId)}/agents/${encodeURIComponent(sageAgent.agent_id)}/chat`
-      : null;
-  const sageActive = Boolean(sageAgent) && activeAgentId === sageAgent?.agent_id;
+  // above the section list, and routed at workspace scope (…/sage/overview, no
+  // project segment) since it's the workspace's own operator, not
+  // project-scoped work. Lands on Overview, not Chat — chat isn't built yet,
+  // so routing the pin straight there would open on an empty "coming soon"
+  // tab instead of the agent's real status/activity. role="operator" is the
+  // intended tag (ensured server-side for every Sage install), but
+  // findSageAgent() falls back to matching the name directly — some installs
+  // predate that guarantee and still carry a plain "specialist" role.
+  const sageAgent = findSageAgent(agents);
+  const sageHref = sageAgent ? `/w/${encodeURIComponent(workspaceId)}/sage/overview` : null;
+  const sageActive = segment === "sage";
 
   // Keyboard navigation. Ignored while typing or when a modifier is held (so
   // ⌘K and browser shortcuts are untouched).
@@ -173,58 +160,22 @@ export function PrimaryRail({
           const Icon = item.icon;
           const active = segment === item.segment;
           const focused = focusIdx === idx;
-          const isProjects = item.key === "projects";
           return (
             <div key={item.key} className="fleet-rail-nav-group">
               <button
                 type="button"
                 title={collapsed ? item.label : undefined}
                 className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
-                onClick={() => {
-                  if (isProjects && !collapsed) setProjectsOpen((v) => !v);
-                  router.push(hrefFor(item.segment));
-                }}
+                onClick={() => router.push(hrefFor(item.segment))}
               >
                 <span className="fleet-rail-item-icon">
                   <Icon size={RAIL_ICON} strokeWidth={1.75} />
                 </span>
                 {!collapsed && <span className="fleet-rail-item-label">{item.label}</span>}
-                {!collapsed && isProjects && (
-                  <span
-                    className="fleet-rail-item-caret"
-                    role="button"
-                    tabIndex={-1}
-                    aria-label={projectsOpen ? "Collapse projects" : "Expand projects"}
-                    onClick={(e) => { e.stopPropagation(); setProjectsOpen((v) => !v); }}
-                  >
-                    <ChevronRight size={13} strokeWidth={2} style={{ transform: projectsOpen ? "rotate(90deg)" : "none", transition: "transform 150ms ease-out" }} />
-                  </span>
-                )}
-                {!collapsed && !isProjects && (
+                {!collapsed && (
                   <kbd className="fleet-rail-item-chord">G {item.chord.toUpperCase()}</kbd>
                 )}
               </button>
-
-              {isProjects && projectsOpen && !collapsed && projects.length > 0 && (
-                <div className="fleet-rail-subnav">
-                  {projects.map((p) => {
-                    const subActive = segment === "projects" && activeProjectId === p.id;
-                    return (
-                      <Link
-                        key={p.id}
-                        href={`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(p.id)}`}
-                        className={`fleet-rail-subitem${subActive ? " fleet-rail-subitem--active" : ""}`}
-                      >
-                        <span className="fleet-rail-subitem-dot" />
-                        <span className="fleet-rail-subitem-label">{p.name || p.id}</span>
-                        {typeof p.agent_count === "number" && (
-                          <span className="fleet-rail-subitem-count">{p.agent_count}</span>
-                        )}
-                      </Link>
-                    );
-                  })}
-                </div>
-              )}
             </div>
           );
         })}

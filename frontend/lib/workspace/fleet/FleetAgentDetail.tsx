@@ -11,6 +11,7 @@ import {
   Loader2,
   Lock,
   MessageSquare,
+  PanelRight,
   Plug,
   Radio,
   Sparkles,
@@ -50,9 +51,10 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
 ];
 
 /**
- * Agent detail — centered modal (~80vw) with internal left nav.
- * Every tab has real data or an intentional empty state with a
- * working next action. No stubs.
+ * Agent detail — centered modal (~80vw) with an internal right nav (tabs),
+ * collapsible via the toggle button in the content column. Every tab has
+ * real data or an intentional empty state with a working next action. No
+ * stubs.
  */
 export function FleetAgentDetail({
   workspaceId,
@@ -74,6 +76,7 @@ export function FleetAgentDetail({
   onTabChange?: (tab: TabId) => void;
 }) {
   const [activeTab, setActiveTab] = useState<TabId>(initialTab || "overview");
+  const [navOpen, setNavOpen] = useState(true);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
 
   const status = deriveStatus(agent?.hardware_status || "unknown");
@@ -115,38 +118,18 @@ export function FleetAgentDetail({
 
   const inner = (
     <>
-      {/* Left nav */}
-      <div className="fleet-detail-nav">
-        <div className="fleet-detail-nav-header">
-          <div className="fleet-detail-avatar">
-            <div className="fleet-detail-avatar-icon">
-              {(agent?.label || "A").charAt(0).toUpperCase()}
-            </div>
-            <span className={`fleet-detail-dot ${dotClass}`} />
-          </div>
-          <div className="fleet-detail-name">{agent?.label || "Agent"}</div>
-          <span className={`fleet-detail-meta-status ${dotClass}`}>{status.label}</span>
-        </div>
-        <nav className="fleet-detail-nav-tabs">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                className={`fleet-detail-nav-tab${activeTab === tab.id ? " fleet-detail-nav-tab--active" : ""}`}
-                onClick={() => selectTab(tab.id)}
-              >
-                <Icon size={16} strokeWidth={1.75} />
-                {tab.label}
-              </button>
-            );
-          })}
-        </nav>
-      </div>
-
       {/* Content */}
       <div className="fleet-detail-main">
+        <button
+          type="button"
+          className={`fleet-detail-nav-toggle${variant === "modal" ? " fleet-detail-nav-toggle--modal" : ""}${navOpen ? " is-active" : ""}`}
+          onClick={() => setNavOpen((v) => !v)}
+          aria-label={navOpen ? "Hide tabs" : "Show tabs"}
+          aria-pressed={navOpen}
+          title={navOpen ? "Hide tabs" : "Show tabs"}
+        >
+          <PanelRight size={16} strokeWidth={1.75} />
+        </button>
         {variant === "modal" && onClose && (
           <button type="button" className="fleet-detail-close" onClick={onClose} aria-label="Close">
             <X size={16} strokeWidth={1.75} />
@@ -178,6 +161,36 @@ export function FleetAgentDetail({
           )}
           {activeTab === "chat" && <ChatTab agent={agent} />}
         </div>
+      </div>
+
+      {/* Right nav — tabs live here, not on the left */}
+      <div className={`fleet-detail-nav${navOpen ? "" : " fleet-detail-nav--collapsed"}`}>
+        <div className="fleet-detail-nav-header">
+          <div className="fleet-detail-avatar">
+            <div className="fleet-detail-avatar-icon">
+              {(agent?.label || "A").charAt(0).toUpperCase()}
+            </div>
+            <span className={`fleet-detail-dot ${dotClass}`} />
+          </div>
+          <div className="fleet-detail-name">{agent?.label || "Agent"}</div>
+          <span className={`fleet-detail-meta-status ${dotClass}`}>{status.label}</span>
+        </div>
+        <nav className="fleet-detail-nav-tabs">
+          {TABS.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                className={`fleet-detail-nav-tab${activeTab === tab.id ? " fleet-detail-nav-tab--active" : ""}`}
+                onClick={() => selectTab(tab.id)}
+              >
+                <Icon size={16} strokeWidth={1.75} />
+                {tab.label}
+              </button>
+            );
+          })}
+        </nav>
       </div>
     </>
   );
@@ -906,7 +919,8 @@ function ToolsTab({
 
 // ── Model ───────────────────────────────────────────────────────────────────
 
-import { BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, providerLabel, MODE_LABELS, type ProviderMode } from "./fleet-provider-constants";
+import { BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, providerLabel, MODE_LABELS, COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, type ProviderMode } from "./fleet-provider-constants";
+import { GatewayBoxPicker } from "./gateway-box-picker";
 
 function resolveDisplayMode(config: Record<string, any>): ProviderMode {
   const mode = config.mode;
@@ -960,7 +974,15 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
   const config = agent?.model_config || {};
   const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
   const [provider, setProvider] = useState<string>(config.provider || "");
+  const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
   const [apiKey, setApiKey] = useState("");
+  // cli_subscription is still not dispatchable (Phase 3) — saving it would
+  // resolve to a guaranteed "not yet available" turn error. Block save.
+  const isComingSoon = COMING_SOON_MODES.has(mode);
+  // BYO-brain Phase 2: "local" (Ollama on the paired box) is live, but a local
+  // agent MUST name which box runs it, or every turn fails with "no computer
+  // is bound". Require a gateway before saving.
+  const localNeedsBox = mode === "local" && !gatewayBinding.trim();
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -972,6 +994,14 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
   const isPlatformDefault = !config.provider && config.mode !== "byok_api" && config.mode !== "cli_subscription" && config.mode !== "local";
 
   async function save() {
+    if (COMING_SOON_MODES.has(mode)) {
+      setError(`${COMING_SOON_NOTE}. This option can’t be saved yet.`);
+      return;
+    }
+    if (mode === "local" && !gatewayBinding.trim()) {
+      setError("Pick a computer (with Ollama) to run this agent’s local model.");
+      return;
+    }
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -1014,6 +1044,13 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
     const patch: Record<string, any> = { mode };
     if (mode === "byok_api" || mode === "cli_subscription" || mode === "local") {
       patch.provider = provider;
+    }
+    // BYO-brain Phase 0: forward-wire which box + runtime. (Save is blocked for
+    // these modes today; this keeps the persisted shape correct once it opens.)
+    if (mode === "cli_subscription" || mode === "local") {
+      if (gatewayBinding) patch.gateway_binding = gatewayBinding;
+      const rt = runtimeForProvider(provider);
+      if (rt) patch.runtime = rt;
     }
     const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
       method: "PATCH",
@@ -1067,11 +1104,12 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
         </button>
         <button
           type="button"
-          className={`fleet-wizard-option${mode === "cli_subscription" ? " is-selected" : ""}`}
+          className={`fleet-wizard-option fleet-wizard-option--soon${mode === "cli_subscription" ? " is-selected" : ""}`}
           onClick={() => { setMode("cli_subscription"); setProvider(provider || "claude_code_cli"); setSaved(false); }}
         >
           <span className="fleet-wizard-option-label">Your subscription</span>
           <span className="fleet-wizard-option-body">Claude Code or Codex via Gateway.</span>
+          <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> {COMING_SOON_NOTE}</span>
         </button>
         <button
           type="button"
@@ -1079,7 +1117,7 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
           onClick={() => { setMode("local"); setProvider(provider || "ollama"); setSaved(false); }}
         >
           <span className="fleet-wizard-option-label">Run locally</span>
-          <span className="fleet-wizard-option-body">Ollama on your own machine.</span>
+          <span className="fleet-wizard-option-body">Ollama on your own machine, via the Gateway.</span>
         </button>
       </div>
 
@@ -1113,6 +1151,7 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
             ))}
           </select>
           <p className="fleet-channel-expand-hint">{SUBSCRIPTION_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
+          <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={(id) => { setGatewayBinding(id); setSaved(false); }} />
         </div>
       )}
 
@@ -1125,13 +1164,20 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
             ))}
           </select>
           <p className="fleet-channel-expand-hint">{LOCAL_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
+          <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={(id) => { setGatewayBinding(id); setSaved(false); }} requireLocalModel />
         </div>
       )}
 
       <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12 }}>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving || isComingSoon || localNeedsBox}>
           {saving ? "Saving…" : saved ? "Saved ✓" : "Save"}
         </button>
+        {isComingSoon && (
+          <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>{COMING_SOON_NOTE} — you can’t save this yet.</span>
+        )}
+        {localNeedsBox && !isComingSoon && (
+          <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Pick a computer to run this agent’s local model.</span>
+        )}
         {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
       </div>
     </div>

@@ -3,9 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
+import { Bot, Calendar, DollarSign, Hash, Zap } from "lucide-react";
+
 import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
-import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
-import { timeAgo } from "@/lib/workspace/fleet/fleet-presentation";
+import { useBreadcrumbLabel, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
+import { timeAgo, tintKeyForIndex, TINTS } from "@/lib/workspace/fleet/fleet-presentation";
 import { AgentsList } from "@/lib/workspace/fleet/AgentsList";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "@/lib/workspace/fleet/FleetRightPanel";
@@ -132,20 +134,11 @@ export default function ProjectDetailPage() {
 
   return (
     <main className="fleet-content fleet-content--with-panel">
-      <div className="fleet-content-head">
-        <div className="fleet-header">
-          <div>
-            <h1 className="fleet-title">{project?.name || "Project"}</h1>
-            <p className="fleet-subtitle">
-              {loading ? "Loading…" : `${shown.length} ${shown.length === 1 ? "agent" : "agents"}`}
-              {project?.description ? ` · ${project.description}` : ""}
-            </p>
-          </div>
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
-            <span className="fleet-btn-plus">+</span> New agent
-          </button>
-        </div>
-      </div>
+      <HeaderAction>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+          <span className="fleet-btn-plus">+</span> New agent
+        </button>
+      </HeaderAction>
 
       <div className="fleet-content-toolbar">
         {inProject.length > 0 && (
@@ -180,19 +173,26 @@ export default function ProjectDetailPage() {
 
         <FleetRightPanel open={panelOpen}>
           <PanelSection title="Properties">
-            <PanelRow label="Cost this month" value={money(rollup?.usd_cost)} />
-            <PanelRow label="Tokens" value={(rollup?.total_tokens ?? 0).toLocaleString()} />
-            <PanelRow label="LLM calls" value={(rollup?.events ?? 0).toLocaleString()} />
-            <PanelRow label="Agents" value={inProject.length} />
-            <PanelRow label="Created" value={project?.created_at ? new Date(project.created_at).toLocaleDateString() : "—"} />
+            {project?.description && <PanelRow label="Description" value={project.description} />}
+            <PanelRow label="Cost this month" value={money(rollup?.usd_cost)} icon={<DollarSign size={15} strokeWidth={1.75} />} tone="accent" />
+            <PanelRow label="Tokens" value={(rollup?.total_tokens ?? 0).toLocaleString()} icon={<Hash size={15} strokeWidth={1.75} />} />
+            <PanelRow label="LLM calls" value={(rollup?.events ?? 0).toLocaleString()} icon={<Zap size={15} strokeWidth={1.75} />} />
+            <PanelRow label="Agents" value={inProject.length} icon={<Bot size={15} strokeWidth={1.75} />} />
+            <PanelRow label="Created" value={project?.created_at ? new Date(project.created_at).toLocaleDateString() : "—"} icon={<Calendar size={15} strokeWidth={1.75} />} tone={project?.created_at ? "default" : "muted"} />
           </PanelSection>
 
           <PanelSection title="Cost by agent">
             {costByAgent.length === 0 ? (
               <div className="fleet-panel-empty">No agents yet.</div>
             ) : (
-              costByAgent.map((a) => (
-                <PanelRow key={a.id} label={a.label} value={a.cost > 0 ? money(a.cost) : "—"} />
+              costByAgent.map((a, i) => (
+                <PanelRow
+                  key={a.id}
+                  label={a.label}
+                  icon={<span className="fleet-tint-pip" style={{ background: TINTS[tintKeyForIndex(i)].fg }} />}
+                  value={a.cost > 0 ? money(a.cost) : "—"}
+                  tone={a.cost > 0 ? "default" : "muted"}
+                />
               ))
             )}
           </PanelSection>

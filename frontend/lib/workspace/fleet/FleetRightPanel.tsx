@@ -70,11 +70,30 @@ export function PanelSection({
   );
 }
 
-export function PanelRow({ label, value }: { label: string; value: ReactNode }) {
+export type PanelValueTone = "default" | "online" | "offline" | "muted" | "accent";
+
+export function PanelRow({
+  label,
+  value,
+  icon,
+  tone = "default",
+}: {
+  label: string;
+  value: ReactNode;
+  /** Leading indicator — an icon or a colored StatusDot. */
+  icon?: ReactNode;
+  /** Colors the value (status green/red, spend accent, empty muted). */
+  tone?: PanelValueTone;
+}) {
   return (
     <div className="fleet-panel-row">
-      <span className="fleet-panel-row-label">{label}</span>
-      <span className="fleet-panel-row-value">{value}</span>
+      <span className="fleet-panel-row-label">
+        {icon && <span className="fleet-panel-row-icon">{icon}</span>}
+        <span>{label}</span>
+      </span>
+      <span className={`fleet-panel-row-value${tone !== "default" ? ` fleet-panel-row-value--${tone}` : ""}`}>
+        {value}
+      </span>
     </div>
   );
 }

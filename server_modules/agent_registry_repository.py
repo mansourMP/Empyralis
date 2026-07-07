@@ -663,7 +663,7 @@ async def ensure_workspace_agent_registry_seeded(
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, NULL, NULL, $8, $9::jsonb, NULL, '[]'::jsonb, $10, NULL, $11::jsonb, NOW(), NOW()
                 )
-                ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
+                ON CONFLICT (id) DO NOTHING
                 """,
                 profile_id,
                 tenant_token,
@@ -703,7 +703,7 @@ async def ensure_workspace_agent_registry_seeded(
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, NULL, NULL, NULL, '{}'::jsonb, NOW(), NOW()
                     )
-                    ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
+                    ON CONFLICT (id) DO NOTHING
                     """,
                     agent_definition_id,
                     tenant_token,
@@ -740,7 +740,7 @@ async def ensure_workspace_agent_registry_seeded(
                         $1, $2, $3, $4, 1, 'published', $5::jsonb, NULL, $6::jsonb, '{}'::jsonb, $7::jsonb,
                         $8::jsonb, '{}'::jsonb, '{}'::jsonb, $9, NOW()
                     )
-                    ON CONFLICT (agent_definition_id, version_number) DO NOTHING
+                    ON CONFLICT (id) DO NOTHING
                     """,
                     version_id,
                     tenant_token,
@@ -792,7 +792,7 @@ async def ensure_workspace_agent_registry_seeded(
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, NULL, NULL, NULL, '{"system_agent":true,"hidden_from_catalog":true}'::jsonb, NOW(), NOW()
                 )
-                ON CONFLICT (tenant_id, workspace_id, slug) DO NOTHING
+                ON CONFLICT (id) DO NOTHING
                 """,
                 master_definition_id,
                 tenant_token,
@@ -829,7 +829,7 @@ async def ensure_workspace_agent_registry_seeded(
                     $1, $2, $3, $4, 1, 'published', $5::jsonb, NULL, $6::jsonb, '{}'::jsonb, $7::jsonb,
                     $8::jsonb, '{}'::jsonb, '{"system_agent":true,"hidden_from_catalog":true}'::jsonb, $9, NOW()
                 )
-                ON CONFLICT (agent_definition_id, version_number) DO NOTHING
+                ON CONFLICT (id) DO NOTHING
                 """,
                 master_version_id,
                 tenant_token,
@@ -884,6 +884,7 @@ async def ensure_workspace_agent_registry_seeded(
                     NULL, '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
                     '{"trust_mode":"guarded","session_mode":"copilot"}'::jsonb, '{"system_agent":true,"hidden_from_agents_dashboard":true}'::jsonb, NOW(), NOW()
                 )
+                ON CONFLICT (id) DO NOTHING
                 """,
                 f"ainstall_{workspace_slug}_sage",
                 tenant_token,

@@ -118,7 +118,7 @@ export function FleetCommandPalette({
         hint: "→ chat",
         group: "Commands",
         icon: MessageSquare,
-        run: () => go(`${base}/chat`),
+        run: () => go(sage ? `${base}/sage/chat` : `${base}/chat`),
       },
       {
         id: "toggle-theme",

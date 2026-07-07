@@ -25,10 +25,10 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
     if (!pid) return;
     router.push(`${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(agentId)}/${tab}`);
   };
-  const openChat = () => {
-    const sage = agents.find((a) => (a.role || "").toLowerCase() === "operator") || agents[0];
-    if (sage) goToAgentTab(sage.agent_id, "chat");
-  };
+  // Sage is workspace-level, not project-nested — its detail view routes
+  // through /sage/{tab} rather than the per-project agent route above.
+  const goToSage = (tab = "overview") => router.push(`${base}/sage/${tab}`);
+  const openChat = () => goToSage("chat");
 
   // ── Loading ──
   if (loading && agents.length === 0) {
@@ -76,7 +76,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 
         {/* Sage operator row */}
         {sageAgent && (
-          <SageRow agentId={sageAgent.id} onChat={openChat} onSelect={(id) => goToAgentTab(id, "overview")} />
+          <SageRow onChat={openChat} onSelect={() => goToSage("overview")} />
         )}
 
         {/* Grid or empty */}
@@ -121,24 +121,22 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 // ── Sage operator row (the single accent fill on the page) ─────────────────
 
 function SageRow({
-  agentId,
   onChat,
   onSelect,
 }: {
-  agentId: string;
   onChat: () => void;
-  onSelect: (id: string) => void;
+  onSelect: () => void;
 }) {
   return (
     <div
       role="button"
       tabIndex={0}
       className="fleet-sage"
-      onClick={() => onSelect(agentId)}
+      onClick={() => onSelect()}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onSelect(agentId);
+          onSelect();
         }
       }}
     >

@@ -20,6 +20,7 @@ const SHELL_SEGMENTS = new Set([
   "billing",
   "settings",
   "fleet",
+  "sage",
 ]);
 
 export function FleetShellDecider({
