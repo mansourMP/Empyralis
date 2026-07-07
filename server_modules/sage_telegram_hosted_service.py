@@ -335,7 +335,11 @@ def _to_telegram_markdown(text: str) -> str:
     # Special chars that need escaping in MarkdownV2 inline text.
     # Structural chars (# > | -) are NOT escaped — rich messages use them for headings, quotes, tables, lists.
     # $ is NOT escaped — used for inline math.
-    _ESCAPE_CHARS = r'_*[]()~`{}.'
+    # ! WAS missing — Telegram rejects any reply containing an unescaped '!'
+    # with "can't parse entities", so parse_mode=MarkdownV2 silently failed
+    # on ordinary punctuation and every send fell through to the plain-text
+    # retry path (or failed outright if that retry also hit an error).
+    _ESCAPE_CHARS = r'_*[]()~`{}.!'
     _BOLD_OPEN = '\x01'
     _BOLD_CLOSE = '\x02'
     _ITL_OPEN = '\x03'
