@@ -118,6 +118,22 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* A flex column, not just a scroll box: lets .fleet-content--chat/
+     --with-panel fill EXACTLY the available height via flex:1 (see those
+     rules). Measured, not theoretical: both height:100% AND
+     position:absolute;inset:0 on the child resolved against the viewport
+     here instead of this box's own (legitimately flex-grown, 842px)
+     height — a real engine quirk with percentage/inset resolution through
+     an ancestor whose size comes from flex-grow rather than an explicit
+     length. flex:1 sidesteps it entirely: it's resolved directly by the
+     flex algorithm, never by percentage/containing-block resolution.
+     Harmless for every other page here (plain <main class="fleet-content">
+     children get the flex-item default flex:0 1 auto — i.e. sized to their
+     own content, exactly like normal block flow — plus align-items:stretch
+     keeps them full width, so nothing about today's non-chat pages
+     changes). */
+  display: flex;
+  flex-direction: column;
 }
 .fleet-breadcrumbs {
   display: flex;
@@ -796,6 +812,25 @@ a.fleet-breadcrumb:hover {
 
 /* ── UI Phase 4: collapsible right panel (Linear properties-panel pattern) ── */
 .fleet-content--with-panel {
+  /* flex:1 (not height:100%) — see .fleet-shell-scroll's comment for why:
+     filling the TRUE available height, not the content's own height nor the
+     outer viewport's height, is load-bearing for any child relying on
+     height:100% (a properties panel, a chat composer pinned to the
+     bottom). */
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Same full-height reset as --with-panel, honestly named for a page with NO
+   right panel (Sage: full-width chat, contract forbids one). Kept as its own
+   class rather than reusing --with-panel's name on a panel-less page. */
+.fleet-content--chat {
+  flex: 1;
+  min-height: 0;
   padding: 0;
   overflow: hidden;
   display: flex;
@@ -3318,36 +3353,28 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 
 /* SAGE — full-width chat with the Operator. No tabs, no stat cards, no right
-   panel, no deployment status (contract). Reuses .fleet-content--with-panel's
-   zero-padding/flex-column/overflow-hidden shell from the page component. */
+   panel, no deployment status, no second header repeating "Sage" (the
+   breadcrumb already says it — the Operator badge rides on that crumb via
+   useBreadcrumbBadge instead). Reuses .fleet-content--chat's zero-padding/
+   flex-column/overflow-hidden shell from the page component; flex:1 here
+   (not height:100%, same reasoning as .fleet-shell-scroll above) is what
+   lets flex:1 (list) + flex-shrink:0 (composer) below actually pin the
+   composer to the true bottom instead of collapsing to content height and
+   leaving it stranded mid-screen. */
 .fleet-sage-chat {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
   min-height: 0;
 }
-.fleet-sage-chat-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-shrink: 0;
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--border);
-}
-.fleet-sage-chat-icon {
-  display: inline-flex;
-  color: var(--accent);
-}
-.fleet-sage-chat-name {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  color: var(--text-primary);
-}
+/* Sits in the breadcrumb row now (see SageChat.tsx's useBreadcrumbBadge), not
+   a standalone header block — no margin-left override needed here since the
+   base .fleet-badge's own margin-left is exactly the gap it needs next to
+   the "Sage" crumb text (the breadcrumb row has no flex `gap` to supply it). */
 .fleet-badge--operator {
   color: var(--accent);
   border-color: var(--accent-ring);
   background: var(--accent-soft);
-  margin-left: 0;
 }
 .fleet-sage-chat-list {
   flex: 1;
@@ -3359,7 +3386,12 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   gap: var(--space-2);
 }
 .fleet-sage-chat-empty {
-  margin: auto;
+  /* Bottom-anchored, not dead-centered: margin-top:auto absorbs all the
+     extra space above (empty conversation = short content), so this block
+     sits just above the pinned composer rather than stretching it toward
+     the middle of the screen. Horizontal centering (margin-left/right:auto)
+     is unchanged. */
+  margin: auto auto 0;
   max-width: 420px;
   text-align: center;
   display: flex;
@@ -3368,20 +3400,24 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   gap: var(--space-2);
 }
 .fleet-sage-chat-suggestions {
+  /* A row of small chips, not a stacked column of full-width boxes. */
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: var(--space-2);
   margin-top: var(--space-4);
-  width: 100%;
+  margin-bottom: var(--space-5);
+  width: auto;
 }
 .fleet-sage-chat-suggestion {
-  text-align: left;
-  padding: var(--space-3) var(--space-4);
+  text-align: center;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-pill);
   background: var(--bg-card);
+  font-size: var(--text-xs);
   color: var(--text-secondary);
-  font-size: var(--text-sm);
   cursor: pointer;
 }
 .fleet-sage-chat-suggestion:hover {

@@ -12,7 +12,7 @@ export default function SagePage() {
   const workspaceId = String(params?.workspaceId || "");
 
   return (
-    <main className="fleet-content fleet-content--with-panel">
+    <main className="fleet-content fleet-content--chat">
       <SageChat workspaceId={workspaceId} />
     </main>
   );

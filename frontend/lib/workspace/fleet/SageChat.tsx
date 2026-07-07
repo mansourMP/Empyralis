@@ -7,12 +7,19 @@ import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ChatMessage, type WorkstationChatMessageRecord } from "@/lib/workspace/chat-message";
 import { PRIMARY_THREAD_ID } from "@/lib/workspace/workstation-chat-pane-model";
+import { useBreadcrumbBadge } from "./Breadcrumbs";
 
 const STARTER_PROMPTS = [
   "What agents do I have?",
   "Create a support agent for my store",
   "Help me set up a Telegram bot",
 ];
+
+// Module-level constant, not created inline in the component body: the
+// breadcrumb badge registry keys on referential identity (see
+// useBreadcrumbBadge), so a fresh JSX element on every render would re-fire
+// its effect every render — a render loop. One stable element, created once.
+const OPERATOR_BADGE = <span className="fleet-badge fleet-badge--operator">Operator</span>;
 
 type RawTurn = Record<string, any>;
 type SseEvent = { event: string; payload: Record<string, unknown> };
@@ -86,6 +93,11 @@ export function SageChat({ workspaceId }: { workspaceId: string }) {
   const actor = useMemo(() => (
     account ? { type: "user", id: account.id, display_name: account.displayName || account.email } : null
   ), [account]);
+
+  // The breadcrumb already says "Sage" — no second "Sage · Operator" header
+  // block repeating it below. The role marker rides along on the breadcrumb
+  // crumb itself instead (small badge, contract: no doubled page titles).
+  useBreadcrumbBadge("sage", OPERATOR_BADGE);
 
   const loadThread = useCallback(async () => {
     try {
@@ -270,12 +282,6 @@ export function SageChat({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="fleet-sage-chat">
-      <div className="fleet-sage-chat-header">
-        <span className="fleet-sage-chat-icon"><Sparkles size={16} strokeWidth={1.75} /></span>
-        <span className="fleet-sage-chat-name">Sage</span>
-        <span className="fleet-badge fleet-badge--operator">Operator</span>
-      </div>
-
       <div className="fleet-sage-chat-list" ref={listRef}>
         {loading ? (
           <div className="fleet-activity-skeleton" aria-label="Loading conversation">

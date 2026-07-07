@@ -23,13 +23,8 @@ export default function InboxPage() {
 
   return (
     <main className="fleet-content">
-      <div className="fleet-header">
-        <div>
-          <h1 className="fleet-title">Inbox</h1>
-          <p className="fleet-subtitle">Everything your agents did — escalations, activity, and alerts, newest first.</p>
-        </div>
-      </div>
-
+      {/* No page-title header — the breadcrumb already says "Inbox". Straight
+          to the feed (contract: no doubled headers). */}
       {loading && events.length === 0 ? (
         <FleetListSkeleton rows={6} />
       ) : error && events.length === 0 ? (

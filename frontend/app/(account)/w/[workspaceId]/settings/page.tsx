@@ -94,13 +94,7 @@ export default function SettingsPage() {
 
   return (
     <main className="fleet-content">
-      <div className="fleet-header">
-        <div>
-          <h1 className="fleet-title">Settings</h1>
-          <p className="fleet-subtitle">Workspace configuration, billing, and API access.</p>
-        </div>
-      </div>
-
+      {/* No page-title header — the breadcrumb already says "Settings". */}
       {/* Billing */}
       <div className="fleet-detail-section-title">Billing</div>
       <Link href={`/w/${workspaceId}/billing`} className="fleet-list-row" style={{ textDecoration: "none" }}>

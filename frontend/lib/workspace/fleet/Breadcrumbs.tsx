@@ -25,18 +25,30 @@ import { useFleetWorkspace } from "./fleet-data";
  */
 
 type LabelMap = Record<string, string>;
+type BadgeMap = Record<string, ReactNode>;
 
 const BreadcrumbLabelContext = createContext<{
   labels: LabelMap;
   setLabel: (key: string, label: string) => void;
-}>({ labels: {}, setLabel: () => {} });
+  badges: BadgeMap;
+  setBadge: (key: string, badge: ReactNode) => void;
+}>({ labels: {}, setLabel: () => {}, badges: {}, setBadge: () => {} });
 
 export function BreadcrumbLabelProvider({ children }: { children: ReactNode }) {
   const [labels, setLabels] = useState<LabelMap>({});
+  const [badges, setBadges] = useState<BadgeMap>({});
   const setLabel = useCallback((key: string, label: string) => {
     setLabels((prev) => (prev[key] === label ? prev : { ...prev, [key]: label }));
   }, []);
-  const value = useMemo(() => ({ labels, setLabel }), [labels, setLabel]);
+  const setBadge = useCallback((key: string, badge: ReactNode) => {
+    // Bail out on a referentially-stable no-op update (mirrors setLabel's
+    // value bailout above) — badges are ReactNode, not primitives, so callers
+    // must memoize their badge element; this is the second layer of defense
+    // against a render loop (component re-renders → new badge element →
+    // setBadge → context value changes → component re-renders → ...).
+    setBadges((prev) => (prev[key] === badge ? prev : { ...prev, [key]: badge }));
+  }, []);
+  const value = useMemo(() => ({ labels, setLabel, badges, setBadge }), [labels, setLabel, badges, setBadge]);
   return (
     <BreadcrumbLabelContext.Provider value={value}>
       {children}
@@ -54,6 +66,24 @@ export function useBreadcrumbLabel(
   useEffect(() => {
     if (key && label) setLabel(key, label);
   }, [key, label, setLabel]);
+}
+
+/** Attach a small inline badge next to a breadcrumb segment's own label —
+ *  e.g. Sage's "Operator" tag next to "Sage". For a status/role marker that
+ *  belongs to the destination itself, not a second header block repeating
+ *  the name (the contract violation this exists to avoid). Pass `null` to
+ *  clear (e.g. on unmount) — a stale registration is otherwise harmless
+ *  (unused keys just never render) but explicit clearing is cheap here. */
+export function useBreadcrumbBadge(
+  key: string | null | undefined,
+  badge: ReactNode | null,
+) {
+  const { setBadge } = useContext(BreadcrumbLabelContext);
+  useEffect(() => {
+    if (!key) return;
+    setBadge(key, badge);
+    return () => setBadge(key, null);
+  }, [key, badge, setBadge]);
 }
 
 /**
@@ -125,11 +155,11 @@ function looksLikeOpaqueId(segment: string): boolean {
   return /_[0-9a-f]{6,}$/i.test(segment) || /^[0-9a-f]{8}-?[0-9a-f-]{4,}$/i.test(segment);
 }
 
-type Crumb = { key: string; label: string; href: string; current: boolean; pending: boolean };
+type Crumb = { key: string; label: string; href: string; current: boolean; pending: boolean; badge: ReactNode };
 
 export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
   const pathname = usePathname() || "";
-  const { labels } = useContext(BreadcrumbLabelContext);
+  const { labels, badges } = useContext(BreadcrumbLabelContext);
   const { workspace } = useFleetWorkspace(workspaceId);
 
   const crumbs = useMemo<Crumb[]>(() => {
@@ -153,6 +183,7 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       href: `${base}/agents`,
       current: segments.length === 0,
       pending: false,
+      badge: null,
     }];
     let acc = base;
     segments.forEach((seg, i) => {
@@ -172,10 +203,11 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
         href: acc,
         current: i === segments.length - 1,
         pending,
+        badge: badges[seg] ?? null,
       });
     });
     return items;
-  }, [pathname, workspaceId, labels, workspace?.name]);
+  }, [pathname, workspaceId, labels, badges, workspace?.name]);
 
   if (crumbs.length <= 1) {
     return (
@@ -199,6 +231,7 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
           ) : (
             <Link className="fleet-breadcrumb" href={c.href}>{c.label}</Link>
           )}
+          {c.badge}
         </span>
       ))}
     </nav>

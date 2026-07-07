@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 
 import { useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
+import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 
 type ByAgent = { agent_install_id: string; events: number; total_tokens: number; usd_cost: number };
 type UsageRollup = {
@@ -61,11 +62,10 @@ export default function BillingPage() {
 
   return (
     <main className="fleet-content">
-      <div className="fleet-header">
-        <div>
-          <h1 className="fleet-title">Billing</h1>
-          <p className="fleet-subtitle">What your agents cost — by project, then by agent. Real usage, honestly.</p>
-        </div>
+      {/* No page-title header — the breadcrumb already says "Billing". The
+          period toggle is a real control, not a title, so it rides the
+          breadcrumb row's action slot instead of a second header block. */}
+      <HeaderAction>
         <div className="fleet-segmented">
           {PERIODS.map((p) => (
             <button key={p} type="button" className={`fleet-segmented-btn${period === p ? " fleet-segmented-btn--active" : ""}`} onClick={() => setPeriod(p)}>
@@ -73,7 +73,7 @@ export default function BillingPage() {
             </button>
           ))}
         </div>
-      </div>
+      </HeaderAction>
 
       {loading && <FleetListSkeleton rows={5} />}
       {!loading && data && !data.ok && (
