@@ -2230,6 +2230,12 @@ def _resolve_direct_tool_gateway_id(
     session_ctx: Dict[str, Any] | None,
 ) -> str | None:
     from server_modules import gateway_protocol_service, gateway_state_repository
+    from server_modules import workspace_scope as _ws
+    from server_modules.hardware_runtime_adapters import gateway_adapter as _gateway_adapter
+
+    normalized_workspace_id = _ws.resolve_workspace(
+        workspace_id, site="skills_service:resolve_gateway_for_workspace"
+    )
 
     metadata = _direct_tool_session_metadata(session_ctx)
     candidate_ids: List[str] = []
@@ -2251,14 +2257,20 @@ def _resolve_direct_tool_gateway_id(
         registration = gateway_state_repository.get_gateway_registration(gateway_id)
         if not registration:
             continue
-        if str(registration.get("status") or "").strip().lower() != "active":
+        # A candidate sourced from session metadata (gateway_id / runtime_id /
+        # execution_target_matching_runtime_ids) must actually belong to THIS
+        # workspace before it's trusted — otherwise a stale or cross-workspace
+        # runtime id surviving in metadata could hand this turn's shell/
+        # filesystem/browser tools to another workspace's gateway. Mirrors
+        # machine_lease_service._worker_runtime_scope_allows_run, which already
+        # enforces this for the async run-queue claim path.
+        usable, _unusable_reason = _gateway_adapter.registration_is_usable(
+            registration, workspace_id=normalized_workspace_id
+        )
+        if not usable:
             continue
         if gateway_protocol_service.gateway_connection_is_live(gateway_id):
             return gateway_id
-    from server_modules import workspace_scope as _ws
-    normalized_workspace_id = _ws.resolve_workspace(
-        workspace_id, site="skills_service:resolve_gateway_for_workspace"
-    )
     resolved_gateway_id = _resolve_live_gateway_from_workspace(
         normalized_workspace_id,
         gateway_state_repository=gateway_state_repository,
@@ -2266,12 +2278,12 @@ def _resolve_direct_tool_gateway_id(
     )
     if resolved_gateway_id:
         return resolved_gateway_id
-    if normalized_workspace_id != "default" and _local_direct_tool_gateway_fallback_enabled():
-        return _resolve_live_gateway_from_workspace(
-            "default",
-            gateway_state_repository=gateway_state_repository,
-            gateway_protocol_service=gateway_protocol_service,
-        )
+    # No cross-workspace fallback to whatever is registered under the literal
+    # "default" workspace: that used to fire whenever the backend considered
+    # itself in a dev-like environment, regardless of which workspace was
+    # asking — i.e. ANY workspace could reach an unscoped/"default" worker
+    # just because the process was running in dev mode. A worker with no
+    # workspace of its own must not be handed to an arbitrary workspace.
     return None
 
 
@@ -2877,11 +2889,11 @@ def _local_direct_shell_worker_online_exact(workspace_id: str) -> bool:
 
 def _local_direct_shell_worker_online(workspace_id: str) -> bool:
     normalized_workspace_id = str(workspace_id or "default").strip() or "default"
-    if _local_direct_shell_worker_online_exact(normalized_workspace_id):
-        return True
-    if normalized_workspace_id != "default" and _local_direct_tool_gateway_fallback_enabled():
-        return _local_direct_shell_worker_online_exact("default")
-    return False
+    # No cross-workspace fallback: a worker online for "default" must not be
+    # treated as available to every workspace just because we're in a
+    # dev-like environment — that was the exact hole that let an unrelated
+    # workspace reach another workspace's (or an unscoped) local worker.
+    return _local_direct_shell_worker_online_exact(normalized_workspace_id)
 
 
 def _local_dev_direct_shell_fallback_enabled(workspace_id: str) -> bool:
@@ -2890,10 +2902,14 @@ def _local_dev_direct_shell_fallback_enabled(workspace_id: str) -> bool:
     env_name = str(os.getenv("ORION_ENV") or os.getenv("APP_ENV") or "").strip().lower()
     if env_name not in _LOCAL_DIRECT_TOOL_GATEWAY_FALLBACK_ENVS:
         return False
-    # In local dev, allow direct shell execution without requiring a registered
-    # local worker.  The worker check added unnecessary friction for development.
-    if local_tool_executor.is_local_dev():
-        return True
+    # Being a dev-like environment is necessary but NOT sufficient: this
+    # workspace must also have its own online worker. The previous
+    # unconditional `is_local_dev()` bypass here handed direct shell
+    # execution to EVERY workspace in a dev-like environment regardless of
+    # which (if any) workspace a local worker was actually registered to —
+    # confirmed to let unrelated/fresh workspaces reach the developer's own
+    # machine. Restoring the worker check this bypass had deliberately
+    # skipped ("added unnecessary friction for development").
     return _local_direct_shell_worker_online(workspace_id)
 
 
@@ -2965,7 +2981,15 @@ def _execute_safe_direct_local_tool_call(
     normalized_action = str(action_id or "").strip().lower()
     if normalized_connector == "file" and normalized_action not in {"read", "write"}:
         _raise_direct_chat_tool_execution_blocked()
-    if local_tool_executor.is_local_dev():
+    # `is_local_dev()` alone is a process-wide check with no notion of which
+    # workspace is asking — every workspace passes it identically. This
+    # workspace must ALSO have its own online local worker before it's handed
+    # the in-process shortcut, mirroring gateway_adapter.registration_is_usable
+    # (a worker with no workspace of its own must not serve every workspace).
+    normalized_local_dev_workspace_id = str(workspace_id or "default").strip() or "default"
+    if local_tool_executor.is_local_dev() and _local_direct_shell_worker_online_exact(
+        normalized_local_dev_workspace_id
+    ):
         if normalized_connector == "shell" and normalized_action in ("exec", "execute", "run"):
             result = local_tool_executor.shell_execute(
                 str(argument_payload.get("command") or "")
@@ -3062,8 +3086,15 @@ def _execute_custom_connector_tool_call_sync(
         tool_input,
     )
     session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
-    # Local dev: bypass gateway entirely, execute directly on this machine
-    if local_tool_executor.is_local_dev():
+    # Local dev: bypass gateway entirely, execute directly on this machine —
+    # but ONLY when this specific workspace has its own online local worker.
+    # `is_local_dev()` alone has no notion of which workspace is asking, so
+    # without this check every workspace in a dev-like environment could
+    # reach whichever machine the backend process itself runs on.
+    _normalized_local_dev_workspace_id = str(workspace_id or "default").strip() or "default"
+    if local_tool_executor.is_local_dev() and _local_direct_shell_worker_online_exact(
+        _normalized_local_dev_workspace_id
+    ):
         if connector_id == "shell" and action_id == "exec":
             result = local_tool_executor.shell_execute(
                 str(argument_payload.get("command") or "")

@@ -173,8 +173,15 @@ def registration_is_usable(registration: Optional[Dict[str, Any]], *, workspace_
         return False, "gateway_registration_inactive"
     if text(registration.get("device_trust_state")).lower() == "revoked":
         return False, "gateway_device_revoked"
-    registration_workspace_id = text(registration.get("workspace_id"))
-    if registration_workspace_id and registration_workspace_id != (text(workspace_id) or "default"):
+    # Normalize BOTH sides before comparing. A registration with no
+    # workspace_id must NOT be treated as a wildcard that matches any
+    # requesting workspace — that was the exact hole that let an unscoped
+    # (e.g. local-dev "trusted_full_access") worker be reached from any
+    # workspace. An unscoped registration now only matches a request that
+    # is ALSO unscoped ("default"), same as machine_lease_service's
+    # _worker_runtime_scope_allows_run.
+    registration_workspace_id = text(registration.get("workspace_id")) or "default"
+    if registration_workspace_id != (text(workspace_id) or "default"):
         return False, "gateway_workspace_mismatch"
     return True, ""
 
