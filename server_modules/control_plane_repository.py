@@ -754,31 +754,6 @@ CREATE TABLE IF NOT EXISTS agent_runtime_profiles (
     UNIQUE(agent_install_id)
 );
 
--- Phase 3B: Hosted bot pool — platform-owned Telegram bots, pre-provisioned and
--- assignable to a single agent each. The encrypted token lives in the vault
--- (platform-scoped, workspace_id NULL); credential_id references it. status is
--- free | assigned | quarantined. One bot serves exactly one agent (partial
--- unique index on assigned_agent_install_id); the per-bot channel binding
--- (endpoint_key = bot_username) is the cloud-side one-binding-per-bot guarantee.
-CREATE TABLE IF NOT EXISTS hosted_bot_pool (
-    id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL DEFAULT 'telegram',
-    bot_username TEXT NOT NULL,
-    bot_id TEXT NULL,
-    credential_id TEXT NOT NULL,
-    webhook_secret TEXT NULL,
-    status TEXT NOT NULL DEFAULT 'free'
-        CHECK (status IN ('free', 'assigned', 'quarantined')),
-    assigned_agent_install_id TEXT NULL REFERENCES workspace_agent_installs(id) ON DELETE SET NULL,
-    assigned_workspace_id TEXT NULL,
-    assigned_tenant_id TEXT NULL,
-    assigned_at TIMESTAMPTZ NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(provider, bot_username)
-);
-
 -- Phase 3C: Vault credentials — the encrypted secret store, moved out of the
 -- lock-free JSON file (~/.empyralis/state/vault/credentials.json) that lost a
 -- credential under concurrent writes in Phase 3B. Storage only: the AES
@@ -3728,16 +3703,6 @@ async def ensure_control_plane_schema() -> Any:
         await pool.execute(
             "CREATE INDEX IF NOT EXISTS idx_workspace_agent_installs_project "
             "ON workspace_agent_installs(project_id)"
-        )
-        # ── Phase 3B: one hosted pool bot serves at most one agent. ──
-        await pool.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_hosted_bot_pool_assignment "
-            "ON hosted_bot_pool(assigned_agent_install_id) "
-            "WHERE assigned_agent_install_id IS NOT NULL"
-        )
-        await pool.execute(
-            "CREATE INDEX IF NOT EXISTS idx_hosted_bot_pool_status "
-            "ON hosted_bot_pool(provider, status)"
         )
         # ── Phase 3C: vault credential lookups (workspace + agent scoped). ──
         await pool.execute(

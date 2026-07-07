@@ -629,11 +629,14 @@ async def fleet_connection_summary(
         return {"ok": False, "error": str(exc)}
 
 
-# ── Phase 3B: per-agent Telegram bot provisioning ───────────────────────────
+# ── Per-agent Telegram bot provisioning (BYO token only) ────────────────────
+# The platform has no bot pool for specialist agents — only the user's own
+# BotFather token. The one platform-owned Telegram bot is reserved for Sage
+# (server_modules/sage_telegram_hosted_service.py), entirely separate from
+# this per-agent path.
 
 class FleetTelegramAssignRequest(BaseModel):
-    source: str = Field(default="pool", description="'pool' (claim a platform bot) or 'byo'")
-    token: Optional[str] = None
+    token: str = Field(..., description="The user's BotFather token (BYO).")
 
 
 @router.post("/api/w/{workspace_id}/fleet/agent-channels/telegram")
@@ -643,21 +646,14 @@ async def fleet_assign_agent_telegram(
     body: FleetTelegramAssignRequest,
     agent_id: str = Query(..., description="Agent install ID"),
 ) -> Dict[str, Any]:
-    """Give this agent its OWN Telegram bot — either claimed from the hosted
-    pool (source=pool) or the user's BotFather token (source=byo)."""
+    """Give this agent its OWN Telegram bot from the user's BotFather token."""
     from server_modules import hosted_bot_provisioning_service as prov
 
     tenant_id = await _resolve_tenant(workspace_id)
-    source = str(body.source or "pool").strip().lower()
     try:
-        if source == "byo":
-            result = await prov.assign_byo_bot(
-                agent_install_id=agent_id, workspace_id=workspace_id, tenant_id=tenant_id, token=body.token or "",
-            )
-        else:
-            result = await prov.assign_pool_bot(
-                agent_install_id=agent_id, workspace_id=workspace_id, tenant_id=tenant_id,
-            )
+        result = await prov.assign_byo_bot(
+            agent_install_id=agent_id, workspace_id=workspace_id, tenant_id=tenant_id, token=body.token,
+        )
         return {"ok": True, "channel": result}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -670,7 +666,7 @@ async def fleet_release_agent_telegram(
     agent_id: str = Query(..., description="Agent install ID"),
 ) -> Dict[str, Any]:
     """Release this agent's Telegram bot: delete webhook, clear binding, and
-    return a pool bot to the pool (or delete a BYO credential)."""
+    delete its BYO credential."""
     from server_modules import hosted_bot_provisioning_service as prov
 
     tenant_id = await _resolve_tenant(workspace_id)

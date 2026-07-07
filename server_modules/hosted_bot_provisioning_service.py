@@ -1,19 +1,20 @@
-"""Phase 3B: Per-agent Telegram bot provisioning + hosted bot pool.
+"""Per-agent Telegram bot provisioning — BYO token only.
 
-Each agent gets its OWN Telegram bot identity. Two sources:
+Each agent that wants Telegram gets its OWN bot identity from the user's own
+BotFather token (BYO). There is no platform-owned bot pool for specialist
+agents — the ONE hosted bot the platform owns is reserved for Sage itself
+(see sage_telegram_hosted_service.py + TelegramPairPanel.tsx on the fleet
+home page), entirely separate from this module.
 
-  - POOL: a platform-owned bot claimed from `hosted_bot_pool`. The token lives
-    in the vault platform-scoped (workspace_id NULL); the pool row references it.
-  - BYO:  the user's own BotFather token, stored as an AGENT-scoped vault
-    credential (the Phase 2 agent_install_id shape).
+Assigning writes an enabled channel binding (Phase 2 `agent_channel_bindings`)
+with endpoint_key = bot_username, which is the cloud-side one-bot-one-agent
+guarantee (uq_agent_channel_bindings_active_inbound_owner).
 
-Either way, assigning writes an enabled channel binding (Phase 2
-`agent_channel_bindings`) with endpoint_key = bot_username, which is the
-cloud-side one-bot-one-agent guarantee (uq_agent_channel_bindings_active_inbound_owner).
-
-Inbound routing is keyed by the bot: an update delivered to bot X's per-bot
-webhook resolves to exactly the agent bound to bot X. No shared webhook, no
-chat→workspace pairing ambiguity.
+Inbound routing is keyed by agent_install_id: an update delivered to an
+agent's per-agent webhook resolves to exactly that agent, using a bypass_rls
+lookup on agent_channel_bindings (see agent_bindings_repository.
+get_channel_binding_by_agent_unscoped) since the webhook URL carries only the
+agent_install_id — there is no session to derive a tenant from up front.
 """
 
 from __future__ import annotations
@@ -23,12 +24,11 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import httpx
 
 from server_modules import agent_bindings_repository as bindings
-from server_modules import hosted_bot_pool_repository as pool_repo
 from server_modules.channel_transport import ChannelTransport
 
 LOGGER = logging.getLogger(__name__)
@@ -36,6 +36,13 @@ LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_BASE = "https://api.telegram.org"
 CHANNEL_KEY_TELEGRAM = "telegram_bot"
 POOL_BOT_VAULT_PROVIDER = "telegram_bot"
+
+# First-contact marketing reply: sent once per (agent, chat_id) the first time
+# a not-yet-onboarded stranger messages an agent's BYO bot, if the agent has
+# opted in. Off by default — see fleet_tools.py's telegram_first_contact_reply
+# config key.
+_FIRST_CONTACT_SEEN_SENDERS_CAP = 2000
+_FIRST_CONTACT_LINK = "https://empyralis.ai"
 
 
 def _now_iso() -> str:
@@ -93,32 +100,7 @@ async def send_text(token: str, chat_id: str, text: str, *, reply_to_message_id:
     return await telegram_api(token, "sendMessage", body)
 
 
-# ── Vault: platform-scoped pool tokens & agent-scoped BYO tokens ────────────
-
-def store_pool_bot_credential(*, token: str, bot_username: str, bot_id: Optional[str] = None) -> str:
-    """Store a pool bot token in the vault PLATFORM-scoped (workspace_id=None).
-    Returns the credential_id. Not visible to any workspace-scoped connector
-    query (workspace_visible(None, <ws>) is False)."""
-    from server_modules.vault_store import add_credential, _openssl_encrypt
-    import json as _json
-
-    cred_id = str(uuid.uuid4())
-    now = _now_iso()
-    entry = {
-        "id": cred_id,
-        "label": f"Hosted pool bot @{str(bot_username or '').lstrip('@')}",
-        "provider": POOL_BOT_VAULT_PROVIDER,
-        "workspace_id": None,           # platform-scoped
-        "platform_scoped": True,
-        "mode": "hosted_pool",
-        "metadata": {"bot_username": str(bot_username or "").lstrip("@"), "bot_id": str(bot_id or "")},
-        "created_at": now,
-        "updated_at": now,
-        "encrypted_secret": _openssl_encrypt(_json.dumps({"bot_token": str(token or "").strip()}, separators=(",", ":"))),
-    }
-    add_credential(entry)   # Phase 3C: single-row INSERT
-    return cred_id
-
+# ── Vault: agent-scoped BYO tokens ──────────────────────────────────────────
 
 def store_byo_bot_credential(*, workspace_id: str, agent_install_id: str, token: str, bot_username: str, bot_id: Optional[str] = None) -> str:
     """Store a BYO bot token as an AGENT-scoped vault credential (Phase 2 shape)."""
@@ -177,63 +159,14 @@ def webhook_base_url() -> str:
     return ""
 
 
-def pool_bot_webhook_url(pool_bot_id: str) -> str:
+def agent_bot_webhook_url(agent_install_id: str) -> str:
     base = webhook_base_url()
     if not base:
         return ""
-    return f"{base}/api/sage/telegram-hosted/webhook/{pool_bot_id}"
+    return f"{base}/api/sage/telegram-hosted/webhook/byo/{agent_install_id}"
 
 
 # ── Assignment / release ────────────────────────────────────────────────────
-
-async def assign_pool_bot(*, agent_install_id: str, workspace_id: str, tenant_id: str) -> Dict[str, Any]:
-    """Claim a free pool bot for the agent: set its webhook, write the enabled
-    channel binding, return the bot identity."""
-    claimed = await pool_repo.claim_free_bot(
-        agent_install_id=agent_install_id, workspace_id=workspace_id, tenant_id=tenant_id,
-    )
-    if claimed is None:
-        raise RuntimeError("No free hosted bot available in the pool. Add capacity with scripts/manage_bot_pool.py.")
-
-    bot_username = claimed["bot_username"]
-    # Ensure a webhook secret exists (a bot added via manage_bot_pool already
-    # has one; rotate in only if somehow missing).
-    secret = claimed.get("webhook_secret") or _new_secret()
-    if not claimed.get("webhook_secret"):
-        from server_modules import control_plane_repository as cpr
-        pool = await cpr.ensure_control_plane_schema()
-        if pool is not None:
-            await pool.execute("UPDATE hosted_bot_pool SET webhook_secret=$2, updated_at=NOW() WHERE id=$1", claimed["id"], secret)
-
-    token = resolve_bot_token(claimed["credential_id"])
-    webhook_set = False
-    webhook_url = pool_bot_webhook_url(claimed["id"])
-    if webhook_url:
-        try:
-            res = await set_webhook(token, url=webhook_url, secret_token=secret)
-            webhook_set = bool(res.get("ok"))
-        except Exception as exc:
-            LOGGER.warning("assign_pool_bot: setWebhook best-effort failed: %s", exc)
-
-    await bindings.upsert_channel_binding(
-        tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_install_id,
-        channel_key=CHANNEL_KEY_TELEGRAM, enabled=True,
-        binding={
-            "endpoint_key": bot_username,
-            "is_inbound_owner": True,
-            "source": "pool",
-            "pool_bot_id": claimed["id"],
-            "bot_username": bot_username,
-        },
-    )
-    return {
-        "source": "pool",
-        "pool_bot_id": claimed["id"],
-        "bot_username": bot_username,
-        "webhook_url": webhook_url,
-        "webhook_set": webhook_set,
-    }
-
 
 async def assign_byo_bot(*, agent_install_id: str, workspace_id: str, tenant_id: str, token: str) -> Dict[str, Any]:
     """Validate a user's BotFather token, store it agent-scoped, register its
@@ -254,8 +187,7 @@ async def assign_byo_bot(*, agent_install_id: str, workspace_id: str, tenant_id:
 
     secret = _new_secret()
     webhook_set = False
-    base = webhook_base_url()
-    webhook_url = f"{base}/api/sage/telegram-hosted/webhook/byo/{agent_install_id}" if base else ""
+    webhook_url = agent_bot_webhook_url(agent_install_id)
     if webhook_url:
         try:
             res = await set_webhook(token, url=webhook_url, secret_token=secret)
@@ -286,8 +218,7 @@ async def assign_byo_bot(*, agent_install_id: str, workspace_id: str, tenant_id:
 
 async def release_agent_telegram(*, agent_install_id: str, workspace_id: str, tenant_id: str) -> Dict[str, Any]:
     """Release an agent's Telegram bot: delete the webhook, clear the binding,
-    and (pool) return the bot to the pool with a rotated secret, or (byo) delete
-    the agent-scoped credential."""
+    and delete the agent-scoped credential."""
     agent_bindings = await bindings.list_agent_channel_bindings(
         tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_install_id, enabled_only=False,
     )
@@ -296,34 +227,20 @@ async def release_agent_telegram(*, agent_install_id: str, workspace_id: str, te
         return {"released": False, "reason": "no telegram binding for this agent"}
 
     binding_meta = target.get("binding") or {}
-    source = str(binding_meta.get("source") or "").strip()
-    result: Dict[str, Any] = {"released": True, "source": source, "webhook_deleted": False}
+    result: Dict[str, Any] = {"released": True, "source": "byo", "webhook_deleted": False}
 
     # Best-effort webhook teardown + token cleanup.
     try:
-        if source == "pool":
-            pool_bot_id = str(binding_meta.get("pool_bot_id") or "").strip()
-            bot = await pool_repo.get_bot(pool_bot_id) if pool_bot_id else None
-            if bot is not None:
-                try:
-                    token = resolve_bot_token(bot["credential_id"])
-                    res = await delete_webhook(token)
-                    result["webhook_deleted"] = bool(res.get("ok"))
-                except Exception as exc:
-                    LOGGER.warning("release: pool deleteWebhook best-effort failed: %s", exc)
-                await pool_repo.release_bot(pool_bot_id=pool_bot_id, new_webhook_secret=_new_secret())
-                result["pool_bot_id"] = pool_bot_id
-        elif source == "byo":
-            cred_id = str(binding_meta.get("credential_id") or "").strip()
-            if cred_id:
-                try:
-                    token = resolve_bot_token(cred_id, workspace_id=workspace_id)
-                    res = await delete_webhook(token)
-                    result["webhook_deleted"] = bool(res.get("ok"))
-                except Exception as exc:
-                    LOGGER.warning("release: byo deleteWebhook best-effort failed: %s", exc)
-                delete_vault_credential_by_id(cred_id)
-                result["credential_deleted"] = True
+        cred_id = str(binding_meta.get("credential_id") or "").strip()
+        if cred_id:
+            try:
+                token = resolve_bot_token(cred_id, workspace_id=workspace_id)
+                res = await delete_webhook(token)
+                result["webhook_deleted"] = bool(res.get("ok"))
+            except Exception as exc:
+                LOGGER.warning("release: byo deleteWebhook best-effort failed: %s", exc)
+            delete_vault_credential_by_id(cred_id)
+            result["credential_deleted"] = True
     finally:
         await bindings.delete_channel_binding(
             tenant_id=tenant_id, workspace_id=workspace_id,
@@ -333,28 +250,6 @@ async def release_agent_telegram(*, agent_install_id: str, workspace_id: str, te
 
 
 # ── Inbound routing (bot → agent) ───────────────────────────────────────────
-
-async def resolve_inbound_agent(pool_bot_id: str) -> Optional[Dict[str, Any]]:
-    """Given the pool bot an update was delivered to, resolve exactly the agent
-    it is assigned to. Pure routing — no LLM. Returns None if the bot is
-    unassigned (free/quarantined)."""
-    bot = await pool_repo.get_bot(str(pool_bot_id or "").strip())
-    if bot is None:
-        return None
-    agent_install_id = bot.get("assigned_agent_install_id")
-    if not agent_install_id or bot.get("status") != "assigned":
-        return None
-    return {
-        "pool_bot_id": bot["id"],
-        "agent_install_id": agent_install_id,
-        "workspace_id": bot.get("assigned_workspace_id"),
-        "tenant_id": bot.get("assigned_tenant_id"),
-        "bot_username": bot.get("bot_username"),
-        "credential_id": bot.get("credential_id"),
-        "webhook_secret": bot.get("webhook_secret"),
-        "source": "pool",
-    }
-
 
 async def _agent_label(agent_install_id: str, workspace_id: str, tenant_id: str) -> str:
     try:
@@ -370,12 +265,11 @@ async def _agent_label(agent_install_id: str, workspace_id: str, tenant_id: str)
     return "Agent"
 
 
-class PoolBotTransport(ChannelTransport):
-    """ChannelTransport for a pool-assigned bot.
+class AgentBotTransport(ChannelTransport):
+    """ChannelTransport for an agent's own BYO Telegram bot.
 
-    Sends via THAT bot's own token (resolved per-assignment from the vault),
-    not the shared hosted bot's module-level token — so the reply genuinely
-    comes from the bot the customer is messaging, not from Sage's channel.
+    Sends via THAT bot's own token (resolved per-binding from the vault), so
+    the reply genuinely comes from the bot the customer is messaging.
     """
 
     max_message_length: int = 4096
@@ -391,7 +285,7 @@ class PoolBotTransport(ChannelTransport):
         reply_to = int(reply_to_id) if reply_to_id else None
 
         # Reuse the same MarkdownV2 conversion the shared hosted bot uses, so
-        # pool-bot replies get the same formatting fidelity — just via a
+        # per-agent replies get the same formatting fidelity — just via a
         # different bot token. Falls back to plain text on parse failure.
         from server_modules.sage_telegram_hosted_service import _to_telegram_markdown
 
@@ -414,7 +308,7 @@ class PoolBotTransport(ChannelTransport):
             result = await telegram_api(self.token, "sendMessage", body)
             return bool(result.get("ok"))
         except Exception as exc:
-            LOGGER.warning("PoolBotTransport.send_message failed for chat_id=%s: %s", self.chat_id, exc)
+            LOGGER.warning("AgentBotTransport.send_message failed for chat_id=%s: %s", self.chat_id, exc)
             return False
 
     async def start_typing(self) -> None:
@@ -435,31 +329,74 @@ class PoolBotTransport(ChannelTransport):
         return _to_telegram_markdown(text)
 
 
-async def route_hosted_inbound(
+async def _maybe_send_first_contact_reply(
     *,
-    pool_bot_id: str,
+    install: Dict[str, Any],
+    tenant_id: str,
+    workspace_id: str,
+    agent_install_id: str,
+    chat_id: str,
+    agent_label: str,
+    transport: "AgentBotTransport",
+) -> None:
+    """If this agent has opted into the first-contact marketing reply AND this
+    chat_id has never messaged it before, send a one-time intro identifying it
+    as an AI agent with a link, then remember the chat_id so it never repeats.
+
+    Off by default. Best-effort: any failure here must never block the real
+    turn that follows it.
+    """
+    try:
+        meta = dict((install or {}).get("metadata") or {})
+        if not bool(meta.get("telegram_first_contact_reply")):
+            return
+        seen = meta.get("telegram_seen_senders")
+        seen_list = [str(s) for s in seen] if isinstance(seen, list) else []
+        chat_key = str(chat_id or "").strip()
+        if not chat_key or chat_key in seen_list:
+            return
+
+        intro = (
+            f"👋 Hi! I'm {agent_label}, an AI agent — not a human. "
+            f"I'm built on Empyralis. Learn more: {_FIRST_CONTACT_LINK}"
+        )
+        await transport.send_message(intro)
+
+        seen_list.append(chat_key)
+        seen_list = seen_list[-_FIRST_CONTACT_SEEN_SENDERS_CAP:]
+        from server_modules import agent_registry_repository as repo
+        await repo.update_workspace_agent_install(
+            agent_install_id,
+            tenant_id=tenant_id, workspace_id=workspace_id,
+            metadata={"telegram_seen_senders": seen_list},
+        )
+    except Exception as exc:
+        LOGGER.warning("first-contact reply best-effort failed for agent=%s chat_id=%s: %s", agent_install_id, chat_id, exc)
+
+
+async def route_agent_inbound(
+    *,
+    agent_install_id: str,
     chat_id: str,
     message: str,
     reply_to_message_id: Optional[int] = None,
     deliver: bool = True,
 ) -> Dict[str, Any]:
-    """Route an inbound message from a pool bot to its assigned agent and run
-    a REAL turn as THAT agent — its own persona, model/provider binding, and
-    memory scope, in its own thread — replying via the bot's own token.
-
-    Phase 3B originally shipped routing + an attributed label-and-echo reply
-    as a deliberate placeholder ("swapping in the full specialist turn runtime
-    is a later phase"). This is that later phase: the resolved agent now
-    actually executes via execute_sage_turn's specialist_context instead of a
-    hardcoded echo, so persona/model/memory and cost attribution are real.
+    """Route an inbound message from an agent's own BYO bot and run a REAL
+    turn as THAT agent — its own persona, model/provider binding, and memory
+    scope, in its own thread — replying via the bot's own token.
     """
-    routed = await resolve_inbound_agent(pool_bot_id)
-    if routed is None:
-        return {"routed": False, "reason": "bot is not assigned to any agent"}
+    binding = await bindings.get_channel_binding_by_agent_unscoped(
+        agent_install_id=agent_install_id, channel_key=CHANNEL_KEY_TELEGRAM,
+    )
+    if binding is None:
+        return {"routed": False, "reason": "no active telegram binding for this agent"}
 
-    agent_install_id = str(routed["agent_install_id"])
-    workspace_id = str(routed["workspace_id"] or "")
-    tenant_id = str(routed["tenant_id"] or "")
+    workspace_id = str(binding.get("workspace_id") or "")
+    tenant_id = str(binding.get("tenant_id") or "")
+    binding_meta = binding.get("binding") or {}
+    bot_username = str(binding_meta.get("bot_username") or "")
+    credential_id = str(binding_meta.get("credential_id") or "")
     label = await _agent_label(agent_install_id, workspace_id, tenant_id)
 
     if not deliver:
@@ -468,7 +405,20 @@ async def route_hosted_inbound(
             "agent_install_id": agent_install_id,
             "agent_label": label,
             "workspace_id": workspace_id,
-            "bot_username": routed["bot_username"],
+            "bot_username": bot_username,
+        }
+
+    try:
+        token = resolve_bot_token(credential_id)
+    except Exception as exc:
+        LOGGER.warning("route_agent_inbound: could not resolve bot token for %s: %s", agent_install_id, exc)
+        return {
+            "routed": True,
+            "agent_install_id": agent_install_id,
+            "agent_label": label,
+            "workspace_id": workspace_id,
+            "bot_username": bot_username,
+            "reply_sent": False,
         }
 
     from server_modules import specialist_runtime_context as _src
@@ -482,36 +432,37 @@ async def route_hosted_inbound(
         )
     except Exception as exc:
         LOGGER.warning(
-            "route_hosted_inbound: specialist context resolution failed for %s: %s — falling back to Sage",
+            "route_agent_inbound: specialist context resolution failed for %s: %s — falling back to Sage",
             agent_install_id, exc,
         )
         specialist_context = None
 
-    # Stable per-agent thread so this agent's hosted-bot conversation has its
-    # own history/memory scope, distinct from the workspace's sage-main thread.
-    thread_id = f"thread_agent_{agent_install_id}"
+    transport = AgentBotTransport(token=token, chat_id=str(chat_id))
 
     try:
-        token = resolve_bot_token(routed["credential_id"])
+        from server_modules import agent_registry_repository as repo
+        install = await repo.get_workspace_agent_install_bundle(
+            agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+        )
+        await _maybe_send_first_contact_reply(
+            install=install or {}, tenant_id=tenant_id, workspace_id=workspace_id,
+            agent_install_id=agent_install_id, chat_id=str(chat_id), agent_label=label,
+            transport=transport,
+        )
     except Exception as exc:
-        LOGGER.warning("route_hosted_inbound: could not resolve bot token for %s: %s", pool_bot_id, exc)
-        return {
-            "routed": True,
-            "agent_install_id": agent_install_id,
-            "agent_label": label,
-            "workspace_id": workspace_id,
-            "bot_username": routed["bot_username"],
-            "reply_sent": False,
-        }
+        LOGGER.warning("route_agent_inbound: first-contact check failed (non-fatal) for %s: %s", agent_install_id, exc)
+
+    # Stable per-agent thread so this agent's bot conversation has its own
+    # history/memory scope, distinct from the workspace's sage-main thread.
+    thread_id = f"thread_agent_{agent_install_id}"
 
     from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
 
-    transport = PoolBotTransport(token=token, chat_id=str(chat_id))
     delivered = await dispatch_sage_reply_safe(
         transport=transport,
         workspace_id=workspace_id,
         message=str(message or ""),
-        channel_origin="telegram_hosted_pool",
+        channel_origin="telegram_agent_byo",
         sender_id=str(chat_id),
         thread_id=thread_id,
         reply_to_id=str(reply_to_message_id or "") or None,
@@ -523,6 +474,6 @@ async def route_hosted_inbound(
         "agent_install_id": agent_install_id,
         "agent_label": label,
         "workspace_id": workspace_id,
-        "bot_username": routed["bot_username"],
+        "bot_username": bot_username,
         "reply_sent": delivered,
     }

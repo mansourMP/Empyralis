@@ -216,3 +216,36 @@ async def delete_channel_binding(
         tenant_id=tenant_id, workspace_id=workspace_id,
         agent_install_id=agent_install_id, key=channel_key,
     )
+
+
+async def get_channel_binding_by_agent_unscoped(
+    *, agent_install_id: str, channel_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve a channel binding from the agent_install_id alone, with no
+    tenant/workspace known in advance — the shape a webhook receives (the
+    URL path carries only the agent_install_id; there is no session to
+    derive a tenant from). agent_install_id is already a random, effectively
+    unique token, so this is the same bypass_rls=True pattern documented on
+    control_plane_repository.rls_fetchrow for bearer-token/id system lookups
+    (matching how the old hosted-bot-pool webhook resolved a pool_bot_id).
+    Returns tenant_id/workspace_id alongside the binding so the caller can
+    then do normal tenant-scoped work."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return None
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
+        """
+        SELECT tenant_id, workspace_id, agent_install_id, channel_key AS key, enabled, binding
+        FROM agent_channel_bindings
+        WHERE agent_install_id = $1 AND channel_key = $2 AND enabled = TRUE
+        """,
+        str(agent_install_id or "").strip(),
+        str(channel_key or "").strip(),
+        bypass_rls=True,
+    )
+    if row is None:
+        return None
+    r = dict(row)
+    r["binding"] = _binding_json(r.get("binding"))
+    return r

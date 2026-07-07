@@ -6,7 +6,6 @@ import {
   Check,
   ChevronRight,
   Cpu,
-  ExternalLink,
   Inbox,
   LayoutGrid,
   Loader2,
@@ -603,120 +602,76 @@ function channelStatePill(channel: FleetChannel | undefined): { label: string; t
 export function ChannelsTab({
   workspaceId, agentId, agent,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
-  const { channels, hostedTelegramConfigured, loading } = useFleetAgentChannels(workspaceId, agentId);
+  const { channels, loading } = useFleetAgentChannels(workspaceId, agentId);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [pairing, setPairing] = useState(false);
-  const [pairingCode, setPairingCode] = useState<string | null>(null);
-  const [deepLink, setDeepLink] = useState<string | null>(null);
-  const [pairError, setPairError] = useState<string | null>(null);
-  const [pairResult, setPairResult] = useState<string | null>(null);
   const [oauthBusy, setOauthBusy] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
 
-  // Telegram's 3-option sheet: hosted bot (already works) / your own bot
-  // token / your personal account via Gateway. Slack and Discord stay
+  // Telegram's 2-option sheet: your own bot token / your personal account via
+  // Gateway. There is no platform-owned bot pool for specialist agents — the
+  // one hosted bot the platform owns is reserved for Sage itself (paired from
+  // the Fleet home page's TelegramPairPanel, not here). Slack and Discord stay
   // single-path OAuth below — they have no BYO-bot or personal-account
-  // capability in the catalog today, so a 3-option sheet for them would be
-  // two fake buttons. Wire those up when those paths actually exist.
-  const [telegramOption, setTelegramOption] = useState<"hosted" | "byo_bot" | "personal" | null>(null);
-  const [byoBotFields, setByoBotFields] = useState<string[]>([]);
-  const [byoBotValues, setByoBotValues] = useState<Record<string, string>>({});
+  // capability in the catalog today, so a multi-option sheet for them would
+  // be fake buttons. Wire those up when those paths actually exist.
+  const [telegramOption, setTelegramOption] = useState<"byo_bot" | "personal" | null>(null);
+  const [byoToken, setByoToken] = useState("");
   const [byoBotBusy, setByoBotBusy] = useState(false);
   const [byoBotError, setByoBotError] = useState<string | null>(null);
   const [byoBotSaved, setByoBotSaved] = useState(false);
   const [personalWarningAck, setPersonalWarningAck] = useState(false);
-
-  const startByoBotSetup = useCallback(async () => {
-    setByoBotBusy(true);
-    setByoBotError(null);
-    try {
-      const res = await fetch("/api/connections/telegram_bot/setup/start", {
-        method: "POST",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ workspace_id: workspaceId, surface: "sage" }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
-      const fields: string[] = data?.auth_required_fields?.length ? data.auth_required_fields : ["bot_token"];
-      setByoBotFields(fields);
-      setByoBotValues({});
-    } catch (e) {
-      setByoBotError(e instanceof Error ? e.message : "Could not start bot setup.");
-    } finally {
-      setByoBotBusy(false);
-    }
-  }, [workspaceId]);
+  const [firstContactReply, setFirstContactReply] = useState(!!agent?.telegram_first_contact_reply);
+  const [firstContactSaving, setFirstContactSaving] = useState(false);
+  // agent starts null and loads async — resync once the real value arrives
+  // (and again if it changes, e.g. edited from another tab) without
+  // clobbering an in-progress toggle on every 30s poll of an unchanged value.
+  useEffect(() => {
+    if (agent) setFirstContactReply(!!agent.telegram_first_contact_reply);
+  }, [agent?.telegram_first_contact_reply]);
 
   const saveByoBotToken = useCallback(async () => {
+    if (!byoToken.trim()) {
+      setByoBotError("Paste the token BotFather gave you.");
+      return;
+    }
     setByoBotBusy(true);
     setByoBotError(null);
     try {
-      const res = await fetch("/api/connectors/vault", {
-        method: "POST",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          connector: "telegram_bot",
-          label: "Telegram Bot",
-          credentials: byoBotValues,
-        }),
-      });
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/telegram?agent_id=${encodeURIComponent(agentId)}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify({ token: byoToken.trim() }),
+        },
+      );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
       setByoBotSaved(true);
     } catch (e) {
       setByoBotError(e instanceof Error ? e.message : "Could not save the bot token.");
     } finally {
       setByoBotBusy(false);
     }
-  }, [workspaceId, byoBotValues]);
+  }, [workspaceId, agentId, byoToken]);
 
-  const startHostedPairing = useCallback(async () => {
-    setPairing(true);
-    setPairError(null);
-    setPairResult(null);
+  const saveFirstContactReply = useCallback(async (next: boolean) => {
+    setFirstContactReply(next);
+    setFirstContactSaving(true);
     try {
-      const res = await fetch("/api/sage/telegram-hosted/pair/start", {
-        method: "POST",
+      await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
         credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ workspace_id: workspaceId }),
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { telegram_first_contact_reply: next } }),
       });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(body || `HTTP ${res.status}`);
-      }
-      const data = await res.json() as { pairing_code: string; deep_link: string | null };
-      setPairingCode(data.pairing_code);
-      if (data.deep_link) {
-        setDeepLink(data.deep_link);
-        window.open(data.deep_link, "_blank");
-      }
-      const check = setInterval(async () => {
-        try {
-          const s = await fetch(
-            `/api/sage/telegram-hosted/pair/status?workspace_id=${encodeURIComponent(workspaceId)}`,
-            { credentials: "include" },
-          );
-          if (s.ok) {
-            const status = await s.json();
-            if (status.paired) {
-              clearInterval(check);
-              setPairResult(`Connected — send a message to @${status.bot_username || "the bot"}`);
-              setPairingCode(null);
-              setPairing(false);
-            }
-          }
-        } catch { /* keep polling */ }
-      }, 3000);
-      setTimeout(() => clearInterval(check), 120_000);
-    } catch (e) {
-      setPairError(e instanceof Error ? e.message : "Could not start pairing. Try again.");
-      setPairing(false);
+    } catch {
+      // Best-effort — the toggle re-syncs from the agent record on next load.
+    } finally {
+      setFirstContactSaving(false);
     }
-  }, [workspaceId]);
+  }, [workspaceId, agentId]);
 
   const startOAuth = useCallback(async (id: string) => {
     setOauthBusy(id);
@@ -754,7 +709,7 @@ export function ChannelsTab({
     if (platform.mode === "hosted") {
       setExpanded(expanded === platform.id ? null : platform.id);
       setTelegramOption(null);
-      setByoBotFields([]);
+      setByoToken("");
       setByoBotError(null);
       setByoBotSaved(false);
       setPersonalWarningAck(false);
@@ -802,14 +757,6 @@ export function ChannelsTab({
           <div className="fleet-wizard-options">
             <button
               type="button"
-              className={`fleet-wizard-option${telegramOption === "hosted" ? " is-selected" : ""}`}
-              onClick={() => setTelegramOption(telegramOption === "hosted" ? null : "hosted")}
-            >
-              <span className="fleet-wizard-option-label">Empyralis-hosted bot <span className="fleet-wizard-option-tag">Recommended</span></span>
-              <span className="fleet-wizard-option-body">One-click pair. No BotFather setup, no token, no Gateway.</span>
-            </button>
-            <button
-              type="button"
               className={`fleet-wizard-option${telegramOption === "byo_bot" ? " is-selected" : ""}`}
               onClick={() => setTelegramOption(telegramOption === "byo_bot" ? null : "byo_bot")}
             >
@@ -826,71 +773,52 @@ export function ChannelsTab({
             </button>
           </div>
 
-          {telegramOption === "hosted" && (
-            <div className="fleet-channel-expand" style={{ marginTop: 12 }}>
-              {pairResult ? (
-                <div className="fleet-channel-expand-success">
-                  <Check size={16} strokeWidth={2} /> {pairResult}
-                </div>
-              ) : pairingCode ? (
-                <div>
-                  <div className="fleet-pair-code">
-                    <span className="fleet-pair-code-label">Code</span>
-                    <code className="fleet-pair-code-value">{pairingCode}</code>
-                  </div>
-                  {deepLink && (
-                    <a href={deepLink} target="_blank" rel="noopener noreferrer" className="fleet-btn fleet-btn--accent" style={{ marginLeft: 8 }}>
-                      Open Telegram <ExternalLink size={14} style={{ marginLeft: 4 }} />
-                    </a>
-                  )}
-                  <p className="fleet-channel-expand-hint" style={{ marginTop: 8 }}>
-                    Send this code to the Empyralis bot on Telegram. This tab updates automatically when paired.
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={startHostedPairing} disabled={pairing}>
-                    {pairing ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Starting…</> : "Pair Telegram"}
-                  </button>
-                  {!hostedTelegramConfigured && (
-                    <p className="fleet-channel-expand-error">The hosted Telegram bot is not configured on this server.</p>
-                  )}
-                  {pairError && <p className="fleet-channel-expand-error">{pairError}</p>}
-                </div>
-              )}
-            </div>
-          )}
-
           {telegramOption === "byo_bot" && (
             <div className="fleet-channel-expand" style={{ marginTop: 12 }}>
               {byoBotSaved ? (
                 <div className="fleet-channel-expand-success">
-                  <Check size={16} strokeWidth={2} /> Bot token saved. Sage will use it for this channel.
+                  <Check size={16} strokeWidth={2} /> Bot token saved — this agent's own bot is live.
                 </div>
-              ) : byoBotFields.length > 0 ? (
+              ) : (
                 <>
                   <p className="fleet-channel-expand-hint">Paste the token BotFather gave you when you created the bot.</p>
-                  {byoBotFields.map((field) => (
-                    <label key={field} className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
-                      <span>{field.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}</span>
-                      <input
-                        type="password"
-                        autoComplete="off"
-                        value={byoBotValues[field] || ""}
-                        onChange={(e) => setByoBotValues((cur) => ({ ...cur, [field]: e.currentTarget.value }))}
-                      />
-                    </label>
-                  ))}
+                  <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                    <span>Bot Token</span>
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      value={byoToken}
+                      onChange={(e) => { setByoToken(e.currentTarget.value); setByoBotError(null); }}
+                    />
+                  </label>
                   <button type="button" className="fleet-btn fleet-btn--accent" onClick={saveByoBotToken} disabled={byoBotBusy}>
-                    {byoBotBusy ? "Saving…" : "Save token"}
+                    {byoBotBusy ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save token"}
                   </button>
                 </>
-              ) : (
-                <button type="button" className="fleet-btn fleet-btn--accent" onClick={startByoBotSetup} disabled={byoBotBusy}>
-                  {byoBotBusy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Connect your bot"}
-                </button>
               )}
               {byoBotError && <p className="fleet-channel-expand-error">{byoBotError}</p>}
+
+              {agent && (
+                <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={firstContactReply}
+                      aria-label="Reply to new contacts with an intro message"
+                      className={`fleet-toggle${firstContactReply ? " is-on" : ""}`}
+                      disabled={firstContactSaving}
+                      onClick={() => void saveFirstContactReply(!firstContactReply)}
+                    />
+                    <span style={{ fontSize: 13 }}>
+                      Reply to new contacts with an intro message
+                      <span style={{ display: "block", fontSize: 12, color: "var(--text-muted)" }}>
+                        The first time a stranger messages this bot, it identifies itself as an AI agent with a link. Off by default.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
             </div>
           )}
 

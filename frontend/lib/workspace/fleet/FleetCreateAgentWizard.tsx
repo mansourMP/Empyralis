@@ -20,7 +20,7 @@ import { GatewayBoxPicker } from "./gateway-box-picker";
 type CapabilityPreset = "standard" | "knowledge";
 type WizardProviderMode = "platform" | "byok" | "subscription" | "local";
 type HardwareChoice = "none" | "gateway";
-type ChannelChoice = "none" | "telegram_pool" | "byo";
+type ChannelChoice = "none" | "byo";
 
 // Fixed order per the UI contract: name → project → capability preset →
 // hardware → AI brain → model → channel. Hardware comes before the brain
@@ -234,39 +234,11 @@ export function FleetCreateAgentWizard({
     }
   }
 
-  // Step 7 (Channel) → Create. "Telegram — hosted bot" must actually assign a
-  // bot (claims a free bot from the hosted pool) — not just set local state
-  // and silently finish with no channel. On failure (e.g. the pool is out of
-  // capacity), say so honestly and let the user retry or fall back to "Not
-  // yet" — never close the wizard pretending a channel was attached.
-  async function submitChannelAndCreate() {
-    if (channel !== "telegram_pool") {
-      finish();
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/telegram?agent_id=${encodeURIComponent(agentId || "")}`,
-        {
-          method: "POST",
-          credentials: "include",
-          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-          body: JSON.stringify({ source: "pool" }),
-        },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) {
-        throw new Error(data?.error || data?.detail || `Could not assign a hosted bot (HTTP ${res.status}).`);
-      }
-      finish();
-    } catch (e) {
-      const reason = e instanceof Error ? e.message : "Could not assign a hosted bot.";
-      setError(`${reason} Pick “Not yet” and finish now, or try again — you can also assign a bot from this agent’s Channels tab later.`);
-    } finally {
-      setBusy(false);
-    }
+  // Step 7 (Channel) → Create. Neither remaining choice makes a server call
+  // here — "byo" is just a signpost ("you'll paste the token in the Channels
+  // tab next"); the actual bot assignment happens there.
+  function submitChannelAndCreate() {
+    finish();
   }
 
   function finish() {
@@ -478,10 +450,6 @@ export function FleetCreateAgentWizard({
                 <button type="button" className={`fleet-wizard-option${channel === "none" ? " is-selected" : ""}`} onClick={() => setChannel("none")}>
                   <span className="fleet-wizard-option-label">Not yet <span className="fleet-wizard-option-tag">Recommended</span></span>
                   <span className="fleet-wizard-option-body">Create it now, connect a channel later from the Channels tab.</span>
-                </button>
-                <button type="button" className={`fleet-wizard-option${channel === "telegram_pool" ? " is-selected" : ""}`} onClick={() => setChannel("telegram_pool")}>
-                  <span className="fleet-wizard-option-label">Telegram — hosted bot</span>
-                  <span className="fleet-wizard-option-body">Claims a real bot from our shared pool the moment you click Create.</span>
                 </button>
                 <button type="button" className={`fleet-wizard-option${channel === "byo" ? " is-selected" : ""}`} onClick={() => setChannel("byo")}>
                   <span className="fleet-wizard-option-label">Bring your own bot</span>

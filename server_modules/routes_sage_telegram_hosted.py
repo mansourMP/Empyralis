@@ -233,23 +233,27 @@ async def telegram_webhook(request: Request) -> dict:
     return {"ok": True}
 
 
-@router.post("/sage/telegram-hosted/webhook/{pool_bot_id}")
-async def telegram_pool_webhook(pool_bot_id: str, request: Request) -> dict:
-    """Phase 3B: per-bot webhook. An update delivered here came from exactly one
-    pool bot, which is assigned to exactly one agent — so inbound routes to that
-    agent with no chat→workspace pairing ambiguity."""
-    _enforce_hosted_webhook_rate_limit(request, "/sage/telegram-hosted/webhook/pool")
+@router.post("/sage/telegram-hosted/webhook/byo/{agent_install_id}")
+async def telegram_agent_byo_webhook(agent_install_id: str, request: Request) -> dict:
+    """Per-agent webhook for a BYO Telegram bot. An update delivered here came
+    from exactly one agent's own bot — no chat→workspace pairing ambiguity.
+    The agent_install_id in the URL is the only identity a webhook has (no
+    session), so the binding lookup is an intentional bypass_rls query keyed
+    on that id — see agent_bindings_repository.get_channel_binding_by_agent_unscoped."""
+    _enforce_hosted_webhook_rate_limit(request, "/sage/telegram-hosted/webhook/byo")
     from server_modules import hosted_bot_provisioning_service as prov
-    from server_modules import hosted_bot_pool_repository as pool_repo
+    from server_modules import agent_bindings_repository as bindings_repo
 
-    bot = await pool_repo.get_bot(pool_bot_id)
-    if bot is None:
-        raise HTTPException(status_code=404, detail="Unknown bot")
+    binding = await bindings_repo.get_channel_binding_by_agent_unscoped(
+        agent_install_id=agent_install_id, channel_key=prov.CHANNEL_KEY_TELEGRAM,
+    )
+    if binding is None:
+        raise HTTPException(status_code=404, detail="Unknown agent or no active Telegram binding")
 
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    expected = str(bot.get("webhook_secret") or "")
+    expected = str((binding.get("binding") or {}).get("webhook_secret") or "")
     if not expected:
-        # Fail closed: a pool bot with no webhook secret cannot be authenticated.
+        # Fail closed: a binding with no webhook secret cannot be authenticated.
         raise HTTPException(status_code=503, detail="Bot webhook secret is not configured.")
     if not secrets.compare_digest(header_secret, expected):
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
@@ -263,8 +267,8 @@ async def telegram_pool_webhook(pool_bot_id: str, request: Request) -> dict:
     if parsed is None:
         return {"ok": True}
 
-    result = await prov.route_hosted_inbound(
-        pool_bot_id=pool_bot_id,
+    result = await prov.route_agent_inbound(
+        agent_install_id=agent_install_id,
         chat_id=parsed["chat_id"],
         message=parsed["text"],
         reply_to_message_id=parsed.get("message_id"),

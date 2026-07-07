@@ -24,6 +24,7 @@ export type FleetAgent = {
   subagents_enabled?: boolean;
   instructions?: string;
   preferred_gateway_id?: string;
+  telegram_first_contact_reply?: boolean;
 };
 
 export type FleetProject = {

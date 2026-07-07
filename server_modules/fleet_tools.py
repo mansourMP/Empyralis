@@ -28,7 +28,7 @@ _ALLOWED_CONFIGURE_KEYS = {
     "enabled_tools", "connectors", "channel_bindings",
     "subagents_enabled", "hardware_access", "model_config", "display_name",
     "purpose_preset", "instructions", "context_policy", "tool_toggles",
-    "preferred_gateway_id",
+    "preferred_gateway_id", "telegram_first_contact_reply",
 }
 _MAX_INSTRUCTIONS_CHARS = 8000
 _VALID_CONTEXT_FULL_ACTIONS = {"compact", "fresh_session"}
@@ -416,6 +416,7 @@ async def fleet_list_agents(
             "context_policy": dict(_ctx_pol),
             "instructions": str(_meta_i.get("instructions") or "").strip(),
             "preferred_gateway_id": str(_meta_i.get("preferred_gateway_id") or "").strip(),
+            "telegram_first_contact_reply": bool(_meta_i.get("telegram_first_contact_reply")),
             # Phase U3: placement visibility
             "runtime_target": _runtime_target,
             "hardware_status": _hardware_status,
@@ -694,6 +695,8 @@ async def fleet_configure_agent(
             meta["subagents_enabled"] = bool(clean_patch["subagents_enabled"])
         if "instructions" in clean_patch:
             meta["instructions"] = str(clean_patch["instructions"] or "").strip()[:_MAX_INSTRUCTIONS_CHARS]
+        if "telegram_first_contact_reply" in clean_patch:
+            meta["telegram_first_contact_reply"] = bool(clean_patch["telegram_first_contact_reply"])
         if "preferred_gateway_id" in clean_patch:
             value = clean_patch["preferred_gateway_id"]
             if value is not None and not isinstance(value, str):
