@@ -1559,12 +1559,23 @@ async def agent_turn(
         context_hints.setdefault("thread_id", resolved_thread_id)
         resolved_turn_request.context_hints = context_hints
     binding_metadata = _metadata_dict(resolved_turn_request.context_hints.get("metadata"))
-    master_agent_install_id = (
-        str(binding_metadata.get("master_agent_install_id") or binding_metadata.get("workspace_agent_install_id") or "").strip()
-        or None
-    )
     active_agent_install_id = (
         str(binding_metadata.get("active_agent_install_id") or binding_metadata.get("workspace_agent_install_id") or "").strip()
+        or None
+    )
+    # Falls back to active_agent_install_id: a specialist's own turn should
+    # tag the thread with ITS OWN id, not go untagged. Without this, every
+    # specialist turn (web chat and channel-bound alike) wrote NULL here,
+    # which made per-agent thread listing (list_agent_threads' own
+    # active_agent_install_id filter) unable to find anything, ever — not a
+    # UI bug, a write-side gap.
+    master_agent_install_id = (
+        str(
+            binding_metadata.get("master_agent_install_id")
+            or binding_metadata.get("workspace_agent_install_id")
+            or active_agent_install_id
+            or ""
+        ).strip()
         or None
     )
     runtime_profile_id = str(binding_metadata.get("runtime_profile_id") or "").strip() or None

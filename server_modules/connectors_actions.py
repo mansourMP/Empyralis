@@ -20,6 +20,7 @@ from server_modules.connectors.discord_connector import (
     interaction_signature_headers as discord_interaction_signature_headers,
     parse_inbound_event as discord_parse_inbound_event,
     send_dm as discord_send_dm,
+    send_message as discord_send_channel_message,
     should_trigger_agent_run as discord_should_trigger_agent_run,
     verify_interaction_signature as discord_verify_interaction_signature,
 )
@@ -1193,6 +1194,17 @@ async def slack_events_webhook(request: Request):
                     triggered += 1
                     if not triggered_run_id:
                         triggered_run_id = str(route_payload.get("run_id") or "").strip()
+                # route_inbound_channel_message already ran the agent turn and
+                # computed a real reply — previously nothing sent it back to
+                # Slack (the agent answered, the customer just never saw it).
+                reply_text = str(route_payload.get("reply") or "").strip()
+                if reply_text:
+                    try:
+                        slack_send_channel_message(secret, channel_id, reply_text)
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning(
+                            "slack_events_webhook: reply send failed for channel=%s: %s", channel_id, exc
+                        )
             return {"ok": True, "handled": handled, "triggered": triggered, "run_id": triggered_run_id or None}
         return {"ok": True}
     except HTTPException:
@@ -1430,6 +1442,22 @@ async def discord_webhook(request: Request):
                     triggered_run_id = str(route_payload.get("run_id") or "").strip()
                 if not triggered_reply:
                     triggered_reply = str(route_payload.get("reply") or "").strip()
+                # Interactions reply via the type:4 response below (Discord's
+                # own mechanism for that request shape) — but a plain guild
+                # MESSAGE_CREATE ("event") has no such response channel, so the
+                # agent's real, already-computed reply was previously just
+                # discarded here. Send it as a normal channel message.
+                if parsed.get("kind") != "interaction":
+                    reply_text = str(route_payload.get("reply") or "").strip()
+                    channel_id = str(parsed.get("channel_id") or "").strip()
+                    if reply_text and channel_id:
+                        try:
+                            discord_send_channel_message(secret, channel_id, reply_text)
+                        except Exception as exc:
+                            import logging as _discord_reply_log
+                            _discord_reply_log.getLogger(__name__).warning(
+                                "discord_webhook: reply send failed for channel=%s: %s", channel_id, exc
+                            )
 
         if parsed.get("kind") == "interaction":
             if triggered_run_id:

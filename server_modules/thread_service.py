@@ -223,6 +223,7 @@ async def list_threads(
     workspace_id: str,
     tenant_id: Optional[str] = None,
     owner_user_id: Optional[str] = None,
+    active_agent_install_id: Optional[str] = None,
     include_turns: bool = False,
     limit: int = 50,
 ) -> List[Dict[str, Any]]:
@@ -239,6 +240,7 @@ async def list_threads(
         workspace_id=workspace_id,
         tenant_id=tenant_id,
         owner_user_id=owner_user_id,
+        active_agent_install_id=active_agent_install_id,
         include_turns=bool(decision.get("include_turns", include_turns)),
         limit=int(decision.get("limit") or limit or 50),
     )

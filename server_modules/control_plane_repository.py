@@ -11646,6 +11646,13 @@ async def list_agent_threads(
         conditions.append(f"owner_user_id = ${next_index}")
         params.append(str(owner_user_id or "").strip())
         next_index += 1
+    if active_agent_install_id:
+        # Was accepted as a parameter and even threaded into the include_turns
+        # branch below, but never actually added to the WHERE clause — every
+        # caller passing it got back every thread in the workspace, unfiltered.
+        conditions.append(f"master_agent_install_id = ${next_index}")
+        params.append(str(active_agent_install_id or "").strip())
+        next_index += 1
     params.append(max(1, int(limit or 50)))
     async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
         if connection is None:
@@ -11657,6 +11664,7 @@ async def list_agent_threads(
                     if tenant_key == resolved_tenant_id
                     and workspace_key == resolved_workspace_id
                     and (not owner_user_id or str(record.get("owner_user_id") or "") == str(owner_user_id or "").strip())
+                    and (not active_agent_install_id or str(record.get("master_agent_install_id") or "") == str(active_agent_install_id or "").strip())
                 ]
             items.sort(
                 key=lambda item: str(item.get("last_turn_at") or item.get("updated_at") or item.get("created_at") or ""),

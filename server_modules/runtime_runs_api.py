@@ -1209,6 +1209,7 @@ def register_run_routes(app) -> None:
     @app.get("/threads", dependencies=[Depends(viewer_dependency)], response_model=ApiThreadListResponse)
     async def list_threads(
         workspace_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
         include_turns: bool = False,
         limit: int = 50,
         current_user=Depends(viewer_dependency),
@@ -1224,6 +1225,7 @@ def register_run_routes(app) -> None:
             workspace_id=requested_workspace_id,
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
+            active_agent_install_id=str(agent_id or "").strip() or None,
             include_turns=bool(include_turns),
             limit=max(1, min(int(limit or 50), 200)),
         )
