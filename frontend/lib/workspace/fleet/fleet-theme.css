@@ -2310,6 +2310,106 @@ a.fleet-breadcrumb:hover {
   color: var(--text-primary);
 }
 
+/* ── Toggle switch (Tools tab, per-tool on/off) ──────────────────────────── */
+.fleet-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 34px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  cursor: pointer;
+  padding: 0;
+  transition: background var(--motion-base, 0.15s) ease-out, border-color var(--motion-base, 0.15s) ease-out;
+}
+.fleet-toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform var(--motion-base, 0.15s) ease-out, background var(--motion-base, 0.15s) ease-out;
+}
+.fleet-toggle.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent-ring);
+}
+.fleet-toggle.is-on::after {
+  transform: translateX(14px);
+  background: var(--accent);
+}
+.fleet-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.fleet-toggle:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+
+.fleet-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.fleet-toggle-row:last-child { border-bottom: none; }
+.fleet-toggle-row-label { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.fleet-toggle-row-desc { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+/* ── Advanced disclosure (collapsed-by-default sections) ─────────────────── */
+.fleet-disclosure {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+.fleet-disclosure-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 12px 0;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+}
+.fleet-disclosure-trigger:hover { color: var(--text-primary); }
+.fleet-disclosure-chevron {
+  transition: transform var(--motion-base, 0.15s) ease-out;
+}
+.fleet-disclosure.is-open .fleet-disclosure-chevron { transform: rotate(90deg); }
+.fleet-disclosure-body { padding-bottom: 12px; }
+
+/* ── Persona / instructions editor (Overview tab) ────────────────────────── */
+.fleet-persona-textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  padding: 12px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.fleet-persona-textarea:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
 /* ── Command palette (Cmd+K) ─────────────────────────────────────────────── */
 
 .fleet-palette-backdrop {

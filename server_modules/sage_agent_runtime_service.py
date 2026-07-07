@@ -1920,6 +1920,7 @@ async def _run_sage_action_loop_v3(
     sender_id: str | None = None,
     sender_class: str = "owner",
     agent_install_id: str = "",
+    preferred_gateway_id: str = "",
 ) -> dict[str, Any] | None:
     # Phase 4B: when agent_install_id is set this turn runs as that specialist —
     # its tool whitelist, tool-call executor identity, and mid-turn memory
@@ -2017,6 +2018,14 @@ async def _run_sage_action_loop_v3(
     # defaults to the Sage namespace exactly as before (byte-for-byte).
     if _acting_install_id:
         session_ctx["active_agent_install_id"] = _acting_install_id
+        # A specialist's preferred box (Hardware tab / Model tab box-picker) is
+        # surfaced as the FIRST candidate _resolve_direct_tool_gateway_id checks
+        # (skills_service.py) — it's already validated for workspace-usability
+        # and liveness there, with the existing workspace-wide scan as fallback
+        # when this box is offline or unset.
+        _preferred_gw = str(preferred_gateway_id or "").strip()
+        if _preferred_gw:
+            session_ctx["metadata"]["gateway_id"] = _preferred_gw
         if _specialist_toolset is not None:
             session_ctx["specialist_guard"] = {
                 "agent_install_id": _acting_install_id,
@@ -3310,6 +3319,7 @@ async def handle_sage_chat(
         sender_id=sender_id,
         # Phase 4B: run the tool loop as the resolved specialist (empty for Sage).
         agent_install_id=_spec_install_id,
+        preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
     )
     if action_result is not None:
         if "sage_action_loop" not in used_context:

@@ -47,6 +47,11 @@ class SpecialistRuntimeContext:
     mode: str = ""
     gateway_binding: str = ""
     runtime: str = ""
+    # The paired box this specialist's TOOL calls (shell/file/browser) prefer,
+    # distinct from gateway_binding above (which names the box that hosts the
+    # AI brain itself, only used in local/cli_subscription mode). Empty = no
+    # preference; dispatch falls back to any live gateway in the workspace.
+    preferred_gateway_id: str = ""
     project_id: str = ""
     context_policy: Dict[str, Any] = field(default_factory=dict)
     is_specialist: bool = True
@@ -156,6 +161,7 @@ async def resolve_specialist_runtime_context(
         mode=_text(_model_config.get("mode")).lower(),
         gateway_binding=_text(_model_config.get("gateway_binding")),
         runtime=_text(_model_config.get("runtime")).lower(),
+        preferred_gateway_id=_text(_inst_meta.get("preferred_gateway_id")),
         project_id=_text(bundle.get("project_id")),
         context_policy=dict(_ctx_policy),
         is_specialist=True,

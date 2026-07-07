@@ -745,6 +745,7 @@ async def fleet_agent_tools(
     try:
         manifest = await fleet_get_agent_tools(
             workspace_id=workspace_id,
+            tenant_id=await _resolve_tenant(workspace_id),
             agent_id=agent_id,
         )
         return manifest

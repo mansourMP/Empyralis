@@ -27,8 +27,11 @@ FLEET_TOOL_PREFIX = "fleet_"
 _ALLOWED_CONFIGURE_KEYS = {
     "enabled_tools", "connectors", "channel_bindings",
     "subagents_enabled", "hardware_access", "model_config", "display_name",
-    "purpose_preset",
+    "purpose_preset", "instructions", "context_policy", "tool_toggles",
+    "preferred_gateway_id",
 }
+_MAX_INSTRUCTIONS_CHARS = 8000
+_VALID_CONTEXT_FULL_ACTIONS = {"compact", "fresh_session"}
 _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local"}
 # BYO-brain Phase 0: model_config may carry which paired Gateway box runs the
 # brain (gateway_binding) and which CLI/engine to spawn there (runtime).
@@ -411,6 +414,8 @@ async def fleet_list_agents(
             "hardware_access": str(inst_dict.get("hardware_access") or "none").strip(),
             "hardware_access_locked": bool(_meta_i.get("hardware_access_locked") or _pco_i.get("hardware_access_locked")),
             "context_policy": dict(_ctx_pol),
+            "instructions": str(_meta_i.get("instructions") or "").strip(),
+            "preferred_gateway_id": str(_meta_i.get("preferred_gateway_id") or "").strip(),
             # Phase U3: placement visibility
             "runtime_target": _runtime_target,
             "hardware_status": _hardware_status,
@@ -555,77 +560,65 @@ async def fleet_get_project_activity(
 async def fleet_get_agent_tools(
     *,
     workspace_id: str,
+    tenant_id: str = "default",
     agent_id: str,
 ) -> Dict[str, Any]:
-    """Return the tool manifest for a specific agent.
+    """Return the FULL toggleable tool catalog for a specific agent, with each
+    tool's real enabled state.
 
-    Resolves the agent install metadata to find enabled_tools, then
-    looks up each skill definition from the skill registry. Returns
-    a flat list of {id, label, description, action_class} entries.
+    "Real" here means read from the install's `tool_toggles` column — the
+    field _resolve_specialist_toolset actually enforces at runtime (see
+    sage_agent_runtime_service.py). metadata.enabled_tools is a separate,
+    display-only list nothing in the tool-dispatch path consults; toggling
+    it would be a fake control, so this function ignores it as a source of
+    truth (fleet_create_agent still seeds it, kept only for back-compat
+    display in older callers).
+
+    Core tools (always on for every agent, never gated by tool_toggles) are
+    returned separately under "core_tools" for read-only display — they
+    aren't real toggles because there's nothing to turn off.
     """
     from server_modules import agent_registry_repository as repo
     from server_modules import skill_registry
+    from server_modules.sage_agent_runtime_service import _core_direct_tool_names
 
     try:
-        installs = await repo.list_workspace_agent_installs(
-            tenant_id="system",
-            workspace_id=workspace_id,
-            include_master=True,
+        bundle = await repo.get_workspace_agent_install_bundle(
+            agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
         )
     except Exception:
-        installs = []
+        bundle = None
 
-    # Find the agent install
-    inst: Dict[str, Any] = {}
-    for i in (installs or []):
-        d = dict(i) if isinstance(i, dict) else {}
-        if str(d.get("id") or "") == agent_id:
-            inst = d
-            break
+    if not bundle:
+        return {"ok": True, "tools": [], "core_tools": [], "agent_id": agent_id}
 
-    if not inst:
-        # Agent not found — return empty, not an error
-        return {"ok": True, "tools": [], "agent_id": agent_id}
-
-    # Read enabled_tools from metadata
-    meta = inst.get("meta") or inst.get("metadata") or {}
-    if isinstance(meta, str):
+    bundle_dict = dict(bundle)
+    is_master = resolve_agent_role(bundle_dict) == OPERATOR_ROLE
+    toggles = bundle_dict.get("tool_toggles")
+    if isinstance(toggles, str):
         import json as _json
         try:
-            meta = _json.loads(meta)
+            toggles = _json.loads(toggles)
         except Exception:
-            meta = {}
-    enabled_ids: List[str] = []
-    raw = meta.get("enabled_tools") or []
-    if isinstance(raw, list):
-        enabled_ids = [str(t).strip() for t in raw if str(t).strip()]
+            toggles = {}
+    if not isinstance(toggles, dict):
+        toggles = {}
 
-    # Resolve each tool ID to a skill definition
-    definitions = skill_registry.list_skill_definitions(workspace_id=workspace_id)
+    definitions = skill_registry.list_skill_definitions(workspace_id=workspace_id, include_disabled=True)
     tools: List[Dict[str, Any]] = []
-    for sid in enabled_ids:
-        match = None
-        for d in definitions:
-            if d.id == sid:
-                match = d
-                break
-        if match:
-            tools.append({
-                "id": match.id,
-                "label": match.label,
-                "description": match.description or "",
-                "action_class": match.action_class,
-            })
-        else:
-            # Tool ID referenced but not in registry — include as unknown
-            tools.append({
-                "id": sid,
-                "label": sid,
-                "description": "This tool is referenced but not in the skill registry.",
-                "action_class": "unknown",
-            })
+    for d in definitions:
+        tools.append({
+            "id": d.id,
+            "label": d.label,
+            "description": d.description or "",
+            "action_class": d.action_class,
+            # Sage (operator) isn't gated by tool_toggles at all — every tool
+            # is already available to it, so the toggle would be misleading.
+            "enabled": True if is_master else bool(toggles.get(d.id, False)),
+        })
 
-    return {"ok": True, "tools": tools, "agent_id": agent_id}
+    core_tools = sorted(_core_direct_tool_names())
+    return {"ok": True, "tools": tools, "core_tools": core_tools, "agent_id": agent_id, "is_master": is_master}
 
 
 async def fleet_configure_agent(
@@ -699,14 +692,49 @@ async def fleet_configure_agent(
                 meta[k] = clean_patch[k]
         if "subagents_enabled" in clean_patch:
             meta["subagents_enabled"] = bool(clean_patch["subagents_enabled"])
+        if "instructions" in clean_patch:
+            meta["instructions"] = str(clean_patch["instructions"] or "").strip()[:_MAX_INSTRUCTIONS_CHARS]
+        if "preferred_gateway_id" in clean_patch:
+            value = clean_patch["preferred_gateway_id"]
+            if value is not None and not isinstance(value, str):
+                return {"ok": False, "error": "preferred_gateway_id must be a gateway id string."}
+            meta["preferred_gateway_id"] = str(value or "").strip()
+        if "context_policy" in clean_patch:
+            cp = clean_patch["context_policy"]
+            if not isinstance(cp, dict):
+                return {"ok": False, "error": "context_policy must be an object."}
+            next_cp = dict(meta.get("context_policy") or {})
+            if "max_context_tokens" in cp:
+                try:
+                    max_tok = int(cp["max_context_tokens"])
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "context_policy.max_context_tokens must be an integer."}
+                if max_tok < 0:
+                    return {"ok": False, "error": "context_policy.max_context_tokens must be ≥ 0."}
+                next_cp["max_context_tokens"] = max_tok
+            if "on_context_full" in cp:
+                action = str(cp["on_context_full"] or "").strip().lower()
+                if action not in _VALID_CONTEXT_FULL_ACTIONS:
+                    return {
+                        "ok": False,
+                        "error": f"context_policy.on_context_full must be one of: {', '.join(sorted(_VALID_CONTEXT_FULL_ACTIONS))}",
+                    }
+                next_cp["on_context_full"] = action
+            meta["context_policy"] = next_cp
+        _next_hardware_access: Optional[str] = None
         if "hardware_access" in clean_patch:
             # Phase 5B: a knowledge agent's hardware access is policy-locked. It
             # can only be granted by changing the capability preset — a direct
             # grant here is refused and ledgered.
             from server_modules import capability_presets as _caps_cfg
 
-            _granting_hw = bool(clean_patch["hardware_access"]) and str(clean_patch["hardware_access"]).strip().lower() not in {"none", "false", "0"}
-            if _granting_hw and _caps_cfg.hardware_is_locked(bundle_dict):
+            requested = str(clean_patch["hardware_access"] or "").strip().lower()
+            if requested not in {"none", "gateway", "vps", "all"}:
+                return {
+                    "ok": False,
+                    "error": "hardware_access must be one of: none, gateway, vps, all",
+                }
+            if requested != "none" and _caps_cfg.hardware_is_locked(bundle_dict):
                 await _ledger_fleet_action(
                     action="hardware_grant_denied",
                     actor_id=actor_id,
@@ -716,7 +744,7 @@ async def fleet_configure_agent(
                     metadata={
                         "reason": "knowledge_agent_hardware_locked",
                         "capability_preset": "knowledge",
-                        "requested_hardware_access": clean_patch["hardware_access"],
+                        "requested_hardware_access": requested,
                     },
                 )
                 return {
@@ -726,16 +754,34 @@ async def fleet_configure_agent(
                         "Change its capability preset (not just this field) to grant hardware."
                     ),
                 }
-            meta["hardware_access"] = bool(clean_patch["hardware_access"])
+            # Real storage target is the workspace_agent_installs.hardware_access
+            # COLUMN — HardwareTab / fleet_list_agents read the column, not
+            # metadata. (metadata.hardware_access used to be written here as a
+            # bare bool, which nothing ever read — a silent no-op.)
+            _next_hardware_access = requested
         if "model_config" in clean_patch:
             meta["model_config"] = dict(clean_patch["model_config"] or {})
+        _next_tool_toggles: Optional[Dict[str, bool]] = None
+        if "tool_toggles" in clean_patch:
+            raw_toggles = clean_patch["tool_toggles"]
+            if not isinstance(raw_toggles, dict):
+                return {"ok": False, "error": "tool_toggles must be an object of {tool_id: true|false}."}
+            _next_tool_toggles = {
+                str(tool_id).strip(): bool(enabled_flag)
+                for tool_id, enabled_flag in raw_toggles.items()
+                if str(tool_id).strip()
+            }
 
-        # Persist via update
+        # Persist via update. tool_toggles / hardware_access are real columns —
+        # update_workspace_agent_install writes them directly (tool_toggles is
+        # merged with the existing dict there), everything else lives in metadata.
         await repo.update_workspace_agent_install(
             agent_id,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
             metadata=meta,
+            tool_toggles=_next_tool_toggles,
+            hardware_access=_next_hardware_access,
         )
     except Exception as exc:
         await _ledger_fleet_action(
@@ -874,9 +920,16 @@ async def fleet_create_agent(
     # model_tier, context_policy, hardware lock flag, subagents default).
     meta.update(dict(_preset_defaults.get("metadata") or {}))
     meta["subagents_enabled"] = bool(_preset_defaults.get("subagents_enabled"))
-    meta["hardware_access"] = str(_preset_defaults.get("hardware_access") or "none")
+    _preset_hardware_access = str(_preset_defaults.get("hardware_access") or "none")
+    meta["hardware_access"] = _preset_hardware_access
+    # tool_toggles is the field _resolve_specialist_toolset actually enforces at
+    # runtime (metadata.enabled_tools below is display-only, read by the Tools
+    # tab). A preset with a concrete allowlist (knowledge) must seed tool_toggles
+    # too, or its restriction is cosmetic — the agent gets core tools only.
+    _preset_tool_toggles: Dict[str, bool] = {}
     if _preset_defaults.get("enabled_tools") is not None:
         meta["enabled_tools"] = list(_preset_defaults["enabled_tools"])
+        _preset_tool_toggles = {str(t): True for t in _preset_defaults["enabled_tools"]}
 
     clean_preset = str(purpose_preset or "").strip().lower()
     if clean_preset in _VALID_PURPOSE_PRESETS:
@@ -924,6 +977,8 @@ async def fleet_create_agent(
             label=agent_label,
             metadata=meta,
             policy_context_overrides=dict(_preset_defaults.get("policy_context_overrides") or {}),
+            hardware_access=_preset_hardware_access,
+            tool_toggles=_preset_tool_toggles or None,
         )
         if not result:
             return {"ok": False, "error": "Failed to create agent install — check agent definition exists"}

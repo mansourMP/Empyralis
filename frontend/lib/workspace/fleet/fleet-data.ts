@@ -22,6 +22,8 @@ export type FleetAgent = {
   hardware_access_locked?: boolean;
   context_policy?: { max_context_tokens?: number; on_context_full?: string };
   subagents_enabled?: boolean;
+  instructions?: string;
+  preferred_gateway_id?: string;
 };
 
 export type FleetProject = {
@@ -189,6 +191,7 @@ export type FleetTool = {
   label: string;
   description: string;
   action_class: string;
+  enabled: boolean;
 };
 
 export function useFleetAgentChannels(workspaceId: string, agentId: string | null) {
@@ -282,27 +285,29 @@ export function useFleetProjectConnectors(workspaceId: string, projectId: string
 
 export function useFleetAgentTools(workspaceId: string, agentId: string | null) {
   const [tools, setTools] = useState<FleetTool[]>([]);
+  const [coreTools, setCoreTools] = useState<string[]>([]);
+  const [isMaster, setIsMaster] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (!agentId) { setTools([]); return; }
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const res = await fetch(
-          `/api/w/${workspaceId}/fleet/agent-tools?agent_id=${encodeURIComponent(agentId)}`
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) setTools(data.tools || []);
-      } catch { if (!cancelled) setTools([]); }
-      finally { if (!cancelled) setLoading(false); }
-    })();
-    return () => { cancelled = true; };
+  const refresh = useCallback(async () => {
+    if (!agentId) { setTools([]); setCoreTools([]); return; }
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/w/${workspaceId}/fleet/agent-tools?agent_id=${encodeURIComponent(agentId)}`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTools(data.tools || []);
+      setCoreTools(data.core_tools || []);
+      setIsMaster(Boolean(data.is_master));
+    } catch { setTools([]); setCoreTools([]); }
+    finally { setLoading(false); }
   }, [workspaceId, agentId]);
 
-  return { tools, loading };
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  return { tools, coreTools, isMaster, loading, refresh };
 }
 
 export type WorkspaceActivityEvent = {

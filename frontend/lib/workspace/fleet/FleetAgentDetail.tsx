@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Brain,
   Check,
+  ChevronRight,
   Cpu,
   ExternalLink,
   Inbox,
@@ -41,13 +42,14 @@ import { ConnectorPicker } from "./ConnectorPicker";
 import { GatewayPairPanel } from "../../gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
-type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "chat";
+type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "chat";
 
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
   { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
+  { id: "tools", label: "Tools", icon: Wrench },
   { id: "hardware", label: "Hardware", icon: Cpu },
   { id: "model", label: "Model", icon: Sparkles },
   { id: "memory", label: "Memory", icon: Brain },
@@ -228,6 +230,9 @@ export function FleetAgentDetail({
           {activeTab === "connectors" && (
             <ConnectorsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
           )}
+          {activeTab === "tools" && (
+            <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
+          )}
           {activeTab === "hardware" && <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
           {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
           {activeTab === "memory" && (
@@ -276,6 +281,8 @@ export function FleetAgentDetail({
 // ── Overview ────────────────────────────────────────────────────────────────
 
 function OverviewTab({
+  workspaceId,
+  agentId,
   agent,
   status,
   events,
@@ -292,6 +299,7 @@ function OverviewTab({
   const deployed = status.label !== "Not deployed";
   const placement = derivePlacement(agent?.runtime_target || "unknown", deployed);
   const role = agent?.role || "agent";
+  const isMaster = role === "operator";
 
   return (
     <div className="fleet-detail-overview">
@@ -311,6 +319,10 @@ function OverviewTab({
           <span className="fleet-config-value" style={{ textTransform: "capitalize" }}>{role}</span>
         </div>
       </div>
+
+      {!isMaster && agent && (
+        <PersonaEditor workspaceId={workspaceId} agentId={agentId} agent={agent} />
+      )}
 
       <div className="fleet-detail-section-title">Recent activity</div>
       {loading ? (
@@ -352,6 +364,57 @@ function OverviewTab({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Persona / system-prompt editor — the biggest pre-existing customization gap:
+// instructions were only ever settable at creation (wizard step 1's one-liner),
+// with no way to see or change what an agent IS after it exists.
+function PersonaEditor({
+  workspaceId, agentId, agent,
+}: { workspaceId: string; agentId: string; agent: FleetAgent }) {
+  const [draft, setDraft] = useState(agent.instructions || "");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { instructions: draft } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Persona</div>
+      <textarea
+        className="fleet-persona-textarea"
+        value={draft}
+        onChange={(e) => { setDraft(e.currentTarget.value); setSaved(false); }}
+        placeholder="What this agent is and how it should behave — e.g. “You handle customer refund requests. Be concise, and always confirm the order number before acting.”"
+        spellCheck
+      />
+      <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 12 }}>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
+          {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
+        </button>
+        {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
+      </div>
     </div>
   );
 }
@@ -912,48 +975,127 @@ function ConnectorsTab({
   return <ConnectorPicker workspaceId={workspaceId} projectId={projectId} agentId={agentId} />;
 }
 
+// ── Shared: collapsed-by-default "Advanced" section ─────────────────────────
+
+function Disclosure({
+  label, defaultOpen = false, children,
+}: { label: string; defaultOpen?: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className={`fleet-disclosure${open ? " is-open" : ""}`}>
+      <button
+        type="button"
+        className="fleet-disclosure-trigger"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <ChevronRight size={13} strokeWidth={2} className="fleet-disclosure-chevron" />
+        {label}
+      </button>
+      {open && <div className="fleet-disclosure-body">{children}</div>}
+    </div>
+  );
+}
+
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 function ToolsTab({
   workspaceId, agentId, agent, onChat,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
-  const { tools, loading } = useFleetAgentTools(workspaceId, agentId);
+  const { tools, coreTools, isMaster, loading, refresh } = useFleetAgentTools(workspaceId, agentId);
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggle(toolId: string, next: boolean) {
+    setPending(toolId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { tool_toggles: { [toolId]: next } } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update this tool.");
+    } finally {
+      setPending(null);
+    }
+  }
 
   if (loading) {
     return <div className="fleet-activity-skeleton" aria-label="Loading tools"><div className="fleet-skeleton-bar" style={{ width: "60%" }} /></div>;
   }
 
-  if (tools.length === 0) {
+  if (tools.length === 0 && coreTools.length === 0) {
     return (
       <EmptyState
         icon={Wrench}
-        title="No tools enabled"
-        body="This agent has no tools in its capability manifest. Chat with Sage to configure tools for this agent."
+        title="No tools available"
+        body="Chat with Sage to configure tools for this agent."
         action="Chat to configure"
         onAction={onChat}
       />
     );
   }
 
+  const enabledCount = tools.filter((t) => t.enabled).length;
+
   return (
     <div className="fleet-config">
-      <div className="fleet-detail-section-title">{tools.length} {tools.length === 1 ? "tool" : "tools"}</div>
+      {isMaster ? (
+        <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
+          This is the operator agent — it has unrestricted tool access, not gated by these toggles.
+        </p>
+      ) : (
+        <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>
+          {enabledCount} of {tools.length} tools enabled
+        </div>
+      )}
       {tools.map((t) => (
-        <div key={t.id} className="fleet-config-row">
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 500 }}>{t.label}</div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t.description}</div>
+        <div key={t.id} className="fleet-toggle-row">
+          <div style={{ minWidth: 0 }}>
+            <div className="fleet-toggle-row-label">{t.label}</div>
+            {t.description && <div className="fleet-toggle-row-desc">{t.description}</div>}
           </div>
-          <span className="fleet-config-value" style={{ fontSize: 11 }}>{t.action_class}</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={t.enabled}
+            aria-label={`${t.enabled ? "Disable" : "Enable"} ${t.label}`}
+            className={`fleet-toggle${t.enabled ? " is-on" : ""}`}
+            disabled={isMaster || pending === t.id}
+            onClick={() => toggle(t.id, !t.enabled)}
+          />
         </div>
       ))}
+      {error && <p className="fleet-channel-expand-error">{error}</p>}
+      {coreTools.length > 0 && (
+        <Disclosure label={`${coreTools.length} core ${coreTools.length === 1 ? "tool" : "tools"} — always on`}>
+          <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
+            Every agent has these regardless of the toggles above — memory, search, and task completion.
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {coreTools.map((name) => (
+              <span key={name} className="fleet-badge" style={{ marginLeft: 0 }}>{name}</span>
+            ))}
+          </div>
+        </Disclosure>
+      )}
     </div>
   );
 }
 
 // ── Model ───────────────────────────────────────────────────────────────────
 
-import { BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, providerLabel, MODE_LABELS, COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, type ProviderMode } from "./fleet-provider-constants";
+import {
+  BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, providerLabel, MODE_LABELS,
+  COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, type ProviderMode,
+  FREEFORM_MODEL_PROVIDERS, modelsForProvider, defaultModelForProvider,
+} from "./fleet-provider-constants";
 import { GatewayBoxPicker } from "./gateway-box-picker";
 
 function resolveDisplayMode(config: Record<string, any>): ProviderMode {
@@ -1004,12 +1146,181 @@ function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: strin
   );
 }
 
+// Which paired box this agent's TOOL calls (shell/file/browser) prefer — a
+// separate concept from the AI-brain gateway_binding below (which names the
+// box that HOSTS the model itself, only used in local/cli_subscription mode).
+// Backed by hardware_access (none/gateway column) + preferred_gateway_id
+// (metadata hint _resolve_direct_tool_gateway_id checks first, falling back
+// to any live gateway in the workspace when unset or offline).
+function HardwareBindingSection({
+  workspaceId, agentId, agent,
+}: { workspaceId: string; agentId: string; agent: FleetAgent }) {
+  const locked = !!agent.hardware_access_locked;
+  const [wantsHardware, setWantsHardware] = useState((agent.hardware_access || "none").toLowerCase() !== "none");
+  const [gatewayId, setGatewayId] = useState(agent.preferred_gateway_id || "");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          patch: {
+            hardware_access: wantsHardware ? "gateway" : "none",
+            preferred_gateway_id: wantsHardware ? gatewayId : "",
+          },
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Hardware</div>
+      {locked ? (
+        <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
+          This is a knowledge agent — hardware access is off and policy-locked. Change its capability
+          preset to grant hardware.
+        </p>
+      ) : (
+        <>
+          <div className="fleet-wizard-options">
+            <button
+              type="button"
+              className={`fleet-wizard-option${!wantsHardware ? " is-selected" : ""}`}
+              onClick={() => { setWantsHardware(false); setSaved(false); }}
+            >
+              <span className="fleet-wizard-option-label">Cloud only</span>
+              <span className="fleet-wizard-option-body">No computer access — runs entirely in the cloud.</span>
+            </button>
+            <button
+              type="button"
+              className={`fleet-wizard-option${wantsHardware ? " is-selected" : ""}`}
+              onClick={() => { setWantsHardware(true); setSaved(false); }}
+            >
+              <span className="fleet-wizard-option-label">A paired computer</span>
+              <span className="fleet-wizard-option-body">Shell, filesystem, and browser access on a box you've paired.</span>
+            </button>
+          </div>
+          {wantsHardware && (
+            <>
+              <GatewayBoxPicker workspaceId={workspaceId} value={gatewayId} onChange={(id) => { setGatewayId(id); setSaved(false); }} />
+              <p className="fleet-channel-expand-hint">Optional — leave unset to use whichever paired computer is online.</p>
+            </>
+          )}
+          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
+              {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
+            </button>
+            {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const _CONTEXT_FULL_OPTIONS: { value: string; label: string }[] = [
+  { value: "compact", label: "Compact — summarize and continue" },
+  { value: "fresh_session", label: "Fresh session — start a new thread" },
+];
+
+function ContextPolicySection({
+  workspaceId, agentId, agent,
+}: { workspaceId: string; agentId: string; agent: FleetAgent }) {
+  const pol = agent.context_policy || {};
+  const [maxTokens, setMaxTokens] = useState(String(pol.max_context_tokens || 0));
+  const [onFull, setOnFull] = useState(pol.on_context_full === "fresh_session" ? "fresh_session" : "compact");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    const parsed = parseInt(maxTokens, 10);
+    if (Number.isNaN(parsed) || parsed < 0) {
+      setError("Max tokens must be 0 (model default) or a positive number.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { context_policy: { max_context_tokens: parsed, on_context_full: onFull } } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div>
+      <label className="fleet-wizard-label" style={{ marginTop: 0 }}>Max context tokens</label>
+      <input
+        className="fleet-wizard-input"
+        type="number"
+        min={0}
+        value={maxTokens}
+        onChange={(e) => { setMaxTokens(e.currentTarget.value); setSaved(false); }}
+        placeholder="0 = model default"
+      />
+      <label className="fleet-wizard-label">When context fills up</label>
+      <select className="fleet-wizard-input" value={onFull} onChange={(e) => { setOnFull(e.currentTarget.value); setSaved(false); }}>
+        {_CONTEXT_FULL_OPTIONS.map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
+          {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
+        </button>
+        {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
+      </div>
+    </div>
+  );
+}
+
 function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
   const config = agent?.model_config || {};
   const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
   const [provider, setProvider] = useState<string>(config.provider || "");
   const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
+  const [selectedModel, setSelectedModel] = useState<string>(config.model || "");
   const [apiKey, setApiKey] = useState("");
+  // Re-default the model choice when the provider changes AFTER mount (so an
+  // id from the previous provider doesn't linger in a <select> that no longer
+  // has it) — but never on first render, which would clobber the agent's
+  // actual current model.
+  const skipNextModelReset = useRef(true);
+  useEffect(() => {
+    if (skipNextModelReset.current) { skipNextModelReset.current = false; return; }
+    if (mode === "byok_api") {
+      setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(provider) ? "" : defaultModelForProvider(provider));
+    } else if (mode === "local") {
+      setSelectedModel(defaultModelForProvider(provider || "ollama"));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider]);
   // cli_subscription is still not dispatchable (Phase 3) — saving it would
   // resolve to a guaranteed "not yet available" turn error. Block save.
   const isComingSoon = COMING_SOON_MODES.has(mode);
@@ -1078,6 +1389,9 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
     const patch: Record<string, any> = { mode };
     if (mode === "byok_api" || mode === "cli_subscription" || mode === "local") {
       patch.provider = provider;
+    }
+    if ((mode === "byok_api" || mode === "local") && selectedModel.trim()) {
+      patch.model = selectedModel.trim();
     }
     // BYO-brain Phase 0: forward-wire which box + runtime. (Save is blocked for
     // these modes today; this keeps the persisted shape correct once it opens.)
@@ -1173,6 +1487,24 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
             placeholder="sk-..."
           />
           <p className="fleet-channel-expand-hint">Stored in this workspace's vault.</p>
+          {FREEFORM_MODEL_PROVIDERS.has(provider) ? (
+            <>
+              <label className="fleet-wizard-label">Model ID</label>
+              <input
+                className="fleet-wizard-input"
+                value={selectedModel}
+                onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}
+                placeholder={provider === "azure_openai" ? "e.g. my-gpt4-deployment" : "e.g. llama-3-70b"}
+              />
+            </>
+          ) : (
+            <>
+              <label className="fleet-wizard-label">Model</label>
+              <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
+                {modelsForProvider(provider).map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </>
+          )}
         </div>
       )}
 
@@ -1198,6 +1530,14 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
             ))}
           </select>
           <p className="fleet-channel-expand-hint">{LOCAL_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
+          <label className="fleet-wizard-label">Ollama model</label>
+          <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
+            {modelsForProvider("ollama").map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+          <p className="fleet-channel-expand-hint">
+            This turn only works if this model is actually pulled on the box below — run{" "}
+            <code>ollama pull {selectedModel || "llama3.2"}</code> there first if you haven't.
+          </p>
           <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={(id) => { setGatewayBinding(id); setSaved(false); }} requireLocalModel />
         </div>
       )}
@@ -1214,6 +1554,18 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
         )}
         {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
       </div>
+
+      {agent && (
+        <div style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
+          <HardwareBindingSection workspaceId={workspaceId} agentId={agentId} agent={agent} />
+        </div>
+      )}
+
+      {agent && (
+        <Disclosure label="Advanced — context policy">
+          <ContextPolicySection workspaceId={workspaceId} agentId={agentId} agent={agent} />
+        </Disclosure>
+      )}
     </div>
   );
 }

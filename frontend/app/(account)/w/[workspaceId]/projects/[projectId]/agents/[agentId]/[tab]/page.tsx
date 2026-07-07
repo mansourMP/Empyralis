@@ -6,7 +6,7 @@ import { useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-da
 import { FleetAgentDetail } from "@/lib/workspace/fleet/FleetAgentDetail";
 import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
 
-const VALID_TABS = ["overview", "work", "channels", "connectors", "hardware", "model", "memory", "chat"] as const;
+const VALID_TABS = ["overview", "work", "channels", "connectors", "tools", "hardware", "model", "memory", "chat"] as const;
 type Tab = (typeof VALID_TABS)[number];
 
 export default function AgentDetailPage() {

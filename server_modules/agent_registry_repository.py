@@ -418,6 +418,7 @@ def _row_to_install_summary(row: Any) -> Optional[Dict[str, Any]]:
         "status": str(payload.get("status") or "").strip() or "active",
         "enabled": bool(payload.get("enabled")),
         "project_id": _normalize_token(payload.get("project_id")),
+        "hardware_access": str(payload.get("hardware_access") or "none").strip() or "none",
         "runtime_profile_id": _normalize_token(payload.get("runtime_profile_id")),
         "runtime_mode": str(payload.get("runtime_mode") or "").strip() or "hosted_secure",
         "compiled_workflow_version_id": _normalize_token(payload.get("compiled_workflow_version_id")),
@@ -2067,6 +2068,7 @@ def _create_workspace_agent_install_local(
     agent_definition_version_id: Optional[str] = None,
     label: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    hardware_access: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """SQLite fallback for create_workspace_agent_install when Postgres is unavailable."""
     import json as _json
@@ -2099,8 +2101,8 @@ def _create_workspace_agent_install_local(
                     id, tenant_id, workspace_id, agent_definition_id, agent_definition_version_id,
                     install_scope, label, status, enabled, tool_toggles, folder_grants,
                     connector_bindings, memory_scope_overrides, policy_context_overrides,
-                    metadata, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'workspace', ?, 'active', 1, '{}', '[]', '{}', '{}', '{}', ?, ?, ?)""",
+                    metadata, hardware_access, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'workspace', ?, 'active', 1, '{}', '[]', '{}', '{}', '{}', ?, ?, ?, ?)""",
                 (
                     install_id,
                     str(tenant_id or "").strip(),
@@ -2109,6 +2111,7 @@ def _create_workspace_agent_install_local(
                     version_id,
                     resolved_label,
                     _json.dumps(normalized_metadata),
+                    str(hardware_access or "").strip() or "none",
                     datetime.now(timezone.utc).isoformat(),
                     datetime.now(timezone.utc).isoformat(),
                 ),
@@ -2175,6 +2178,7 @@ def _get_workspace_agent_install_bundle_local(
                 "memory_scope_overrides": _dict_json(payload.get("memory_scope_overrides")),
                 "policy_context_overrides": _dict_json(payload.get("policy_context_overrides")),
                 "metadata": _dict_json(payload.get("metadata")),
+                "hardware_access": str(payload.get("hardware_access") or "none").strip() or "none",
                 "created_at": _iso(payload.get("created_at")),
                 "updated_at": _iso(payload.get("updated_at")),
             }
@@ -2195,6 +2199,8 @@ def _update_workspace_agent_install_local(
     metadata: Optional[Dict[str, Any]] = None,
     enabled: Optional[bool] = None,
     status: Optional[str] = None,
+    tool_toggles: Optional[Dict[str, Any]] = None,
+    hardware_access: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """SQLite fallback for update_workspace_agent_install."""
     import json as _json
@@ -2213,15 +2219,19 @@ def _update_workspace_agent_install_local(
             next_label = str(label or "").strip() or str(existing.get("label") or "").strip()
             next_enabled = 1 if enabled is True else (0 if enabled is False else int(existing.get("enabled") or 1))
             next_status = str(status or "").strip() or str(existing.get("status") or "active").strip()
+            next_tool_toggles = {**_json.loads(str(existing.get("tool_toggles") or "{}")), **dict(tool_toggles or {})}
+            next_hardware_access = str(hardware_access or "").strip() or str(existing.get("hardware_access") or "none").strip() or "none"
             connection.execute(
                 """UPDATE workspace_agent_installs
-                   SET label = ?, metadata = ?, enabled = ?, status = ?, updated_at = ?
+                   SET label = ?, metadata = ?, enabled = ?, status = ?, tool_toggles = ?, hardware_access = ?, updated_at = ?
                    WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
                 (
                     next_label,
                     _json.dumps(next_metadata),
                     next_enabled,
                     next_status,
+                    _json.dumps(next_tool_toggles),
+                    next_hardware_access,
                     datetime.now(timezone.utc).isoformat(),
                     str(install_id or "").strip(),
                     str(tenant_id or "").strip(),
@@ -2388,6 +2398,7 @@ async def create_workspace_agent_install(
     memory_scope_overrides: Optional[Dict[str, Any]] = None,
     policy_context_overrides: Optional[Dict[str, Any]] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    hardware_access: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     definition = await get_agent_definition(
         agent_definition_id,
@@ -2424,6 +2435,7 @@ async def create_workspace_agent_install(
             agent_definition_version_id=agent_definition_version_id,
             label=label,
             metadata=metadata,
+            hardware_access=hardware_access,
         )
     resolved_version_id = _pick_definition_version_id(definition, agent_definition_version_id)
     await control_plane_repository.rls_execute(
@@ -2433,12 +2445,12 @@ async def create_workspace_agent_install(
             id, tenant_id, workspace_id, agent_definition_id, agent_definition_version_id, installed_by_user_id,
             install_scope, owner_user_id, thread_id, label, status, enabled, runtime_profile_id, compiled_workflow_version_id,
             root_folder_uri, tool_toggles, folder_grants, connector_bindings, memory_scope_overrides,
-            policy_context_overrides, metadata, created_at, updated_at
+            policy_context_overrides, metadata, hardware_access, created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             'workspace', $7, $8, $9, 'active', TRUE, $10, NULL,
             $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
-            $16::jsonb, $17::jsonb, NOW(), NOW()
+            $16::jsonb, $17::jsonb, $18, NOW(), NOW()
         )
         """,
         install_id,
@@ -2458,6 +2470,7 @@ async def create_workspace_agent_install(
         _to_json(memory_scope_overrides, default={}),
         _to_json(merged_policy, default={}),
         _to_json(normalized_metadata, default={}),
+        _normalize_token(hardware_access) or "none",
         tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return await get_workspace_agent_install_bundle(
@@ -2483,6 +2496,7 @@ async def update_workspace_agent_install(
     enabled: Optional[bool] = None,
     status: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    hardware_access: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     existing = await get_workspace_agent_install_bundle(
         install_id,
@@ -2502,6 +2516,8 @@ async def update_workspace_agent_install(
             metadata=metadata,
             enabled=enabled,
             status=status,
+            tool_toggles=tool_toggles,
+            hardware_access=hardware_access,
         )
     next_tool_toggles = {**_dict_json(existing.get("tool_toggles")), **_dict_json(tool_toggles)}
     next_policy = {**_dict_json(existing.get("policy_context_overrides")), **_dict_json(policy_context_overrides)}
@@ -2529,6 +2545,7 @@ async def update_workspace_agent_install(
             enabled = $12,
             status = $13,
             metadata = $14::jsonb,
+            hardware_access = $15,
             updated_at = NOW()
         WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
         """,
@@ -2546,6 +2563,7 @@ async def update_workspace_agent_install(
         bool(enabled) if enabled is not None else bool(existing.get("enabled", True)),
         _normalize_token(status) or str(existing.get("status") or "active").strip() or "active",
         _to_json(normalized_metadata, default={}),
+        _normalize_token(hardware_access) or str(existing.get("hardware_access") or "none").strip() or "none",
         tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return await get_workspace_agent_install_bundle(
@@ -2713,6 +2731,7 @@ async def get_workspace_agent_install_bundle(
         "status": str(payload.get("status") or "").strip() or "active",
         "enabled": bool(payload.get("enabled")),
         "project_id": _normalize_token(payload.get("project_id")),
+        "hardware_access": str(payload.get("hardware_access") or "none").strip() or "none",
         "runtime_profile_id": _normalize_token(payload.get("runtime_profile_id")),
         "runtime_mode": str(payload.get("runtime_mode") or "").strip() or "hosted_secure",
         "compiled_workflow_version_id": _normalize_token(payload.get("compiled_workflow_version_id")),
