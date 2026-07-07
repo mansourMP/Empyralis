@@ -3467,6 +3467,15 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   flex: 1;
   min-height: 0;
 }
+/* Agent-detail's Chat tab: same component as Sage's own page, but its parent
+   here is .fleet-detail-body — a plain overflow:auto block, not a flex
+   container — so flex:1 above has nothing to fill. height:100% (same fix
+   .fleet-work-split uses) gives it a definite height to hand down. */
+.fleet-agent-chat-panel {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
 /* Sits in the breadcrumb row now (see SageChat.tsx's useBreadcrumbBadge), not
    a standalone header block — no margin-left override needed here since the
    base .fleet-badge's own margin-left is exactly the gap it needs next to

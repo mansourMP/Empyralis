@@ -3204,8 +3204,17 @@ async def handle_sage_chat(
             "belong to the operator (Sage). If a request falls outside your scope, "
             "say so and escalate to the operator instead of acting."
         )
+        # Applies regardless of whether the persona above is the configured one
+        # or the generic fallback — a real customer should never be the one
+        # asked who THEY are.
+        _spec_intro_rule = (
+            "\n\n## First message\n"
+            "If no earlier turns are shown above, this is the start of the "
+            "conversation — briefly introduce yourself by name and what you help "
+            "with before addressing the request."
+        )
         _spec_memory_block = f"\n\n## Your memory\n{memory_context}" if memory_context else ""
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,

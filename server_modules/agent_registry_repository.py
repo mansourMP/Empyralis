@@ -471,7 +471,7 @@ DEFAULT_AGENT_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "slug": "fleet-specialist",
         "name": "Fleet Specialist",
-        "display_name": None,  # null — agent will ask owner for a name
+        "display_name": None,  # null until the owner names it — has no bearing on how it talks to real users
         "description": "A specialist agent created via the fleet management tools. Configurable by operators.",
         "category": "System",
         "icon": "bot",
@@ -479,11 +479,11 @@ DEFAULT_AGENT_DEFINITIONS: List[Dict[str, Any]] = [
         "visibility": "private",
         "manifest": {
             "template_kind": "specialist",
-            "default_prompt": (
-                "You are a new assistant in this workspace. Introduce yourself briefly and ask "
-                "the owner what they would like to call you. Once they choose a name, use "
-                "fleet_configure_agent to save your display_name."
-            ),
+            # No default_prompt here on purpose: it isn't read for the customer-
+            # facing persona (specialist_runtime_context._persona_from_bundle
+            # ignores it) — a shared, per-definition prompt can't be a sane
+            # per-agent persona anyway. The actual default lives in
+            # specialist_runtime_context._default_specialist_persona.
         },
         "capability_manifest": {
             "summary": ["general_purpose"],

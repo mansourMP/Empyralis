@@ -69,7 +69,10 @@ def _text(value: Any) -> str:
 def _default_specialist_persona(label: str) -> str:
     name = label or "this specialist"
     return (
-        f"You are {name}, a specialist agent in this workspace. "
+        f"You are {name}, a specialist agent in this workspace. When someone "
+        "greets you or asks who you are, introduce yourself by name and briefly "
+        "say what you help with — even if your specific purpose hasn't been "
+        "configured yet — instead of asking who they are. "
         "You handle only the work you were configured for. You do NOT manage the "
         "fleet, create or reconfigure other agents, or take workspace-operator "
         "actions — those belong to Sage, the operator. If a request falls outside "
@@ -78,13 +81,17 @@ def _default_specialist_persona(label: str) -> str:
 
 
 def _persona_from_bundle(bundle: Mapping[str, Any], label: str) -> str:
-    version = bundle.get("agent_definition_version") if isinstance(bundle.get("agent_definition_version"), dict) else {}
-    manifest = version.get("manifest") if isinstance(version.get("manifest"), dict) else {}
-    persona = _text(manifest.get("default_prompt")) or _text(manifest.get("system_prompt"))
-    if not persona:
-        # Fall back to a persona stored on the install metadata, then a safe default.
-        meta = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
-        persona = _text(meta.get("persona")) or _text(meta.get("system_prompt"))
+    """Per-agent customization always wins. `instructions` is the field the
+    product actually writes (the creation wizard's one-liner + Settings' own
+    Persona editor); `persona`/`system_prompt` are kept as forward-compat keys
+    in case something else starts writing them. Deliberately never falls back
+    to the agent definition's manifest `default_prompt`/`system_prompt`: that
+    text is shared across every install of a definition, not per-agent, and
+    isn't meant to be shown to a real end user (see agent_registry_repository's
+    fleet-specialist definition, which used to ship an owner-onboarding script
+    here — the "who are you and who am I" bug)."""
+    meta = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+    persona = _text(meta.get("instructions")) or _text(meta.get("persona")) or _text(meta.get("system_prompt"))
     return persona or _default_specialist_persona(label)
 
 
