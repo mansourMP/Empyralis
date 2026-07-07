@@ -1,12 +1,19 @@
-import { redirect } from "next/navigation";
+"use client";
 
-// Sage index without a tab → its Overview tab. Keeps the workspace-level
-// "Sage" breadcrumb crumb (…/sage) a live link rather than a 404.
-export default async function SageIndexRedirect({
-  params,
-}: {
-  params: Promise<{ workspaceId: string }>;
-}) {
-  const { workspaceId } = await params;
-  redirect(`/w/${encodeURIComponent(workspaceId)}/sage/overview`);
+import { useParams } from "next/navigation";
+
+import { SageChat } from "@/lib/workspace/fleet/SageChat";
+
+// Sage's whole surface: a full-width chat with the Operator. No tabs — this
+// used to route into FleetAgentDetail (the same tabbed shell as a regular
+// agent), which is exactly the contract violation this route fixes.
+export default function SagePage() {
+  const params = useParams();
+  const workspaceId = String(params?.workspaceId || "");
+
+  return (
+    <main className="fleet-content fleet-content--with-panel">
+      <SageChat workspaceId={workspaceId} />
+    </main>
+  );
 }

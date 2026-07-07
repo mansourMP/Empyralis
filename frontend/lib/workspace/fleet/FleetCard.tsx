@@ -8,8 +8,8 @@ import {
   TINTS,
   deriveStatus,
   derivePlacement,
-  statusClass,
 } from "./fleet-presentation";
+import { StatusChip } from "./fleet-indicators";
 
 /**
  * Agent card. Whole card opens the detail overlay; hover reveals small
@@ -83,10 +83,7 @@ export function FleetCard({
           </div>
           <span className="fleet-card-name">{agent.name}</span>
         </div>
-        <span className={`fleet-card-status ${statusClass(status.tone)}`}>
-          <span className="fleet-card-status-dot" />
-          {status.label}
-        </span>
+        <StatusChip tone={status.tone} label={status.label} />
       </div>
 
       <div className="fleet-card-meta">{placement}</div>

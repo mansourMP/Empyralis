@@ -6,9 +6,7 @@ import { Cpu, Server, Terminal, X } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
-import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
-import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "@/lib/workspace/fleet/FleetRightPanel";
-import { StatusChip, StatusDot, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
+import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import {
   CLOUD_VPS_PROVIDERS,
   CLOUD_VPS_PROVIDER_IDS,
@@ -100,8 +98,6 @@ export default function HardwarePage() {
 
   const cloudServers = regs.filter((r) => r.hardware_kind === "cloud_vps");
   const devices = regs.filter((r) => r.hardware_kind !== "cloud_vps");
-  const onlineCount = regs.filter(isOnline).length;
-  const [panelOpen, togglePanel] = usePanelOpenState("hardware");
 
   const renderRow = (r: Registration) => {
     const gatewayId = String(r.gateway_id || r.id || "");
@@ -138,14 +134,9 @@ export default function HardwarePage() {
   };
 
   return (
-    <main className="fleet-content fleet-content--with-panel">
-      <div className="fleet-content-toolbar">
-        {regs.length > 0 && <FleetToolbar panelOpen={panelOpen} onTogglePanel={togglePanel} />}
-      </div>
-
-      <div className="fleet-content-with-panel">
-        <div className="fleet-content-main">
-          <div className="fleet-detail-section-title">Connect a cloud server</div>
+    <main className="fleet-content">
+      {/* A box row already says everything — no right panel on Hardware (contract). */}
+      <div className="fleet-detail-section-title">Connect a cloud server</div>
           <div className="fleet-provider-grid">
             {CLOUD_VPS_PROVIDER_IDS.map((providerId) => {
               const provider = CLOUD_VPS_PROVIDERS[providerId];
@@ -216,17 +207,6 @@ export default function HardwarePage() {
               </button>
             )}
           </div>
-        </div>
-
-        <FleetRightPanel open={panelOpen}>
-          <PanelSection title="Properties">
-            <PanelRow label="Computers" value={regs.length} icon={<Cpu size={15} strokeWidth={1.75} />} />
-            <PanelRow label="Online" value={onlineCount} icon={<StatusDot tone="online" />} tone="online" />
-            <PanelRow label="Cloud servers" value={cloudServers.length} icon={<Server size={15} strokeWidth={1.75} />} />
-            <PanelRow label="Your devices" value={devices.length} icon={<Cpu size={15} strokeWidth={1.75} />} />
-          </PanelSection>
-        </FleetRightPanel>
-      </div>
 
       <CloudVpsSetupPanel
         open={vpsPanelOpen}

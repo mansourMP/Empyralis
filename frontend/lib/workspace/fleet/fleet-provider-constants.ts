@@ -67,3 +67,68 @@ export const RUNTIME_FOR_PROVIDER: Record<string, string> = {
 export function runtimeForProvider(providerId: string): string {
   return RUNTIME_FOR_PROVIDER[providerId] || "";
 }
+
+/** Static mirror of provider_profiles.py PROVIDER_MODEL_CATALOG (model ids +
+ *  default_model only — not the full metadata) for the create-agent wizard's
+ *  Model step. There is no live "list models for a provider" endpoint reachable
+ *  from the browser today, so this mirrors the same fixed, backend-recognized
+ *  id list rather than inventing one. Keep in sync with provider_profiles.py. */
+export const MODELS_BY_PROVIDER: Record<string, string[]> = {
+  anthropic: [
+    "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-20250514", "claude-opus-4-1-20250805",
+    "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
+  ],
+  openai: [
+    "gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
+    "gpt-5.2", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini",
+  ],
+  gemini: [
+    "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+    "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro",
+  ],
+  deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+  groq: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+  openrouter: [
+    "openai/gpt-5.5", "openai/gpt-5.5-pro", "openai/gpt-5.4", "openai/gpt-5.4-mini",
+    "anthropic/claude-opus-4.7", "anthropic/claude-sonnet-4.6",
+    "google/gemini-3-pro-preview", "google/gemini-3-flash-preview", "google/gemini-2.5-flash",
+    "x-ai/grok-4", "deepseek/deepseek-chat", "mistralai/mistral-large-latest",
+  ],
+  xai: ["grok-4", "grok-4-0709", "grok-4-latest", "grok-3"],
+  qwen: ["qwen-plus", "qwen-turbo", "qwen-max"],
+  mistral: ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest"],
+  bedrock: ["anthropic.claude-3-5-sonnet-20241022-v2:0", "amazon.nova-pro-v1:0"],
+  ollama_cloud: ["gpt-oss:120b", "gpt-oss:20b"],
+  ollama: ["llama3.2", "llama3", "mistral", "gemma", "phi3"],
+};
+
+export const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
+  anthropic: "claude-sonnet-4-6",
+  openai: "gpt-5.4",
+  gemini: "gemini-2.5-flash",
+  deepseek: "deepseek-chat",
+  groq: "llama-3.3-70b-versatile",
+  openrouter: "openai/gpt-5.2",
+  xai: "grok-4",
+  qwen: "qwen-plus",
+  mistral: "mistral-large-latest",
+  bedrock: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+  ollama_cloud: "gpt-oss:120b",
+  ollama: "llama3.2",
+};
+
+/** Providers with no fixed model catalog (deployment-scoped or fully custom) —
+ *  the Model step renders a free-text field instead of a <select> for these. */
+export const FREEFORM_MODEL_PROVIDERS: ReadonlySet<string> = new Set([
+  "custom_openai_compatible",
+  "azure_openai",
+]);
+
+export function modelsForProvider(providerId: string): string[] {
+  return MODELS_BY_PROVIDER[providerId] || [];
+}
+
+export function defaultModelForProvider(providerId: string): string {
+  return DEFAULT_MODEL_BY_PROVIDER[providerId] || modelsForProvider(providerId)[0] || "";
+}

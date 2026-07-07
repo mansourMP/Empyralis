@@ -114,7 +114,18 @@ function humanize(segment: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-type Crumb = { key: string; label: string; href: string; current: boolean };
+// Backend ids are always an opaque prefix + a hex/uuid tail (ainstall_<hex16>,
+// project_<hex16>, plain uuids, …) — never real words. humanize() on one of
+// these prints the raw id back at the user in Title Case ("Ainstall A1b2c3…",
+// "Project 94bf1234…"), which is exactly the "raw IDs on first paint" bug: the
+// owning page hasn't registered the real name yet (useBreadcrumbLabel fires
+// once its own data fetch resolves). Recognize the shape and show a neutral
+// loading placeholder instead of guessing English out of hex digits.
+function looksLikeOpaqueId(segment: string): boolean {
+  return /_[0-9a-f]{6,}$/i.test(segment) || /^[0-9a-f]{8}-?[0-9a-f-]{4,}$/i.test(segment);
+}
+
+type Crumb = { key: string; label: string; href: string; current: boolean; pending: boolean };
 
 export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
   const pathname = usePathname() || "";
@@ -141,6 +152,7 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       label: hasRealName ? workspace!.name : "Workspace",
       href: `${base}/agents`,
       current: segments.length === 0,
+      pending: false,
     }];
     let acc = base;
     segments.forEach((seg, i) => {
@@ -151,12 +163,15 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       const isStructuralAgents =
         seg === "agents" && prev !== undefined && segments[i - 2] === "projects";
       if (isStructuralAgents) return;
-      const label = labels[seg] || STATIC_LABELS[seg] || humanize(seg);
+      const registered = labels[seg] || STATIC_LABELS[seg];
+      const pending = !registered && looksLikeOpaqueId(seg);
+      const label = registered || (pending ? "" : humanize(seg));
       items.push({
         key: `${seg}-${i}`,
         label,
         href: acc,
         current: i === segments.length - 1,
+        pending,
       });
     });
     return items;
@@ -175,7 +190,11 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       {crumbs.map((c, i) => (
         <span key={c.key} className="fleet-breadcrumb-seg">
           {i > 0 && <ChevronRight size={13} strokeWidth={1.75} className="fleet-breadcrumb-sep" aria-hidden />}
-          {c.current ? (
+          {c.pending ? (
+            <span className={`fleet-breadcrumb${c.current ? " fleet-breadcrumb--current" : ""}`} aria-label="Loading name…">
+              <span className="fleet-breadcrumb-skeleton" aria-hidden />
+            </span>
+          ) : c.current ? (
             <span className="fleet-breadcrumb fleet-breadcrumb--current" aria-current="page">{c.label}</span>
           ) : (
             <Link className="fleet-breadcrumb" href={c.href}>{c.label}</Link>

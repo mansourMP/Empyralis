@@ -3,20 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { Bot } from "lucide-react";
-
 import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
+import { findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
 import { AgentsList } from "@/lib/workspace/fleet/AgentsList";
-import { StatusDot } from "@/lib/workspace/fleet/fleet-indicators";
-import { tintKeyForIndex, TINTS } from "@/lib/workspace/fleet/fleet-presentation";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
-import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "@/lib/workspace/fleet/FleetRightPanel";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
-
-const money = (n: number) => `$${n.toFixed(4)}`;
 
 type SortMode = "last_active" | "status" | "cost" | "name" | "group";
 
@@ -35,15 +29,23 @@ export default function AgentsPage() {
   const workspaceId = String(params?.workspaceId || "");
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
-  const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
+  const { agents: allAgents, loading, error, refresh } = useFleetAgents(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
+
+  // Sage is the Operator, not a listed worker — it never appears as a row
+  // here (contract). Same root cause as its own detail page: Sage isn't a
+  // specialist agent, so it's excluded from every agent-list surface.
+  const sageAgent = useMemo(() => findSageAgent(allAgents), [allAgents]);
+  const agents = useMemo(
+    () => (sageAgent ? allAgents.filter((a) => a.agent_id !== sageAgent.agent_id) : allAgents),
+    [allAgents, sageAgent],
+  );
   const [projectFilter, setProjectFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [channelFilter, setChannelFilter] = useState<string>("all");
   const [sort, setSort] = useState<SortMode>("last_active");
   const [cost, setCost] = useState<Map<string, number>>(new Map());
   const [wizardOpen, setWizardOpen] = useState(false);
-  const [panelOpen, togglePanel] = usePanelOpenState("agents");
 
   // Onboarding hand-off: /agents?new=1 lands straight in the wizard. Read the
   // flag client-side (no useSearchParams → no Suspense boundary needed),
@@ -112,17 +114,8 @@ export default function AgentsPage() {
   const goToAgent = (agentId: string, projectId: string) =>
     router.push(`${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/overview`);
 
-  const onlineCount = agents.filter((a) => a.hardware_status === "online").length;
-  const offlineCount = agents.filter((a) => a.hardware_status === "offline").length;
-  const costByAgent = useMemo(
-    () => agents
-      .map((a) => ({ id: a.agent_id, label: a.label || "Unnamed agent", cost: cost.get(a.agent_id) || 0 }))
-      .sort((a, b) => b.cost - a.cost),
-    [agents, cost],
-  );
-
   return (
-    <main className="fleet-content fleet-content--with-panel">
+    <main className="fleet-content">
       <HeaderAction>
         <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
           <span className="fleet-btn-plus">+</span>
@@ -138,67 +131,32 @@ export default function AgentsPage() {
             sortValue={sort}
             sortDefault="last_active"
             onSortChange={(v) => setSort(v as SortMode)}
-            panelOpen={panelOpen}
-            onTogglePanel={togglePanel}
           />
         )}
       </div>
 
-      <div className="fleet-content-with-panel">
-        <div className="fleet-content-main">
-          {loading && agents.length === 0 ? (
-            <FleetListSkeleton rows={6} />
-          ) : error && agents.length === 0 ? (
-            <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
-          ) : agents.length === 0 ? (
-            <FirstAgentEmpty
-              title="No agents yet"
-              desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
-              onCreate={() => setWizardOpen(true)}
-            />
-          ) : shown.length === 0 ? (
-            <div className="fleet-page-state-body">No agents match these filters.</div>
-          ) : (
-            <AgentsList
-              agents={shown}
-              costByAgent={cost}
-              projectNameById={projName}
-              groupByProject={sort === "group"}
-              onSelect={goToAgent}
-            />
-          )}
-        </div>
-
-        <FleetRightPanel open={panelOpen}>
-          <PanelSection title="Properties">
-            <PanelRow label="Agents" value={agents.length} icon={<Bot size={15} strokeWidth={1.75} />} />
-            <PanelRow label="Online" value={onlineCount} icon={<StatusDot tone="online" />} tone="online" />
-            <PanelRow label="Offline" value={offlineCount} icon={<StatusDot tone="offline" />} tone="offline" />
-            <PanelRow
-              label="Not deployed"
-              value={agents.length - onlineCount - offlineCount}
-              icon={<StatusDot tone="unknown" />}
-              tone="muted"
-            />
-          </PanelSection>
-
-          <PanelSection title="Cost by agent">
-            {costByAgent.length === 0 ? (
-              <div className="fleet-panel-empty">No agents yet.</div>
-            ) : (
-              costByAgent.map((a, i) => (
-                <PanelRow
-                  key={a.id}
-                  label={a.label}
-                  icon={<span className="fleet-tint-pip" style={{ background: TINTS[tintKeyForIndex(i)].fg }} />}
-                  value={a.cost > 0 ? money(a.cost) : "—"}
-                  tone={a.cost > 0 ? "default" : "muted"}
-                />
-              ))
-            )}
-          </PanelSection>
-        </FleetRightPanel>
-      </div>
+      {/* The rows ARE the information — no right panel on the Agents list (contract). */}
+      {loading && agents.length === 0 ? (
+        <FleetListSkeleton rows={6} />
+      ) : error && agents.length === 0 ? (
+        <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
+      ) : agents.length === 0 ? (
+        <FirstAgentEmpty
+          title="No agents yet"
+          desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
+          onCreate={() => setWizardOpen(true)}
+        />
+      ) : shown.length === 0 ? (
+        <div className="fleet-page-state-body">No agents match these filters.</div>
+      ) : (
+        <AgentsList
+          agents={shown}
+          costByAgent={cost}
+          projectNameById={projName}
+          groupByProject={sort === "group"}
+          onSelect={goToAgent}
+        />
+      )}
 
       {wizardOpen && (
         <FleetCreateAgentWizard

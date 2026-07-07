@@ -22,9 +22,12 @@ export default function AgentDetailPage() {
   const agentBase = `${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`;
 
   const { agents } = useFleetAgents(workspaceId);
-  const { projects } = useFleetProjects(workspaceId);
+  const { projects, loading: projectsLoading } = useFleetProjects(workspaceId);
   const agent = agents.find((a) => a.agent_id === agentId) || null;
   const project = projects.find((p) => p.id === projectId);
+  // undefined while projects are still loading (shows a placeholder, never the
+  // raw id); "—" once loaded if this project genuinely isn't found (deleted).
+  const projectName = project?.name || (projectsLoading ? undefined : "—");
 
   // Real names in the breadcrumb chain instead of raw ids.
   useBreadcrumbLabel(projectId, project?.name);
@@ -35,6 +38,7 @@ export default function AgentDetailPage() {
       workspaceId={workspaceId}
       agentId={agentId}
       agent={agent}
+      projectName={projectName}
       variant="page"
       initialTab={tab}
       onTabChange={(t) => router.replace(`${agentBase}/${t}`)}

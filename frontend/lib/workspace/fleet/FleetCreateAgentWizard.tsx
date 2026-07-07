@@ -4,16 +4,29 @@ import { useEffect, useState } from "react";
 import { Check, Loader2, Lock, X } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
-import { BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, COMING_SOON_NOTE, providerLabel } from "./fleet-provider-constants";
+import {
+  BYOK_PROVIDERS,
+  SUBSCRIPTION_PROVIDERS,
+  LOCAL_PROVIDERS,
+  COMING_SOON_NOTE,
+  FREEFORM_MODEL_PROVIDERS,
+  providerLabel,
+  modelsForProvider,
+  defaultModelForProvider,
+} from "./fleet-provider-constants";
 import { useFleetProjects } from "./fleet-data";
-import { ConnectorPicker } from "./ConnectorPicker";
 import { GatewayBoxPicker } from "./gateway-box-picker";
 
 type CapabilityPreset = "standard" | "knowledge";
 type WizardProviderMode = "platform" | "byok" | "subscription" | "local";
+type HardwareChoice = "none" | "gateway";
 type ChannelChoice = "none" | "telegram_pool" | "byo";
 
-const STEP_LABELS = ["Name", "Project", "Type", "Model", "Connectors", "Channel"];
+// Fixed order per the UI contract: name → project → capability preset →
+// hardware → AI brain → model → channel. Hardware comes before the brain
+// because the chosen box determines which brains are actually available
+// (a box with no local Ollama can't run "Run locally").
+const STEP_LABELS = ["Name", "Project", "Capability preset", "Hardware", "AI brain", "Model", "Channel"];
 
 const PRESET_OPTIONS: { id: CapabilityPreset; label: string; body: string; note?: string }[] = [
   {
@@ -30,10 +43,12 @@ const PRESET_OPTIONS: { id: CapabilityPreset; label: string; body: string; note?
 ];
 
 /**
- * Create-agent wizard aligned to the real model:
- * Name → Project → Type (capability preset) → Model → Channel.
- * The agent is created at the Type step (name + preset + project); Model and
- * Channel are incremental patches after. Plain-language throughout — no jargon.
+ * Create-agent wizard — fixed order per the UI contract:
+ * Name → Project → Capability preset → Hardware → AI brain → Model → Channel.
+ * The agent row is created behind the scenes at the Preset step (so later
+ * steps have an agent_id to patch), but the button there reads "Next" — the
+ * user only sees "Create" on the final (Channel) step, once everything is
+ * actually configured. Plain-language throughout — no jargon.
  */
 export function FleetCreateAgentWizard({
   workspaceId,
@@ -53,12 +68,15 @@ export function FleetCreateAgentWizard({
   const [description, setDescription] = useState("");
   const [projectId, setProjectId] = useState<string>(initialProjectId || "");
   const [preset, setPreset] = useState<CapabilityPreset>("standard");
+  const [hardwareChoice, setHardwareChoice] = useState<HardwareChoice>("none");
+  const [hardwareGatewayId, setHardwareGatewayId] = useState("");
   const [providerMode, setProviderMode] = useState<WizardProviderMode>("platform");
   const [byokProvider, setByokProvider] = useState("anthropic");
   const [byokKey, setByokKey] = useState("");
   const [subscriptionProvider, setSubscriptionProvider] = useState("claude_code_cli");
   const [localProvider, setLocalProvider] = useState("ollama");
   const [gatewayBinding, setGatewayBinding] = useState("");
+  const [selectedModel, setSelectedModel] = useState("");
   const [channel, setChannel] = useState<ChannelChoice>("none");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +87,16 @@ export function FleetCreateAgentWizard({
       setProjectId(initialProjectId || projects[0].id);
     }
   }, [projects, projectId, initialProjectId]);
+
+  // The provider whose model catalog the Model step should show — keep the
+  // selected model in sync with it (freeform providers get "" so their text
+  // field starts empty rather than carrying over a stale id from another mode).
+  const activeModelProvider = providerMode === "byok" ? byokProvider : providerMode === "local" ? (localProvider || "ollama") : "";
+  useEffect(() => {
+    if (!activeModelProvider) return;
+    setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(activeModelProvider) ? "" : defaultModelForProvider(activeModelProvider));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeModelProvider]);
 
   async function patchAgent(patch: Record<string, any>) {
     if (!agentId) return;
@@ -82,8 +110,15 @@ export function FleetCreateAgentWizard({
     if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
   }
 
-  // Step 3 → create the agent with its preset + project.
+  // Step 3 (Capability preset) → create the agent with its preset + project.
+  // The button here reads "Next", not "Create" — more steps follow. If the
+  // agent was already created (the user went Back and returned), don't
+  // create a second one; just advance.
   async function createAgent() {
+    if (agentId) {
+      setStep(4);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -109,8 +144,25 @@ export function FleetCreateAgentWizard({
     }
   }
 
-  // Step 4 → set the model/provider.
-  async function submitProvider() {
+  // Step 4 (Hardware) → no server call — this step's box choice seeds the AI
+  // brain step's default box (hardware before brain: the box determines which
+  // brains are available). Knowledge agents are hardware-locked to none.
+  function submitHardware() {
+    if (preset !== "knowledge" && hardwareChoice === "gateway" && !hardwareGatewayId.trim()) {
+      setError("Pick a computer, or choose “No dedicated hardware” to continue.");
+      return;
+    }
+    setError(null);
+    if (hardwareChoice === "gateway" && hardwareGatewayId && !gatewayBinding) {
+      setGatewayBinding(hardwareGatewayId);
+    }
+    setStep(5);
+  }
+
+  // Step 5 (AI brain) → who pays / which brain. Saves a BYOK vault key if one
+  // was entered; the actual model_config patch is deferred to the Model step
+  // (step 6), once the concrete model is also known, so it's written once.
+  async function submitBrain() {
     // cli_subscription isn't dispatchable yet (Phase 3) — persisting it resolves
     // to a guaranteed "not yet available" turn error. The Next button is disabled
     // for it; this guard is defence in depth.
@@ -126,31 +178,24 @@ export function FleetCreateAgentWizard({
     setBusy(true);
     setError(null);
     try {
-      if (providerMode === "byok") {
-        if (byokKey.trim()) {
-          const vaultRes = await fetch("/api/connectors/vault", {
-            method: "POST",
-            credentials: "include",
-            headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-            body: JSON.stringify({
-              workspace_id: workspaceId,
-              connector: byokProvider,
-              label: providerLabel(byokProvider),
-              credentials: { api_key: byokKey.trim() },
-            }),
-          });
-          if (!vaultRes.ok) {
-            const vd = await vaultRes.json().catch(() => ({}));
-            throw new Error(vd?.detail || vd?.error || `HTTP ${vaultRes.status}`);
-          }
+      if (providerMode === "byok" && byokKey.trim()) {
+        const vaultRes = await fetch("/api/connectors/vault", {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            workspace_id: workspaceId,
+            connector: byokProvider,
+            label: providerLabel(byokProvider),
+            credentials: { api_key: byokKey.trim() },
+          }),
+        });
+        if (!vaultRes.ok) {
+          const vd = await vaultRes.json().catch(() => ({}));
+          throw new Error(vd?.detail || vd?.error || `HTTP ${vaultRes.status}`);
         }
-        await patchAgent({ model_config: { mode: "byok_api", provider: byokProvider } });
-      } else if (providerMode === "local") {
-        await patchAgent({ model_config: { mode: "local", provider: localProvider || "ollama", gateway_binding: gatewayBinding.trim(), runtime: "ollama" } });
       }
-      // platform: nothing to patch — it's the default. subscription is coming
-      // soon and is blocked above, never persisted into a broken turn.
-      setStep(5);
+      setStep(6);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the provider.");
     } finally {
@@ -158,7 +203,72 @@ export function FleetCreateAgentWizard({
     }
   }
 
-  // Step 6 → finish. Channel BYO/pool setup continues in the Channels tab.
+  // Step 6 (Model) → the real model picker for the chosen brain. Writes the
+  // FULL model_config in one shot (mode/provider/gateway_binding/runtime were
+  // already known; model is the new field) — the PATCH endpoint replaces
+  // model_config wholesale, so a partial write here would erase the brain
+  // step's choices. Platform mode has nothing to pick (fixed platform model)
+  // and nothing to patch — same as before.
+  async function submitModel() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (providerMode === "byok") {
+        await patchAgent({ model_config: { mode: "byok_api", provider: byokProvider, model: selectedModel.trim() || undefined } });
+      } else if (providerMode === "local") {
+        await patchAgent({
+          model_config: {
+            mode: "local",
+            provider: localProvider || "ollama",
+            gateway_binding: gatewayBinding.trim(),
+            runtime: "ollama",
+            model: selectedModel.trim() || undefined,
+          },
+        });
+      }
+      setStep(7);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save the model.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Step 7 (Channel) → Create. "Telegram — hosted bot" must actually assign a
+  // bot (claims a free bot from the hosted pool) — not just set local state
+  // and silently finish with no channel. On failure (e.g. the pool is out of
+  // capacity), say so honestly and let the user retry or fall back to "Not
+  // yet" — never close the wizard pretending a channel was attached.
+  async function submitChannelAndCreate() {
+    if (channel !== "telegram_pool") {
+      finish();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/telegram?agent_id=${encodeURIComponent(agentId || "")}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify({ source: "pool" }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || data?.detail || `Could not assign a hosted bot (HTTP ${res.status}).`);
+      }
+      finish();
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : "Could not assign a hosted bot.";
+      setError(`${reason} Pick “Not yet” and finish now, or try again — you can also assign a bot from this agent’s Channels tab later.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function finish() {
     if (agentId) onCreated(agentId);
   }
@@ -190,9 +300,10 @@ export function FleetCreateAgentWizard({
             <div className="fleet-wizard-panel">
               <div className="fleet-detail-section-title">Name your agent</div>
               <label className="fleet-wizard-label">Name</label>
-              <input className="fleet-wizard-input" value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder="e.g. Support Bot" autoFocus />
+              <input className="fleet-wizard-input" value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder="e.g. Support Bot" autoFocus disabled={Boolean(agentId)} />
               <label className="fleet-wizard-label">What should it do? (one line)</label>
-              <input className="fleet-wizard-input" value={description} onChange={(e) => setDescription(e.currentTarget.value)} placeholder="e.g. Answer customer questions about orders" />
+              <input className="fleet-wizard-input" value={description} onChange={(e) => setDescription(e.currentTarget.value)} placeholder="e.g. Answer customer questions about orders" disabled={Boolean(agentId)} />
+              {agentId && <p className="fleet-wizard-hint">Already created — these fields are locked in. Rename it from the agent’s Overview tab after finishing.</p>}
             </div>
           )}
 
@@ -201,7 +312,7 @@ export function FleetCreateAgentWizard({
               <div className="fleet-detail-section-title">Which project?</div>
               <div className="fleet-wizard-options">
                 {projects.map((p) => (
-                  <button key={p.id} type="button" className={`fleet-wizard-option${projectId === p.id ? " is-selected" : ""}`} onClick={() => setProjectId(p.id)}>
+                  <button key={p.id} type="button" className={`fleet-wizard-option${projectId === p.id ? " is-selected" : ""}`} onClick={() => setProjectId(p.id)} disabled={Boolean(agentId)}>
                     <span className="fleet-wizard-option-label">{p.name || p.id}</span>
                     <span className="fleet-wizard-option-body">{p.description || `${p.agent_count ?? 0} agents`}</span>
                   </button>
@@ -213,10 +324,10 @@ export function FleetCreateAgentWizard({
 
           {step === 3 && (
             <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">What kind of agent?</div>
+              <div className="fleet-detail-section-title">Capability preset</div>
               <div className="fleet-wizard-options">
                 {PRESET_OPTIONS.map((opt) => (
-                  <button key={opt.id} type="button" className={`fleet-wizard-option${preset === opt.id ? " is-selected" : ""}`} onClick={() => setPreset(opt.id)}>
+                  <button key={opt.id} type="button" className={`fleet-wizard-option${preset === opt.id ? " is-selected" : ""}`} onClick={() => setPreset(opt.id)} disabled={Boolean(agentId)}>
                     <span className="fleet-wizard-option-label">{opt.label}</span>
                     <span className="fleet-wizard-option-body">{opt.body}</span>
                     {opt.note && (
@@ -229,6 +340,34 @@ export function FleetCreateAgentWizard({
           )}
 
           {step === 4 && (
+            <div className="fleet-wizard-panel">
+              <div className="fleet-detail-section-title">Which computer runs it?</div>
+              {preset === "knowledge" ? (
+                <p className="fleet-wizard-hint">
+                  Knowledge agents run cloud-only — hardware access is off and locked for safety.
+                  Change the capability preset above to grant hardware.
+                </p>
+              ) : (
+                <>
+                  <div className="fleet-wizard-options">
+                    <button type="button" className={`fleet-wizard-option${hardwareChoice === "none" ? " is-selected" : ""}`} onClick={() => setHardwareChoice("none")}>
+                      <span className="fleet-wizard-option-label">No dedicated hardware <span className="fleet-wizard-option-tag">Recommended</span></span>
+                      <span className="fleet-wizard-option-body">Runs in the cloud. Pair a computer for it anytime from the Hardware tab.</span>
+                    </button>
+                    <button type="button" className={`fleet-wizard-option${hardwareChoice === "gateway" ? " is-selected" : ""}`} onClick={() => setHardwareChoice("gateway")}>
+                      <span className="fleet-wizard-option-label">A paired computer</span>
+                      <span className="fleet-wizard-option-body">Give it a computer — for browser/shell access, or to run its AI brain locally next.</span>
+                    </button>
+                  </div>
+                  {hardwareChoice === "gateway" && (
+                    <GatewayBoxPicker workspaceId={workspaceId} value={hardwareGatewayId} onChange={setHardwareGatewayId} />
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {step === 5 && (
             <div className="fleet-wizard-panel">
               <div className="fleet-detail-section-title">Who pays for the model?</div>
               <div className="fleet-wizard-options">
@@ -282,19 +421,57 @@ export function FleetCreateAgentWizard({
             </div>
           )}
 
-          {step === 5 && (
+          {step === 6 && (
             <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">Connect any apps it needs</div>
-              <p className="fleet-wizard-hint">
-                Reuse an account this project already has, connect a different one, or skip for now — you can always add connectors later from the agent's Connectors tab.
-              </p>
-              {agentId && projectId ? (
-                <ConnectorPicker workspaceId={workspaceId} projectId={projectId} agentId={agentId} />
-              ) : null}
+              <div className="fleet-detail-section-title">Which model?</div>
+              {providerMode === "platform" && (
+                <p className="fleet-wizard-hint">
+                  This agent uses Empyralis’ managed model (DeepSeek). Nothing to configure — Empyralis
+                  picks and maintains it for you.
+                </p>
+              )}
+              {providerMode === "byok" && (
+                FREEFORM_MODEL_PROVIDERS.has(byokProvider) ? (
+                  <>
+                    <label className="fleet-wizard-label">Model ID</label>
+                    <input
+                      className="fleet-wizard-input"
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.currentTarget.value)}
+                      placeholder={byokProvider === "azure_openai" ? "e.g. my-gpt4-deployment" : "e.g. llama-3-70b"}
+                    />
+                    <p className="fleet-wizard-hint">
+                      {byokProvider === "azure_openai"
+                        ? "Azure OpenAI is deployment-scoped — enter your deployment's name, not a model family."
+                        : "Custom OpenAI-compatible endpoints don't have a fixed catalog — enter the model id your endpoint expects."}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <label className="fleet-wizard-label">Model</label>
+                    <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => setSelectedModel(e.currentTarget.value)}>
+                      {modelsForProvider(byokProvider).map((m) => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  </>
+                )
+              )}
+              {providerMode === "local" && (
+                <>
+                  <label className="fleet-wizard-label">Ollama model</label>
+                  <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => setSelectedModel(e.currentTarget.value)}>
+                    {modelsForProvider("ollama").map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                  <p className="fleet-wizard-hint">
+                    This is a suggested list — the turn will only work if this model is actually pulled on
+                    the computer you chose. Not sure? Run <code>ollama pull {selectedModel || "llama3.2"}</code> on
+                    that box first.
+                  </p>
+                </>
+              )}
             </div>
           )}
 
-          {step === 6 && (
+          {step === 7 && (
             <div className="fleet-wizard-panel">
               <div className="fleet-detail-section-title">How do people reach it?</div>
               <div className="fleet-wizard-options">
@@ -304,7 +481,7 @@ export function FleetCreateAgentWizard({
                 </button>
                 <button type="button" className={`fleet-wizard-option${channel === "telegram_pool" ? " is-selected" : ""}`} onClick={() => setChannel("telegram_pool")}>
                   <span className="fleet-wizard-option-label">Telegram — hosted bot</span>
-                  <span className="fleet-wizard-option-body">Get a ready-made bot from the shared pool. You’ll pick one in the Channels tab.</span>
+                  <span className="fleet-wizard-option-body">Claims a real bot from our shared pool the moment you click Create.</span>
                 </button>
                 <button type="button" className={`fleet-wizard-option${channel === "byo" ? " is-selected" : ""}`} onClick={() => setChannel("byo")}>
                   <span className="fleet-wizard-option-label">Bring your own bot</span>
@@ -329,19 +506,28 @@ export function FleetCreateAgentWizard({
           {step === 2 && <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setStep(3)} disabled={!projectId}>Next</button>}
           {step === 3 && (
             <button type="button" className="fleet-btn fleet-btn--accent" onClick={createAgent} disabled={busy}>
-              {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Create"}
-            </button>
-          )}
-          {step === 4 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitProvider} disabled={busy || providerMode === "subscription" || (providerMode === "local" && !gatewayBinding.trim())}>
               {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Next"}
             </button>
           )}
+          {step === 4 && (
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitHardware} disabled={busy || (preset !== "knowledge" && hardwareChoice === "gateway" && !hardwareGatewayId.trim())}>
+              Next
+            </button>
+          )}
           {step === 5 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setStep(6)} disabled={busy}>Next</button>
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitBrain} disabled={busy || providerMode === "subscription" || (providerMode === "local" && !gatewayBinding.trim())}>
+              {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Next"}
+            </button>
           )}
           {step === 6 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={finish} disabled={busy}>Done</button>
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitModel} disabled={busy}>
+              {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Next"}
+            </button>
+          )}
+          {step === 7 && (
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitChannelAndCreate} disabled={busy}>
+              {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Create"}
+            </button>
           )}
         </div>
       </div>

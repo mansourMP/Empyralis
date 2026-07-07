@@ -1,6 +1,6 @@
 import type { FleetAgent } from "./fleet-data";
 
-export type AgentStatusTone = "online" | "offline" | "unknown";
+export type AgentStatusTone = "online" | "offline" | "unknown" | "error";
 
 export type AgentSummary = {
   id: string;
@@ -80,10 +80,13 @@ export function findSageAgent(agents: FleetAgent[]): FleetAgent | null {
   );
 }
 
-/** Status tone + label. Unknown is calm ("Not deployed"), never alarming. */
+/** Status tone + label — the ONE status vocabulary (contract):
+ *  online (green) · offline (red) · not deployed (neutral) · error (red).
+ *  Unknown is calm ("Not deployed"), never alarming. */
 export function deriveStatus(hardwareStatus: string): { tone: AgentStatusTone; label: string } {
   if (hardwareStatus === "online") return { tone: "online", label: "Online" };
   if (hardwareStatus === "offline") return { tone: "offline", label: "Offline" };
+  if (hardwareStatus === "error") return { tone: "error", label: "Error" };
   return { tone: "unknown", label: "Not deployed" };
 }
 

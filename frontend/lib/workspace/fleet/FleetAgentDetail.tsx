@@ -32,7 +32,10 @@ import {
   type FleetAgent,
   type FleetChannel,
 } from "./fleet-data";
-import { deriveStatus, derivePlacement, statusClass } from "./fleet-presentation";
+import { deriveStatus, derivePlacement, type AgentStatusTone } from "./fleet-presentation";
+import { StatusChip } from "./fleet-indicators";
+import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "./FleetRightPanel";
+import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
 import { GatewayPairPanel } from "../../gateway/GatewayPairPanel";
@@ -60,6 +63,7 @@ export function FleetAgentDetail({
   workspaceId,
   agentId,
   agent,
+  projectName,
   onChat,
   onClose,
   variant = "modal",
@@ -69,6 +73,13 @@ export function FleetAgentDetail({
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
+  /** Resolved project display name — passed by the routed page (from the URL's
+   *  projectId, so it's available on first paint independent of the agents
+   *  fetch). undefined = still resolving (shows a loading placeholder); pass
+   *  "—" explicitly when there genuinely is no project (e.g. Sage). NEVER
+   *  fall back to the raw project_id here — that's the "raw ids on first
+   *  paint" bug. */
+  projectName?: string;
   onChat: (agentId: string) => void;
   onClose?: () => void;
   variant?: "modal" | "page";
@@ -76,11 +87,33 @@ export function FleetAgentDetail({
   onTabChange?: (tab: TabId) => void;
 }) {
   const [activeTab, setActiveTab] = useState<TabId>(initialTab || "overview");
-  const [navOpen, setNavOpen] = useState(true);
+  // Properties panel — closed by default, remembered per agent (Linear pattern).
+  const [panelOpen, togglePanel] = usePanelOpenState(`agent:${agentId}`);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
+  const { channels } = useFleetAgentChannels(workspaceId, agentId);
+  const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
+  const [costToday, setCostToday] = useState<number | null>(null);
 
   const status = deriveStatus(agent?.hardware_status || "unknown");
-  const dotClass = statusClass(status.tone);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled && d?.totals) setCostToday(Number(d.totals.usd_cost || 0)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [workspaceId, agentId]);
+
+  const connectedChannels = channels.filter((c: any) => c?.connected).length;
+  const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
+  const preset = agent?.capability_preset || agent?.purpose_preset || "standard";
+  const resolvedModel = String(
+    agent?.model_config?.model
+    || agent?.model_config?.resolved_model
+    || (agent?.model_config?.mode === "local" ? "Local · Ollama" : "")
+    || "Platform default",
+  );
 
   // Page mode: keep the active tab in sync with the URL {tab} segment.
   useEffect(() => {
@@ -116,32 +149,73 @@ export function FleetAgentDetail({
     return () => window.removeEventListener("fleet:switch-tab", onSwitchTab);
   }, [selectTab]);
 
+  const propertiesPanel = (
+    <FleetRightPanel open={panelOpen}>
+      <PanelSection title="Properties">
+        <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
+        <PanelRow label="Preset" value={<span style={{ textTransform: "capitalize" }}>{preset}</span>} />
+        <PanelRow label="Model" value={resolvedModel} />
+        <PanelRow
+          label="Project"
+          value={projectName || <span className="fleet-skeleton-bar" style={{ width: 56, display: "inline-block" }} aria-label="Loading project…" />}
+          tone={projectName ? "default" : "muted"}
+        />
+        <PanelRow label="Cost today" value={costToday === null ? "…" : `$${costToday.toFixed(4)}`} tone={costToday ? "accent" : "muted"} />
+        <PanelRow label="Channels" value={connectedChannels} />
+        <PanelRow label="Connectors" value={connectedConnectors} />
+      </PanelSection>
+    </FleetRightPanel>
+  );
+
   const inner = (
     <>
-      {/* Content */}
-      <div className="fleet-detail-main">
-        <button
-          type="button"
-          className={`fleet-detail-nav-toggle${variant === "modal" ? " fleet-detail-nav-toggle--modal" : ""}${navOpen ? " is-active" : ""}`}
-          onClick={() => setNavOpen((v) => !v)}
-          aria-label={navOpen ? "Hide tabs" : "Show tabs"}
-          aria-pressed={navOpen}
-          title={navOpen ? "Hide tabs" : "Show tabs"}
-        >
-          <PanelRight size={16} strokeWidth={1.75} />
-        </button>
-        {variant === "modal" && onClose && (
-          <button type="button" className="fleet-detail-close" onClick={onClose} aria-label="Close">
-            <X size={16} strokeWidth={1.75} />
+      {/* Tabs live at the TOP, under the breadcrumb — one navigation only. */}
+      <div className="fleet-detail-tabbar">
+        <nav className="fleet-detail-toptabs" aria-label="Agent sections">
+          {TABS.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                className={`fleet-detail-toptab${activeTab === tab.id ? " is-active" : ""}`}
+                onClick={() => selectTab(tab.id)}
+                aria-current={activeTab === tab.id ? "page" : undefined}
+              >
+                <Icon size={15} strokeWidth={1.75} />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="fleet-detail-tabbar-actions">
+          <button
+            type="button"
+            className={`fleet-detail-props-toggle${panelOpen ? " is-active" : ""}`}
+            onClick={togglePanel}
+            aria-pressed={panelOpen}
+            title={panelOpen ? "Hide properties" : "Show properties"}
+          >
+            <PanelRight size={15} strokeWidth={1.75} />
+            <span>Properties</span>
           </button>
-        )}
+          {variant === "modal" && onClose && (
+            <button type="button" className="fleet-detail-close fleet-detail-close--inline" onClick={onClose} aria-label="Close">
+              <X size={16} strokeWidth={1.75} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Columns: main content + properties panel (closed by default) */}
+      <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
           {activeTab === "overview" && (
             <OverviewTab
               workspaceId={workspaceId}
               agentId={agentId}
               agent={agent}
-              statusLabel={status.label}
+              status={status}
               events={events}
               loading={activityLoading}
               onChat={() => onChat(agentId)}
@@ -161,45 +235,26 @@ export function FleetAgentDetail({
           )}
           {activeTab === "chat" && <ChatTab agent={agent} />}
         </div>
-      </div>
-
-      {/* Right nav — tabs live here, not on the left */}
-      <div className={`fleet-detail-nav${navOpen ? "" : " fleet-detail-nav--collapsed"}`}>
-        <div className="fleet-detail-nav-header">
-          <div className="fleet-detail-avatar">
-            <div className="fleet-detail-avatar-icon">
-              {(agent?.label || "A").charAt(0).toUpperCase()}
-            </div>
-            <span className={`fleet-detail-dot ${dotClass}`} />
-          </div>
-          <div className="fleet-detail-name">{agent?.label || "Agent"}</div>
-          <span className={`fleet-detail-meta-status ${dotClass}`}>{status.label}</span>
-        </div>
-        <nav className="fleet-detail-nav-tabs">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                className={`fleet-detail-nav-tab${activeTab === tab.id ? " fleet-detail-nav-tab--active" : ""}`}
-                onClick={() => selectTab(tab.id)}
-              >
-                <Icon size={16} strokeWidth={1.75} />
-                {tab.label}
-              </button>
-            );
-          })}
-        </nav>
+        {propertiesPanel}
       </div>
     </>
   );
 
   if (variant === "page") {
     return (
-      <div className="fleet-detail fleet-detail--page" aria-label={`${agent?.label || "Agent"} details`}>
-        {inner}
-      </div>
+      <>
+        {activeTab === "overview" && (
+          <HeaderAction>
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => onChat(agentId)}>
+              <MessageSquare size={14} strokeWidth={1.75} />
+              Chat with this agent
+            </button>
+          </HeaderAction>
+        )}
+        <div className="fleet-detail fleet-detail--page" aria-label={`${agent?.label || "Agent"} details`}>
+          {inner}
+        </div>
+      </>
     );
   }
 
@@ -221,59 +276,40 @@ export function FleetAgentDetail({
 // ── Overview ────────────────────────────────────────────────────────────────
 
 function OverviewTab({
-  workspaceId,
-  agentId,
   agent,
-  statusLabel,
+  status,
   events,
   loading,
-  onChat,
 }: {
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
-  statusLabel: string;
+  status: { tone: AgentStatusTone; label: string };
   events: any[];
   loading: boolean;
   onChat: () => void;
 }) {
-  const deployed = statusLabel !== "Not deployed";
+  const deployed = status.label !== "Not deployed";
   const placement = derivePlacement(agent?.runtime_target || "unknown", deployed);
-  const { channels } = useFleetAgentChannels(workspaceId, agentId);
-  const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
-  const [costToday, setCostToday] = useState<number | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (!cancelled && d?.totals) setCostToday(Number(d.totals.usd_cost || 0)); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [workspaceId, agentId]);
-  const connectedChannels = channels.filter((c: any) => c?.connected).length;
-  const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
-  const preset = agent?.capability_preset || "standard";
-  const rows: [string, string][] = [
-    ["Status", statusLabel],
-    ["Placement", placement],
-    ["Role", agent?.role || "agent"],
-  ];
+  const role = agent?.role || "agent";
 
   return (
     <div className="fleet-detail-overview">
-      <div className="fleet-stat-grid" style={{ marginTop: 0 }}>
-        <div className="fleet-stat-card"><div className="fleet-stat-value">{connectedChannels}</div><div className="fleet-stat-label">Channels</div></div>
-        <div className="fleet-stat-card"><div className="fleet-stat-value">{connectedConnectors}</div><div className="fleet-stat-label">Connectors</div></div>
-        <div className="fleet-stat-card"><div className="fleet-stat-value">{costToday === null ? "…" : `$${costToday.toFixed(4)}`}</div><div className="fleet-stat-label">Cost today</div></div>
-        <div className="fleet-stat-card"><div className="fleet-stat-value" style={{ textTransform: "capitalize" }}>{preset}</div><div className="fleet-stat-label">Preset</div></div>
-      </div>
-      <div className="fleet-config">
-        {rows.map(([label, value]) => (
-          <div key={label} className="fleet-config-row">
-            <span className="fleet-config-label">{label}</span>
-            <span className="fleet-config-value">{String(value)}</span>
-          </div>
-        ))}
+      {/* The THING (status/placement/role + activity), not numbers. Counts and
+          cost live in the properties panel; the "Chat" action lives top-right. */}
+      <div className="fleet-config" style={{ marginTop: 0 }}>
+        <div className="fleet-config-row">
+          <span className="fleet-config-label">Status</span>
+          <span className="fleet-config-value"><StatusChip tone={status.tone} label={status.label} /></span>
+        </div>
+        <div className="fleet-config-row">
+          <span className="fleet-config-label">Placement</span>
+          <span className="fleet-config-value">{placement}</span>
+        </div>
+        <div className="fleet-config-row">
+          <span className="fleet-config-label">Role</span>
+          <span className="fleet-config-value" style={{ textTransform: "capitalize" }}>{role}</span>
+        </div>
       </div>
 
       <div className="fleet-detail-section-title">Recent activity</div>
@@ -293,9 +329,7 @@ function OverviewTab({
         <EmptyState
           icon={Inbox}
           title="No activity yet"
-          body="Events appear here after this agent processes its first turn."
-          action="Chat with this agent"
-          onAction={onChat}
+          body="Events appear here after this agent processes its first turn. Use “Chat with this agent” to send the first one."
         />
       ) : (
         <div className="fleet-activity">

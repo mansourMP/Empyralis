@@ -79,16 +79,14 @@ export function PrimaryRail({
   const hrefFor = (seg: string) => `/w/${encodeURIComponent(workspaceId)}/${seg}`;
 
   // Sage is the operator, not a normal nav destination — surfaced separately
-  // above the section list, and routed at workspace scope (…/sage/overview, no
-  // project segment) since it's the workspace's own operator, not
-  // project-scoped work. Lands on Overview, not Chat — chat isn't built yet,
-  // so routing the pin straight there would open on an empty "coming soon"
-  // tab instead of the agent's real status/activity. role="operator" is the
-  // intended tag (ensured server-side for every Sage install), but
-  // findSageAgent() falls back to matching the name directly — some installs
-  // predate that guarantee and still carry a plain "specialist" role.
+  // above the section list, and routed at workspace scope (…/sage, no project
+  // segment, no tabs) since it's the workspace's own operator: a full-width
+  // chat, not agent detail. role="operator" is the intended tag (ensured
+  // server-side for every Sage install), but findSageAgent() falls back to
+  // matching the name directly — some installs predate that guarantee and
+  // still carry a plain "specialist" role.
   const sageAgent = findSageAgent(agents);
-  const sageHref = sageAgent ? `/w/${encodeURIComponent(workspaceId)}/sage/overview` : null;
+  const sageHref = sageAgent ? `/w/${encodeURIComponent(workspaceId)}/sage` : null;
   const sageActive = segment === "sage";
 
   // Keyboard navigation. Ignored while typing or when a modifier is held (so
