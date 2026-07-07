@@ -591,15 +591,48 @@ function LegacyMemoryTab({
 
 // Fixed platform order the grid renders in, mapped to the backend
 // connection id that carries that platform's live status.
-const CHANNEL_GRID_PLATFORMS: { label: string; id: string; mode: "hosted" | "oauth" | "gateway" }[] = [
-  { label: "Telegram", id: "sage_telegram_hosted", mode: "hosted" },
-  { label: "Slack", id: "slack", mode: "oauth" },
-  { label: "Discord", id: "discord_bot", mode: "oauth" },
-  { label: "WhatsApp", id: "whatsapp_personal", mode: "gateway" },
-  { label: "Signal", id: "signal_personal", mode: "gateway" },
-  { label: "iMessage", id: "imessage_personal", mode: "gateway" },
-  { label: "WeChat", id: "wechat_personal", mode: "gateway" },
+const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
+  { label: "Telegram", id: "sage_telegram_hosted" },
+  { label: "Slack", id: "slack" },
+  { label: "Discord", id: "discord_bot" },
+  { label: "WhatsApp", id: "whatsapp_personal" },
+  { label: "Signal", id: "signal_personal" },
+  { label: "iMessage", id: "imessage_personal" },
+  { label: "WeChat", id: "wechat_personal" },
 ];
+
+type ChannelDoor = { key: string; label: string; body: string; real: boolean };
+
+// The two-door design: a channel card opens a focused banner showing only the
+// connection paths that are REAL today for that platform — never a door that
+// fails. A door with real:false renders grayed and inert (disabled, no
+// onClick) rather than clickable into an error (contract rule #4).
+const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
+  sage_telegram_hosted: [
+    { key: "byo_bot", label: "Bot token", body: "Bring your own bot — paste the token BotFather gave you.", real: true },
+    { key: "personal", label: "Personal", body: "Your own Telegram account, via the Gateway. The agent acts as you.", real: true },
+  ],
+  slack: [
+    { key: "oauth", label: "OAuth workspace", body: "Connect a Slack workspace — signed mentions and DMs route to Sage.", real: true },
+  ],
+  discord_bot: [
+    { key: "oauth", label: "Bot app", body: "Install the Discord bot app — signed messages route to Sage.", real: true },
+  ],
+  whatsapp_personal: [
+    { key: "business", label: "Business (Twilio)", body: "Meta blocks third-party AI assistants on the WhatsApp Business API — not available yet.", real: false },
+    { key: "personal", label: "Personal", body: "Your own WhatsApp account, via the Gateway. The agent acts as you.", real: true },
+  ],
+  signal_personal: [
+    { key: "personal", label: "Personal", body: "Your own Signal account, via the Gateway. The agent acts as you.", real: true },
+  ],
+  imessage_personal: [
+    { key: "gateway", label: "Mac bridge", body: "Runs through the Gateway paired on a Mac. There's no cloud option for personal iMessage.", real: true },
+  ],
+  wechat_personal: [
+    { key: "business", label: "Business", body: "The local bridge runtime isn't certified yet.", real: false },
+    { key: "personal", label: "Personal", body: "The local bridge runtime isn't certified yet.", real: false },
+  ],
+};
 
 function channelStatePill(channel: FleetChannel | undefined): { label: string; tone: "connected" | "gateway" | "locked" | "setup" } {
   if (!channel) return { label: "Unavailable", tone: "locked" };
@@ -617,14 +650,10 @@ export function ChannelsTab({
   const [oauthBusy, setOauthBusy] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
 
-  // Telegram's 2-option sheet: your own bot token / your personal account via
-  // Gateway. There is no platform-owned bot pool for specialist agents — the
-  // one hosted bot the platform owns is reserved for Sage itself (paired from
-  // the Fleet home page's TelegramPairPanel, not here). Slack and Discord stay
-  // single-path OAuth below — they have no BYO-bot or personal-account
-  // capability in the catalog today, so a multi-option sheet for them would
-  // be fake buttons. Wire those up when those paths actually exist.
-  const [telegramOption, setTelegramOption] = useState<"byo_bot" | "personal" | null>(null);
+  // Which door is picked inside the open banner. Only channels with more than
+  // one door need an explicit pick — a single-door channel auto-selects its
+  // one real door (see `activeDoor` below).
+  const [selectedDoor, setSelectedDoor] = useState<string | null>(null);
   const [byoToken, setByoToken] = useState("");
   const [byoBotBusy, setByoBotBusy] = useState(false);
   const [byoBotError, setByoBotError] = useState<string | null>(null);
@@ -715,24 +744,35 @@ export function ChannelsTab({
 
   const byId = new Map(channels.map((c) => [c.id, c]));
 
-  function handleCardClick(platform: typeof CHANNEL_GRID_PLATFORMS[number]) {
-    if (platform.mode === "hosted") {
-      setExpanded(expanded === platform.id ? null : platform.id);
-      setTelegramOption(null);
-      setByoToken("");
-      setByoBotError(null);
-      setByoBotSaved(false);
-      setPersonalWarningAck(false);
-      return;
-    }
-    if (platform.mode === "oauth") {
-      setExpanded(expanded === platform.id ? null : platform.id);
-      setOauthError(null);
-      return;
-    }
-    // gateway mode
-    setExpanded(expanded === platform.id ? null : platform.id);
+  function closeBanner() {
+    setExpanded(null);
+    setSelectedDoor(null);
+    setByoToken("");
+    setByoBotError(null);
+    setByoBotSaved(false);
+    setPersonalWarningAck(false);
+    setOauthError(null);
   }
+
+  function handleCardClick(platform: typeof CHANNEL_GRID_PLATFORMS[number]) {
+    if (expanded === platform.id) {
+      closeBanner();
+      return;
+    }
+    setExpanded(platform.id);
+    setSelectedDoor(null);
+    setByoToken("");
+    setByoBotError(null);
+    setByoBotSaved(false);
+    setPersonalWarningAck(false);
+    setOauthError(null);
+  }
+
+  const activePlatform = CHANNEL_GRID_PLATFORMS.find((p) => p.id === expanded) || null;
+  const doors = expanded ? CHANNEL_DOORS[expanded] || [] : [];
+  // A lone real door needs no picker — it auto-activates. Otherwise the user's
+  // click on a specific (real) door decides which one is active.
+  const activeDoor = doors.length === 1 && doors[0].real ? doors[0] : doors.find((d) => d.key === selectedDoor) || null;
 
   return (
     <div>
@@ -762,127 +802,156 @@ export function ChannelsTab({
         })}
       </div>
 
-      {expanded === "sage_telegram_hosted" && (
-        <div className="fleet-channel-expand">
-          <div className="fleet-wizard-options">
-            <button
-              type="button"
-              className={`fleet-wizard-option${telegramOption === "byo_bot" ? " is-selected" : ""}`}
-              onClick={() => setTelegramOption(telegramOption === "byo_bot" ? null : "byo_bot")}
-            >
-              <span className="fleet-wizard-option-label">Your own bot</span>
-              <span className="fleet-wizard-option-body">Paste a BotFather token — we handle the rest.</span>
-            </button>
-            <button
-              type="button"
-              className={`fleet-wizard-option${telegramOption === "personal" ? " is-selected" : ""}`}
-              onClick={() => setTelegramOption(telegramOption === "personal" ? null : "personal")}
-            >
-              <span className="fleet-wizard-option-label">Your personal Telegram account</span>
-              <span className="fleet-wizard-option-body">The agent acts as you. Requires the Gateway.</span>
-            </button>
-          </div>
-
-          {telegramOption === "byo_bot" && (
-            <div className="fleet-channel-expand" style={{ marginTop: 12 }}>
-              {byoBotSaved ? (
-                <div className="fleet-channel-expand-success">
-                  <Check size={16} strokeWidth={2} /> Bot token saved — this agent's own bot is live.
-                </div>
-              ) : (
-                <>
-                  <p className="fleet-channel-expand-hint">Paste the token BotFather gave you when you created the bot.</p>
-                  <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
-                    <span>Bot Token</span>
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      value={byoToken}
-                      onChange={(e) => { setByoToken(e.currentTarget.value); setByoBotError(null); }}
-                    />
-                  </label>
-                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={saveByoBotToken} disabled={byoBotBusy}>
-                    {byoBotBusy ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save token"}
-                  </button>
-                </>
-              )}
-              {byoBotError && <p className="fleet-channel-expand-error">{byoBotError}</p>}
-
-              {agent && (
-                <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={firstContactReply}
-                      aria-label="Reply to new contacts with an intro message"
-                      className={`fleet-toggle${firstContactReply ? " is-on" : ""}`}
-                      disabled={firstContactSaving}
-                      onClick={() => void saveFirstContactReply(!firstContactReply)}
-                    />
-                    <span style={{ fontSize: 13 }}>
-                      Reply to new contacts with an intro message
-                      <span style={{ display: "block", fontSize: 12, color: "var(--text-muted)" }}>
-                        The first time a stranger messages this bot, it identifies itself as an AI agent with a link. Off by default.
-                      </span>
-                    </span>
-                  </label>
-                </div>
-              )}
+      {activePlatform && (
+        <div className="fleet-detail-backdrop" onClick={closeBanner}>
+          <div className="fleet-channel-banner" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <div className="fleet-channel-banner-header">
+              <span className="fleet-channel-banner-icon">
+                {CHANNEL_ICONS[activePlatform.id]
+                  ? <img src={CHANNEL_ICONS[activePlatform.id]} alt="" width={24} height={24} />
+                  : activePlatform.label.charAt(0)}
+              </span>
+              <span className="fleet-channel-banner-title">{activePlatform.label}</span>
+              <button type="button" className="fleet-detail-close fleet-detail-close--inline" onClick={closeBanner} aria-label="Close">
+                <X size={16} strokeWidth={2} />
+              </button>
             </div>
-          )}
 
-          {telegramOption === "personal" && (
-            <div className="fleet-channel-expand" style={{ marginTop: 12 }}>
-              {!personalWarningAck ? (
-                <>
-                  <p className="fleet-channel-expand-error" style={{ marginTop: 0 }}>
-                    This agent will act as <strong>you</strong> on Telegram. It can read your DMs and send
-                    messages under your name. This needs the Gateway paired on your machine. Are you sure?
-                  </p>
-                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setPersonalWarningAck(true)}>
-                    Yes, continue
+            <div className="fleet-channel-banner-body">
+              {doors.length >= 1 && (
+                <div className="fleet-wizard-options">
+                  {doors.map((door) => {
+                    const isOnlyRealDoor = doors.length === 1 && door.real;
+                    if (!door.real) {
+                      return (
+                        <button key={door.key} type="button" disabled className="fleet-wizard-option fleet-wizard-option--soon">
+                          <span className="fleet-wizard-option-label">{door.label}</span>
+                          <span className="fleet-wizard-option-body">{door.body}</span>
+                          <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> Coming soon</span>
+                        </button>
+                      );
+                    }
+                    if (isOnlyRealDoor) {
+                      return (
+                        <div key={door.key} className="fleet-wizard-option is-selected" style={{ cursor: "default" }}>
+                          <span className="fleet-wizard-option-label">{door.label}</span>
+                          <span className="fleet-wizard-option-body">{door.body}</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <button
+                        key={door.key}
+                        type="button"
+                        className={`fleet-wizard-option${selectedDoor === door.key ? " is-selected" : ""}`}
+                        onClick={() => setSelectedDoor(selectedDoor === door.key ? null : door.key)}
+                      >
+                        <span className="fleet-wizard-option-label">{door.label}</span>
+                        <span className="fleet-wizard-option-body">{door.body}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Telegram: BYO bot token */}
+              {activePlatform.id === "sage_telegram_hosted" && activeDoor?.key === "byo_bot" && (
+                <div style={{ marginTop: 12 }}>
+                  {byoBotSaved ? (
+                    <div className="fleet-channel-expand-success">
+                      <Check size={16} strokeWidth={2} /> Bot token saved — this agent's own bot is live.
+                    </div>
+                  ) : (
+                    <>
+                      <p className="fleet-channel-expand-hint">Paste the token BotFather gave you when you created the bot.</p>
+                      <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                        <span>Bot Token</span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={byoToken}
+                          onChange={(e) => { setByoToken(e.currentTarget.value); setByoBotError(null); }}
+                        />
+                      </label>
+                      <button type="button" className="fleet-btn fleet-btn--accent" onClick={saveByoBotToken} disabled={byoBotBusy}>
+                        {byoBotBusy ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save token"}
+                      </button>
+                    </>
+                  )}
+                  {byoBotError && <p className="fleet-channel-expand-error">{byoBotError}</p>}
+
+                  {agent && (
+                    <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={firstContactReply}
+                          aria-label="Reply to new contacts with an intro message"
+                          className={`fleet-toggle${firstContactReply ? " is-on" : ""}`}
+                          disabled={firstContactSaving}
+                          onClick={() => void saveFirstContactReply(!firstContactReply)}
+                        />
+                        <span style={{ fontSize: 13 }}>
+                          Reply to new contacts with an intro message
+                          <span style={{ display: "block", fontSize: 12, color: "var(--text-muted)" }}>
+                            The first time a stranger messages this bot, it identifies itself as an AI agent with a link. Off by default.
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Telegram: personal account via Gateway */}
+              {activePlatform.id === "sage_telegram_hosted" && activeDoor?.key === "personal" && (
+                <div style={{ marginTop: 12 }}>
+                  {!personalWarningAck ? (
+                    <>
+                      <p className="fleet-channel-expand-error" style={{ marginTop: 0 }}>
+                        This agent will act as <strong>you</strong> on Telegram. It can read your DMs and send
+                        messages under your name. This needs the Gateway paired on your machine. Are you sure?
+                      </p>
+                      <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setPersonalWarningAck(true)}>
+                        Yes, continue
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <p className="fleet-channel-expand-hint">
+                        This channel runs through Agent Computer (Gateway) on the paired machine.
+                      </p>
+                      <GatewayPairPanel workspaceId={workspaceId} compact />
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Slack / Discord: single-path OAuth */}
+              {(activePlatform.id === "slack" || activePlatform.id === "discord_bot") && activeDoor && (
+                <div style={{ marginTop: 12 }}>
+                  <button
+                    type="button"
+                    className="fleet-btn fleet-btn--accent"
+                    onClick={() => void startOAuth(activePlatform.id)}
+                    disabled={oauthBusy === activePlatform.id}
+                  >
+                    {oauthBusy === activePlatform.id ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+                    {oauthBusy === activePlatform.id ? "Starting…" : `Connect ${activePlatform.label}`}
                   </button>
-                </>
-              ) : (
-                <>
-                  <p className="fleet-channel-expand-hint">
-                    This channel runs through Agent Computer (Gateway) on the paired machine.
-                  </p>
+                  {oauthError && <p className="fleet-channel-expand-error">{oauthError}</p>}
+                </div>
+              )}
+
+              {/* WhatsApp / Signal / iMessage: the one real door is Gateway pairing */}
+              {["whatsapp_personal", "signal_personal", "imessage_personal"].includes(activePlatform.id) && activeDoor?.real && (
+                <div style={{ marginTop: 12 }}>
                   <GatewayPairPanel workspaceId={workspaceId} compact />
-                </>
+                </div>
               )}
             </div>
-          )}
-        </div>
-      )}
-
-      {(expanded === "slack" || expanded === "discord_bot") && (
-        <div className="fleet-channel-expand">
-          <p className="fleet-channel-expand-hint">
-            {expanded === "slack"
-              ? "Connect Slack with OAuth to route signed mentions or DMs into Sage."
-              : "Connect Discord with an app install to route signed messages into Sage."}
-          </p>
-          <button
-            type="button"
-            className="fleet-btn fleet-btn--accent"
-            onClick={() => void startOAuth(expanded)}
-            disabled={oauthBusy === expanded}
-          >
-            {oauthBusy === expanded ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-            {oauthBusy === expanded ? "Starting…" : `Connect ${expanded === "slack" ? "Slack" : "Discord"}`}
-          </button>
-          {oauthError && <p className="fleet-channel-expand-error">{oauthError}</p>}
-        </div>
-      )}
-
-      {expanded && ["whatsapp_personal", "signal_personal", "imessage_personal", "wechat_personal"].includes(expanded) && (
-        <div className="fleet-channel-expand">
-          <p className="fleet-channel-expand-hint">
-            This channel runs through Agent Computer (Gateway) on the paired machine. Pair one below, or open Hardware for the full view.
-          </p>
-          <GatewayPairPanel workspaceId={workspaceId} compact />
+          </div>
         </div>
       )}
     </div>

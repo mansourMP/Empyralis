@@ -1359,6 +1359,62 @@ a.fleet-breadcrumb:hover {
   margin-top: 8px;
 }
 
+/* ── Channel connection banner (UI Phase 11): the "two-door" design. Clicking
+   a channel card opens a focused card over the same dimmed/blurred backdrop
+   the agent-detail modal and wizard use (.fleet-detail-backdrop), rather than
+   expanding inline against the page's own background. ───────────────────── */
+.fleet-channel-banner {
+  width: 480px;
+  max-width: calc(100vw - 48px);
+  max-height: 80vh;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fleet-modal-in 150ms ease-out;
+}
+
+.fleet-channel-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-channel-banner-icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-inset);
+  flex-shrink: 0;
+}
+
+.fleet-channel-banner-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.fleet-channel-banner-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+
 /* ── Connector picker: project-scoped reuse-or-separate (UI Phase 1) ─────── */
 
 .fleet-connector-picker {
