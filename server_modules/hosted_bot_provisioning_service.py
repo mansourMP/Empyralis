@@ -29,6 +29,7 @@ import httpx
 
 from server_modules import agent_bindings_repository as bindings
 from server_modules import hosted_bot_pool_repository as pool_repo
+from server_modules.channel_transport import ChannelTransport
 
 LOGGER = logging.getLogger(__name__)
 
@@ -369,6 +370,71 @@ async def _agent_label(agent_install_id: str, workspace_id: str, tenant_id: str)
     return "Agent"
 
 
+class PoolBotTransport(ChannelTransport):
+    """ChannelTransport for a pool-assigned bot.
+
+    Sends via THAT bot's own token (resolved per-assignment from the vault),
+    not the shared hosted bot's module-level token — so the reply genuinely
+    comes from the bot the customer is messaging, not from Sage's channel.
+    """
+
+    max_message_length: int = 4096
+    supports_typing_indicator: bool = True
+
+    def __init__(self, *, token: str, chat_id: str) -> None:
+        self.token = str(token or "").strip()
+        self.chat_id = str(chat_id)
+
+    async def send_message(self, text: str, *, reply_to_id: Optional[str] = None) -> bool:
+        if not str(text or "").strip():
+            return False
+        reply_to = int(reply_to_id) if reply_to_id else None
+
+        # Reuse the same MarkdownV2 conversion the shared hosted bot uses, so
+        # pool-bot replies get the same formatting fidelity — just via a
+        # different bot token. Falls back to plain text on parse failure.
+        from server_modules.sage_telegram_hosted_service import _to_telegram_markdown
+
+        body: Dict[str, Any] = {
+            "chat_id": self.chat_id,
+            "text": _to_telegram_markdown(text),
+            "parse_mode": "MarkdownV2",
+        }
+        if reply_to is not None:
+            body["reply_to_message_id"] = reply_to
+        try:
+            result = await telegram_api(self.token, "sendMessage", body)
+            if result.get("ok"):
+                return True
+        except Exception:
+            pass
+        try:
+            body.pop("parse_mode", None)
+            body["text"] = text[: self.max_message_length]
+            result = await telegram_api(self.token, "sendMessage", body)
+            return bool(result.get("ok"))
+        except Exception as exc:
+            LOGGER.warning("PoolBotTransport.send_message failed for chat_id=%s: %s", self.chat_id, exc)
+            return False
+
+    async def start_typing(self) -> None:
+        # Best-effort single pulse (Telegram typing indicators auto-expire
+        # after ~5s) — not the repeating background loop the shared hosted
+        # bot uses, to keep this transport's footprint small.
+        try:
+            await telegram_api(self.token, "sendChatAction", {"chat_id": self.chat_id, "action": "typing"})
+        except Exception:
+            pass
+
+    async def stop_typing(self) -> None:
+        return None
+
+    def format_text(self, text: str) -> str:
+        from server_modules.sage_telegram_hosted_service import _to_telegram_markdown
+
+        return _to_telegram_markdown(text)
+
+
 async def route_hosted_inbound(
     *,
     pool_bot_id: str,
@@ -377,35 +443,86 @@ async def route_hosted_inbound(
     reply_to_message_id: Optional[int] = None,
     deliver: bool = True,
 ) -> Dict[str, Any]:
-    """Route an inbound message from a pool bot to its assigned agent and send
-    an attributed reply via THAT bot's token.
+    """Route an inbound message from a pool bot to its assigned agent and run
+    a REAL turn as THAT agent — its own persona, model/provider binding, and
+    memory scope, in its own thread — replying via the bot's own token.
 
-    Per the Phase 3B scope decision: routing + attributed reply. The reply is
-    attributed to the resolved agent so the two-agent proof is real; swapping in
-    the full specialist turn runtime is a later phase.
+    Phase 3B originally shipped routing + an attributed label-and-echo reply
+    as a deliberate placeholder ("swapping in the full specialist turn runtime
+    is a later phase"). This is that later phase: the resolved agent now
+    actually executes via execute_sage_turn's specialist_context instead of a
+    hardcoded echo, so persona/model/memory and cost attribution are real.
     """
     routed = await resolve_inbound_agent(pool_bot_id)
     if routed is None:
         return {"routed": False, "reason": "bot is not assigned to any agent"}
 
-    label = await _agent_label(routed["agent_install_id"], routed["workspace_id"], routed["tenant_id"])
-    reply_text = f"[{label}] received: {message}".strip()
+    agent_install_id = str(routed["agent_install_id"])
+    workspace_id = str(routed["workspace_id"] or "")
+    tenant_id = str(routed["tenant_id"] or "")
+    label = await _agent_label(agent_install_id, workspace_id, tenant_id)
 
-    sent = False
-    if deliver:
-        try:
-            token = resolve_bot_token(routed["credential_id"])
-            res = await send_text(token, str(chat_id), reply_text, reply_to_message_id=reply_to_message_id)
-            sent = bool(res.get("ok"))
-        except Exception as exc:
-            LOGGER.warning("route_hosted_inbound: send best-effort failed: %s", exc)
+    if not deliver:
+        return {
+            "routed": True,
+            "agent_install_id": agent_install_id,
+            "agent_label": label,
+            "workspace_id": workspace_id,
+            "bot_username": routed["bot_username"],
+        }
+
+    from server_modules import specialist_runtime_context as _src
+
+    try:
+        specialist_context = await _src.resolve_specialist_runtime_context(
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            active_agent_install_id=agent_install_id,
+            metadata={},
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "route_hosted_inbound: specialist context resolution failed for %s: %s — falling back to Sage",
+            agent_install_id, exc,
+        )
+        specialist_context = None
+
+    # Stable per-agent thread so this agent's hosted-bot conversation has its
+    # own history/memory scope, distinct from the workspace's sage-main thread.
+    thread_id = f"thread_agent_{agent_install_id}"
+
+    try:
+        token = resolve_bot_token(routed["credential_id"])
+    except Exception as exc:
+        LOGGER.warning("route_hosted_inbound: could not resolve bot token for %s: %s", pool_bot_id, exc)
+        return {
+            "routed": True,
+            "agent_install_id": agent_install_id,
+            "agent_label": label,
+            "workspace_id": workspace_id,
+            "bot_username": routed["bot_username"],
+            "reply_sent": False,
+        }
+
+    from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
+
+    transport = PoolBotTransport(token=token, chat_id=str(chat_id))
+    delivered = await dispatch_sage_reply_safe(
+        transport=transport,
+        workspace_id=workspace_id,
+        message=str(message or ""),
+        channel_origin="telegram_hosted_pool",
+        sender_id=str(chat_id),
+        thread_id=thread_id,
+        reply_to_id=str(reply_to_message_id or "") or None,
+        specialist_context=specialist_context,
+    )
 
     return {
         "routed": True,
-        "agent_install_id": routed["agent_install_id"],
+        "agent_install_id": agent_install_id,
         "agent_label": label,
-        "workspace_id": routed["workspace_id"],
+        "workspace_id": workspace_id,
         "bot_username": routed["bot_username"],
-        "reply_text": reply_text,
-        "reply_sent": sent,
+        "reply_sent": delivered,
     }

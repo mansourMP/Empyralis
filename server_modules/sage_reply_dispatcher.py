@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from server_modules.channel_transport import ChannelTransport
 from server_modules.platform_event import GUARANTEED_FALLBACK
@@ -191,6 +191,7 @@ async def dispatch_sage_reply(
     thread_id: str = "sage-main",
     attachments: list | None = None,
     reply_to_id: Optional[str] = None,
+    specialist_context: Any = None,
 ) -> bool:
     """Execute a full Sage turn and deliver the reply via transport.
 
@@ -217,6 +218,8 @@ async def dispatch_sage_reply(
         thread_id: Active thread ID (default: "sage-main")
         attachments: Resolved media attachments (optional)
         reply_to_id: ID of the inbound message to reply to (first chunk only)
+        specialist_context: When set, the turn runs as this specialist agent
+            (persona/model/memory) instead of Sage — see specialist_runtime_context.py
 
     Returns:
         True if at least one message was sent to the user.
@@ -304,6 +307,7 @@ async def dispatch_sage_reply(
                 channel_sender_id=sender_id,
                 channel_sender_name=sender_name,
                 thread_id=thread_id,
+                specialist_context=specialist_context,
             )
         finally:
             if transport.supports_typing_indicator:
@@ -351,6 +355,7 @@ async def dispatch_sage_reply_safe(
     thread_id: str = "sage-main",
     attachments: list | None = None,
     reply_to_id: Optional[str] = None,
+    specialist_context: Any = None,
 ) -> bool:
     """Like dispatch_sage_reply() but catches ALL exceptions.
 
@@ -373,6 +378,7 @@ async def dispatch_sage_reply_safe(
             thread_id=thread_id,
             attachments=attachments,
             reply_to_id=reply_to_id,
+            specialist_context=specialist_context,
         )
     except Exception as exc:
         _logger.exception(

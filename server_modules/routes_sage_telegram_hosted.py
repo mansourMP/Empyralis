@@ -269,6 +269,11 @@ async def telegram_pool_webhook(pool_bot_id: str, request: Request) -> dict:
         message=parsed["text"],
         reply_to_message_id=parsed.get("message_id"),
     )
+    if result.get("routed") and not result.get("reply_sent", True):
+        # Reply was generated but could not be delivered after bounded
+        # in-band retries. Do NOT ACK success — return 503 so Telegram
+        # redelivers the update instead of silently dropping the answer.
+        raise HTTPException(status_code=503, detail="reply_delivery_failed")
     return {"ok": True, "routing": result}
 
 
