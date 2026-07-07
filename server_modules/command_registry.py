@@ -322,6 +322,19 @@ async def dispatch(
         # Command exists but not for this surface — silently ignore
         return None
 
+    # Owner-gated commands (e.g. /bash, /config, /mcp, /plugins, /debug) must
+    # never execute for a non-owner sender. process_message() already checks
+    # this before calling into dispatch() for its own callers, but
+    # sage_command_dispatcher.py (every customer-facing channel — Telegram,
+    # Discord, WhatsApp, Slack, WeChat, iMessage) calls dispatch() directly,
+    # so the check must also live here or those channels get an ungated
+    # shell/config/plugin command. Silently treat as unrecognized (None) —
+    # do not reveal the command exists to an unauthorized sender.
+    if cmd and cmd.access == "owner":
+        sender_id = str(kwargs.get("sender_id") or kwargs.get("channel_sender_id") or "")
+        if not _is_sender_owner(sender_id, workspace_id):
+            return None
+
     return await handler(
         workspace_id=workspace_id,
         remainder=remainder,

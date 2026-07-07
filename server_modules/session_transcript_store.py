@@ -120,18 +120,48 @@ def _is_inter_session_user_message(item: Dict[str, Any]) -> bool:
     return False
 
 
+_INTERNAL_ORCHESTRATION_PROMPT_PREFIXES = (
+    "based on the tool results above,",
+    "one or more tools failed",
+)
+
+
+def _looks_like_internal_orchestration_prompt(content: str) -> bool:
+    """True for scaffolding the code injects between tool calls to steer the
+    model's next turn (e.g. "Based on the tool results above, ..."). These are
+    constructed as a message in the LLM-facing history so the model sees them,
+    but they were never said BY anyone — not the user, not the assistant —
+    and must not be persisted as if they were conversation."""
+    lowered = content.strip().lower()
+    return any(lowered.startswith(prefix) for prefix in _INTERNAL_ORCHESTRATION_PROMPT_PREFIXES)
+
+
 def _normalized_transcript_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     normalized: List[Dict[str, str]] = []
     for item in list(messages or []):
         if not isinstance(item, dict):
             continue
         role = str(item.get("role") or "").strip().lower()
+        if role == "tool":
+            # Previously dropped entirely, which lost the only record of what
+            # a tool call actually returned. Keep a compact, readable trace
+            # instead of the raw (possibly large/binary) payload.
+            tool_name = str(item.get("name") or "").strip() or "tool"
+            tool_content = _extract_message_text(item.get("content"))
+            if tool_content:
+                normalized.append({
+                    "role": "tool",
+                    "content": f"[{tool_name} result] {tool_content[:600]}",
+                })
+            continue
         if role not in {"user", "assistant"}:
             continue
         if role == "user" and _is_inter_session_user_message(item):
             continue
         content = _extract_message_text(item.get("content"))
         if not content:
+            continue
+        if _looks_like_internal_orchestration_prompt(content):
             continue
         if role == "assistant":
             content = internal_tool_markup_service.strip_internal_tool_markup(content)

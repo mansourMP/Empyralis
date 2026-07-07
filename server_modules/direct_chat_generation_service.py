@@ -264,6 +264,36 @@ def _stable_visible_stream_prefix(value: Any) -> str:
     return text
 
 
+_REASONING_BLOCK_PATTERN = re.compile(
+    r"<(think|thinking)\b[^>]*>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_UNCLOSED_REASONING_BLOCK_PATTERN = re.compile(
+    r"<(think|thinking)\b[^>]*>.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_reasoning_thinking_blocks(text: str) -> str:
+    """Some providers/models emit chain-of-thought inline in `content` as a
+    literal <think>/<thinking> block instead of a separate reasoning field
+    (e.g. a locally-hosted reasoning model proxied through an OpenAI-compatible
+    endpoint). Nothing in the response-assembly pipeline stripped this before
+    it reached the transcript or the user — strip it here, where every final
+    reply is assembled, regardless of which provider produced it.
+
+    Scope: this cleans the completed final_reply. It does not retroactively
+    clean text already emitted as streaming deltas — a model that streams its
+    thinking block token-by-token may still show it transiently in a live
+    session before the final cleaned reply replaces it.
+    """
+    if not text:
+        return text
+    stripped = _REASONING_BLOCK_PATTERN.sub("", text)
+    stripped = _UNCLOSED_REASONING_BLOCK_PATTERN.sub("", stripped)
+    return stripped.strip()
+
+
 def _collapse_exact_duplicate_reply(text: Any) -> str:
     """Defensive guard against a streaming/retry artifact that emits the reply
     verbatim twice back-to-back ("XX" or "X\\nX"). Only collapses when the entire
@@ -1887,7 +1917,7 @@ def stream_provider_backed_direct_chat(
                             "content": final_reply,
                         }
                 leak_guard = response_leak_guard_service.guard_model_response(final_reply)
-                final_reply = leak_guard.text
+                final_reply = _strip_reasoning_thinking_blocks(leak_guard.text)
                 if (
                     conversation_messages
                     and isinstance(conversation_messages[-1], dict)
