@@ -1294,19 +1294,43 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
           // Reusing existing vault key — only patch config
           await patchModelConfig();
         } else {
-          const vaultRes = await fetch("/api/connectors/vault", {
+          // See the identical comment in FleetCreateAgentWizard.tsx's
+          // submitBrain(): /credentials/vault stores + validates the secret
+          // against the real provider adapter and returns a credential_id;
+          // /providers/profiles is the separate routing layer that makes it
+          // discoverable at turn time. /api/connectors/vault (used here
+          // previously) is the unrelated third-party-app connector vault and
+          // 400s "Unsupported connector" for every LLM provider.
+          const label = `${providerLabel(provider)} — ${agent?.label || "agent"}`;
+          const credRes = await fetch("/api/credentials/vault", {
             method: "POST",
             credentials: "include",
             headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
             body: JSON.stringify({
               workspace_id: workspaceId,
-              connector: provider,
-              label: providerLabel(provider),
+              provider,
+              label,
+              mode: "byok",
               credentials: { api_key: apiKey.trim() },
             }),
           });
-          const vaultData = await vaultRes.json().catch(() => ({}));
-          if (!vaultRes.ok) throw new Error(vaultData?.detail || vaultData?.error || `HTTP ${vaultRes.status}`);
+          const credData = await credRes.json().catch(() => ({}));
+          if (!credRes.ok) throw new Error(credData?.detail || credData?.error || `HTTP ${credRes.status}`);
+
+          const profileRes = await fetch("/api/providers/profiles", {
+            method: "POST",
+            credentials: "include",
+            headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              workspace_id: workspaceId,
+              provider,
+              label,
+              credential_id: credData?.id,
+              enabled: true,
+            }),
+          });
+          const profileData = await profileRes.json().catch(() => ({}));
+          if (!profileRes.ok) throw new Error(profileData?.detail || profileData?.error || `HTTP ${profileRes.status}`);
           await patchModelConfig();
         }
       } else if (mode === "cli_subscription" || mode === "local") {

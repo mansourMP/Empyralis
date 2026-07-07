@@ -179,20 +179,50 @@ export function FleetCreateAgentWizard({
     setError(null);
     try {
       if (providerMode === "byok" && byokKey.trim()) {
-        const vaultRes = await fetch("/api/connectors/vault", {
+        // Two calls, not one: /credentials/vault stores the secret itself
+        // (provider-aware — actually validates the key against that
+        // provider's adapter) and returns a credential_id; /providers/profiles
+        // is the separate routing layer that says "this workspace's calls to
+        // this provider use that credential." Both are required — a bare
+        // vault credential with no profile pointing at it is invisible to
+        // direct_chat_credentials() at turn time. (Previously this posted to
+        // /api/connectors/vault — the generic THIRD-PARTY APP connector
+        // vault, e.g. Slack/Notion/Jira — which has no LLM-provider cases at
+        // all and 400s "Unsupported connector" for every one of them.)
+        const label = `${providerLabel(byokProvider)} — ${name.trim() || "agent"}`;
+        const credRes = await fetch("/api/credentials/vault", {
           method: "POST",
           credentials: "include",
           headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
           body: JSON.stringify({
             workspace_id: workspaceId,
-            connector: byokProvider,
-            label: providerLabel(byokProvider),
+            provider: byokProvider,
+            label,
+            mode: "byok",
             credentials: { api_key: byokKey.trim() },
           }),
         });
-        if (!vaultRes.ok) {
-          const vd = await vaultRes.json().catch(() => ({}));
-          throw new Error(vd?.detail || vd?.error || `HTTP ${vaultRes.status}`);
+        if (!credRes.ok) {
+          const cd = await credRes.json().catch(() => ({}));
+          throw new Error(cd?.detail || cd?.error || `HTTP ${credRes.status}`);
+        }
+        const credentialId = (await credRes.json())?.id;
+
+        const profileRes = await fetch("/api/providers/profiles", {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            workspace_id: workspaceId,
+            provider: byokProvider,
+            label,
+            credential_id: credentialId,
+            enabled: true,
+          }),
+        });
+        if (!profileRes.ok) {
+          const pd = await profileRes.json().catch(() => ({}));
+          throw new Error(pd?.detail || pd?.error || `HTTP ${profileRes.status}`);
         }
       }
       setStep(6);
