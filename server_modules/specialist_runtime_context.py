@@ -40,6 +40,13 @@ class SpecialistRuntimeContext:
     persona: str
     provider: str = ""
     model: str = ""
+    # BYO-brain: the agent's model_config binding. mode selects the brain lane
+    # (platform_credits | byok_api | cli_subscription | local); gateway_binding
+    # names the paired box that runs it; runtime is the on-box engine
+    # (claude_code | codex | ollama). Empty mode = platform default.
+    mode: str = ""
+    gateway_binding: str = ""
+    runtime: str = ""
     project_id: str = ""
     context_policy: Dict[str, Any] = field(default_factory=dict)
     is_specialist: bool = True
@@ -137,6 +144,7 @@ async def resolve_specialist_runtime_context(
     provider, model = _model_provider_from(bundle, metadata)
     _inst_meta = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
     _ctx_policy = _inst_meta.get("context_policy") if isinstance(_inst_meta.get("context_policy"), dict) else {}
+    _model_config = _inst_meta.get("model_config") if isinstance(_inst_meta.get("model_config"), dict) else {}
 
     return SpecialistRuntimeContext(
         agent_install_id=active_id,
@@ -145,6 +153,9 @@ async def resolve_specialist_runtime_context(
         persona=persona,
         provider=provider,
         model=model,
+        mode=_text(_model_config.get("mode")).lower(),
+        gateway_binding=_text(_model_config.get("gateway_binding")),
+        runtime=_text(_model_config.get("runtime")).lower(),
         project_id=_text(bundle.get("project_id")),
         context_policy=dict(_ctx_policy),
         is_specialist=True,

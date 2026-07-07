@@ -247,8 +247,9 @@ class PerAgentAIBindingTests(unittest.TestCase):
                 )
             self.assertIn("not yet available", str(ctx.exception).lower())
 
-    def test_local_not_available(self):
-        """local mode raises with honest 'not yet available' error."""
+    def test_local_without_gateway_binding_raises_bound_required(self):
+        """BYO-brain Phase 2: local mode with NO bound box raises an honest
+        'no computer is bound' error — never a silent fallback."""
         with patch(
             "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
@@ -261,7 +262,26 @@ class PerAgentAIBindingTests(unittest.TestCase):
                         agent_id="agent-local-1",
                     )
                 )
-            self.assertIn("not yet available", str(ctx.exception).lower())
+            self.assertIn("no computer is bound", str(ctx.exception).lower())
+
+    def test_local_with_gateway_binding_resolves_local_billing(self):
+        """local mode with a bound box resolves to the on-box runtime + the
+        'local' billing mode (dispatch happens at the turn seam, not here) —
+        so nothing is ever charged to platform credits."""
+        provider, creds, billing = _run(
+            sage_agent_runtime_service._resolve_agent_cloud_provider(
+                workspace_id="ws-test",
+                agent_model_config={
+                    "mode": "local",
+                    "runtime": "ollama",
+                    "gateway_binding": "gateway_abc123",
+                },
+                agent_id="agent-local-2",
+            )
+        )
+        self.assertEqual(provider, "ollama")
+        self.assertEqual(billing, "local")
+        self.assertEqual(creds.get("gateway_binding"), "gateway_abc123")
 
     def test_two_agents_different_providers(self):
         """Two agents with different model_config resolve to different providers."""
@@ -388,6 +408,55 @@ class FleetConfigureValidationTests(unittest.TestCase):
         # Will fail at DB lookup (agent not found), not at validation
         self.assertFalse(result["ok"])
 
+    def test_invalid_model_config_runtime_rejected(self):
+        """BYO-brain Phase 0: an unknown model_config.runtime is rejected up front."""
+        result = _run(
+            fleet_tools.fleet_configure_agent(
+                actor_id="agent-op-1",
+                workspace_id="ws-test",
+                agent_id="agent-x",
+                patch={"model_config": {"mode": "cli_subscription", "runtime": "bogus_cli"}},
+            )
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Invalid model_config runtime", result["error"])
+
+    def test_gateway_binding_accepted_by_validation(self):
+        """BYO-brain Phase 0: gateway_binding + runtime pass validation with no
+        storage change (the call then fails only at the DB lookup)."""
+        result = _run(
+            fleet_tools.fleet_configure_agent(
+                actor_id="agent-op-1",
+                workspace_id="ws-test",
+                agent_id="agent-x",
+                patch={
+                    "model_config": {
+                        "mode": "cli_subscription",
+                        "provider": "claude_code_cli",
+                        "runtime": "claude_code",
+                        "gateway_binding": "gateway_abc123",
+                    }
+                },
+            )
+        )
+        # Rejected only at DB lookup (agent not found), never at validation.
+        self.assertFalse(result["ok"])
+        self.assertNotIn("Invalid model_config", result["error"])
+        self.assertNotIn("gateway_binding must be", result["error"])
+
+    def test_non_string_gateway_binding_rejected(self):
+        """A non-string gateway_binding is rejected."""
+        result = _run(
+            fleet_tools.fleet_configure_agent(
+                actor_id="agent-op-1",
+                workspace_id="ws-test",
+                agent_id="agent-x",
+                patch={"model_config": {"mode": "cli_subscription", "gateway_binding": 123}},
+            )
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("gateway_binding must be", result["error"])
+
 
 class FleetSeedAndBootstrapTests(unittest.TestCase):
     """Phase M3: fleet-seed + Sage operator bootstrap."""
@@ -477,6 +546,127 @@ class FleetSeedAndBootstrapTests(unittest.TestCase):
 
 # Import at module level for test usage
 from server_modules import sage_agent_runtime_service
+
+
+class GatewayBrainDispatchTests(unittest.TestCase):
+    """BYO-brain Phase 2: on-box Ollama dispatch via the gateway WSS rail.
+    Proves the round-trip, the ledger tags, and the no-fallback hard rule."""
+
+    def test_dispatch_success_returns_reply_and_ledgers_gateway_brain(self):
+        exec_mock = AsyncMock(return_value={
+            "result": {
+                "text": "hi from the box's ollama",
+                "model": "llama3.2",
+                "usage": {"input_tokens": 5, "output_tokens": 3},
+            }
+        })
+        brain_ledger = AsyncMock()
+        with patch(
+            "server_modules.gateway_execution_service.execute_tool_via_gateway",
+            new=exec_mock,
+        ), patch(
+            "server_modules.sage_agent_runtime_service._ledger_gateway_brain_turn",
+            new=brain_ledger,
+        ):
+            reply, usage, model = _run(
+                sage_agent_runtime_service._dispatch_local_gateway_brain(
+                    workspace_id="ws-1", tenant_id="default", agent_id="a1",
+                    gateway_binding="gw-1", runtime="ollama", model="llama3.2",
+                    system_prompt="You are a bot.", user_message="hello",
+                    prior_messages=[{"role": "user", "content": "prev"}], trace_id="t1",
+                )
+            )
+        self.assertEqual(reply, "hi from the box's ollama")
+        self.assertEqual(model, "llama3.2")
+        # Dispatched the llm.generate capability to the bound box.
+        kwargs = exec_mock.call_args.kwargs
+        self.assertEqual(kwargs["capability_id"], "llm.generate")
+        self.assertEqual(kwargs["gateway_id"], "gw-1")
+        self.assertEqual(kwargs["arguments"]["runtime"], "ollama")
+        self.assertEqual(kwargs["arguments"]["model"], "llama3.2")
+        # Ledgered as gateway_brain with the runtime + gateway id.
+        self.assertTrue(brain_ledger.called)
+        lk = brain_ledger.call_args.kwargs
+        self.assertEqual(lk["gateway_id"], "gw-1")
+        self.assertEqual(lk["runtime"], "ollama")
+
+    def test_dispatch_without_binding_raises_no_fallback(self):
+        unavail = AsyncMock()
+        with patch(
+            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            new=unavail,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_local_gateway_brain(
+                        workspace_id="ws-1", tenant_id="default", agent_id="a1",
+                        gateway_binding="", runtime="ollama", model="",
+                        system_prompt="S", user_message="U",
+                    )
+                )
+        self.assertIn("no computer is bound", str(ctx.exception).lower())
+        self.assertTrue(unavail.called)
+
+    def test_dispatch_gateway_offline_raises_friendly_no_fallback(self):
+        # The gateway readiness check raises "gateway_offline" — the turn must
+        # FAIL honestly, never fall back to control-plane Ollama or credits.
+        exec_mock = AsyncMock(side_effect=ValueError("gateway_offline"))
+        unavail = AsyncMock()
+        with patch(
+            "server_modules.gateway_execution_service.execute_tool_via_gateway",
+            new=exec_mock,
+        ), patch(
+            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            new=unavail,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_local_gateway_brain(
+                        workspace_id="ws-1", tenant_id="default", agent_id="a1",
+                        gateway_binding="gw-1", runtime="ollama", model="llama3.2",
+                        system_prompt="S", user_message="U",
+                    )
+                )
+        self.assertIn("offline", str(ctx.exception).lower())
+        self.assertTrue(unavail.called)
+
+    def test_dispatch_capability_not_ready_maps_to_ollama_message(self):
+        exec_mock = AsyncMock(side_effect=ValueError("gateway_capability_not_ready"))
+        with patch(
+            "server_modules.gateway_execution_service.execute_tool_via_gateway",
+            new=exec_mock,
+        ), patch(
+            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            new=AsyncMock(),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_local_gateway_brain(
+                        workspace_id="ws-1", tenant_id="default", agent_id="a1",
+                        gateway_binding="gw-1", runtime="ollama", model="llama3.2",
+                        system_prompt="S", user_message="U",
+                    )
+                )
+        self.assertIn("ollama", str(ctx.exception).lower())
+
+    def test_dispatch_empty_completion_raises(self):
+        exec_mock = AsyncMock(return_value={"result": {"text": "", "model": "llama3.2"}})
+        with patch(
+            "server_modules.gateway_execution_service.execute_tool_via_gateway",
+            new=exec_mock,
+        ), patch(
+            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            new=AsyncMock(),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_local_gateway_brain(
+                        workspace_id="ws-1", tenant_id="default", agent_id="a1",
+                        gateway_binding="gw-1", runtime="ollama", model="llama3.2",
+                        system_prompt="S", user_message="U",
+                    )
+                )
+        self.assertIn("empty reply", str(ctx.exception).lower())
 
 
 if __name__ == "__main__":

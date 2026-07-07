@@ -479,3 +479,56 @@ class HardwareGatewayAdapterTests(unittest.TestCase):
             interrupt_mock.assert_not_awaited()
 
         asyncio.run(run_test())
+
+    def test_resolve_file_mount_leaves_non_filesystem_capabilities_unchanged(self) -> None:
+        arguments = {"command": "pwd"}
+        resolved = gateway_adapter._resolve_file_mount_for_gateway_action("shell.execute", arguments, None)
+        self.assertEqual(resolved, arguments)
+        self.assertIs(resolved, arguments)
+
+    def test_resolve_file_mount_leaves_pathless_filesystem_calls_unchanged(self) -> None:
+        arguments = {"mode": "read"}
+        resolved = gateway_adapter._resolve_file_mount_for_gateway_action("filesystem.read", arguments, None)
+        self.assertEqual(resolved, arguments)
+
+    def test_resolve_file_mount_attaches_resolved_mount_for_default_grants(self) -> None:
+        resolved = gateway_adapter._resolve_file_mount_for_gateway_action(
+            "filesystem.write",
+            {"path": "artifacts/notes.txt", "content": "hi"},
+            None,
+        )
+        self.assertEqual(resolved["mount"], "artifacts")
+        self.assertEqual(resolved["path"], "artifacts/notes.txt")
+        self.assertEqual(resolved["content"], "hi")
+
+    def test_resolve_file_mount_reads_the_project_mount_by_default(self) -> None:
+        resolved = gateway_adapter._resolve_file_mount_for_gateway_action(
+            "filesystem.read",
+            {"path": "project/readme.md"},
+            None,
+        )
+        self.assertEqual(resolved["mount"], "project")
+
+    def test_resolve_file_mount_rejects_write_to_a_read_only_grant(self) -> None:
+        with self.assertRaises(RuntimeError):
+            gateway_adapter._resolve_file_mount_for_gateway_action(
+                "filesystem.write",
+                {"path": "project/readme.md", "content": "overwrite"},
+                None,
+            )
+
+    def test_resolve_file_mount_honors_explicit_grants(self) -> None:
+        resolved = gateway_adapter._resolve_file_mount_for_gateway_action(
+            "filesystem.write",
+            {"path": "project/readme.md", "content": "overwrite"},
+            [{"mount": "project", "grant": "read_write"}],
+        )
+        self.assertEqual(resolved["mount"], "project")
+
+    def test_resolve_file_mount_normalizes_read_write_capability_id_too(self) -> None:
+        resolved = gateway_adapter._resolve_file_mount_for_gateway_action(
+            "filesystem.read_write",
+            {"path": "shared/data.csv", "mode": "read"},
+            None,
+        )
+        self.assertEqual(resolved["mount"], "shared")

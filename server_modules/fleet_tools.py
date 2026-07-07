@@ -30,6 +30,12 @@ _ALLOWED_CONFIGURE_KEYS = {
     "purpose_preset",
 }
 _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local"}
+# BYO-brain Phase 0: model_config may carry which paired Gateway box runs the
+# brain (gateway_binding) and which CLI/engine to spawn there (runtime).
+# Storage passes the whole model_config dict through unchanged (see
+# fleet_configure_agent below), so these persist WITHOUT a schema/storage
+# change — we only validate their VALUES here so a typo can't be stored.
+_VALID_MODEL_RUNTIMES = {"claude_code", "codex", "ollama"}
 _VALID_PURPOSE_PRESETS = {"customer_facing", "internal_assistant", "operator"}
 _PURPOSE_PRESET_INSTRUCTIONS = {
     "customer_facing": (
@@ -636,6 +642,8 @@ async def fleet_configure_agent(
     subagents_enabled, hardware_access, model_config.
 
     Model config modes: platform_credits | byok_api | cli_subscription | local
+    Model config may also carry gateway_binding (paired Gateway id that runs
+    the brain) and runtime (claude_code | codex | ollama). Both persist as-is.
     """
     from server_modules import agent_registry_repository as repo
 
@@ -651,7 +659,7 @@ async def fleet_configure_agent(
             "error": "No valid patch keys. Allowed: " + ", ".join(sorted(_ALLOWED_CONFIGURE_KEYS)),
         }
 
-    # Validate model_config mode if present
+    # Validate model_config mode + BYO-brain sub-fields if present.
     if "model_config" in clean_patch:
         mc = dict(clean_patch.get("model_config") or {})
         mode = str(mc.get("mode") or "").strip()
@@ -659,6 +667,18 @@ async def fleet_configure_agent(
             return {
                 "ok": False,
                 "error": f"Invalid model_config mode: {mode}. Must be one of: {', '.join(sorted(_VALID_MODEL_MODES))}",
+            }
+        runtime = str(mc.get("runtime") or "").strip()
+        if runtime and runtime not in _VALID_MODEL_RUNTIMES:
+            return {
+                "ok": False,
+                "error": f"Invalid model_config runtime: {runtime}. Must be one of: {', '.join(sorted(_VALID_MODEL_RUNTIMES))}",
+            }
+        gateway_binding = mc.get("gateway_binding")
+        if gateway_binding is not None and not isinstance(gateway_binding, str):
+            return {
+                "ok": False,
+                "error": "model_config gateway_binding must be a gateway id string.",
             }
 
     try:

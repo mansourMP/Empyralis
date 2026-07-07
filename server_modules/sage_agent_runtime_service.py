@@ -458,19 +458,28 @@ async def _resolve_agent_cloud_provider(
             "Switch this agent to platform_credits or byok_api."
         )
 
-    # ── local: not yet available on this deployment ────────────────
+    # ── local: on-box model via the paired gateway (BYO-brain Phase 2) ─────
+    # The actual completion is dispatched to the bound box at the turn seam
+    # (handle_sage_chat → _dispatch_local_gateway_brain → the gateway WSS rail),
+    # NOT resolved to a cloud endpoint here. This branch only validates the
+    # binding and returns the "local" billing mode so nothing is ever charged
+    # to platform credits. No subscription credential is ever involved.
     if mode == "local":
-        await _ledger_provider_unavailable(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            mode=mode,
-            provider=provider,
-            reason="local mode is not yet available on this deployment.",
-        )
-        raise RuntimeError(
-            "Local model mode is not yet available on this deployment. "
-            "Switch this agent to platform_credits or byok_api."
-        )
+        gateway_binding = str(mc.get("gateway_binding") or "").strip()
+        if not gateway_binding:
+            await _ledger_provider_unavailable(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                mode=mode,
+                provider=provider,
+                reason="local mode requires a bound gateway (gateway_binding).",
+            )
+            raise RuntimeError(
+                "This agent is set to run locally, but no computer is bound to it. "
+                "Bind a paired computer that has Ollama installed, then try again."
+            )
+        runtime = str(mc.get("runtime") or "ollama").strip().lower() or "ollama"
+        return runtime, {"gateway_binding": gateway_binding}, "local"
 
     # Unknown mode
     await _ledger_provider_unavailable(
@@ -521,6 +530,173 @@ async def _ledger_provider_unavailable(
         )
     except Exception:
         pass
+
+
+async def _ledger_gateway_brain_turn(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    agent_id: str,
+    gateway_id: str,
+    runtime: str,
+    model: str,
+    usage: Optional[Dict[str, Any]] = None,
+    trace_id: str = "",
+) -> None:
+    """Ledger a gateway_brain turn — a completion produced on the user's OWN
+    paired box (never a cloud provider, never platform credits). Tagged
+    execution_tier=gateway_brain, runtime, gateway_id so per-turn metering can
+    prove these turns are distinct and are never cross-billed. Best effort."""
+    try:
+        from server_modules import activity_ledger_service
+        _usage = usage if isinstance(usage, dict) else {}
+        await activity_ledger_service.append_activity_event(
+            tenant_id=str(tenant_id or "system").strip() or "system",
+            workspace_id=workspace_id,
+            actor_type="agent",
+            actor_id=str(agent_id or "").strip() or "unknown",
+            event_class="system_activity",
+            detail_level="audit_reference",
+            action="gateway_brain_turn",
+            title=f"Gateway brain turn: {runtime}",
+            summary=(
+                f"Turn generated on the user's paired box {gateway_id} via "
+                f"{runtime} ({model or 'default model'}). "
+                f"execution_tier=gateway_brain — not billed to platform credits."
+            ),
+            status="completed",
+            metadata={
+                "agent_id": agent_id,
+                "execution_tier": "gateway_brain",
+                "runtime": runtime,
+                "gateway_id": gateway_id,
+                "model": model,
+                "input_tokens": int(_usage.get("input_tokens") or 0),
+                "output_tokens": int(_usage.get("output_tokens") or 0),
+                "trace_id": trace_id,
+            },
+        )
+    except Exception:
+        pass
+
+
+def _friendly_gateway_brain_error(reason: str) -> str:
+    """Map a raw dispatch/readiness reason to a platform-voice message. The turn
+    is DENIED — there is no fallback to control-plane Ollama or platform credits."""
+    r = str(reason or "").strip().lower()
+    if "gateway_offline" in r or "offline" in r:
+        return ("Your computer is offline. Start the Empyralis gateway on the box "
+                "bound to this agent, then send the message again.")
+    if "capability_not_ready" in r or "capability_missing" in r or "unreachable" in r:
+        return ("Your computer doesn't have a local model runtime ready. Install and "
+                "start Ollama on that box, then send the message again.")
+    if ("registration_missing" in r or "workspace_mismatch" in r
+            or "inactive" in r or "revoked" in r):
+        return ("The computer bound to this agent is no longer paired. Re-pair a box "
+                "that has Ollama and bind it to this agent, then retry.")
+    if "heartbeat_stale" in r or "unhealthy" in r:
+        return ("Your computer stopped reporting in. Check the Empyralis gateway on "
+                "that box, then send the message again.")
+    return f"The local model turn failed on your computer: {reason}"
+
+
+async def _dispatch_local_gateway_brain(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    agent_id: str,
+    gateway_binding: str,
+    runtime: str,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    prior_messages: Optional[list] = None,
+    trace_id: str = "",
+) -> tuple[str, dict, str]:
+    """Dispatch ONE completion to the agent's paired box via the gateway WSS
+    rail (llm.generate → the box's OWN local Ollama). Returns (reply, usage,
+    resolved_model).
+
+    HARD RULE — no fallback: if no gateway is bound, the box is offline, or the
+    box has no local model runtime ready, the turn FAILS with a platform-voice
+    error + a provider_unavailable ledger row. It NEVER falls back to a
+    control-plane Ollama or to platform credits. No subscription credential is
+    ever involved — Ollama is local and needs no login."""
+    gateway_id = str(gateway_binding or "").strip()
+    _runtime = str(runtime or "").strip().lower() or "ollama"
+    _model = str(model or "").strip() or "llama3.2"
+
+    if not gateway_id:
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="local", provider=_runtime,
+            reason="local mode requires a bound gateway (gateway_binding is empty).",
+        )
+        raise RuntimeError(
+            "This agent is set to run locally, but no computer is bound to it. "
+            "Bind a paired computer that has Ollama installed, then try again."
+        )
+
+    messages: list = []
+    for _m in (prior_messages or []):
+        if not isinstance(_m, dict):
+            continue
+        _role = str(_m.get("role") or "").strip().lower()
+        _content = str(_m.get("content") or "").strip()
+        if _content and _role in {"user", "assistant", "system"}:
+            messages.append({"role": _role, "content": _content})
+
+    run_id = f"gateway-brain-{trace_id or uuid.uuid4()}"
+    from server_modules import gateway_execution_service
+    try:
+        response = await gateway_execution_service.execute_tool_via_gateway(
+            gateway_id=gateway_id,
+            capability_id="llm.generate",
+            arguments={
+                "runtime": _runtime,
+                "model": _model,
+                "system": system_prompt,
+                "messages": messages,
+                "prompt": user_message,
+                "timeout_seconds": 120,
+            },
+            run_id=run_id,
+            trace_id=trace_id or run_id,
+            workspace_id=workspace_id,
+            timeout_seconds=125,
+            request_id=run_id,
+            runtime_access_mode="default_guarded",
+            empyralis_approved=True,
+            agent_scope="specialist",
+            emit_hardware_activity=False,
+        )
+    except Exception as exc:
+        _reason = str(exc)
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="local",
+            provider=f"{_runtime}@{gateway_id}", reason=_reason,
+        )
+        raise RuntimeError(_friendly_gateway_brain_error(_reason)) from exc
+
+    result = response.get("result") if isinstance(response.get("result"), dict) else {}
+    reply = str(result.get("text") or "").strip()
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    resolved_model = str(result.get("model") or _model).strip()
+    if not reply:
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="local",
+            provider=f"{_runtime}@{gateway_id}", reason="gateway returned an empty completion.",
+        )
+        raise RuntimeError(
+            "Your computer's local model returned an empty reply. Check that Ollama "
+            "is running with a model on that box, then try again."
+        )
+
+    await _ledger_gateway_brain_turn(
+        workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id,
+        gateway_id=gateway_id, runtime=_runtime, model=resolved_model,
+        usage=usage, trace_id=trace_id,
+    )
+    return reply, usage, resolved_model
 
 
 async def get_persisted_model_preference(workspace_id: str) -> str:
@@ -3032,6 +3208,86 @@ async def handle_sage_chat(
             message=normalized_message,
             system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{attachment_context}{mcp_tool_inventory}",
         )
+
+    # ── BYO-brain Phase 2: on-box local model turn ─────────────────────────
+    # A specialist bound to model_config.mode == "local" runs its turn on ITS
+    # OWN paired box's Ollama via the gateway WSS rail — never the cloud
+    # provider, never platform credits, no fallback. This proves the
+    # box-dispatch rail on a zero-compliance-risk payload before any
+    # subscription token is involved. A local turn is a single completion; the
+    # cloud tool/action-loop below is deliberately skipped (Ollama tool-use is a
+    # later phase).
+    if _spec is not None and str(getattr(_spec, "mode", "") or "").strip().lower() == "local":
+        _local_runtime = str(getattr(_spec, "runtime", "") or "").strip().lower() or "ollama"
+        _local_gateway_id = str(getattr(_spec, "gateway_binding", "") or "").strip()
+        _local_reply, _local_usage, _local_model = await _dispatch_local_gateway_brain(
+            workspace_id=normalized_workspace_id,
+            tenant_id=effective_tenant_id,
+            agent_id=_spec_install_id,
+            gateway_binding=_local_gateway_id,
+            runtime=_local_runtime,
+            model=str(getattr(_spec, "model", "") or ""),
+            system_prompt=envelope["system_prompt"],
+            user_message=envelope.get("user_message") or normalized_message,
+            prior_messages=prior_messages,
+            trace_id=trace_id,
+        )
+        if "gateway_brain_local" not in used_context:
+            used_context.append("gateway_brain_local")
+        # Persist the turn to the shared thread, same as the cloud path.
+        try:
+            await thread_service.record_user_turn(
+                thread_id=thread_id,
+                tenant_id=effective_tenant_id,
+                workspace_id=normalized_workspace_id,
+                session_id=None,
+                actor={"user_id": actor_user_id or "sage", "name": actor_email or "sage"},
+                content=normalized_message,
+                metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
+            )
+            await thread_service.record_assistant_turn(
+                thread_id=thread_id,
+                tenant_id=effective_tenant_id,
+                workspace_id=normalized_workspace_id,
+                session_id=None,
+                actor={"user_id": _spec_install_id or "specialist", "name": str(getattr(_spec, "agent_label", "") or "Specialist")},
+                reply=_local_reply,
+                status="completed",
+                run_id=trace_id,
+                metadata={"channel": channel_origin or "sage", "request_id": (request_id or None), "execution_tier": "gateway_brain"},
+            )
+        except Exception as _persist_exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("gateway_brain turn persist failed: %s", _persist_exc)
+        return {
+            "message": _local_reply,
+            "error": None,
+            "used_context": used_context,
+            "tool_calls": [],
+            "available_tools": [],
+            "blocked_tools": [],
+            "approvals_required": [],
+            "memory_updates": [],
+            "tool_progress_messages": [],
+            "action_execution_mode": "gateway_brain",
+            "route_decision": _build_sage_route_decision(message=normalized_message),
+            "trace_id": trace_id,
+            "provider": _local_runtime,
+            "model": _local_model or None,
+            # Metering tags: these turns are provably distinct and never
+            # cross-billed with platform-credit or BYOK turns.
+            "execution_tier": "gateway_brain",
+            "runtime": _local_runtime,
+            "gateway_id": _local_gateway_id or None,
+            "proof_log": None,
+            "proof_log_id": "",
+            "transparency_events": [],
+            "acting_agent_install_id": _spec_install_id or None,
+            "acting_agent_label": (str(getattr(_spec, "agent_label", "") or "").strip() or None),
+            "runtime_specialization": "specialist",
+            "memory_scope": _spec_install_id or f"workspace:{normalized_workspace_id}",
+            "ai_setup_url": f"/w/{normalized_workspace_id}{_SAGE_AI_SETUP_PATH}",
+        }
 
     action_loop_message = _normalized_sage_action_loop_message(normalized_message, prior_messages)
     # Always run the action loop — the LLM decides whether tools are needed.

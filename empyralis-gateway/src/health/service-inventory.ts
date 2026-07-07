@@ -12,6 +12,8 @@ import {
   capabilityPermissionReady,
   capabilityPermissionStatus,
   desktopPermissionForCapability,
+  setLlmRuntimeOllamaReady,
+  setShellSandboxDockerReady,
   type CapabilityPermissionStatus,
 } from "../runtime/desktop-permissions";
 
@@ -81,9 +83,20 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 1_500;
 const PASSIVE_INVENTORY_CACHE_TTL_MS = 60_000;
 const OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags";
 const MACOS_SYSTEM_PROFILER = "/usr/sbin/system_profiler";
+// Desktop-control capabilities that still depend on the old local
+// supervisor/runner concept — checkLocalRunnerHealth() in cloud/ws-client.ts
+// hardcodes false for these (desktop control is still out of scope; the Rust
+// supervisor daemon that implemented it is archived, not rebuilt).
+//
+// shell.execute and filesystem.read_write used to be in this set too, back
+// when they were also dispatched through the same local-runner/supervisor
+// path. They are NOT anymore: they now have their own independent,
+// Docker-sandboxed executor (GatewayShellRuntime) gated on the "shell_sandbox"
+// desktop permission (see runtime/desktop-permissions.ts), which has nothing
+// to do with local-runner health. Leaving them in this set would force-block
+// them forever regardless of Docker state, since localRunnerReady is always
+// false — that would silently defeat the whole shell-sandbox feature.
 const LOCAL_RUNNER_CAPABILITIES: ReadonlySet<string> = new Set([
-  "filesystem.read_write",
-  "shell.execute",
   "screenshot.capture",
   "computer_control.ocr",
   "computer_control.move",
@@ -413,8 +426,50 @@ async function probeOllama(
     summary: result.ok
       ? `Ollama API is reachable${typeof modelCount === "number" ? ` with ${modelCount} model(s)` : ""}.`
       : truncate(result.error || `Ollama API returned status ${result.status}.`),
-    metadata: { status_code: result.status, model_count: modelCount },
+    // Ollama is a LOCAL runtime with no login: "authenticated" tracks
+    // reachability so the box-picker can show it uniformly with the CLIs.
+    metadata: {
+      status_code: result.status,
+      model_count: modelCount,
+      installed: result.ok,
+      authenticated: result.ok,
+      has_models: typeof modelCount === "number" ? modelCount > 0 : false,
+    },
   }, checkedAt);
+}
+
+// Read-only auth-presence check for an installed AI CLI. We check ONLY whether
+// an auth MARKER exists — a credential file on disk (existence only, via
+// fs.existsSync) or an env var being non-empty. We NEVER open, read, or
+// transmit the CONTENTS of any credential file. This yields the
+// installed-vs-authenticated distinction with zero credential exposure.
+function detectAuthPresence(
+  filePaths: string[],
+  envKeys: string[],
+  env: NodeJS.ProcessEnv,
+): boolean {
+  for (const key of envKeys) {
+    if (String(env[key] ?? "").trim()) {
+      return true;
+    }
+  }
+  for (const filePath of filePaths) {
+    if (!filePath) {
+      continue;
+    }
+    try {
+      if (fs.existsSync(filePath)) {
+        return true;
+      }
+    } catch {
+      // Inaccessible path — treat as absent, never surface the error.
+    }
+  }
+  return false;
+}
+
+function homeDir(env: NodeJS.ProcessEnv): string {
+  return String(env.HOME || env.USERPROFILE || "").trim() || os.homedir();
 }
 
 async function probeCodexCli(
@@ -438,21 +493,107 @@ async function probeCodexCli(
       detected: false,
       check: "codex --version",
       summary: "Codex CLI was not found on PATH or in the Codex app bundle.",
+      metadata: { installed: false, authenticated: false },
     }, checkedAt);
   }
   const result = await runCommand(command, ["--version"], DEFAULT_COMMAND_TIMEOUT_MS);
-  const ready = result.exitCode === 0;
+  // The binary was found on PATH above, so it IS installed. `--version` is only
+  // a best-effort version/liveness string — a slow cold start (these are Node
+  // CLIs) must never flip installed → false and produce a flaky signal.
+  const installed = true;
+  const authenticated = detectAuthPresence(
+    [path.join(homeDir(env), ".codex", "auth.json")],
+    ["CODEX_API_KEY"],
+    env,
+  );
   return makeItem({
     id: "codex_cli",
     label: "Codex CLI",
     kind: "developer_tool",
-    status: ready ? "ready" : "degraded",
+    status: installed ? (authenticated ? "ready" : "degraded") : "degraded",
     detected: true,
     check: "codex --version",
-    summary: ready
-      ? truncate(result.stdout || "Codex CLI is available.")
+    summary: installed
+      ? (authenticated
+          ? truncate(result.stdout || "Codex CLI is installed and signed in.")
+          : "Codex CLI is installed but not signed in (run `codex login`).")
       : truncate(result.stderr || result.stdout || `codex --version exited with ${result.exitCode}.`),
-    metadata: { path: command, exit_code: result.exitCode, timed_out: Boolean(result.timedOut) },
+    metadata: { path: command, exit_code: result.exitCode, installed, authenticated, timed_out: Boolean(result.timedOut) },
+  }, checkedAt);
+}
+
+async function probeClaudeCli(
+  checkedAt: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  commandExists: (command: string) => string | null,
+  runCommand: (command: string, args: string[], timeoutMs: number) => Promise<CommandResult>,
+): Promise<PassiveServiceInventoryItem> {
+  const candidates = [
+    String(env.CLAUDE_CLI_PATH || "").trim(),
+    "claude",
+  ].filter(Boolean);
+  const command = candidates.map(commandExists).find(Boolean) || null;
+  if (!command) {
+    return makeItem({
+      id: "claude_cli",
+      label: "Claude Code CLI",
+      kind: "developer_tool",
+      status: "missing",
+      detected: false,
+      check: "claude --version",
+      summary: "Claude Code CLI was not found on PATH.",
+      metadata: { installed: false, authenticated: false },
+    }, checkedAt);
+  }
+  const result = await runCommand(command, ["--version"], DEFAULT_COMMAND_TIMEOUT_MS);
+  // The binary was found on PATH above, so it IS installed. `--version` is only
+  // a best-effort version/liveness string — a slow cold start (these are Node
+  // CLIs) must never flip installed → false and produce a flaky signal.
+  const installed = true;
+  let authenticated = detectAuthPresence(
+    [
+      path.join(homeDir(env), ".claude", ".credentials.json"),
+      path.join(homeDir(env), ".claude", "credentials.json"),
+    ],
+    ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+    env,
+  );
+  if (!authenticated && platform === "darwin") {
+    // On macOS, Claude Code stores its OAuth token in the login Keychain, not a
+    // file. `security find-generic-password` WITHOUT -w returns only the item's
+    // metadata + a 0 exit status when it EXISTS — it never emits the secret.
+    // This keeps the "never read credential contents" rule while making the
+    // installed-vs-authenticated signal accurate on macOS boxes too.
+    const security = commandExists("security");
+    if (security) {
+      try {
+        const kc = await runCommand(
+          security,
+          ["find-generic-password", "-s", "Claude Code-credentials"],
+          DEFAULT_COMMAND_TIMEOUT_MS,
+        );
+        if (kc.exitCode === 0) {
+          authenticated = true;
+        }
+      } catch {
+        // Keychain unavailable/locked — leave the conservative file-based result.
+      }
+    }
+  }
+  return makeItem({
+    id: "claude_cli",
+    label: "Claude Code CLI",
+    kind: "developer_tool",
+    status: installed ? (authenticated ? "ready" : "degraded") : "degraded",
+    detected: true,
+    check: "claude --version",
+    summary: installed
+      ? (authenticated
+          ? truncate(result.stdout || "Claude Code CLI is installed and signed in.")
+          : "Claude Code CLI is installed but not signed in (run `claude login`).")
+      : truncate(result.stderr || result.stdout || `claude --version exited with ${result.exitCode}.`),
+    metadata: { path: command, exit_code: result.exitCode, installed, authenticated, timed_out: Boolean(result.timedOut) },
   }, checkedAt);
 }
 
@@ -547,8 +688,19 @@ export async function collectPassiveInventorySnapshot(
     probeDocker(checkedAt, commandExists, runCommand),
     probeOllama(checkedAt, httpGetJson),
     probeCodexCli(checkedAt, env, commandExists, runCommand),
+    probeClaudeCli(checkedAt, env, platform, commandExists, runCommand),
     probeGpu(checkedAt, platform, commandExists, runCommand),
   ]);
+  // Feed the just-computed Docker probe result into the shell_sandbox
+  // permission gate (runtime/desktop-permissions.ts) — same probe, no
+  // separate check, no extra race between this and capability readiness.
+  const dockerItem = serviceInventory.find((item) => item.id === "docker");
+  setShellSandboxDockerReady(dockerItem?.status === "ready");
+  // Same pattern for the on-box LLM capability: the just-computed Ollama probe
+  // gates the llm_runtime permission, so llm.generate only reports ready when a
+  // local Ollama endpoint is actually reachable (BYO-brain Phase 2).
+  const ollamaItem = serviceInventory.find((item) => item.id === "ollama");
+  setLlmRuntimeOllamaReady(ollamaItem?.status === "ready");
   if (typeof options.localRunnerReady === "boolean") {
     serviceInventory.unshift(buildLocalRunnerInventoryItem(options.localRunnerReady, checkedAt));
   }

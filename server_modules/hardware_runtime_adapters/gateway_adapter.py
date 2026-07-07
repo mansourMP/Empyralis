@@ -7,6 +7,7 @@ from server_modules import (
     agent_computer_permission_secret_model,
     agent_trace_service,
     execution_mode_policy,
+    file_mount_security,
     gateway_approval_service,
     gateway_execution_service,
     gateway_protocol_service,
@@ -17,8 +18,50 @@ from server_modules import (
     hardware_runtime_session_service,
     hardware_runtime_target_resolver,
     rust_runtime_kernel_client,
+    runtime_policy,
 )
 from server_modules.hardware_runtime_adapters.common import dict_value, text
+
+
+def _resolve_file_mount_for_gateway_action(
+    capability_id: str,
+    arguments: Dict[str, Any],
+    file_mount_grants: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Resolves which named mount (artifacts/project/shared/knowledge/local_root/
+    connector_files) a filesystem.* gateway action is allowed to touch, and at
+    what grant level, using the same file_mount_security path run_service.py's
+    execute_workflow_local_tool() already uses for the equivalent workflow
+    execution path. Returns arguments unchanged for non-filesystem capabilities
+    (shell.execute has no single target path to resolve a mount against).
+
+    The Gateway trusts this resolved mount NAME (not a host path — the Gateway
+    itself, not the cloud, knows how mount names map to its own local disk
+    layout) and mounts exactly that as the container's /workspace volume.
+    """
+    normalized_capability = text(capability_id).strip()
+    if not normalized_capability.startswith("filesystem."):
+        return arguments
+    raw_path = arguments.get("path") or arguments.get("file_path")
+    if not text(raw_path):
+        # No path to resolve a mount against — let the Gateway's own
+        # validation reject the missing-path case with its usual message.
+        return arguments
+    raw_mode = arguments.get("mode") or arguments.get("operation") or (
+        "write" if normalized_capability == "filesystem.write" else "read"
+    )
+    execution_target = runtime_policy.normalize_execution_target(
+        arguments.get("execution_target") or runtime_policy.EXECUTION_TARGET_LOCAL_COMPANION
+    )
+    file_access = file_mount_security.assert_file_mount_access(
+        raw_path,
+        raw_mode,
+        file_mount_grants,
+        execution_target,
+    )
+    resolved_arguments = dict(arguments)
+    resolved_arguments["mount"] = file_access["mount"]
+    return resolved_arguments
 
 
 HARDWARE_RUNTIME_SESSION_BINDING = hardware_runtime_session_service.HARDWARE_RUNTIME_SESSION_BINDING
@@ -178,7 +221,48 @@ async def execute_gateway_action(
     tool_call_id: str,
     runtime_target: str = "user_device_gateway",
     agent_scope: str = "studio_agent",
+    file_mount_grants: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    try:
+        arguments = _resolve_file_mount_for_gateway_action(capability_id, arguments, file_mount_grants)
+    except Exception as exc:
+        failure = agent_computer_permission_secret_model.local_failure_classification(exc)
+        state = text(failure.get("state")) or "failed"
+        reason = text(failure.get("reason")) or "file_mount_access_denied"
+        summary = text(failure.get("summary")) or "File mount access denied."
+        LOGGER.warning(
+            "Gateway hardware action blocked by file-mount policy: type=%s reason=%s capability=%s request_id=%s",
+            type(exc).__name__,
+            reason,
+            capability_id,
+            request_id,
+        )
+        runtime_session = await hardware_runtime_session_service.update_runtime_session(
+            runtime_session,
+            state=state,
+            audit_action="hardware_action.failed",
+            reason=reason,
+            extra_metadata={"failure_reason": reason},
+        )
+        await hardware_result_correlator_service.emit_tool_result(
+            trace_context,
+            tool_call_id=tool_call_id,
+            status=state,
+            summary=summary,
+            capability_id=capability_id,
+            arguments=arguments,
+            runtime_session=runtime_session,
+            runtime_target=runtime_target,
+            request_id=request_id,
+            action_id=action_id,
+            metadata={"failure_reason": reason},
+        )
+        return {
+            "status": state,
+            "reason": reason,
+            "runtime_session": runtime_session,
+            "trace_id": trace_id,
+        }
     registration = find_gateway_registration(
         gateway_id=gateway_id,
         workspace_id=text(workspace_id) or "default",

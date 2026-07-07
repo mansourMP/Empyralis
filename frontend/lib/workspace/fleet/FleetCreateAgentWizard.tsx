@@ -4,12 +4,13 @@ import { useEffect, useState } from "react";
 import { Check, Loader2, Lock, X } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
-import { BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, providerLabel } from "./fleet-provider-constants";
+import { BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, COMING_SOON_NOTE, providerLabel } from "./fleet-provider-constants";
 import { useFleetProjects } from "./fleet-data";
 import { ConnectorPicker } from "./ConnectorPicker";
+import { GatewayBoxPicker } from "./gateway-box-picker";
 
 type CapabilityPreset = "standard" | "knowledge";
-type WizardProviderMode = "platform" | "byok" | "subscription";
+type WizardProviderMode = "platform" | "byok" | "subscription" | "local";
 type ChannelChoice = "none" | "telegram_pool" | "byo";
 
 const STEP_LABELS = ["Name", "Project", "Type", "Model", "Connectors", "Channel"];
@@ -56,6 +57,8 @@ export function FleetCreateAgentWizard({
   const [byokProvider, setByokProvider] = useState("anthropic");
   const [byokKey, setByokKey] = useState("");
   const [subscriptionProvider, setSubscriptionProvider] = useState("claude_code_cli");
+  const [localProvider, setLocalProvider] = useState("ollama");
+  const [gatewayBinding, setGatewayBinding] = useState("");
   const [channel, setChannel] = useState<ChannelChoice>("none");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +111,18 @@ export function FleetCreateAgentWizard({
 
   // Step 4 → set the model/provider.
   async function submitProvider() {
+    // cli_subscription isn't dispatchable yet (Phase 3) — persisting it resolves
+    // to a guaranteed "not yet available" turn error. The Next button is disabled
+    // for it; this guard is defence in depth.
+    if (providerMode === "subscription") {
+      setError(`${COMING_SOON_NOTE}. Pick Empyralis credits or your own API key to continue.`);
+      return;
+    }
+    // BYO-brain Phase 2: "local" is live but a local agent MUST name its box.
+    if (providerMode === "local" && !gatewayBinding.trim()) {
+      setError("Pick a computer (with Ollama) to run this agent’s local model.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -130,10 +145,11 @@ export function FleetCreateAgentWizard({
           }
         }
         await patchAgent({ model_config: { mode: "byok_api", provider: byokProvider } });
-      } else if (providerMode === "subscription") {
-        await patchAgent({ model_config: { mode: "cli_subscription", provider: subscriptionProvider } });
+      } else if (providerMode === "local") {
+        await patchAgent({ model_config: { mode: "local", provider: localProvider || "ollama", gateway_binding: gatewayBinding.trim(), runtime: "ollama" } });
       }
-      // platform: nothing to patch — it's the default.
+      // platform: nothing to patch — it's the default. subscription is coming
+      // soon and is blocked above, never persisted into a broken turn.
       setStep(5);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the provider.");
@@ -224,16 +240,21 @@ export function FleetCreateAgentWizard({
                   <span className="fleet-wizard-option-label">Your own API key</span>
                   <span className="fleet-wizard-option-body">Use your key for any provider. You pay them directly.</span>
                 </button>
-                <button type="button" className={`fleet-wizard-option${providerMode === "subscription" ? " is-selected" : ""}`} onClick={() => setProviderMode("subscription")}>
+                <button type="button" className={`fleet-wizard-option fleet-wizard-option--soon${providerMode === "subscription" ? " is-selected" : ""}`} onClick={() => setProviderMode("subscription")}>
                   <span className="fleet-wizard-option-label">Your subscription</span>
                   <span className="fleet-wizard-option-body">Route through your Claude Code or Codex plan. Needs the Gateway.</span>
+                  <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> {COMING_SOON_NOTE}</span>
+                </button>
+                <button type="button" className={`fleet-wizard-option${providerMode === "local" ? " is-selected" : ""}`} onClick={() => setProviderMode("local")}>
+                  <span className="fleet-wizard-option-label">Run locally</span>
+                  <span className="fleet-wizard-option-body">Ollama on your own machine, via the Gateway.</span>
                 </button>
               </div>
               {providerMode === "byok" && (
                 <div className="fleet-channel-expand">
                   <label className="fleet-wizard-label">Provider</label>
                   <select className="fleet-wizard-input" value={byokProvider} onChange={(e) => setByokProvider(e.currentTarget.value)}>
-                    {BYOK_PROVIDERS.map((p) => <option key={p} value={p}>{providerLabel(p)}</option>)}
+                    {BYOK_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
                   </select>
                   <label className="fleet-wizard-label">API key</label>
                   <input className="fleet-wizard-input" type="password" value={byokKey} onChange={(e) => setByokKey(e.currentTarget.value)} placeholder="Paste your key" />
@@ -243,8 +264,19 @@ export function FleetCreateAgentWizard({
                 <div className="fleet-channel-expand">
                   <label className="fleet-wizard-label">Subscription</label>
                   <select className="fleet-wizard-input" value={subscriptionProvider} onChange={(e) => setSubscriptionProvider(e.currentTarget.value)}>
-                    {SUBSCRIPTION_PROVIDERS.map((p) => <option key={p} value={p}>{providerLabel(p)}</option>)}
+                    {SUBSCRIPTION_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
                   </select>
+                  <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={setGatewayBinding} />
+                  <p className="fleet-channel-expand-hint">{COMING_SOON_NOTE}. You’ll be able to save this once your box can run it.</p>
+                </div>
+              )}
+              {providerMode === "local" && (
+                <div className="fleet-channel-expand">
+                  <label className="fleet-wizard-label">Runtime</label>
+                  <select className="fleet-wizard-input" value={localProvider} onChange={(e) => setLocalProvider(e.currentTarget.value)}>
+                    {LOCAL_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                  </select>
+                  <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={setGatewayBinding} requireLocalModel />
                 </div>
               )}
             </div>
@@ -301,7 +333,7 @@ export function FleetCreateAgentWizard({
             </button>
           )}
           {step === 4 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitProvider} disabled={busy}>
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitProvider} disabled={busy || providerMode === "subscription" || (providerMode === "local" && !gatewayBinding.trim())}>
               {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Next"}
             </button>
           )}

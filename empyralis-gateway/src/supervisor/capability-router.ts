@@ -4,6 +4,8 @@ import type {
   GatewayToolInvokePayload,
 } from "../protocol/types";
 import { GatewayBrowserRuntime } from "../browser/runtime";
+import { GatewayShellRuntime } from "../shell/runtime";
+import { GatewayLLMRuntime } from "../llm/runtime";
 import { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
 import { ExternalAgentProxyRuntime } from "../external-agent/proxy-runtime";
 import {
@@ -20,7 +22,11 @@ const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // ARCHIVED: "supervisor" executor removed (Phase U1 — product refocus).
 // The Rust empyralis-supervisor daemon is no longer part of the product.
 // Desktop control (mouse/keyboard/screen/fs) is OUT of scope.
-type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel";
+// "shell_sandbox" (re-added): per-run Docker-sandboxed shell/filesystem
+// execution — see src/shell/runtime.ts. Unlike the old supervisor, this has
+// no unsandboxed path: it only exists where Docker (or an explicitly
+// authorized full_access mode) is actually verified present.
+type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm";
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -44,6 +50,8 @@ export class GatewayCapabilityRouter {
     private readonly browserRuntime?: GatewayBrowserRuntime,
     private readonly personalChannelRuntimes = new PersonalChannelRuntimeRegistry(),
     private readonly externalAgentProxyRuntime = new ExternalAgentProxyRuntime(),
+    private readonly shellRuntime?: GatewayShellRuntime,
+    private readonly llmRuntime?: GatewayLLMRuntime,
   ) {}
 
   supportedCapabilities(): string[] {
@@ -54,6 +62,14 @@ export class GatewayCapabilityRouter {
         : []),
       ...this.personalChannelRuntimes.requestedCapabilities(),
       ...this.externalAgentProxyRuntime.requestedCapabilities(),
+      // shell_sandbox capabilities are filtered the same way as browser's —
+      // gated on the "shell_sandbox" desktop permission, which is only
+      // "granted" when Docker reads ready (see runtime/desktop-permissions.ts).
+      ...filterCapabilitiesByDesktopPermission(this.shellRuntime?.requestedCapabilities() ?? []),
+      // llm.generate is gated on the "llm_runtime" permission, only "granted"
+      // when a local Ollama endpoint reads ready — same pattern as shell/Docker
+      // (BYO-brain Phase 2).
+      ...filterCapabilitiesByDesktopPermission(this.llmRuntime?.requestedCapabilities() ?? []),
     ];
   }
 
@@ -117,13 +133,38 @@ export class GatewayCapabilityRouter {
         result,
       };
     }
+    if (this.shellRuntime?.supportsCapability(capabilityId)) {
+      this.trackExecutor(runId, "shell_sandbox");
+      const result = await this.shellRuntime.handleCapabilityInvoke(
+        frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
+      );
+      return {
+        request_id: frame.id,
+        capability_id: capabilityId,
+        run_id: runId,
+        result,
+      };
+    }
+    if (this.llmRuntime?.supportsCapability(capabilityId)) {
+      this.trackExecutor(runId, "llm");
+      const result = await this.llmRuntime.handleCapabilityInvoke(
+        frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
+      );
+      return {
+        request_id: frame.id,
+        capability_id: capabilityId,
+        run_id: runId,
+        result,
+      };
+    }
     // ARCHIVED (Phase U1): supervisor executor removed.
-    // Capabilities that don't match browser, external-agent-proxy, or personal-channel
-    // are no longer supported. Desktop control (mouse/keyboard/screen/fs) is OUT.
+    // Capabilities that don't match browser, external-agent-proxy, personal-channel,
+    // or shell_sandbox are no longer supported. Desktop control (mouse/keyboard/
+    // screen) is still OUT — only shell/filesystem came back, and only sandboxed.
     throw new Error(
       `No executor available for capability "${capabilityId}". ` +
-      `Supported executors: browser, external_agent_proxy, personal_channel. ` +
-      `Desktop control capabilities are no longer part of the Empyralis product.`,
+      `Supported executors: browser, external_agent_proxy, personal_channel, shell_sandbox. ` +
+      `Desktop control capabilities are not part of the Empyralis product.`,
     );
   }
 
@@ -173,6 +214,30 @@ export class GatewayCapabilityRouter {
       return {
         interrupted: false,
         error: `Personal channel interrupt not yet implemented for run_id "${runId}".`,
+        run_id: runId,
+      };
+    }
+
+    if (executor === "shell_sandbox") {
+      // shell_sandbox runs are a single awaited call per container (bounded
+      // by its own timeout) rather than a long-lived session — there is no
+      // separate in-flight handle to signal yet. A real implementation would
+      // track run_id -> container name and issue `docker kill`; not built.
+      return {
+        interrupted: false,
+        error: `shell_sandbox interrupt not yet implemented for run_id "${runId}".`,
+        run_id: runId,
+      };
+    }
+
+    if (executor === "llm") {
+      // llm.generate is a single awaited request/response to the local Ollama
+      // endpoint, bounded by its own timeout — there is no long-lived session
+      // handle to signal. The in-flight fetch is abandoned when its own
+      // AbortController timeout fires; there is nothing to cancel out-of-band.
+      return {
+        interrupted: false,
+        error: `llm interrupt not applicable for run_id "${runId}" (single bounded request).`,
         run_id: runId,
       };
     }

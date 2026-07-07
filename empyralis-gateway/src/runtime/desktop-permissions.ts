@@ -8,7 +8,9 @@ export type DesktopPermissionId =
   | "accessibility"
   | "clipboard"
   | "automation"
-  | "browser";
+  | "browser"
+  | "shell_sandbox"
+  | "llm_runtime";
 
 export type DesktopPermissionState =
   | "granted"
@@ -39,6 +41,8 @@ const PERMISSION_ENV_KEYS: Record<DesktopPermissionId, string> = {
   clipboard: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_CLIPBOARD",
   automation: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_AUTOMATION",
   browser: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_BROWSER",
+  shell_sandbox: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX",
+  llm_runtime: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_LLM_RUNTIME",
 };
 
 const DESKTOP_CAPABILITY_PERMISSIONS: Record<string, DesktopPermissionId> = {
@@ -62,7 +66,38 @@ const DESKTOP_CAPABILITY_PERMISSIONS: Record<string, DesktopPermissionId> = {
   "browser.session.takeover": "browser",
   "browser.session.resume": "browser",
   "browser.session.interrupt": "browser",
+  "shell.execute": "shell_sandbox",
+  "filesystem.read_write": "shell_sandbox",
+  // BYO-brain Phase 2: the on-box LLM capability is gated the same way
+  // shell_sandbox is gated on Docker — only "granted" when a local model
+  // runtime (Ollama) has actually been confirmed reachable.
+  "llm.generate": "llm_runtime",
 };
+
+// Docker readiness for the shell_sandbox permission. Unlike the other
+// permissions above (OS-level, read from env vars with a "granted by
+// default" fallback), shell_sandbox has NO default-granted fallback — it is
+// only ever "granted" when Docker has been actively confirmed ready.
+// Updated from health/service-inventory.ts right after it probes Docker, so
+// this reflects the same probe result the rest of capability-readiness
+// reporting uses (no separate probe, no extra race).
+let shellSandboxDockerReady = false;
+
+export function setShellSandboxDockerReady(ready: boolean): void {
+  shellSandboxDockerReady = ready;
+}
+
+// Ollama (local model runtime) readiness for the llm_runtime permission.
+// Same shape as shellSandboxDockerReady: NO "granted by default" fallback —
+// the on-box LLM capability is only "granted" when a local Ollama endpoint has
+// been actively confirmed reachable. Updated from health/service-inventory.ts
+// right after it probes Ollama, so it reflects the same probe result the rest
+// of capability-readiness reporting uses (no separate probe, no extra race).
+let llmRuntimeOllamaReady = false;
+
+export function setLlmRuntimeOllamaReady(ready: boolean): void {
+  llmRuntimeOllamaReady = ready;
+}
 
 function normalizePermissionState(value: unknown): DesktopPermissionState | null {
   const token = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
@@ -92,6 +127,16 @@ function defaultDesktopPermissionState(
   const configured = normalizePermissionState(env[PERMISSION_ENV_KEYS[permission]]);
   if (configured) {
     return configured;
+  }
+  if (permission === "shell_sandbox") {
+    // No "granted by default" fallback for this one — absence of a
+    // confirmed-ready Docker daemon means restricted, never granted.
+    return shellSandboxDockerReady ? "granted" : "restricted";
+  }
+  if (permission === "llm_runtime") {
+    // No "granted by default" fallback either — the on-box LLM capability is
+    // only granted when a local Ollama runtime is confirmed reachable.
+    return llmRuntimeOllamaReady ? "granted" : "restricted";
   }
   if (agentComputerSystemServiceModeEnabled(env) && !agentComputerUserSessionBridgeEnabled(env)) {
     return "restricted";

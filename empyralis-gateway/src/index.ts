@@ -23,6 +23,9 @@ import {
 } from "./channels/local-bridge-runtime";
 import { GatewayBrowserWorker } from "./browser/worker";
 import { GatewayBrowserRuntime } from "./browser/runtime";
+import { GatewayShellRuntime } from "./shell/runtime";
+import { GatewayLLMRuntime } from "./llm/runtime";
+import { collectPassiveInventorySnapshot } from "./health/service-inventory";
 
 const GATEWAY_VERSION = "0.1.0";
 
@@ -112,6 +115,11 @@ async function main(): Promise<void> {
   // ARCHIVED (Phase U1): supervisorClient instantiation removed.
   const browserWorker = new GatewayBrowserWorker(config);
   const browserRuntime = new GatewayBrowserRuntime(db, browserWorker);
+  const shellRuntime = new GatewayShellRuntime({
+    stateDir: config.stateDir,
+    fullAccessLocallyEnabled: config.shellFullAccessLocallyEnabled,
+    dockerImage: config.shellSandboxDockerImage,
+  });
   const personalChannelRuntimes = new PersonalChannelRuntimeRegistry(
     config.personalChannelsEnabled
       ? [
@@ -121,9 +129,26 @@ async function main(): Promise<void> {
         ]
       : [],
   );
+  // Docker readiness feeds the shell_sandbox permission (runtime/desktop-
+  // permissions.ts), which gates what capabilityRouter.supportedCapabilities()
+  // below advertises. requestedCapabilities is computed exactly once at
+  // startup and never recomputed for this process's lifetime (heartbeats
+  // only re-evaluate ready/blocked within that fixed list) — so this probe
+  // MUST be awaited here, before that one-time computation, or a Docker
+  // daemon that's genuinely available could still be wrongly excluded for
+  // the whole life of this process.
+  await collectPassiveInventorySnapshot({});
+  // BYO-brain Phase 2: on-box LLM runtime. Its llm.generate capability is only
+  // advertised when the llm_runtime permission reads granted — i.e. when the
+  // Ollama probe in collectPassiveInventorySnapshot() above confirmed a local
+  // endpoint is reachable (mirrors how shell_sandbox is gated on Docker).
+  const llmRuntime = new GatewayLLMRuntime();
   const capabilityRouter = new GatewayCapabilityRouter(
     browserRuntime,
     personalChannelRuntimes,
+    undefined,
+    shellRuntime,
+    llmRuntime,
   );
   const identity = await resolveDeviceIdentity(db, {
     gatewayId: config.gatewayId,

@@ -44,3 +44,26 @@ export const MODE_LABELS: Record<ProviderMode, string> = {
   cli_subscription: "Your subscription",
   local: "Run locally",
 };
+
+/** BYO-brain: cli_subscription still needs the on-box CLI runner (Phase 3),
+ *  so it stays "coming soon" — persisting it resolves to a guaranteed "not yet
+ *  available" turn error. `local` (Ollama on the paired box) shipped in Phase 2
+ *  and is now savable, so it is NO LONGER in this set. */
+export const COMING_SOON_MODES: ReadonlySet<ProviderMode> = new Set<ProviderMode>([
+  "cli_subscription",
+]);
+
+export const COMING_SOON_NOTE = "Coming soon — requires a paired box";
+
+/** Maps a subscription/local provider id to the runtime engine the Gateway
+ *  will spawn (model_config.runtime). Forward-wired for Phase 0; matches
+ *  fleet_tools.py _VALID_MODEL_RUNTIMES. */
+export const RUNTIME_FOR_PROVIDER: Record<string, string> = {
+  claude_code_cli: "claude_code",
+  "openai-codex": "codex",
+  ollama: "ollama",
+};
+
+export function runtimeForProvider(providerId: string): string {
+  return RUNTIME_FOR_PROVIDER[providerId] || "";
+}

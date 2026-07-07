@@ -18,6 +18,14 @@ export interface GatewayConfig {
   displayName?: string;
   browserPythonExecutable: string;
   browserProjectRoot: string;
+  /**
+   * The box operator's half of the shell_sandbox full_access opt-in (see
+   * shell/runtime.ts's GatewayShellRuntimeConfig doc comment for the other,
+   * server-asserted half). Defaults to false — sandbox mode is the floor;
+   * full_access must be deliberately turned on for this specific box.
+   */
+  shellFullAccessLocallyEnabled: boolean;
+  shellSandboxDockerImage?: string;
 }
 
 function normalizeBaseUrl(value: string | undefined, fallback: string): string {
@@ -140,5 +148,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
       env.EMPYRALIS_GATEWAY_BROWSER_PYTHON,
     ),
     browserProjectRoot,
+    shellFullAccessLocallyEnabled: normalizeBoolean(env.EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED, false),
+    shellSandboxDockerImage: String(env.EMPYRALIS_GATEWAY_SHELL_SANDBOX_IMAGE || "").trim() || undefined,
   };
 }

@@ -140,6 +140,44 @@ def _hardware_presentation(metadata: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _llm_runtime_summary(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Distill the box's detected AI runtimes (Ollama + Claude/Codex CLIs) from
+    the persisted heartbeat inventory, so the agent-creation box-picker can show
+    per-box readiness instead of making users pick blind (BYO-brain Phase 1).
+    Best effort: absent data yields unknown/false, never an error. Only
+    presence + auth STATUS is surfaced — never any credential content."""
+    inventory = metadata.get("service_inventory")
+    items = inventory if isinstance(inventory, list) else []
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        if isinstance(item, dict) and str(item.get("id") or "").strip():
+            by_id[str(item["id"]).strip()] = item
+
+    def _runtime(entry_id: str) -> Dict[str, Any]:
+        entry = by_id.get(entry_id) or {}
+        meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        status = str(entry.get("status") or "unknown").strip().lower()
+        return {
+            "detected": bool(entry.get("detected")),
+            "status": status,
+            "installed": bool(meta.get("installed")) if "installed" in meta else (status in {"ready", "degraded"}),
+            "authenticated": bool(meta.get("authenticated")),
+        }
+
+    readiness = metadata.get("capability_readiness")
+    ready_ids: set[str] = set()
+    if isinstance(readiness, dict) and isinstance(readiness.get("ready"), list):
+        ready_ids = {str(x).strip().lower() for x in readiness["ready"]}
+    ollama = _runtime("ollama")
+    local_model_ready = ("llm.generate" in ready_ids) or (ollama.get("status") == "ready")
+    return {
+        "ollama": ollama,
+        "claude_code": _runtime("claude_cli"),
+        "codex": _runtime("codex_cli"),
+        "local_model_ready": bool(local_model_ready),
+    }
+
+
 def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
     metadata = dict(registration.get("metadata") or {})
     runtime_access_mode = execution_mode_policy.normalize_runtime_access_mode(
@@ -165,6 +203,7 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
             metadata.get("autonomous_agent_setup_warning_acknowledged")
         ),
         "capabilities": list(registration.get("capabilities") or []),
+        "llm_runtimes": _llm_runtime_summary(metadata),
         "journal_cursor": int(registration.get("journal_cursor") or 0),
         "checkpoint_cursor": int(registration.get("checkpoint_cursor") or 0),
         "created_at": registration.get("created_at"),

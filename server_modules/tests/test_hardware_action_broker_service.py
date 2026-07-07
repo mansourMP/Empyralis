@@ -1739,6 +1739,104 @@ class HardwareActionBrokerServiceTests(unittest.IsolatedAsyncioTestCase):
         emit_result.assert_awaited()
         self.assertEqual(emit_result.await_args.kwargs["status"], "running")
 
+    async def _run_gateway_filesystem_write(self, *, file_mount_grants):
+        """Drives execute_hardware_action for a filesystem.write to
+        project/notes.txt with the given file_mount_grants, through the REAL
+        (unmocked) gateway_adapter.execute_gateway_action code — including its
+        real _resolve_file_mount_for_gateway_action call. Only
+        gateway_execution_service.execute_tool_via_gateway is mocked (matching
+        this file's own established convention, e.g. the
+        test_gateway_connected_action_... test above), so mount resolution
+        and its allow/deny outcome are exercised for real, while the deeper
+        WSS/quota/kernel plumbing inside execute_tool_via_gateway itself is
+        not (that plumbing is unrelated to file-mount grants and already has
+        its own test coverage elsewhere in this file)."""
+        create_patch, extend_patch, started_patch, result_patch, artifact_patch, approval_patch = self._session_patches()
+        execute_mock = AsyncMock(
+            return_value={
+                "gateway_id": "gw-1",
+                "device_id": "device-1",
+                "workspace_id": "ws-1",
+                "request_id": "req-1",
+                "capability_id": "filesystem.read_write",
+                "run_id": "run-1",
+                "result": {"summary": "Wrote file.", "path": "project/notes.txt", "mode": "write"},
+            }
+        )
+        with (
+            create_patch,
+            extend_patch,
+            started_patch,
+            result_patch,
+            artifact_patch,
+            approval_patch,
+            patch(
+                "server_modules.hardware_action_broker_service.gateway_state_repository.get_gateway_registration",
+                return_value=_registration(),
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.gateway_protocol_service.gateway_connection_is_live",
+                return_value=True,
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.gateway_approval_service.capability_requires_owner_approval",
+                return_value=False,
+            ),
+            patch(
+                "server_modules.hardware_action_broker_service.gateway_execution_service.execute_tool_via_gateway",
+                execute_mock,
+            ),
+        ):
+            payload = await broker.execute_hardware_action(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                action_id="filesystem.write",
+                capability_id="filesystem.write",
+                arguments={"path": "project/notes.txt", "content": "hi"},
+                runtime_target="user_device_gateway",
+                gateway_id="gw-1",
+                run_id="run-1",
+                trace_id="trace-1",
+                request_id="req-1",
+                session_id="hrs-gateway",
+                trace_context=_trace(),
+                require_approval=False,
+                file_mount_grants=file_mount_grants,
+            )
+        return payload, execute_mock
+
+    async def test_file_mount_grants_default_denies_write_to_project_mount(self) -> None:
+        # No per-agent grants threaded at all — resolves against
+        # file_mount_security.py's built-in defaults, where "project" is
+        # read-only. This is the "old default" behavior being compared against.
+        payload, execute_mock = await self._run_gateway_filesystem_write(file_mount_grants=None)
+        self.assertEqual(payload["status"], "failed")
+        execute_mock.assert_not_awaited()
+
+    async def test_file_mount_grants_explicit_read_only_still_denies_write(self) -> None:
+        # A real, explicitly-threaded grant of "read" for this agent on the
+        # project mount — distinct from the generic default (this IS the
+        # agent's actual configured grant, not a fallback) — still correctly
+        # denies write.
+        payload, execute_mock = await self._run_gateway_filesystem_write(
+            file_mount_grants=[{"mount": "project", "grant": "read"}]
+        )
+        self.assertEqual(payload["status"], "failed")
+        execute_mock.assert_not_awaited()
+
+    async def test_file_mount_grants_real_per_agent_read_write_grant_allows_write(self) -> None:
+        # This agent's real configured grant is read_write on project —
+        # distinct from the generic default above, and the outcome changes
+        # accordingly: the write is allowed and dispatched.
+        payload, execute_mock = await self._run_gateway_filesystem_write(
+            file_mount_grants=[{"mount": "project", "grant": "read_write"}]
+        )
+        self.assertEqual(payload["status"], "completed")
+        execute_mock.assert_awaited_once()
+        dispatched_arguments = execute_mock.await_args.kwargs["arguments"]
+        self.assertEqual(dispatched_arguments["mount"], "project")
+        self.assertEqual(dispatched_arguments["path"], "project/notes.txt")
+
 
 if __name__ == "__main__":
     unittest.main()

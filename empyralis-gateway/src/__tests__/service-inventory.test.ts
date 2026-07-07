@@ -39,7 +39,13 @@ test("passive service inventory detects services without enabling execution", as
     assert.equal(item.execution_enabled, false);
   }
   assert.deepEqual(snapshot.capability_readiness.requested, ["shell.execute", "screenshot.capture"]);
-  assert.deepEqual(snapshot.capability_readiness.ready, ["shell.execute", "screenshot.capture"]);
+  // shell.execute is gated on the shell_sandbox permission, which is only
+  // granted when Docker reads ready — this mock reports Docker offline, so
+  // shell.execute is correctly blocked here; screenshot.capture is unrelated
+  // (screen_recording permission) and stays ready.
+  assert.deepEqual(snapshot.capability_readiness.ready, ["screenshot.capture"]);
+  assert.deepEqual(snapshot.capability_readiness.blocked, ["shell.execute"]);
+  assert.equal(snapshot.capability_readiness.permission_states["shell.execute"].state, "restricted");
   assert.equal(snapshot.capability_readiness.service_statuses.postgres, "ready");
 });
 
@@ -72,8 +78,13 @@ test("fast passive inventory snapshot avoids service probes for heartbeat livene
 });
 
 test("local runner readiness blocks supervisor-backed capabilities", () => {
+  // screenshot.capture and computer_control.click still depend on the old
+  // local-runner/supervisor path (desktop control remains out of scope).
+  // shell.execute does NOT anymore — it has its own independent,
+  // Docker-gated executor now (see the shell_sandbox tests below) — so it's
+  // deliberately not used as the example capability in this test.
   const snapshot = buildFastPassiveInventorySnapshot({
-    requestedCapabilities: ["shell.execute", "screenshot.capture"],
+    requestedCapabilities: ["computer_control.click", "screenshot.capture"],
     localRunnerReady: false,
     deps: {
       platform: "linux",
@@ -85,6 +96,29 @@ test("local runner readiness blocks supervisor-backed capabilities", () => {
   });
 
   assert.deepEqual(snapshot.capability_readiness.ready, []);
-  assert.deepEqual(snapshot.capability_readiness.blocked, ["shell.execute", "screenshot.capture"]);
+  assert.deepEqual(snapshot.capability_readiness.blocked, ["computer_control.click", "screenshot.capture"]);
   assert.equal(snapshot.capability_readiness.service_statuses.local_runner, "offline");
+});
+
+test("shell_sandbox capabilities are no longer forced-blocked by local runner health", () => {
+  // Confirms the collision fix directly: shell.execute must NOT be blocked
+  // just because localRunnerReady is false (checkLocalRunnerHealth() in
+  // ws-client.ts hardcodes false always) — its readiness now comes from the
+  // shell_sandbox permission (Docker), which this test grants explicitly via
+  // the env override, independent of local-runner health entirely.
+  const snapshot = buildFastPassiveInventorySnapshot({
+    requestedCapabilities: ["shell.execute", "screenshot.capture"],
+    localRunnerReady: false,
+    deps: {
+      platform: "linux",
+      arch: "x64",
+      release: "6.0-test",
+      hostname: "agent-box",
+      now: () => new Date("2026-05-29T00:00:00Z"),
+      env: { EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX: "granted" },
+    },
+  });
+
+  assert.ok(snapshot.capability_readiness.ready.includes("shell.execute"));
+  assert.equal(snapshot.capability_readiness.blocked.includes("shell.execute"), false);
 });

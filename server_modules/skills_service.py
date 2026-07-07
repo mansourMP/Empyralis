@@ -2622,6 +2622,7 @@ def _execute_hardware_action_tool_call(
             request_id=request_id,
             trace_context=trace_context,
             require_approval=False,
+            file_mount_grants=metadata.get("file_mount_grants") if isinstance(metadata.get("file_mount_grants"), list) else None,
         )
     )
     return _format_hardware_action_result(dict(result) if isinstance(result, dict) else {"status": "completed", "execution": {"result": result}})
@@ -2763,6 +2764,7 @@ async def _execute_hardware_action_tool_call_async(
         request_id=request_id,
         trace_context=trace_context,
         require_approval=False,
+        file_mount_grants=metadata.get("file_mount_grants") if isinstance(metadata.get("file_mount_grants"), list) else None,
     )
     return _format_hardware_action_result(dict(result) if isinstance(result, dict) else {"status": "completed", "execution": {"result": result}})
 

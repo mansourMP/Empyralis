@@ -41,11 +41,9 @@ test("gateway production config accepts cloud HTTPS API URL", () => {
     HOME: "/tmp/empyralis-gateway-test",
     EMPYRALIS_DEPLOY_ENV: "production",
     EMPYRALIS_GATEWAY_API_URL: "https://runtime.example.com/api",
-    EMPYRALIS_SUPERVISOR_URL: "https://supervisor.example.com",
   });
 
   assert.equal(config.apiBaseUrl, "https://runtime.example.com/api");
-  assert.equal(config.supervisorUrl, "https://supervisor.example.com");
 });
 
 test("gateway production websocket URL rejects localhost", () => {
