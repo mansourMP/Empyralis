@@ -678,7 +678,7 @@ def build_direct_chat_tool_runtime_bindings(
     ):
         callbacks = direct_tool_execution_callbacks()
         connector_id, action_id = callbacks.parse_tool_name(str(tool_call.get("name") or ""))
-        if connector_id not in {"", "http", "llm", "file", "shell", "screenshot", "computer", "hardware", "memory", "web", "browser", "image", "sage_service"}:
+        if connector_id not in {"", "http", "llm", "file", "shell", "screenshot", "computer", "hardware", "memory", "web", "browser", "image", "sage_service", "fleet"}:
             from server_modules import runs_execution
 
             argument_payload = callbacks.tool_arguments_payload(tool_call.get("arguments"))

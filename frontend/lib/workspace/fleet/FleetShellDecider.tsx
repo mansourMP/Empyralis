@@ -20,6 +20,13 @@ const SHELL_SEGMENTS = new Set([
   "billing",
   "settings",
   "fleet",
+  // "sage" itself no longer has real shell content (the page is just a
+  // redirect() stub to /agents), but it still has to be a recognized segment
+  // here — otherwise this decider swaps in `shellSlot` (null) instead of
+  // `children`, and the page's own redirect never gets to render/fire at all,
+  // leaving the user stuck on a blank /sage with no navigation. Removing this
+  // was the actual bug behind that, not the redirect logic itself.
+  "sage",
 ]);
 
 export function FleetShellDecider({

@@ -1516,6 +1516,30 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
     # Tier 1: always-on tools (8 core tools) injected every turn.
     # Tier 2: registry — everything else, loaded on demand via query_tool_registry.
     tools: list[dict[str, Any]] = list(direct_chat_tool_catalog_service.build_always_on_direct_chat_tools())
+    if specialist_toolset is None:
+        # Fleet-management tools are operator-only and must always be visible
+        # to Sage's own turn — they were registered in
+        # skills_service._builtin_tool_descriptors() (connector_id="fleet")
+        # but that only makes them reachable via the Tier-2 lazy
+        # query_tool_registry path, which the model has no strong reason to
+        # call for a plain instruction like "create a new agent named X". A
+        # specialist must never see these at all (that's enforced by simply
+        # not adding them here when specialist_toolset is not None — the
+        # runtime-side operator-role check in execute_single_direct_tool_call
+        # is a second, independent gate, not the only one).
+        _seen_names = {t.get("name") for t in tools}
+        for _descriptor in _sage_skills_service._builtin_tool_descriptors():
+            if _descriptor.connector_id != "fleet" or _descriptor.tool_name in _seen_names:
+                continue
+            _payload = _sage_skills_service._tool_payload_from_descriptor(_descriptor)
+            _params = _payload.get("parameters") if isinstance(_payload.get("parameters"), dict) else {}
+            _tool_def: dict[str, Any] = {"name": _payload["name"], "description": _payload["description"]}
+            if _params:
+                _tool_def["parameters"] = _params
+            if _payload.get("connector_id"):
+                _tool_def["connector_id"] = _payload["connector_id"]
+            tools.append(_tool_def)
+            _seen_names.add(_descriptor.tool_name)
     _registry = direct_chat_tool_catalog_service.build_registry_entries(tool_capabilities, availability)
     # Phase 4B: a specialist only discovers the connectors/tools it is bound to.
     # Core tools (the `tools` list above) are untouched. None → master/Sage,
