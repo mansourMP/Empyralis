@@ -25,10 +25,10 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
     if (!pid) return;
     router.push(`${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(agentId)}/${tab}`);
   };
-  // Sage is workspace-level, not project-nested — its detail view routes
-  // through /sage/{tab} rather than the per-project agent route above.
-  const goToSage = (tab = "overview") => router.push(`${base}/sage/${tab}`);
-  const openChat = () => goToSage("chat");
+  // Sage is now a corner console (SageLauncher), not a routed page.
+  // Dispatch an event that FleetShell listens for to open the console.
+  const openSageConsole = () =>
+    window.dispatchEvent(new CustomEvent("fleet:open-sage"));
 
   // ── Loading ──
   if (loading && agents.length === 0) {
@@ -76,12 +76,12 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 
         {/* Sage operator row */}
         {sageAgent && (
-          <SageRow onChat={openChat} onSelect={() => goToSage("overview")} />
+          <SageRow onChat={openSageConsole} onSelect={openSageConsole} />
         )}
 
         {/* Grid or empty */}
         {mapped.length === 0 ? (
-          <EmptyFleet onChat={openChat} />
+          <EmptyFleet onChat={openSageConsole} />
         ) : (
           <div className="fleet-grid">
             {otherAgents.map((a) => (
@@ -89,7 +89,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
                 key={a.id}
                 agent={a}
                 onSelect={(id) => goToAgentTab(id, "overview")}
-                onChat={openChat}
+                onChat={openSageConsole}
               />
             ))}
           </div>
@@ -147,7 +147,7 @@ function SageRow({
           <span className="fleet-sage-badge">Operator</span>
         </div>
         <div className="fleet-sage-desc">
-          Ask me to create or configure any agent for you.
+          Your operator — ask me anything about your workspace.
         </div>
       </div>
       <button

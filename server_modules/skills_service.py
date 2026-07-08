@@ -346,27 +346,21 @@ def _action_class_for_tool(connector_id: str, action_id: str) -> str:
         "capture",
         "fetch",
         "get",
-        "get_page_state",
         "list",
         "list_state",
-        "observe",
         "ocr",
         "read",
-        "screenshot",
         "search",
-        "switch_tab",
         "extract_text",
+        "extract_dom",
     }
     write_actions = {
         "append",
         "click",
         "create",
         "create_entry",
-        "download_file",
-        "fill",
         "generate",
         "move",
-        "new_tab",
         "post",
         "send",
         "speak",
@@ -376,7 +370,7 @@ def _action_class_for_tool(connector_id: str, action_id: str) -> str:
         "upload",
         "write",
     }
-    execute_actions = {"applescript", "exec", "execute", "execute_js", "hotkey", "key", "pdf", "request"}
+    execute_actions = {"applescript", "exec", "execute", "hotkey", "key", "request"}
     if action in execute_actions or connector == "shell":
         return "execute"
     if action in write_actions:
@@ -1104,126 +1098,27 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             label="Browser navigate",
             connector_id="browser",
             action_id="navigate",
-            description="Open a URL in the backend browser engine.",
+            description="Render a URL in a headless browser (for JS-rendered pages curl can't read). Follow with browser__extract_text or browser__extract_dom to read its content.",
             capability_id="browser_automation.interactive",
             parameters={"type": "object", "properties": {"url": {"type": "string", "description": "The URL to open."}}, "required": ["url"]},
-        ),
-        ToolDescriptor(
-            tool_name="browser__screenshot",
-            label="Browser screenshot",
-            connector_id="browser",
-            action_id="screenshot",
-            description="Capture a screenshot from the backend browser engine.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"selector": {"type": "string", "description": "Optional CSS/XPath/text selector."}}},
-        ),
-        ToolDescriptor(
-            tool_name="browser__observe",
-            label="Browser observe",
-            connector_id="browser",
-            action_id="observe",
-            description="Return the current browser page state plus a screenshot for vision-style reasoning.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {}},
-        ),
-        ToolDescriptor(
-            tool_name="browser__click",
-            label="Browser click",
-            connector_id="browser",
-            action_id="click",
-            description="Click an element in the backend browser engine.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"selector": {"type": "string", "description": "CSS, XPath, or visible text selector."}}, "required": ["selector"]},
-        ),
-        ToolDescriptor(
-            tool_name="browser__fill",
-            label="Browser fill",
-            connector_id="browser",
-            action_id="fill",
-            description="Fill an input in the backend browser engine.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"selector": {"type": "string"}, "value": {"type": "string"}}, "required": ["selector", "value"]},
         ),
         ToolDescriptor(
             tool_name="browser__extract_text",
             label="Browser extract text",
             connector_id="browser",
             action_id="extract_text",
-            description="Extract readable text from the current page or a selected element.",
+            description="Extract readable text from the current rendered page or a selected element.",
             capability_id="browser_automation.interactive",
             parameters={"type": "object", "properties": {"selector": {"type": "string"}}},
         ),
         ToolDescriptor(
-            tool_name="browser__get_page_state",
-            label="Browser get page state",
+            tool_name="browser__extract_dom",
+            label="Browser extract DOM",
             connector_id="browser",
-            action_id="get_page_state",
-            description="Return the current page title, URL, text preview, and interactive elements.",
+            action_id="extract_dom",
+            description="Extract the rendered HTML of the current page or a selected element.",
             capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {}},
-        ),
-        ToolDescriptor(
-            tool_name="browser__execute_js",
-            label="Browser execute js",
-            connector_id="browser",
-            action_id="execute_js",
-            description="Execute JavaScript in the active browser tab.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]},
-        ),
-        ToolDescriptor(
-            tool_name="browser__new_tab",
-            label="Browser new tab",
-            connector_id="browser",
-            action_id="new_tab",
-            description="Open a new browser tab.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"url": {"type": "string"}}},
-        ),
-        ToolDescriptor(
-            tool_name="browser__switch_tab",
-            label="Browser switch tab",
-            connector_id="browser",
-            action_id="switch_tab",
-            description="Switch to another browser tab.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"tab_id": {"type": "integer"}}, "required": ["tab_id"]},
-        ),
-        ToolDescriptor(
-            tool_name="browser__download_file",
-            label="Browser download file",
-            connector_id="browser",
-            action_id="download_file",
-            description="Download a file through the backend browser engine.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"url": {"type": "string"}, "save_path": {"type": "string"}}, "required": ["url"]},
-        ),
-        ToolDescriptor(
-            tool_name="browser__start_intercept",
-            label="Browser start intercept",
-            connector_id="browser",
-            action_id="start_intercept",
-            description="Start capturing browser network responses matching a URL pattern.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"url_pattern": {"type": "string"}}},
-        ),
-        ToolDescriptor(
-            tool_name="browser__stop_intercept",
-            label="Browser stop intercept",
-            connector_id="browser",
-            action_id="stop_intercept",
-            description="Stop browser network interception and return the captured responses.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {}},
-        ),
-        ToolDescriptor(
-            tool_name="browser__pdf",
-            label="Browser pdf",
-            connector_id="browser",
-            action_id="pdf",
-            description="Print the current browser page to PDF.",
-            capability_id="browser_automation.interactive",
-            parameters={"type": "object", "properties": {"output_path": {"type": "string"}}},
+            parameters={"type": "object", "properties": {"selector": {"type": "string"}}},
         ),
         ToolDescriptor(
             tool_name="send_image",
@@ -1280,6 +1175,139 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["task_description"],
             },
+        ),
+        # ── Fleet management tools (operator-only) ──────────────────────────
+        ToolDescriptor(
+            tool_name="fleet__create_agent",
+            label="Create Agent",
+            connector_id="fleet",
+            action_id="create_agent",
+            description=(
+                "Create a new specialist agent in the workspace. "
+                "Requires operator role. The new agent starts with the "
+                "fleet-specialist definition and the given name, instructions, "
+                "purpose preset, and capability preset."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Display name for the new agent (e.g. 'Support Bot')."},
+                    "instructions": {"type": "string", "description": "Optional system instructions / persona for the agent."},
+                    "purpose_preset": {
+                        "type": "string",
+                        "enum": ["customer_facing", "internal_assistant"],
+                        "description": "What kind of work this agent is for (default: internal_assistant).",
+                    },
+                    "capability_preset": {
+                        "type": "string",
+                        "enum": ["knowledge", "standard"],
+                        "description": "Capability tier: 'knowledge' for read-only research, 'standard' for full tools (default: standard).",
+                    },
+                },
+                "required": ["name"],
+            },
+            risk_level="high",
+            requires_approval=False,
+            audience_safe=False,
+            audience_note="Operator-only: creates a new fleet agent. Owner/operator access.",
+        ),
+        ToolDescriptor(
+            tool_name="fleet__list_agents",
+            label="List Agents",
+            connector_id="fleet",
+            action_id="list_agents",
+            description="List all agents in the workspace with their roles, status, and project assignments.",
+            parameters={
+                "type": "object",
+                "properties": {},
+            },
+            risk_level="low",
+            audience_safe=False,
+            audience_note="Operator-only: reads fleet agent list. Owner/operator access.",
+        ),
+        ToolDescriptor(
+            tool_name="fleet__get_agent_activity",
+            label="Agent Activity",
+            connector_id="fleet",
+            action_id="get_agent_activity",
+            description="Read recent ledger activity events for a specific agent.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "The agent install id to query activity for."},
+                },
+                "required": ["agent_id"],
+            },
+            risk_level="low",
+            audience_safe=False,
+            audience_note="Operator-only: reads agent activity log. Owner/operator access.",
+        ),
+        ToolDescriptor(
+            tool_name="fleet__get_project_activity",
+            label="Project Activity",
+            connector_id="fleet",
+            action_id="get_project_activity",
+            description="Read recent ledger activity events for a specific project.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "The project id to query activity for."},
+                },
+                "required": ["project_id"],
+            },
+            risk_level="low",
+            audience_safe=False,
+            audience_note="Operator-only: reads project activity log. Owner/operator access.",
+        ),
+        ToolDescriptor(
+            tool_name="fleet__configure_agent",
+            label="Configure Agent",
+            connector_id="fleet",
+            action_id="configure_agent",
+            description=(
+                "Update an agent's configuration: enabled tools, connectors, "
+                "channel bindings, hardware access, subagents toggle, model config, "
+                "or instructions. Requires operator role."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "The agent install id to configure."},
+                    "patch": {
+                        "type": "object",
+                        "description": (
+                            "Fields to update. Supported keys: enabled_tools (list of tool ids), "
+                            "connectors (list of connector ids), channel_bindings (object), "
+                            "subagents_enabled (bool), hardware_access (none|gateway|vps|all), "
+                            "instructions (string), model_config (object with mode/provider/model), "
+                            "tool_toggles (object of {tool_id: bool})."
+                        ),
+                    },
+                },
+                "required": ["agent_id", "patch"],
+            },
+            risk_level="high",
+            requires_approval=False,
+            audience_safe=False,
+            audience_note="Operator-only: reconfigures a fleet agent. Owner/operator access.",
+        ),
+        ToolDescriptor(
+            tool_name="fleet__message_agent",
+            label="Message Agent",
+            connector_id="fleet",
+            action_id="message_agent",
+            description="Enqueue a message for another agent to process on its next turn.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "The target agent install id."},
+                    "message": {"type": "string", "description": "The message to enqueue for this agent."},
+                },
+                "required": ["agent_id", "message"],
+            },
+            risk_level="moderate",
+            audience_safe=False,
+            audience_note="Operator-only: messages another agent. Owner/operator access.",
         ),
     ]
 
@@ -3601,41 +3629,10 @@ def execute_single_direct_tool_call(
         browser = _resolve_direct_tool_browser_adapter(session_ctx)
         if action_id == "navigate":
             return json.dumps(browser.run_sync("navigate", argument_payload.get("url") or ""), ensure_ascii=False)
-        if action_id == "screenshot":
-            return str(browser.run_sync("screenshot", argument_payload.get("selector")))
-        if action_id == "observe":
-            return json.dumps(browser.run_sync("observe"), ensure_ascii=False)
-        if action_id == "click":
-            return json.dumps(browser.run_sync("click", argument_payload.get("selector") or ""), ensure_ascii=False)
-        if action_id == "fill":
-            return json.dumps(
-                browser.run_sync(
-                    "fill",
-                    argument_payload.get("selector") or "",
-                    argument_payload.get("value") or "",
-                ),
-                ensure_ascii=False,
-            )
         if action_id == "extract_text":
             return str(browser.run_sync("extract_text", argument_payload.get("selector")))
-        if action_id == "get_page_state":
-            return json.dumps(browser.run_sync("get_page_state"), ensure_ascii=False)
-        if action_id == "execute_js":
-            return json.dumps(browser.run_sync("execute_js", argument_payload.get("script") or ""), ensure_ascii=False)
-        if action_id == "new_tab":
-            return str(browser.run_sync("new_tab", argument_payload.get("url")))
-        if action_id == "switch_tab":
-            browser.run_sync("switch_tab", argument_payload.get("tab_id") or 0)
-            return "Switched browser tab."
-        if action_id == "download_file":
-            return str(browser.run_sync("download_file", argument_payload.get("url") or "", argument_payload.get("save_path")))
-        if action_id == "start_intercept":
-            browser.run_sync("start_intercept", argument_payload.get("url_pattern") or "*")
-            return "Browser interception started."
-        if action_id == "stop_intercept":
-            return json.dumps(browser.run_sync("stop_intercept"), ensure_ascii=False)
-        if action_id == "pdf":
-            return str(browser.run_sync("save_pdf", argument_payload.get("output_path")))
+        if action_id == "extract_dom":
+            return str(browser.run_sync("extract_dom", argument_payload.get("selector")))
         raise RuntimeError(f"Unsupported browser direct tool '{action_id}'.")
     if connector_id == "web" and action_id == "search":
         query = str(argument_payload.get("query") or argument_payload.get("input") or "").strip()
@@ -4021,4 +4018,133 @@ def execute_single_direct_tool_call(
             session_ctx=session_ctx,
             callbacks=callbacks,
         )
+    # ── Fleet management tools (operator-only) ──────────────────────────
+    if connector_id == "fleet":
+        from server_modules.fleet_tools import (
+            fleet_create_agent,
+            fleet_list_agents,
+            fleet_get_agent_activity,
+            fleet_get_project_activity,
+            fleet_configure_agent,
+            fleet_message_agent,
+            resolve_agent_role,
+            OPERATOR_ROLE,
+        )
+
+        # Resolve the calling agent and enforce operator role.
+        actor_install_id = str(
+            session_metadata.get("agent_install_id")
+            or session_metadata.get("active_agent_install_id")
+            or session_metadata.get("agent_id")
+            or ""
+        ).strip()
+        actor_id = actor_install_id or str(session_metadata.get("user_id") or "sage").strip() or "sage"
+
+        if actor_install_id:
+            try:
+                from server_modules import agent_registry_repository as _reg
+                install = callbacks.run_async_tool_call(
+                    _reg.get_workspace_agent_install_bundle(
+                        actor_install_id, tenant_id=tenant_id, workspace_id=workspace_id
+                    )
+                )
+            except Exception:
+                install = None
+
+            role = resolve_agent_role(install) if install else "specialist"
+            if role != OPERATOR_ROLE:
+                return json.dumps({
+                    "ok": False,
+                    "error": (
+                        f"Fleet tool '{action_id}' requires operator role. "
+                        f"Current role: {role}. Only the workspace operator (Sage) can manage the fleet."
+                    ),
+                }, ensure_ascii=False)
+
+        if action_id == "create_agent":
+            result = callbacks.run_async_tool_call(
+                fleet_create_agent(
+                    actor_id=actor_id,
+                    workspace_id=workspace_id,
+                    tenant_id=tenant_id,
+                    name=str(argument_payload.get("name") or "").strip(),
+                    instructions=str(argument_payload.get("instructions") or "").strip(),
+                    purpose_preset=str(argument_payload.get("purpose_preset") or "").strip(),
+                    capability_preset=str(argument_payload.get("capability_preset") or "standard").strip(),
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "list_agents":
+            result = callbacks.run_async_tool_call(
+                fleet_list_agents(
+                    actor_id=actor_id,
+                    workspace_id=workspace_id,
+                    tenant_id=tenant_id,
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "get_agent_activity":
+            agent_id = str(argument_payload.get("agent_id") or "").strip()
+            if not agent_id:
+                raise RuntimeError("Tool 'fleet__get_agent_activity' requires agent_id.")
+            result = callbacks.run_async_tool_call(
+                fleet_get_agent_activity(
+                    actor_id=actor_id,
+                    workspace_id=workspace_id,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "get_project_activity":
+            project_id = str(argument_payload.get("project_id") or "").strip()
+            if not project_id:
+                raise RuntimeError("Tool 'fleet__get_project_activity' requires project_id.")
+            result = callbacks.run_async_tool_call(
+                fleet_get_project_activity(
+                    actor_id=actor_id,
+                    workspace_id=workspace_id,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "configure_agent":
+            agent_id = str(argument_payload.get("agent_id") or "").strip()
+            patch = argument_payload.get("patch")
+            if not agent_id or not isinstance(patch, dict):
+                raise RuntimeError("Tool 'fleet__configure_agent' requires agent_id and patch (object).")
+            result = callbacks.run_async_tool_call(
+                fleet_configure_agent(
+                    actor_id=actor_id,
+                    workspace_id=workspace_id,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    patch=patch,
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "message_agent":
+            agent_id = str(argument_payload.get("agent_id") or "").strip()
+            message = str(argument_payload.get("message") or "").strip()
+            if not agent_id or not message:
+                raise RuntimeError("Tool 'fleet__message_agent' requires agent_id and message.")
+            result = callbacks.run_async_tool_call(
+                fleet_message_agent(
+                    actor_id=actor_id,
+                    workspace_id=workspace_id,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    message=message,
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        raise RuntimeError(f"Unknown fleet action '{action_id}'.")
+
     _raise_direct_chat_tool_execution_blocked()

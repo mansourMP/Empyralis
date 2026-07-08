@@ -205,11 +205,18 @@ sage_activity    | user_message_received | transparency:d19c553f-...          | 
 
 ## Fleet tools (operator-only)
 
-1. `fleet_create_agent` — Create a new specialist agent from fleet-specialist definition
-2. `fleet_list_agents` — List all agents in workspace
-3. `fleet_get_agent_activity` — Query agent's ledger events
-4. `fleet_configure_agent` — Patch agent metadata (role, model_config, etc.)
-5. `fleet_message_agent` — Enqueue message to agent's fleet_inbox
+Live end-to-end from Sage's chat via direct tool calling. Each tool has a
+`fleet__{action}` ToolDescriptor in the builtin catalog, dispatch in
+`skills_service.execute_single_direct_tool_call`, and a SkillDefinition executor
+in `skill_registry`. Role-gated: only the operator (Sage) can invoke them;
+specialist calls are denied and escalated.
+
+1. `fleet__create_agent` — Create a new specialist agent from fleet-specialist definition
+2. `fleet__list_agents` — List all agents in workspace
+3. `fleet__get_agent_activity` — Query agent's ledger events
+4. `fleet__get_project_activity` — Query project's ledger events
+5. `fleet__configure_agent` — Patch agent metadata (role, model_config, etc.)
+6. `fleet__message_agent` — Enqueue message to agent's fleet_inbox
 
 ## Gateway ledger (Phase K)
 

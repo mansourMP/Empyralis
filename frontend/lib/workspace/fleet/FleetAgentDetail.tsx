@@ -39,7 +39,6 @@ import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "./Fl
 import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
-import { GatewayPairPanel } from "../../gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
 type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "chat";
@@ -596,8 +595,6 @@ const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
   { label: "Slack", id: "slack" },
   { label: "Discord", id: "discord_bot" },
   { label: "WhatsApp", id: "whatsapp_personal" },
-  { label: "Signal", id: "signal_personal" },
-  { label: "iMessage", id: "imessage_personal" },
   { label: "WeChat", id: "wechat_personal" },
 ];
 
@@ -610,7 +607,6 @@ type ChannelDoor = { key: string; label: string; body: string; real: boolean };
 const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   sage_telegram_hosted: [
     { key: "byo_bot", label: "Bot token", body: "Bring your own bot — paste the token BotFather gave you.", real: true },
-    { key: "personal", label: "Personal", body: "Your own Telegram account, via the Gateway. The agent acts as you.", real: true },
   ],
   slack: [
     { key: "oauth", label: "OAuth workspace", body: "Connect a Slack workspace — signed mentions and DMs route to Sage.", real: true },
@@ -620,13 +616,6 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   ],
   whatsapp_personal: [
     { key: "business", label: "Business (Twilio)", body: "Meta blocks third-party AI assistants on the WhatsApp Business API — not available yet.", real: false },
-    { key: "personal", label: "Personal", body: "Your own WhatsApp account, via the Gateway. The agent acts as you.", real: true },
-  ],
-  signal_personal: [
-    { key: "personal", label: "Personal", body: "Your own Signal account, via the Gateway. The agent acts as you.", real: true },
-  ],
-  imessage_personal: [
-    { key: "gateway", label: "Mac bridge", body: "Runs through the Gateway paired on a Mac. There's no cloud option for personal iMessage.", real: true },
   ],
   wechat_personal: [
     { key: "business", label: "Business", body: "The local bridge runtime isn't certified yet.", real: false },
@@ -658,7 +647,6 @@ export function ChannelsTab({
   const [byoBotBusy, setByoBotBusy] = useState(false);
   const [byoBotError, setByoBotError] = useState<string | null>(null);
   const [byoBotSaved, setByoBotSaved] = useState(false);
-  const [personalWarningAck, setPersonalWarningAck] = useState(false);
   const [firstContactReply, setFirstContactReply] = useState(!!agent?.telegram_first_contact_reply);
   const [firstContactSaving, setFirstContactSaving] = useState(false);
   // agent starts null and loads async — resync once the real value arrives
@@ -750,7 +738,6 @@ export function ChannelsTab({
     setByoToken("");
     setByoBotError(null);
     setByoBotSaved(false);
-    setPersonalWarningAck(false);
     setOauthError(null);
   }
 
@@ -764,7 +751,6 @@ export function ChannelsTab({
     setByoToken("");
     setByoBotError(null);
     setByoBotSaved(false);
-    setPersonalWarningAck(false);
     setOauthError(null);
   }
 
@@ -904,30 +890,6 @@ export function ChannelsTab({
                 </div>
               )}
 
-              {/* Telegram: personal account via Gateway */}
-              {activePlatform.id === "sage_telegram_hosted" && activeDoor?.key === "personal" && (
-                <div style={{ marginTop: 12 }}>
-                  {!personalWarningAck ? (
-                    <>
-                      <p className="fleet-channel-expand-error" style={{ marginTop: 0 }}>
-                        This agent will act as <strong>you</strong> on Telegram. It can read your DMs and send
-                        messages under your name. This needs the Gateway paired on your machine. Are you sure?
-                      </p>
-                      <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setPersonalWarningAck(true)}>
-                        Yes, continue
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <p className="fleet-channel-expand-hint">
-                        This channel runs through Agent Computer (Gateway) on the paired machine.
-                      </p>
-                      <GatewayPairPanel workspaceId={workspaceId} compact />
-                    </>
-                  )}
-                </div>
-              )}
-
               {/* Slack / Discord: single-path OAuth */}
               {(activePlatform.id === "slack" || activePlatform.id === "discord_bot") && activeDoor && (
                 <div style={{ marginTop: 12 }}>
@@ -944,12 +906,8 @@ export function ChannelsTab({
                 </div>
               )}
 
-              {/* WhatsApp / Signal / iMessage: the one real door is Gateway pairing */}
-              {["whatsapp_personal", "signal_personal", "imessage_personal"].includes(activePlatform.id) && activeDoor?.real && (
-                <div style={{ marginTop: 12 }}>
-                  <GatewayPairPanel workspaceId={workspaceId} compact />
-                </div>
-              )}
+              {/* Gateway-based personal-channel pairing lives on Sage's own console
+                   now (SageLauncher Connect tab) — not on individual agent pages. */}
             </div>
           </div>
         </div>

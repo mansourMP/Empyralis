@@ -52,7 +52,7 @@ function parseSseBlock(block: string): SseEvent | null {
  * set — routed by /api/turn's context_hints.metadata.active_agent_install_id,
  * which specialist_runtime_context.resolve_specialist_runtime_context reads
  * to run the turn as that agent's own persona/model/memory instead of Sage's).
- * SageChat is a thin wrapper over this; the Fleet agent detail page's Chat
+ * SageLauncher is a thin wrapper over this; the Fleet agent detail page's Chat
  * tab is the other caller.
  */
 export function AgentChat({

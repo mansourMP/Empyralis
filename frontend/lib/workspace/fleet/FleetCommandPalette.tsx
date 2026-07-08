@@ -45,10 +45,12 @@ export function FleetCommandPalette({
   workspaceId,
   theme,
   onToggleTheme,
+  onOpenSage,
 }: {
   workspaceId: string;
   theme: FleetTheme;
   onToggleTheme: () => void;
+  onOpenSage: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -110,15 +112,14 @@ export function FleetCommandPalette({
     ];
 
     const summaries = agents.map((a, i) => toAgentSummary(a, i));
-    const sage = summaries.find(isSageAgent);
     const commands: Action[] = [
       {
         id: "chat-sage",
-        label: sage ? "Chat with Sage" : "Open chat",
+        label: "Chat with Sage",
         hint: "→ chat",
         group: "Commands",
         icon: MessageSquare,
-        run: () => go(sage ? `${base}/sage` : `${base}/chat`),
+        run: () => { onOpenSage(); close(); },
       },
       {
         id: "toggle-theme",

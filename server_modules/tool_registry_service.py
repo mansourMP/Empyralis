@@ -90,12 +90,14 @@ def _categorize_tool(name: str, connector_id: str) -> str:
         return "data"
     if c in {"web", "http"} or n.startswith(("web__", "http_")):
         return "web"
+    if c == "fleet" or n.startswith("fleet__"):
+        return "management"
     # App connectors: check if it looks like a connected app tool
     if "__" in n:
         prefix = n.split("__")[0]
         if prefix not in {"memory", "web", "browser", "computer", "file", "shell",
                           "screenshot", "hardware", "llm", "sage_service", "http",
-                          "image", "messaging", "generate"}:
+                          "image", "messaging", "generate", "fleet"}:
             return "app"
     return "other"
 

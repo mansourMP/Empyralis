@@ -511,6 +511,226 @@ async def _live_vision_monitor_skill(
     )
 
 
+# ── Fleet tool executors ──────────────────────────────────────────────────
+
+async def _live_fleet_create_agent_skill(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for fleet-create-agent — delegates to fleet_tools."""
+    from server_modules.fleet_tools import fleet_create_agent
+
+    # Extract an agent name from the goal text (first line, or up to 80 chars).
+    goal_clean = str(goal or "").strip()
+    name = goal_clean.split("\n")[0].strip()[:80] or "Fleet Specialist"
+
+    result = await fleet_create_agent(
+        actor_id=agent_label or "sage",
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        name=name,
+    )
+    return {
+        "status": "ok" if result.get("ok") else "error",
+        "reply": (
+            f"Created agent '{result.get('agent_id', '?')}'."
+            if result.get("ok")
+            else f"Could not create agent: {result.get('error', 'unknown error')}"
+        ),
+        "artifact": result,
+        "steps": [
+            {"label": "Creating fleet agent", "detail": name, "status": "done" if result.get("ok") else "error", "kind": "fleet"},
+        ],
+    }
+
+
+async def _live_fleet_list_agents_skill(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for fleet-list-agents — delegates to fleet_tools."""
+    from server_modules.fleet_tools import fleet_list_agents
+
+    result = await fleet_list_agents(
+        actor_id=agent_label or "sage",
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+    )
+    agents = result.get("agents", []) if isinstance(result, dict) else []
+    summary = "\n".join(
+        f"- {a.get('label', a.get('agent_id', '?'))} ({a.get('role', '?')}) [{a.get('status', '?')}]"
+        for a in (agents or [])
+    ) or "(no agents)"
+    return {
+        "status": "ok",
+        "reply": f"Agents in workspace:\n{summary}",
+        "artifact": result,
+        "steps": [
+            {"label": "Listing fleet agents", "detail": f"{len(agents)} found", "status": "done", "kind": "fleet"},
+        ],
+    }
+
+
+async def _live_fleet_get_agent_activity_skill(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for fleet-get-agent-activity — delegates to fleet_tools.
+
+    The goal text should include an agent install id (ainstall_…). If not found,
+    returns a prompt asking for the id.
+    """
+    from server_modules.fleet_tools import fleet_get_agent_activity
+    import re as _re
+
+    match = _re.search(r"ainstall_[0-9a-fA-F]+", str(goal or ""))
+    agent_id = match.group(0) if match else ""
+    if not agent_id:
+        match2 = _re.search(r"[0-9a-fA-F]{8,}", str(goal or ""))
+        agent_id = match2.group(0) if match2 else ""
+
+    if not agent_id:
+        return {
+            "status": "error",
+            "reply": "I need an agent install id to look up activity. Which agent?",
+            "artifact": None,
+            "steps": [
+                {"label": "Looking up agent activity", "detail": "No agent id found in request", "status": "error", "kind": "fleet"},
+            ],
+        }
+
+    result = await fleet_get_agent_activity(
+        actor_id=agent_label or "sage",
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+    )
+    events = result.get("events", []) if isinstance(result, dict) else []
+    return {
+        "status": "ok",
+        "reply": f"Found {len(events)} activity events for {agent_id}.",
+        "artifact": result,
+        "steps": [
+            {"label": "Reading agent activity", "detail": f"{len(events)} events for {agent_id}", "status": "done", "kind": "fleet"},
+        ],
+    }
+
+
+async def _live_fleet_configure_agent_skill(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for fleet-configure-agent — delegates to fleet_tools.
+
+    Structured configuration is best done via the direct tool calling path
+    (fleet__configure_agent with a JSON patch). This executor handles simple
+    cases described in natural language.
+    """
+    from server_modules.fleet_tools import fleet_configure_agent
+    import re as _re
+
+    match = _re.search(r"ainstall_[0-9a-fA-F]+", str(goal or ""))
+    agent_id = match.group(0) if match else ""
+    if not agent_id:
+        match2 = _re.search(r"[0-9a-fA-F]{8,}", str(goal or ""))
+        agent_id = match2.group(0) if match2 else ""
+
+    if not agent_id:
+        return {
+            "status": "error",
+            "reply": "I need an agent install id to configure it. Which agent?",
+            "artifact": None,
+            "steps": [
+                {"label": "Configuring agent", "detail": "No agent id found in request", "status": "error", "kind": "fleet"},
+            ],
+        }
+
+    result = await fleet_configure_agent(
+        actor_id=agent_label or "sage",
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        patch={"instructions": str(goal or "").strip()},
+    )
+    return {
+        "status": "ok" if result.get("ok") else "error",
+        "reply": (
+            f"Configured agent {agent_id}."
+            if result.get("ok")
+            else f"Could not configure agent: {result.get('error', 'unknown error')}"
+        ),
+        "artifact": result,
+        "steps": [
+            {"label": "Configuring agent", "detail": agent_id, "status": "done" if result.get("ok") else "error", "kind": "fleet"},
+        ],
+    }
+
+
+async def _live_fleet_message_agent_skill(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal: str,
+    agent_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for fleet-message-agent — delegates to fleet_tools."""
+    from server_modules.fleet_tools import fleet_message_agent
+    import re as _re
+
+    match = _re.search(r"ainstall_[0-9a-fA-F]+", str(goal or ""))
+    agent_id = match.group(0) if match else ""
+    if not agent_id:
+        match2 = _re.search(r"[0-9a-fA-F]{8,}", str(goal or ""))
+        agent_id = match2.group(0) if match2 else ""
+
+    if not agent_id:
+        return {
+            "status": "error",
+            "reply": "I need an agent install id to message it. Which agent?",
+            "artifact": None,
+            "steps": [
+                {"label": "Messaging agent", "detail": "No agent id found in request", "status": "error", "kind": "fleet"},
+            ],
+        }
+
+    result = await fleet_message_agent(
+        actor_id=agent_label or "sage",
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        message=str(goal or "").strip(),
+    )
+    return {
+        "status": "ok" if result.get("ok") else "error",
+        "reply": (
+            f"Message enqueued for agent {agent_id}."
+            if result.get("ok")
+            else f"Could not message agent: {result.get('error', 'unknown error')}"
+        ),
+        "artifact": result,
+        "steps": [
+            {"label": "Messaging agent", "detail": agent_id, "status": "done" if result.get("ok") else "error", "kind": "fleet"},
+        ],
+    }
+
+
 # ── Populate adapter executors (must be after all executor functions) ──
 _ADAPTER_EXECUTORS.update({
     "web_search": _live_web_search,
@@ -691,6 +911,7 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         trigger_terms=("create agent", "new agent", "add agent"),
         requires_approval=True,
         skill_class="system",
+        executor=_live_fleet_create_agent_skill,
     ),
     SkillDefinition(
         id="fleet-list-agents",
@@ -702,6 +923,7 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         connector_scopes=(),
         trigger_terms=("list agents", "show agents", "fleet"),
         skill_class="system",
+        executor=_live_fleet_list_agents_skill,
     ),
     SkillDefinition(
         id="fleet-get-agent-activity",
@@ -713,6 +935,7 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         connector_scopes=(),
         trigger_terms=("agent activity", "agent history"),
         skill_class="system",
+        executor=_live_fleet_get_agent_activity_skill,
     ),
     SkillDefinition(
         id="fleet-configure-agent",
@@ -725,6 +948,7 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         trigger_terms=("configure agent", "update agent", "agent settings"),
         requires_approval=True,
         skill_class="system",
+        executor=_live_fleet_configure_agent_skill,
     ),
     SkillDefinition(
         id="fleet-message-agent",
@@ -736,6 +960,7 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         connector_scopes=(),
         trigger_terms=("message agent", "tell agent", "ask agent"),
         skill_class="system",
+        executor=_live_fleet_message_agent_skill,
     ),
     # ── Phase N: Agent memory tools ─────────────────────────────────────
     SkillDefinition(

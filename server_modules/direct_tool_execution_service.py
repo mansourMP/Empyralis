@@ -14,10 +14,10 @@ from server_modules import agent_action_metering_service, tool_broker_guard_serv
 from server_modules import rust_runtime_kernel_client
 from server_modules import hardware_runtime_target_resolver
 
-_BROWSER_CAPTURE_ACTIONS = {"screenshot", "pdf"}
-_BROWSER_MUTATION_ACTIONS = {"click", "fill", "execute_js", "download_file"}
-_BROWSER_NAVIGATION_ACTIONS = {"navigate", "new_tab", "switch_tab", "start_intercept", "stop_intercept"}
-_BROWSER_READ_ACTIONS = {"observe", "extract_text", "get_page_state"}
+_BROWSER_CAPTURE_ACTIONS: set[str] = set()
+_BROWSER_MUTATION_ACTIONS: set[str] = set()
+_BROWSER_NAVIGATION_ACTIONS = {"navigate"}
+_BROWSER_READ_ACTIONS = {"extract_text", "extract_dom"}
 _FILE_DELETE_ACTIONS = {"delete", "remove", "unlink", "trash"}
 _FILE_WRITE_ACTIONS = {"write", "append", "rename", "move", "copy", "mkdir", "touch"}
 _CHANNEL_CONNECTORS = {"discord", "email", "gmail", "imsg", "mail", "signal", "slack", "telegram", "whatsapp"}
@@ -236,29 +236,11 @@ def direct_tool_step_payload(
         detail = detail or callbacks.compact_step_detail(arguments.get("command"))
     elif normalized_connector == "browser":
         kind = "browser"
-        selector = (
-            arguments.get("selector")
-            or arguments.get("url")
-            or arguments.get("url_pattern")
-            or arguments.get("tab_id")
-            or arguments.get("save_path")
-            or arguments.get("output_path")
-        )
+        selector = arguments.get("selector") or arguments.get("url")
         if normalized_action in _BROWSER_READ_ACTIONS:
             label = "Reading browser page"
-        elif normalized_action in _BROWSER_CAPTURE_ACTIONS:
-            label = "Capturing browser artifact"
         elif normalized_action in _BROWSER_NAVIGATION_ACTIONS:
             label = "Navigating browser"
-        elif normalized_action == "click":
-            label = "Clicking browser"
-        elif normalized_action == "fill":
-            label = "Typing in browser"
-            selector = selector or arguments.get("value")
-        elif normalized_action == "download_file":
-            label = "Downloading from browser"
-        elif normalized_action == "execute_js":
-            label = "Running browser script"
         else:
             label = "Using browser"
         detail = detail or callbacks.compact_step_detail(selector)
@@ -326,6 +308,23 @@ def direct_tool_step_payload(
         else:
             label = "Updating Sage service"
         detail = detail or service_label
+    elif normalized_connector == "fleet":
+        kind = "fleet"
+        if normalized_action == "create_agent":
+            label = "Creating agent"
+            detail = detail or callbacks.compact_step_detail(arguments.get("name"))
+        elif normalized_action == "list_agents":
+            label = "Listing agents"
+        elif normalized_action == "get_agent_activity":
+            label = "Reading agent activity"
+        elif normalized_action == "get_project_activity":
+            label = "Reading project activity"
+        elif normalized_action == "configure_agent":
+            label = "Configuring agent"
+        elif normalized_action == "message_agent":
+            label = "Messaging agent"
+        else:
+            label = "Fleet operation"
     else:
         action_label = callbacks.titleize_direct_step_token(normalized_action) or "Connector action"
         connector_label = callbacks.titleize_direct_step_token(normalized_connector) or normalized_connector
@@ -546,6 +545,10 @@ def _direct_tool_governance_metadata(
         action_class = "service_state_update" if normalized_action in {"create_entry", "update_profile"} else "service_state_read"
         governance_boundary = "sage_profile"
         risk_level = "moderate" if action_class.endswith("update") else "low"
+    elif normalized_connector == "fleet":
+        action_class = "fleet_management" if normalized_action in {"create_agent", "configure_agent", "message_agent"} else "fleet_read"
+        governance_boundary = "fleet_control"
+        risk_level = "high" if action_class == "fleet_management" else "low"
     elif normalized_connector == "memory":
         action_class = "workspace_memory_update" if normalized_action in {"update", "append_daily_note", "stage_edit", "apply_edit", "stage_consolidation", "consolidate_daily_notes", "rollback_version"} else "workspace_memory_read"
         governance_boundary = "workspace_memory"

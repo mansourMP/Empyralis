@@ -14,7 +14,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
-  Sparkles,
   Sun,
   type LucideIcon,
 } from "lucide-react";
@@ -22,8 +21,6 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 
-import { useFleetAgents } from "./fleet-data";
-import { findSageAgent } from "./fleet-presentation";
 import type { FleetTheme } from "./fleet-preferences";
 
 type RailNavItem = { key: string; label: string; segment: string; icon: LucideIcon; chord: string };
@@ -70,24 +67,12 @@ export function PrimaryRail({
 }) {
   const router = useRouter();
   const segment = useSelectedLayoutSegment();
-  const { agents } = useFleetAgents(workspaceId);
 
   const [focusIdx, setFocusIdx] = useState(-1);
   const gPendingRef = useRef(false);
   const gTimer = useRef<number | null>(null);
 
   const hrefFor = (seg: string) => `/w/${encodeURIComponent(workspaceId)}/${seg}`;
-
-  // Sage is the operator, not a normal nav destination — surfaced separately
-  // above the section list, and routed at workspace scope (…/sage, no project
-  // segment, no tabs) since it's the workspace's own operator: a full-width
-  // chat, not agent detail. role="operator" is the intended tag (ensured
-  // server-side for every Sage install), but findSageAgent() falls back to
-  // matching the name directly — some installs predate that guarantee and
-  // still carry a plain "specialist" role.
-  const sageAgent = findSageAgent(agents);
-  const sageHref = sageAgent ? `/w/${encodeURIComponent(workspaceId)}/sage` : null;
-  const sageActive = segment === "sage";
 
   // Keyboard navigation. Ignored while typing or when a modifier is held (so
   // ⌘K and browser shortcuts are untouched).
@@ -138,20 +123,6 @@ export function PrimaryRail({
         <div className="fleet-rail-brand-mark">E</div>
         {!collapsed && <span className="fleet-rail-brand-name">Empyralis</span>}
       </div>
-
-      {sageAgent && (
-        <button
-          type="button"
-          title={collapsed ? "Sage" : undefined}
-          className={`fleet-rail-sage${sageActive ? " fleet-rail-sage--active" : ""}`}
-          onClick={() => { if (sageHref) router.push(sageHref); }}
-        >
-          <span className="fleet-rail-sage-icon">
-            <Sparkles size={RAIL_ICON} strokeWidth={1.75} />
-          </span>
-          {!collapsed && <span className="fleet-rail-sage-label">Sage</span>}
-        </button>
-      )}
 
       <nav className="fleet-rail-nav">
         {RAIL_ITEMS.map((item, idx) => {

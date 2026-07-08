@@ -1,12 +1,13 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import "./fleet-theme.css";
 import { FleetCommandPalette } from "./FleetCommandPalette";
 import { FleetHelpButton } from "./FleetHelpButton";
 import { FleetShellDecider } from "./FleetShellDecider";
 import { PrimaryRail } from "./PrimaryRail";
+import { SageLauncher } from "./SageLauncher";
 import { useFleetPreferences } from "./fleet-preferences";
 
 /**
@@ -37,6 +38,18 @@ export function FleetShell({
     toggleCollapsed,
   } = useFleetPreferences();
 
+  const [sageOpen, setSageOpen] = useState(false);
+  const onOpenSage = useCallback(() => setSageOpen(true), []);
+  const onCloseSage = useCallback(() => setSageOpen(false), []);
+
+  // Listen for the custom event dispatched by FleetHome / any other component
+  // that wants to open the Sage console without a direct prop thread.
+  useEffect(() => {
+    const handler = () => onOpenSage();
+    window.addEventListener("fleet:open-sage", handler);
+    return () => window.removeEventListener("fleet:open-sage", handler);
+  }, [onOpenSage]);
+
   return (
     <div className="fleet-root" data-theme={theme}>
       <PrimaryRail
@@ -56,6 +69,13 @@ export function FleetShell({
         workspaceId={workspaceId}
         theme={theme}
         onToggleTheme={toggleTheme}
+        onOpenSage={onOpenSage}
+      />
+      <SageLauncher
+        workspaceId={workspaceId}
+        open={sageOpen}
+        onOpen={onOpenSage}
+        onClose={onCloseSage}
       />
       <FleetHelpButton />
     </div>
