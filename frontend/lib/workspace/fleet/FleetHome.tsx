@@ -147,7 +147,7 @@ function SageRow({
           <span className="fleet-sage-badge">Operator</span>
         </div>
         <div className="fleet-sage-desc">
-          Your operator — ask me anything about your workspace.
+          Ask me to create or configure any agent for you.
         </div>
       </div>
       <button

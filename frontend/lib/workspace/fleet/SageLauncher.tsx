@@ -9,13 +9,11 @@ import { AgentChat } from "./AgentChat";
 import { useFleetAgents } from "./fleet-data";
 import { findSageAgent } from "./fleet-presentation";
 
-// Conservative copy — reflects what Sage can genuinely do today (see Phase B).
-// If fleet-management tools are genuinely callable end-to-end, these should be
-// updated to reflect the real capability.
+// Fleet-management tools are live end-to-end — the console reflects real capability.
 const STARTER_PROMPTS = [
-  "What do you remember about me?",
+  "Create a support agent for my store",
+  "What agents do I have?",
   "Search the web for recent AI news",
-  "Is my paired computer online?",
 ];
 
 type ConsoleTab = "chat" | "connect";
@@ -124,8 +122,8 @@ export function SageLauncher({
                 workspaceId={workspaceId}
                 threadId={PRIMARY_THREAD_ID}
                 emptyIcon={Sparkles}
-                emptyTitle="Ask Sage"
-                emptyBody="Ask me to search the web, check your paired hardware, or work with what I remember about you."
+                emptyTitle="Ask Sage anything"
+                emptyBody="Ask Sage to create an agent, configure your fleet, search the web, or check your paired hardware."
                 starterPrompts={STARTER_PROMPTS}
                 placeholder="Message Sage…"
                 sourceTag="fleet_sage_chat"
