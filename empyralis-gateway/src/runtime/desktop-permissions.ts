@@ -99,6 +99,26 @@ export function setLlmRuntimeOllamaReady(ready: boolean): void {
   llmRuntimeOllamaReady = ready;
 }
 
+// cli_subscription (Phase 3): the SAME llm_runtime permission also gates
+// llm.generate for the owner's own Claude Code / Codex CLI. A box with ONLY
+// Claude Code ready (no Ollama at all) must still get llm.generate advertised
+// — otherwise the capability never even reaches the router, and the control
+// plane sees "gateway_capability_missing" instead of the far more useful
+// "claude_code is not ready" it can actually act on. "Ready" here means
+// installed AND authenticated (see probeClaudeCli/probeCodexCli in
+// health/service-inventory.ts — status "ready", not "degraded"), same
+// installed-vs-authenticated distinction Ollama's reachability check draws.
+let llmRuntimeClaudeCodeReady = false;
+let llmRuntimeCodexReady = false;
+
+export function setLlmRuntimeClaudeCodeReady(ready: boolean): void {
+  llmRuntimeClaudeCodeReady = ready;
+}
+
+export function setLlmRuntimeCodexReady(ready: boolean): void {
+  llmRuntimeCodexReady = ready;
+}
+
 function normalizePermissionState(value: unknown): DesktopPermissionState | null {
   const token = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (token === "1" || token === "true" || token === "yes" || token === "allow" || token === "allowed") {
@@ -135,8 +155,14 @@ function defaultDesktopPermissionState(
   }
   if (permission === "llm_runtime") {
     // No "granted by default" fallback either — the on-box LLM capability is
-    // only granted when a local Ollama runtime is confirmed reachable.
-    return llmRuntimeOllamaReady ? "granted" : "restricted";
+    // only granted when AT LEAST ONE backend is confirmed ready: the local
+    // Ollama runtime, or the owner's own Claude Code / Codex CLI
+    // (cli_subscription, Phase 3). A box with only one of these ready must
+    // still advertise llm.generate — the runtime dispatch itself (Gateway
+    // side: llm/runtime.ts; control plane side:
+    // _cli_subscription_readiness_reason) is what enforces WHICH specific
+    // runtime a given turn actually needs.
+    return (llmRuntimeOllamaReady || llmRuntimeClaudeCodeReady || llmRuntimeCodexReady) ? "granted" : "restricted";
   }
   if (agentComputerSystemServiceModeEnabled(env) && !agentComputerUserSessionBridgeEnabled(env)) {
     return "restricted";

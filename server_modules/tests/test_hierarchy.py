@@ -231,8 +231,11 @@ class PerAgentAIBindingTests(unittest.TestCase):
             self.assertEqual(provider, "deepseek")
             self.assertEqual(billing, "platform_credits")
 
-    def test_cli_subscription_not_available(self):
-        """cli_subscription mode raises with honest 'not yet available' error."""
+    def test_cli_subscription_without_gateway_binding_raises_bound_required(self):
+        """BYO-brain Phase 3: cli_subscription mode with NO bound Gateway
+        raises an honest, platform-voice 'requires a Gateway' error — never a
+        silent fallback to platform credits, and never the old permanent-stub
+        'not yet available' message (this mode is real now)."""
         with patch(
             "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
@@ -245,7 +248,68 @@ class PerAgentAIBindingTests(unittest.TestCase):
                         agent_id="agent-cli-1",
                     )
                 )
-            self.assertIn("not yet available", str(ctx.exception).lower())
+            message = str(ctx.exception)
+            self.assertIn("Heads up:", message)
+            self.assertIn("requires a Gateway", message)
+            self.assertNotIn("not yet available", message.lower())
+
+    def test_cli_subscription_with_gateway_binding_resolves_billing_mode(self):
+        """cli_subscription mode with a bound Gateway resolves to the
+        requested runtime + the 'cli_subscription' billing mode (dispatch,
+        readiness checks, and the actual CLI spawn happen at the turn seam,
+        not here) — so nothing is ever charged to platform credits."""
+        provider, creds, billing = _run(
+            sage_agent_runtime_service._resolve_agent_cloud_provider(
+                workspace_id="ws-test",
+                agent_model_config={
+                    "mode": "cli_subscription",
+                    "runtime": "codex",
+                    "gateway_binding": "gateway_abc123",
+                },
+                agent_id="agent-cli-2",
+            )
+        )
+        self.assertEqual(provider, "codex")
+        self.assertEqual(billing, "cli_subscription")
+        self.assertEqual(creds.get("gateway_binding"), "gateway_abc123")
+        self.assertEqual(creds.get("runtime"), "codex")
+
+    def test_cli_subscription_defaults_to_claude_code_runtime(self):
+        """An unset runtime defaults to claude_code, never a fabricated or
+        empty runtime string."""
+        provider, _creds, billing = _run(
+            sage_agent_runtime_service._resolve_agent_cloud_provider(
+                workspace_id="ws-test",
+                agent_model_config={"mode": "cli_subscription", "gateway_binding": "gateway_abc123"},
+                agent_id="agent-cli-3",
+            )
+        )
+        self.assertEqual(provider, "claude_code")
+        self.assertEqual(billing, "cli_subscription")
+
+    def test_cli_subscription_invalid_runtime_raises(self):
+        """An unsupported cli_subscription runtime is rejected up front, with
+        its own distinct honest message — never silently coerced to a
+        supported one."""
+        with patch(
+            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            new=AsyncMock(),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._resolve_agent_cloud_provider(
+                        workspace_id="ws-test",
+                        agent_model_config={
+                            "mode": "cli_subscription",
+                            "runtime": "gpt-5-direct",
+                            "gateway_binding": "gateway_abc123",
+                        },
+                        agent_id="agent-cli-4",
+                    )
+                )
+            message = str(ctx.exception)
+            self.assertIn("Heads up:", message)
+            self.assertIn("not a supported cli_subscription runtime", message)
 
     def test_local_without_gateway_binding_raises_bound_required(self):
         """BYO-brain Phase 2: local mode with NO bound box raises an honest
@@ -477,27 +541,39 @@ class FleetConfigureValidationTests(unittest.TestCase):
         self.assertTrue(result["ok"])
 
     def test_gateway_binding_accepted_by_validation(self):
-        """BYO-brain Phase 0: gateway_binding + runtime pass validation with no
-        storage change (the call then fails only at the DB lookup)."""
-        result = _run(
-            fleet_tools.fleet_configure_agent(
-                actor_id="agent-op-1",
-                workspace_id="ws-test",
-                agent_id="agent-x",
-                patch={
-                    "model_config": {
-                        "mode": "cli_subscription",
-                        "provider": "claude_code_cli",
-                        "runtime": "claude_code",
-                        "gateway_binding": "gateway_abc123",
-                    }
-                },
+        """BYO-brain Phase 0/3: gateway_binding + runtime pass validation when
+        the binding resolves to a real, active, workspace-paired Gateway
+        registration (the call then fails only at the agent DB lookup)."""
+        registration = {
+            "gateway_id": "gateway_abc123",
+            "workspace_id": "ws-test",
+            "status": "active",
+            "device_trust_state": "trusted",
+        }
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            return_value=registration,
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="agent-op-1",
+                    workspace_id="ws-test",
+                    agent_id="agent-x",
+                    patch={
+                        "model_config": {
+                            "mode": "cli_subscription",
+                            "provider": "claude_code_cli",
+                            "runtime": "claude_code",
+                            "gateway_binding": "gateway_abc123",
+                        }
+                    },
+                )
             )
-        )
         # Rejected only at DB lookup (agent not found), never at validation.
         self.assertFalse(result["ok"])
         self.assertNotIn("Invalid model_config", result["error"])
         self.assertNotIn("gateway_binding must be", result["error"])
+        self.assertNotIn("does not resolve", result["error"])
 
     def test_non_string_gateway_binding_rejected(self):
         """A non-string gateway_binding is rejected."""
@@ -511,6 +587,110 @@ class FleetConfigureValidationTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertIn("gateway_binding must be", result["error"])
+
+    def test_cli_subscription_gateway_binding_must_resolve_to_paired_gateway(self):
+        """The confirmed bypass this fixes: saving model_config
+        {mode: "cli_subscription", gateway_binding: "literally-anything"} must
+        no longer succeed — an unresolvable gateway_binding (no registration
+        at all) is rejected at save time, not silently persisted to fail
+        later mid-conversation."""
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            return_value=None,
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="agent-op-1",
+                    workspace_id="ws-test",
+                    agent_id="agent-x",
+                    patch={
+                        "model_config": {
+                            "mode": "cli_subscription",
+                            "runtime": "claude_code",
+                            "gateway_binding": "literally-anything",
+                        }
+                    },
+                )
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("does not resolve", result["error"])
+
+    def test_cli_subscription_gateway_binding_wrong_workspace_rejected(self):
+        """A gateway_binding that resolves to a REAL registration, but paired
+        to a DIFFERENT workspace, is rejected — the workspace scope check is
+        not skippable just because *some* registration exists."""
+        registration = {
+            "gateway_id": "gateway_other_ws",
+            "workspace_id": "some-other-workspace",
+            "status": "active",
+            "device_trust_state": "trusted",
+        }
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            return_value=registration,
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="agent-op-1",
+                    workspace_id="ws-test",
+                    agent_id="agent-x",
+                    patch={
+                        "model_config": {
+                            "mode": "cli_subscription",
+                            "runtime": "claude_code",
+                            "gateway_binding": "gateway_other_ws",
+                        }
+                    },
+                )
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("does not resolve", result["error"])
+
+    def test_cli_subscription_gateway_binding_revoked_rejected(self):
+        """A gateway_binding pointing at a revoked registration is rejected."""
+        registration = {
+            "gateway_id": "gateway_revoked",
+            "workspace_id": "ws-test",
+            "status": "active",
+            "device_trust_state": "revoked",
+        }
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            return_value=registration,
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="agent-op-1",
+                    workspace_id="ws-test",
+                    agent_id="agent-x",
+                    patch={
+                        "model_config": {
+                            "mode": "cli_subscription",
+                            "runtime": "claude_code",
+                            "gateway_binding": "gateway_revoked",
+                        }
+                    },
+                )
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("does not resolve", result["error"])
+
+    def test_local_mode_gateway_binding_not_required_to_resolve(self):
+        """The new resolution check is scoped to cli_subscription only (per
+        spec) — "local" mode's gateway_binding keeps its existing, more
+        lenient string-only validation, unaffected by this change."""
+        result = _run(
+            fleet_tools.fleet_configure_agent(
+                actor_id="agent-op-1",
+                workspace_id="ws-test",
+                agent_id="agent-x",
+                patch={"model_config": {"mode": "local", "runtime": "ollama", "gateway_binding": "literally-anything"}},
+            )
+        )
+        # Rejected only at DB lookup (agent not found), never at validation —
+        # "local" mode is untouched by the cli_subscription-only fix.
+        self.assertFalse(result["ok"])
+        self.assertNotIn("does not resolve", result["error"])
 
 
 class FleetSeedAndBootstrapTests(unittest.TestCase):

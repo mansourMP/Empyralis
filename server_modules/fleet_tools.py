@@ -781,6 +781,35 @@ async def fleet_configure_agent(
                 "ok": False,
                 "error": "model_config gateway_binding must be a gateway id string.",
             }
+        # cli_subscription needs a REAL, paired Gateway — not just any string.
+        # Confirm it resolves to an active registration for THIS workspace
+        # before saving, instead of silently persisting a binding that can
+        # never dispatch (the turn-time error would otherwise only surface
+        # much later, mid-conversation, instead of at save time).
+        if mode == "cli_subscription" and isinstance(gateway_binding, str) and gateway_binding.strip():
+            from server_modules import gateway_state_repository
+
+            _gateway_id = gateway_binding.strip()
+            _registration = gateway_state_repository.get_gateway_registration(_gateway_id)
+            _registration_workspace_id = str((_registration or {}).get("workspace_id") or "").strip()
+            _resolves = (
+                isinstance(_registration, dict)
+                and bool(_registration)
+                and str(_registration.get("status") or "").strip().lower() == "active"
+                and str(_registration.get("device_trust_state") or "").strip().lower() != "revoked"
+                and (
+                    not _registration_workspace_id
+                    or _registration_workspace_id == (str(workspace_id or "").strip() or "default")
+                )
+            )
+            if not _resolves:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"gateway_binding '{_gateway_id}' does not resolve to a Gateway paired "
+                        "to this workspace. Pair a Gateway first, then bind it here."
+                    ),
+                }
 
     try:
         bundle = await repo.get_workspace_agent_install_bundle(

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { GatewayLLMRuntime, LLM_GENERATE_CAPABILITY } from "../llm/runtime";
+import { CliRunError } from "../llm/cli-runner";
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 
 function makeInvokeFrame(
@@ -85,15 +86,15 @@ test("llm.generate prefers an explicit messages array (system + history + user)"
   assert.equal((capture.body as { messages: unknown[] }).messages.length, 4);
 });
 
-test("llm.generate rejects a non-ollama runtime (CLI subscription is a later phase)", async () => {
+test("llm.generate rejects a genuinely unknown runtime (not ollama/claude_code/codex)", async () => {
   const runtime = new GatewayLLMRuntime({
     fetchImpl: async () => {
       throw new Error("fetch should not be called");
     },
   });
   await assert.rejects(
-    () => runtime.handleCapabilityInvoke(makeInvokeFrame({ model: "x", prompt: "hi", runtime: "claude_code" })),
-    /not supported on this Gateway yet/,
+    () => runtime.handleCapabilityInvoke(makeInvokeFrame({ model: "x", prompt: "hi", runtime: "gpt-5-direct" })),
+    /not supported on this Gateway/,
   );
 });
 
@@ -133,4 +134,128 @@ test("supportsCapability only matches llm.generate", () => {
   assert.equal(runtime.supportsCapability("llm.generate"), true);
   assert.equal(runtime.supportsCapability("shell.execute"), false);
   assert.deepEqual(runtime.requestedCapabilities(), ["llm.generate"]);
+});
+
+// ── cli_subscription (Phase 3): claude_code / codex via the injected cliRunner ──
+
+interface CliCapture {
+  runtime?: string;
+  prompt?: string;
+  systemPrompt?: string;
+  model?: string;
+  timeoutMs?: number;
+}
+
+test("llm.generate (claude_code): dispatches via cliRunner, keeps system prompt separate", async () => {
+  const capture: CliCapture = {};
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      Object.assign(capture, params);
+      return { text: "hello from claude", usage: { input_tokens: 10, output_tokens: 3 } };
+    },
+  });
+  const result = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({ runtime: "claude_code", model: "claude-sonnet-4-6", system: "Be terse.", prompt: "hi" }),
+  );
+  assert.equal(capture.runtime, "claude_code");
+  assert.equal(capture.systemPrompt, "Be terse.");
+  assert.equal(capture.prompt, "hi");
+  assert.equal(capture.model, "claude-sonnet-4-6");
+  assert.equal(result.text, "hello from claude");
+  assert.equal(result.runtime, "claude_code");
+  assert.equal(result.model, "claude-sonnet-4-6");
+  assert.deepEqual(result.usage, { input_tokens: 10, output_tokens: 3 });
+  assert.equal(result.source, "gateway_claude_code");
+});
+
+test("llm.generate (codex): dispatches via cliRunner, folds system prompt into the prompt body", async () => {
+  const capture: CliCapture = {};
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      Object.assign(capture, params);
+      return { text: "PONG", usage: { input_tokens: 100, output_tokens: 1 } };
+    },
+  });
+  const result = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({ runtime: "codex", system: "Be terse.", prompt: "ping" }),
+  );
+  assert.equal(capture.runtime, "codex");
+  // Codex has no separate system-prompt flag — the caller folds it in.
+  assert.equal(capture.systemPrompt, "");
+  assert.equal(capture.prompt, "Be terse.\n\nping");
+  assert.equal(result.source, "gateway_codex");
+  assert.equal(result.model, "default");
+});
+
+test("llm.generate (claude_code/codex): never inherits Ollama's default model name", async () => {
+  const captures: CliCapture[] = [];
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      captures.push(params);
+      return { text: "ok", usage: { input_tokens: 1, output_tokens: 1 } };
+    },
+  });
+  await runtime.handleCapabilityInvoke(makeInvokeFrame({ runtime: "claude_code", prompt: "hi" }));
+  await runtime.handleCapabilityInvoke(makeInvokeFrame({ runtime: "codex", prompt: "hi" }));
+  for (const capture of captures) {
+    assert.equal(capture.model, "", "no model override means empty, never the Ollama default model name");
+  }
+});
+
+test("llm.generate (claude_code): multi-turn history is flattened with role labels", async () => {
+  const capture: CliCapture = {};
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      Object.assign(capture, params);
+      return { text: "ok", usage: { input_tokens: 1, output_tokens: 1 } };
+    },
+  });
+  await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({
+      runtime: "claude_code",
+      messages: [
+        { role: "system", content: "S" },
+        { role: "user", content: "U1" },
+        { role: "assistant", content: "A1" },
+        { role: "user", content: "U2" },
+      ],
+    }),
+  );
+  assert.equal(capture.systemPrompt, "S");
+  assert.equal(capture.prompt, "User: U1\n\nAssistant: A1\n\nUser: U2");
+});
+
+const CLI_FAILURE_CASES: Array<{ kind: "not_installed" | "not_authenticated" | "timeout" | "crash"; expect: RegExp }> = [
+  { kind: "not_installed", expect: /not installed/ },
+  { kind: "not_authenticated", expect: /not signed in/ },
+  { kind: "timeout", expect: /timed out/ },
+  { kind: "crash", expect: /exited unexpectedly/ },
+];
+
+for (const runtime of ["claude_code", "codex"] as const) {
+  for (const { kind, expect } of CLI_FAILURE_CASES) {
+    test(`llm.generate (${runtime}): a ${kind} cliRunner failure surfaces a distinct, honest message`, async () => {
+      const gateway = new GatewayLLMRuntime({
+        cliRunner: async () => {
+          throw new CliRunError(kind, "detail from the CLI");
+        },
+      });
+      await assert.rejects(
+        () => gateway.handleCapabilityInvoke(makeInvokeFrame({ runtime, prompt: "hi" })),
+        expect,
+      );
+    });
+  }
+}
+
+test("llm.generate (claude_code): a plain (non-CliRunError) cliRunner throw still surfaces honestly", async () => {
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async () => {
+      throw new Error("unexpected wiring bug");
+    },
+  });
+  await assert.rejects(
+    () => runtime.handleCapabilityInvoke(makeInvokeFrame({ runtime: "claude_code", prompt: "hi" })),
+    /generation failed on this Gateway \(unexpected wiring bug\)/,
+  );
 });

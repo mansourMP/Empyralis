@@ -454,6 +454,88 @@ AI_SCOPE_MISSING = PlatformEvent(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# cli_subscription (Gateway brain) — an agent's turn runs on the OWNER's own
+# Claude Code / Codex subscription, executing on their own paired Gateway.
+# Every distinct failure mode gets its own honest event here rather than one
+# blanket string — callers compose the final platform-voice line as
+# f"Heads up: {event.channel_text}" (sage_agent_runtime_service.
+# _friendly_cli_subscription_error). No fallback to platform credits ever.
+# ═══════════════════════════════════════════════════════════════════════════
+
+CLI_SUBSCRIPTION_NO_GATEWAY = PlatformEvent(
+    code="cli_subscription_no_gateway",
+    title="Gateway required",
+    detail="cli_subscription mode requires a paired Gateway. Bind one in agent settings.",
+    channel_text="cli_subscription requires a Gateway. Bind one in agent settings.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_GATEWAY_NOT_PAIRED = PlatformEvent(
+    code="cli_subscription_gateway_not_paired",
+    title="Gateway not paired",
+    detail="The Gateway bound to this agent is no longer paired to this workspace. Re-pair a Gateway and bind it to this agent.",
+    channel_text="the bound Gateway is no longer paired to this workspace. Re-pair a Gateway and bind it to this agent, then retry.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_GATEWAY_OFFLINE = PlatformEvent(
+    code="cli_subscription_gateway_offline",
+    title="Gateway offline",
+    detail="The Gateway bound to this agent is offline. Start it and retry.",
+    channel_text="the bound Gateway is offline. Start it on the paired machine and retry.",
+    severity="warning",
+)
+
+CLI_SUBSCRIPTION_CLAUDE_NOT_INSTALLED = PlatformEvent(
+    code="cli_subscription_claude_not_installed",
+    title="Claude Code not installed",
+    detail="Claude Code is not installed on the bound Gateway. Install it with `npm install -g @anthropic-ai/claude-code`.",
+    channel_text="Claude Code is not installed on the Gateway. Run `npm install -g @anthropic-ai/claude-code` on that machine.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_CODEX_NOT_INSTALLED = PlatformEvent(
+    code="cli_subscription_codex_not_installed",
+    title="Codex not installed",
+    detail="Codex is not installed on the bound Gateway. Install it with `npm install -g @openai/codex`.",
+    channel_text="Codex is not installed on the Gateway. Run `npm install -g @openai/codex` on that machine.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_CLAUDE_NOT_AUTHENTICATED = PlatformEvent(
+    code="cli_subscription_claude_not_authenticated",
+    title="Claude Code not signed in",
+    detail="Claude Code on the bound Gateway is not signed in. Run `claude login` on that machine.",
+    channel_text="Claude Code on the Gateway is not logged in. Run `claude login` on that machine.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_CODEX_NOT_AUTHENTICATED = PlatformEvent(
+    code="cli_subscription_codex_not_authenticated",
+    title="Codex not signed in",
+    detail="Codex on the bound Gateway is not signed in. Run `codex login` on that machine.",
+    channel_text="Codex on the Gateway is not logged in. Run `codex login` on that machine.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_TIMEOUT = PlatformEvent(
+    code="cli_subscription_timeout",
+    title="Generation timed out",
+    detail="cli_subscription generation timed out. The CLI may be rate-limited or busy. Retry.",
+    channel_text="generation timed out. The CLI may be rate-limited or busy. Retry.",
+    severity="warning",
+)
+
+CLI_SUBSCRIPTION_CRASH = PlatformEvent(
+    code="cli_subscription_crash",
+    title="CLI exited unexpectedly",
+    detail="The CLI exited unexpectedly on the bound Gateway. Check Gateway logs.",
+    channel_text="the CLI exited unexpectedly. Check Gateway logs.",
+    severity="error",
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Guaranteed fallback
 # ═══════════════════════════════════════════════════════════════════════════
 
