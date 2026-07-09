@@ -9,6 +9,11 @@ export type AgentSummary = {
   preset: "customer_facing" | "internal_assistant" | "operator";
   runtimeTarget: string;
   hardwareStatus: string;
+  // Real placement source (see resolveHardwarePlacement in gateway-box-picker.tsx)
+  // — runtimeTarget/hardwareStatus above are display-legacy and must not be
+  // used for "where does this agent run", only for online/offline status.
+  hardwareAccess: string;
+  preferredGatewayId: string;
   lastActivity: string | null;
   tint: TintKey;
   stopped?: StoppedState;
@@ -59,6 +64,8 @@ export function toAgentSummary(agent: FleetAgent, index: number): AgentSummary {
     preset: agent.purpose_preset || presetForRole(agent.role),
     runtimeTarget: agent.runtime_target || "unknown",
     hardwareStatus: agent.hardware_status || "unknown",
+    hardwareAccess: agent.hardware_access || "none",
+    preferredGatewayId: agent.preferred_gateway_id || "",
     lastActivity: agent.last_activity || null,
     tint: tintForAgent(agent, index),
     stopped: agent.stopped,

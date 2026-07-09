@@ -7,9 +7,9 @@ import {
   type AgentSummary,
   TINTS,
   deriveStatus,
-  derivePlacement,
 } from "./fleet-presentation";
 import { StatusChip } from "./fleet-indicators";
+import { resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
 
 /**
  * Agent card. Whole card opens the detail overlay; hover reveals small
@@ -17,16 +17,20 @@ import { StatusChip } from "./fleet-indicators";
  */
 export function FleetCard({
   agent,
+  gateways,
   onSelect,
   onChat,
 }: {
   agent: AgentSummary;
+  /** Workspace's paired-box list, fetched once by the caller (FleetHome) —
+   *  not per-card, since a workspace can have many agent cards on screen at
+   *  once. */
+  gateways: FleetGateway[];
   onSelect: (id: string) => void;
   onChat: (id: string) => void;
 }) {
   const status = deriveStatus(agent.hardwareStatus, agent.stopped?.active);
-  const deployed = status.tone !== "unknown";
-  const placement = derivePlacement(agent.runtimeTarget, deployed);
+  const placement = resolveHardwarePlacement(agent.hardwareAccess, agent.preferredGatewayId, gateways);
   const tint = TINTS[agent.tint];
 
   const tileStyle: CSSProperties = {
@@ -86,7 +90,7 @@ export function FleetCard({
         <StatusChip tone={status.tone} label={status.label} />
       </div>
 
-      <div className="fleet-card-meta">{placement}</div>
+      <div className="fleet-card-meta">{placement.label}</div>
 
       <div className="fleet-card-activity">
         {agent.lastActivity ?? "No activity yet"}

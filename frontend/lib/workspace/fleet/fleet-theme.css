@@ -2100,6 +2100,8 @@ a.fleet-breadcrumb:hover {
 .fleet-detail-dot.is-offline,
 .fleet-activity-dot.is-warn { background: var(--offline-dot); }
 
+.fleet-detail-dot.is-degraded { background: var(--degraded-dot); }
+
 .fleet-card-meta {
   font-size: 13px;
   font-weight: 400;
@@ -3504,6 +3506,20 @@ a.fleet-list-row:hover {
 .fleet-list-row-icon { display: inline-flex; color: var(--text-secondary); flex-shrink: 0; }
 .fleet-list-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .fleet-list-row-title { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary); }
+
+/* Hardware page: click-to-rename a paired box's title (nickname). */
+.fleet-list-row-title-edit {
+  background: none; border: none; padding: 0; margin: 0;
+  font: inherit; font-weight: var(--weight-medium); color: var(--text-primary);
+  cursor: text; text-align: left;
+  border-bottom: 1px dashed transparent;
+}
+.fleet-list-row-title-edit:hover { border-bottom-color: var(--border-strong); }
+.fleet-list-row-title-input {
+  font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary);
+  background: var(--bg-inset); border: 1px solid var(--border-strong); border-radius: 4px;
+  padding: 1px 4px; width: 100%; max-width: 240px;
+}
 .fleet-list-row-desc {
   font-size: var(--text-xs); color: var(--text-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -3985,6 +4001,13 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   margin-top: var(--space-2);
   font-size: var(--text-xs); font-weight: var(--weight-medium);
   color: var(--accent);
+}
+
+/* Same note slot, used where the reason is a real hardware precondition
+   (e.g. "needs a paired computer") rather than a generic lock — mirrors
+   channelStatePill's "gateway" tone color. */
+.fleet-wizard-option-note--gateway {
+  color: var(--offline-text);
 }
 
 /* ── Thin scrollbars — every scroll container inside the fleet surface.

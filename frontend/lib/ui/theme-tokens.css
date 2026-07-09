@@ -104,6 +104,7 @@ html[data-theme="dark"] {
   --offline-text: #f87171;
   --offline-dot: #ef4444;
   --unknown-dot: #71717a;
+  --degraded-dot: #f59e0b;
 }
 
 html[data-theme="light"] {

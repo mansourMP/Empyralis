@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { Cpu, Server, Terminal, X } from "lucide-react";
 
@@ -26,6 +26,92 @@ type Registration = {
   hardware_kind?: "cloud_vps" | "personal_device" | string;
   hardware_label?: string;
 };
+
+/** Click-to-rename a paired box's nickname. gatewayLabel() (used everywhere
+ *  this registration is displayed — the Hardware tab's "Running on" header,
+ *  box pickers, etc.) already prefers display_name over the derived
+ *  "Provider · Region" label, so setting it here is the whole fix. */
+function HardwareRenameField({
+  gatewayId,
+  displayName,
+  onRenamed,
+}: {
+  gatewayId: string;
+  displayName: string;
+  onRenamed: (next: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(displayName);
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(displayName);
+  }, [displayName, editing]);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  async function commit() {
+    if (saving) return;
+    const next = draft.trim();
+    if (!next || next === displayName) {
+      setDraft(displayName);
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/rename`, {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ display_name: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setEditing(false);
+      onRenamed(next);
+    } catch {
+      setDraft(displayName); // roll back — the row still shows the last-saved name
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="fleet-list-row-title-input"
+        value={draft}
+        disabled={saving}
+        maxLength={80}
+        onChange={(e) => setDraft(e.currentTarget.value)}
+        onClick={(e) => e.stopPropagation()}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          if (e.key === "Escape") { setDraft(displayName); setEditing(false); }
+        }}
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="fleet-list-row-title-edit"
+      title="Rename this computer"
+      onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+    >
+      {displayName}
+    </button>
+  );
+}
 
 export default function HardwarePage() {
   const params = useParams();
@@ -96,6 +182,14 @@ export default function HardwarePage() {
     }
   };
 
+  const handleRenamed = (gatewayId: string, nextName: string) => {
+    setRegs((current) =>
+      current.map((r) =>
+        String(r.gateway_id || r.id || "") === gatewayId ? { ...r, display_name: nextName } : r,
+      ),
+    );
+  };
+
   const cloudServers = regs.filter((r) => r.hardware_kind === "cloud_vps");
   const devices = regs.filter((r) => r.hardware_kind !== "cloud_vps");
 
@@ -109,11 +203,13 @@ export default function HardwarePage() {
           {isCloud ? <Server size={15} strokeWidth={1.75} /> : <Cpu size={15} strokeWidth={1.75} />}
         </TintTile>
         <span className="fleet-list-row-main">
-          <span className="fleet-list-row-title">
-            {isCloud ? r.hardware_label || "Cloud server" : r.display_name || r.platform || gatewayId || "Computer"}
-          </span>
+          <HardwareRenameField
+            gatewayId={gatewayId}
+            displayName={r.display_name || r.hardware_label || r.platform || gatewayId || "Computer"}
+            onRenamed={(next) => handleRenamed(gatewayId, next)}
+          />
           <span className="fleet-list-row-desc">
-            {isCloud ? r.display_name || "Agent Computer" : r.platform || "unknown platform"}
+            {isCloud ? r.hardware_label || "Agent Computer" : r.platform || "unknown platform"}
             {r.last_seen_at ? ` · last seen ${new Date(r.last_seen_at).toLocaleString()}` : ""}
           </span>
         </span>
@@ -149,7 +245,7 @@ export default function HardwarePage() {
                 >
                   <span className="fleet-provider-card-top">
                     <img src={provider.logoSrc} alt="" className="fleet-provider-card-logo" aria-hidden="true" />
-                    <span className="fleet-provider-card-badge">{provider.price}</span>
+                    <span className="fleet-provider-card-badge">{provider.accountMethod}</span>
                   </span>
                   <span className="fleet-provider-card-title">{provider.label}</span>
                   <span className="fleet-provider-card-desc">{provider.tagline}</span>

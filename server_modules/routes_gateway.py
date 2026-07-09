@@ -839,6 +839,10 @@ class GatewayRegistrationRevokeRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class GatewayRegistrationRenameRequest(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=80)
+
+
 class DedicatedWorkstationBindRequest(BaseModel):
     workspace_id: Optional[str] = Field(default=None, min_length=1)
     policy_id: str = Field(min_length=1, max_length=160)
@@ -1740,13 +1744,38 @@ async def provision_hardware_vps(
 @router.get("/hardware/vps/regions")
 async def get_hardware_vps_regions(
     provider: str = Query(..., min_length=1),
+    token_id: Optional[str] = Query(default=None),
+    workspace_id: Optional[str] = None,
     current_user=Depends(require_api_key),
 ):
     try:
-        catalog = vps_provisioning_service.provider_catalog()
         provider_id = vps_provisioning_service.resolve_provider_options(provider, None, None)["provider"]
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # A stored provider credential unlocks the live catalog (region
+    # availability changes over time; the static list is a curated fallback,
+    # not a hard limit). No credential yet (still on the 'provider' picker
+    # step) just serves the static list, same as before this endpoint could
+    # go live.
+    if token_id and workspace_id:
+        resolved_workspace = enforce_workspace_access(
+            current_user,
+            workspace_id,
+            minimum_role="owner",
+        )
+        user_id = str((current_user or {}).get("user_id") or "").strip() or None
+        try:
+            return vps_provisioning_service.fetch_provider_regions(
+                provider_id,
+                token_id=token_id,
+                workspace_id=resolved_workspace,
+                user_id=user_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="VPS provider credential was not found.") from exc
+        except vps_provisioning_service.VPSProvisioningError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    catalog = vps_provisioning_service.provider_catalog()
     item = catalog.get(provider_id)
     if not isinstance(item, dict):
         raise HTTPException(status_code=404, detail="VPS provider was not found.")
@@ -2044,6 +2073,36 @@ async def revoke_gateway_registration(
                 actor_user_id=str((current_user or {}).get("user_id") or "").strip(),
             )
         return revoked_payload
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/gateway/registrations/{gateway_id}/rename")
+async def rename_gateway_registration_route(
+    gateway_id: str,
+    body: GatewayRegistrationRenameRequest,
+    current_user=Depends(require_api_key),
+):
+    registration = gateway_state_repository.get_gateway_registration(gateway_id)
+    if not registration:
+        raise HTTPException(status_code=404, detail="Gateway registration was not found.")
+    registration_workspace_id = str(registration.get("workspace_id") or "").strip() or "default"
+    resolved_workspace_id = enforce_workspace_access(
+        current_user,
+        registration_workspace_id,
+        minimum_role="owner",
+    )
+    if resolved_workspace_id != registration_workspace_id:
+        raise HTTPException(status_code=403, detail="Workspace is not accessible for this user.")
+    tenant_id = workspace_tenant_id(current_user, resolved_workspace_id)
+    try:
+        return gateway_registry_service.rename_gateway_registration(
+            gateway_id=gateway_id,
+            display_name=body.display_name,
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            user_id=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

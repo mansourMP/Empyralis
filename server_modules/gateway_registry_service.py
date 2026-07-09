@@ -461,3 +461,39 @@ def revoke_gateway_registration(
             "revocation_reason": resolved_reason,
         },
     }
+
+
+def rename_gateway_registration(
+    *,
+    gateway_id: str,
+    display_name: str,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Owner-chosen nickname for a paired box — the Hardware page's rename
+    affordance. Real gateway boxes and VPS-provisioned ones share the same
+    registration row, so this isn't VPS-specific; gatewayLabel() on the
+    frontend already prefers display_name over the derived hardware_label
+    ("Provider · Region"), so setting this is the whole fix."""
+    registration = gateway_state_repository.get_gateway_registration(gateway_id)
+    if not registration:
+        raise ValueError("Gateway registration was not found.")
+    if str(registration.get("tenant_id") or "").strip() != str(tenant_id or "").strip():
+        raise ValueError("Gateway registration scope mismatch.")
+    if str(registration.get("workspace_id") or "").strip() != str(workspace_id or "").strip():
+        raise ValueError("Gateway registration scope mismatch.")
+    if user_id and str(registration.get("user_id") or "").strip() != str(user_id or "").strip():
+        raise ValueError("Gateway registration scope mismatch.")
+    clean_name = str(display_name or "").strip()
+    if not clean_name:
+        raise ValueError("display_name must not be empty.")
+    renamed = gateway_state_repository.rename_gateway_registration(
+        gateway_id=gateway_id,
+        display_name=clean_name,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    if not renamed:
+        raise ValueError("Gateway registration was not found.")
+    return gateway_registration_public_payload(renamed)

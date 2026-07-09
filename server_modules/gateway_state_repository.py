@@ -1864,6 +1864,49 @@ def update_gateway_registration_state(
     return _registration_from_row(row)
 
 
+def rename_gateway_registration(
+    *,
+    gateway_id: str,
+    display_name: str,
+    tenant_id: str,
+    workspace_id: str,
+    db_path: Optional[Path | str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Owner-chosen nickname for a paired box (physical device or VPS). Scope-
+    checked by the caller (gateway_registry_service.rename_gateway_registration)
+    before this runs; only touches the display_name column, so it can't
+    disturb device_trust_state/status/metadata consistency the way a full
+    update_gateway_registration_state call could."""
+    clean_name = str(display_name or "").strip()[:80]
+    with _DB_LOCK:
+        conn = _connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT * FROM gateway_registrations WHERE gateway_id = ?",
+                (str(gateway_id or "").strip(),),
+            ).fetchone()
+            registration = _registration_from_row(row)
+            if registration is None:
+                return None
+            if not _registration_scope_matches(
+                registration, tenant_id=tenant_id, workspace_id=workspace_id
+            ):
+                return None
+            now_iso = _utc_now_iso()
+            conn.execute(
+                "UPDATE gateway_registrations SET display_name = ?, updated_at = ? WHERE gateway_id = ?",
+                (clean_name or None, now_iso, str(gateway_id or "").strip()),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM gateway_registrations WHERE gateway_id = ?",
+                (str(gateway_id or "").strip(),),
+            ).fetchone()
+        finally:
+            conn.close()
+    return _registration_from_row(row)
+
+
 def record_gateway_event(
     *,
     gateway_id: str,
