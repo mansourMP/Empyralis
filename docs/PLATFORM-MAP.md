@@ -1,12 +1,30 @@
 # Empyralis — Complete Platform Map
 
-**Updated:** 2026-07-06  
-**Commit:** Phase 8 (verify branch)  
-**Graph:** 28,619 nodes · 72,533 edges · 1,162 communities _(graph stats carried from Fix-1; not re-run this pass)_  
+**Updated:** 2026-07-09  
+**Commit:** `04ccc0e8` (post-Phase 8; this refresh also reflects substantial uncommitted work on top — Phase 7B consolidation, the Authority Mandate system, kill switch, and activity/usage attribution — see changelog below)  
+**Graph:** 97,296 nodes · 190,019 edges · 4,448 communities · 3,259 files _(fresh graphify run 2026-07-08 — predates the changes in this refresh; treat as directional, not current)_  
 **Test baseline:** ~1,319 pre-existing failures — compare failing sets in isolation, not counts  
-**Code:** ~275,000 lines Python (server_modules/) + TypeScript (frontend/, gateway/) + Rust (supervisor/, kernel/)  
+**Code:** ~275,000 lines Python (server_modules/) + TypeScript (frontend/, gateway/) + Rust (kernel/; supervisor/ archived, see §2.3)  
 **For:** Outside engineers and agents — read this cold, understand the entire platform.
 
+> **2026-07-09 refresh — this map was materially stale and had already caused
+> wrong briefs.** Corrected in this pass: the create-agent wizard is
+> documented as its actual current 4-step flow (Placement → Brain → Channels
+> → Connections, auto-named, agent created on step 1), not the old 5-step
+> Name-first flow. The Rust Supervisor is documented as **archived by owner
+> decision** (moved to `_archive/`, "agents do not control user desktops"),
+> not "never compiled" as if still pending. Four new sections were added:
+> **Authority Mandate** (§10), **Kill switch** (§11), **Attribution** (§12),
+> and **One agent class** (§13) — covering work that existed in the repo but
+> had no map entry. Every file reference touched by this pass was checked
+> against the live tree, not memory; stale pointers to files deleted in the
+> Phase 7B consolidation (`channel_execution_service.py`,
+> `transparency_settings_service.py`, `supervisor_client.py`,
+> `computer_control.py`, and their dead test files) were removed. Part 9 ("what
+> blocks a real user") is rewritten to the true current list — the wizard,
+> provider modes, kill switch, attribution, and first-run honesty gaps this
+> map used to list as blockers are now solved and moved into "works today."
+>
 > **Phase 8 changes (2026-07-06):** The legacy workstation shell is gone. Every
 > workspace surface now renders **fleet-native** inside `FleetShell` — landing,
 > agents, projects, billing, inbox, hardware, settings — on the new
@@ -80,11 +98,12 @@
 │   (droplet)  │  │   └─ bridges/        │  │                          │
 │              │  │                      │  │                          │
 │              │  │ empyralis-supervisor │  │                          │
-│              │  │ (Rust, :7788)        │  │                          │
-│              │  │ ⚠️ NEVER COMPILED    │  │                          │
-│              │  │   shell, fs, OCR,    │  │                          │
-│              │  │   screenshot, mouse, │  │                          │
-│              │  │   clipboard, etc.    │  │                          │
+│              │  │ ARCHIVED (owner      │  │                          │
+│              │  │ decision 2026-07-04) │  │                          │
+│              │  │  desktop control is  │  │                          │
+│              │  │  OUT of the product; │  │                          │
+│              │  │  code kept in        │  │                          │
+│              │  │  _archive/supervisor/│  │                          │
 └──────────────┘  └──────────────────────┘  └──────────────────────────┘
 
               empyralis-runtime-kernel (Rust CLI)
@@ -160,7 +179,7 @@ MODE 4: local (Runs on customer's own hardware)
 
 | Surface | File | What it does |
 |---------|------|--------------|
-| Create-agent wizard step 3 | `FleetCreateAgentWizard.tsx` | Sets initial model_config at agent creation |
+| Create-agent wizard | `FleetCreateAgentWizard.tsx` | `model_config` defaults to `platform_credits` the moment the agent is created (Step 1, "Placement"); the "Brain" step (Step 2) only PATCHes it if the user picks BYOK or local |
 | Agent detail → Model tab | `FleetAgentDetail.tsx` (ModelTab) | Edits model_config post-creation via PATCH |
 | Backend validation | `fleet_tools.py` `_VALID_MODEL_MODES` | Rejects invalid modes |
 | Provider catalog | `provider_profiles.py` `PROVIDER_CATALOG` | 17 providers with auth modes, models, scopes |
@@ -302,7 +321,6 @@ This IS the production backend. Everything below lives at `server_modules/`.
 | `channel_lane_contract_service.py` | — | Canonical channel lane definitions (discord_personal contradiction) |
 | `channel_types.py` | — | Channel type definitions |
 | `channel_platform_service.py` | — | Channel platform management |
-| `channel_execution_service.py` | — | ⚠️ Channel execution (hardcoded strings) |
 | `channel_blocking_policy_service.py` | — | Channel blocking/safe mode |
 | `personal_channel_sage_bridge_service.py` | — | ⚠️ 6 near-identical per-channel wrapper functions |
 | `personal_channels_service.py` | 2,270 | Personal channel management |
@@ -369,7 +387,7 @@ This IS the production backend. Everything below lives at `server_modules/`.
 | `hardware_runtime_adapters/cloud_computer_adapter.py` | — | Cloud computer adapter |
 | `hardware_runtime_adapters/gateway_adapter.py` | — | Gateway adapter |
 | `hardware_runtime_adapters/self_hosted_node_adapter.py` | — | Self-hosted VPS adapter |
-| `supervisor_client.py` | — | Supervisor HTTP client |
+| ~~`supervisor_client.py`~~ | — | **Gone** — archived to `_archive/supervisor/` (see §2.3), not present in `server_modules/` |
 
 #### Runtime / Sessions
 
@@ -499,7 +517,7 @@ The Gateway runs on user hardware, opens an outbound WSS tunnel to cloud, and ro
 | **Entry** | `index.ts`, `config.ts` | Process lock, subsystem init, WSS client start |
 | **Cloud** | `cloud/ws-client.ts` (997 lines), `cloud/heartbeat.ts`, `cloud/heartbeat-payload.ts`, `cloud/reconnect.ts` | WSS connection, heartbeat, exponential-backoff reconnection |
 | **Channels** | `channels/telegram/runtime.ts` (825 lines), `channels/whatsapp/runtime.ts` (665 lines), `channels/foundation/` (6 files: credential-redactor, draft-manager, outbound-store, reconnect-utils, typing-keepalive), `channels/local-bridge-runtime.ts` (433 lines), `channels/personal-runtime.ts`, `channels/personal-config-store.ts` | Personal messaging: Telegram (GramJS), WhatsApp (Baileys), Signal/iMessage/WeChat (local HTTP bridge) |
-| **Supervisor** | `supervisor/client.ts`, `supervisor/capability-router.ts`, `supervisor/signing.ts` | ⚠️ Central dispatch hub — routes tool.invoke to 4 executors: browser, external-agent-proxy, personal-channels, supervisor (Rust daemon). Bundles channel messaging + hardware execution together. |
+| **Capability router** | `supervisor/capability-router.ts` (directory name is historical — the Rust supervisor executor was removed from it in the 2026-07-04 archival) | Central dispatch hub — current `ExecutorName` type is `browser \| external_agent_proxy \| personal_channel \| shell_sandbox \| llm`. No supervisor executor; `supervisor/client.ts` and `supervisor/signing.ts` now live in `_archive/supervisor/gateway/`, not here. |
 | **Browser** | `browser/runtime.ts`, `browser/worker.ts`, `browser/session-store.ts` | Browser automation via Python subprocess |
 | **Pairing** | `pairing/device-identity.ts`, `pairing/token-store.ts` | Device UUID + pairing token persistence |
 | **Protocol** | `protocol/types.ts`, `protocol/codec.ts` | Wire format `v1alpha2`: frame types, validation, 256KB limit, 32-level nesting limit |
@@ -508,7 +526,35 @@ The Gateway runs on user hardware, opens an outbound WSS tunnel to cloud, and ro
 | **Bridges** | `bridges/signal-cli-bridge.ts` (381 lines), `bridges/bluebubbles-bridge.ts` (422 lines) | Standalone HTTP bridge servers for Signal (signal-cli JSON-RPC) and iMessage (BlueBubbles API) |
 | **State** | `state/db.ts`, `state/journal.ts`, `state/outbox.ts`, `state/checkpoints.ts` | JSON-file persistence: atomic writes, corruption detection, NDJSON journal, outbox (at-least-once delivery) |
 
-### 2.3 Supervisor — `empyralis-supervisor/src/` (Rust — ⚠️ NEVER COMPILED)
+### 2.3 Supervisor — ARCHIVED BY OWNER DECISION (2026-07-04, Phase U1)
+
+**Not "never compiled" — deliberately disabled and moved.** Per
+`_archive/supervisor/README.md`: *"Empyralis agents do NOT control user
+desktops. The Gateway STAYS (personal channels + VPS pairing). Desktop
+control via supervisor is OUT of the product."* The code was fully
+functional (as of commit `44451aa9c`, Phase P3) and is preserved for
+auditability, not deleted — an 18-step revival checklist is documented in
+that same README if desktop control is ever brought back.
+
+**What moved:** `empyralis-supervisor/` (the whole Rust tree below) →
+`_archive/supervisor/empyralis-supervisor/`; `server_modules/supervisor_client.py`
+and `server_modules/computer_control.py` → `_archive/supervisor/`;
+`empyralis-gateway/src/supervisor/{client,signing}.ts` → `_archive/supervisor/gateway/`.
+Their test files (`test_supervisor_client.py`, `test_computer_control.py`)
+still exist in `server_modules/tests/` but now fail to collect (import a
+module that no longer exists) — dead tests, not a regression to chase.
+
+**Current impact:** `gateway_execution_service.py:57-60` documents this
+directly — desktop-control tool calls (`computer__click`, `computer__type`,
+`computer__ocr`, `computer__clipboard_read`, `computer__clipboard_write`,
+`computer__launch_app`, `computer__focus_window`, `computer__speak`,
+`computer__applescript`) "have no executor on the gateway side." The Gateway
+itself is unaffected — personal channels (Telegram/WhatsApp via GramJS/Baileys)
+and VPS pairing route through it exactly as before; only the supervisor
+dispatch branch is gone.
+
+Original file inventory (historical reference — files below now live under
+`_archive/supervisor/empyralis-supervisor/src/`, not `empyralis-supervisor/src/`):
 
 HTTP server at `127.0.0.1:7788`. HMAC-SHA256 signature verification on all requests.
 
@@ -579,11 +625,11 @@ Fleet components own their own data (no `useWorkspaceBoundary()` context).
 | `FleetShell.tsx` / `FleetShellDecider.tsx` / `FleetContentFrame.tsx` | Themed root (canvas), segment router, and bordered content panel + breadcrumbs. |
 | `PrimaryRail.tsx` | Persistent left rail (Inbox, Projects, Agents, Hardware, Billing, Settings) with keyboard chords. |
 | `FleetHome.tsx` | Agent grid + status strip + "New agent" button. Opens wizard. |
-| `FleetAgentDetail.tsx` | **Routed, deep-linkable** agent detail (not a modal) — `/projects/[pid]/agents/[aid]/[tab]`. 7 tabs: Overview, **Work**, Hardware, Memory, Channels, Connectors, Model (editable). Exports `ChannelsTab` for wizard reuse. |
+| `FleetAgentDetail.tsx` | **Routed, deep-linkable** agent detail (not a modal) — `/projects/[pid]/agents/[aid]/[tab]`. 8 tabs (`TABS`, `FleetAgentDetail.tsx:54-63`): Overview, Work, Channels, Connectors, **Tools**, Hardware, Model (editable), Memory. Exports `ChannelsTab` for wizard reuse. Overview hosts `AgentTitle` (inline click-to-edit rename, `:497-588`) and `PersonaEditor` (instructions, `:593-639`) — the only places those fields are set post-creation. |
 | `tabs/WorkTab.tsx` | End-customer conversations, split-view. **Live** — 7s polling of the list + open transcript, unread dots, "{n} new" count (Phase 8 Part A). |
 | `first-agent-empty.tsx` | Shared first-run empty state + create-agent wizard (`FirstAgentEmpty` / `CreateFirstAgentEmpty`) used by Agents/Projects/Inbox (Phase 8 Part B). |
 | `fleet-states.tsx` | Shared `FleetListSkeleton` + `FleetSurfaceError` — human error states + loading skeletons on every list/tab (Phase 8 Part C5). |
-| `FleetCreateAgentWizard.tsx` | 5-step wizard: Name → Purpose → Provider → Channels → Hardware. Agent exists at step 2, later steps are incremental PATCHes. Closing early = real agent, not lost work. |
+| `FleetCreateAgentWizard.tsx` | **v2, 4-step wizard** (own docstring, `:92-100`): Placement → Brain → Channels → Connections. Name/Project/Capability preset are no longer steps — sane defaults, editable later. Agent is created on Step 1's commit (`submitPlacement()`, `:182-217`); later steps are incremental PATCHes. Closing early = real agent, not lost work. |
 | `FleetCommandPalette.tsx` | Keyboard-driven command palette for switching agent tabs. |
 | `fleet-data.ts` | React hooks (each exposes `{ data, loading, error }` where relevant): `useFleetAgents`, `useFleetProjects`, `useFleetAgentActivity`, `useFleetAgentChannels`, `useFleetAgentConnectors`, `useFleetAgentTools`, `useWorkspaceActivity`, `useWorkspaceStatusStrip`. |
 | `fleet-presentation.ts` | Agent summary projection, status/placement derivation, tint colors. |
@@ -597,23 +643,38 @@ Fleet components own their own data (no `useWorkspaceBoundary()` context).
 | Tab | Data Source | Notes |
 |-----|-------------|-------|
 | **Overview** | `useFleetAgentActivity` → `GET /fleet/agent-activity` | Status, placement, role, recent activity feed |
-| **Work** | `GET /api/deployed-agents/{id}/conversations` (+ transcript) | End-customer conversations, split-view. **Live** — 7s polling + unread dots (Phase 8 Part A) |
+| **Work** | `GET /api/threads?workspace_id=...&agent_id=...` (+ transcript) | End-customer conversations, split-view. **Live** — 7s polling + unread dots (Phase C switched this off the deployed-agents conversations endpoint onto fleet's own thread store) |
 | **Channels** | `GET /fleet/agent-channels` | 7-platform grid. Telegram: hosted / BYO token / personal-via-Gateway. Slack/Discord: OAuth. WhatsApp/Signal/iMessage/WeChat: Gateway pair panel. Exports `ChannelsTab` for wizard reuse |
 | **Connectors** | `GET /fleet/agent-connectors` | MCP/OAuth connector grid with inline credential setup |
 | **Hardware** | agent `hardware_access` + gateway registrations | Cloud (default) vs a paired Gateway computer |
 | **Model** | agent `model_config` + `PATCH /fleet/agents/{id}` | **Interactive** — 4-mode selector (platform credits / BYOK / subscription / local), provider dropdown, API key, Save |
 | **Memory** | `GET /api/sage-context-files?agent_id=` | Split-pane MD file browser, editable + Save |
 
-#### Wizard — 5 Steps
+#### Wizard — 4 Steps (v2, `FleetCreateAgentWizard.tsx`)
+
+`STEP_LABELS` (`FleetCreateAgentWizard.tsx:29`): `["Placement", "Brain", "Channels", "Connections"]`.
+Name, project, and capability preset are no longer steps — they're sane
+defaults (auto-generated name, `"standard"` preset), editable later from the
+Overview tab. Every field below that isn't touched by a step is still set
+automatically at creation (see Part 13 for the full breakdown of what's
+seeded vs. what needs a later PATCH).
 
 | Step | What happens | Persisted via |
 |------|-------------|---------------|
-| 1. Name | Agent name + one-line description | Nothing yet |
-| 2. Purpose | Pick preset (customer_facing / internal_assistant / operator) | `POST /fleet/agents` — agent created here |
-| 3. Provider | Pick mode + provider + optional API key | `PATCH /fleet/agents/{id}` — `model_config` |
-| 4. Channels | Optional — 7-platform grid, same as Channels tab | Inline via `ChannelsTab` |
-| 5. Hardware | Cloud (default) or paired Gateway | `PATCH /fleet/agents/{id}` — `hardware_access` |
-| Finish | Closes wizard, opens agent detail modal | Agent is fully configured |
+| 1. Placement | Cloud (default) / self-hosted VPS / paired-Gateway computer | `POST /fleet/agents` — **agent is created here**, on first commit (`submitPlacement()`, `:182-217`, guarded so a later re-visit only PATCHes); immediately followed by `PATCH /fleet/agents/{id}` for `hardware_access`/`preferred_gateway_id` |
+| 2. Brain | Who pays for the model (`platform_credits` default / BYOK / local) + which model | `PATCH /fleet/agents/{id}` — `model_config`, only sent for BYOK/local (platform_credits needs no patch — it's already the default) |
+| 3. Channels | Optional — same `ChannelsTab` component as the agent detail page | Inline via `ChannelsTab`; button reads "Skip for now" if nothing's connected |
+| 4. Connections | Optional — MCP/OAuth connector picker (`ConnectorPicker`) | Inline; explicitly "skip and add them later" |
+| Finish | Closes wizard, opens agent detail | Agent already exists and is usable — closing at any step keeps a real, working agent, not a discarded draft |
+
+**Auto-naming:** the wizard sends no `name`; the backend (`fleet_create_agent`,
+`fleet_tools.py:1189-1203`) assigns one from a 50-name curated pool
+(`agent_name_pool.py` — `NAME_POOL`, `assign_agent_name()`; "Sage" reserved
+for the operator), collision-checked against every existing label in the
+workspace including the master agent. **Inline rename** lives in the
+Overview tab: `AgentTitle` (`FleetAgentDetail.tsx:497-588`) is a click-to-edit
+control that PATCHes `display_name` directly — the only place an agent is
+renamed post-creation.
 
 #### Theme System
 
@@ -645,7 +706,6 @@ shell, so kept): `workspace-boundary.tsx` (16 importers), `workspace-shell.ts`,
 `server-workspace-bootstrap.ts`, `workspace-setup-form.tsx`,
 `workspace-channel-pairing-surface.tsx`, `hosted-mini-app-surface.tsx`,
 `cloud-vps-setup-panel.tsx`, the `sage-chat/` stack + `workstation-chat-pane-hooks/-model`,
-`workstation-deployed-agent-analytics-pane.tsx` / `-test-turn-pane.tsx`,
 `workstation-split-workbench.tsx`, `workstation-surface-primitives.tsx`,
 `workstation-stream-manager.ts`, `workstation-client.ts`. (`application-surface-tabs.ts`
 is a pre-existing orphan, unrelated to the sweep — left for separate cleanup.)
@@ -887,20 +947,20 @@ Memory list:
 
 ### 4.1 God Objects — Top 10 by Edge Count
 
-From `graphify-out/GRAPH_REPORT.md` (2026-07-03):
+From `graphify-out/GRAPH_REPORT.md` (2026-07-08, fresh run):
 
 | Rank | Node | Edges | What Breaks If It Changes |
 |------|------|-------|---------------------------|
 | 1 | `Communities` | 763 | Graph structure — metadata node |
-| 2 | `PATH` | 607 | **Everything.** Referenced by tests, state paths, runtime config, legacy file resolution. 80+ communities depend on it. |
-| 3 | `RunStartRequest` | 174 | All run execution — turn start, session creation, VPS claim |
-| 4 | `RunServiceTests` | 143 | Test suite for the second-largest service file (6,474 lines) |
-| 5 | `InMemoryVirtualComputerRuntime` | 132 | All virtual computer tests and simulation |
-| 6 | `AgentManifest` | 127 | Every agent definition, every registry read, every specialist |
-| 7 | `enforce_workspace_access()` | 124 | Every API route — auth wall across the entire platform |
-| 8 | `_scoped_connection()` | 123 | Every Postgres query through the control plane |
-| 9 | `runtime_state_store_decision_command()` | 114 | All state persistence authorization |
-| 10 | `_token()` | 105 | Auth token resolution — every request |
+| 2 | `RunStartRequest` | 175 | All run execution — turn start, session creation, VPS claim |
+| 3 | `RunServiceTests` | 143 | Test suite for the second-largest service file (6,474 lines) |
+| 4 | `InMemoryVirtualComputerRuntime` | 132 | All virtual computer tests and simulation |
+| 5 | `enforce_workspace_access()` | 124 | Every API route — auth wall across the entire platform |
+| 6 | `_scoped_connection()` | 118 | Every Postgres query through the control plane |
+| 7 | `runtime_state_store_decision_command()` | 114 | All state persistence authorization |
+| 8 | `AgentManifest` | 110 | Every agent definition, every registry read, every specialist |
+| 9 | `_token()` | 102 | Auth token resolution — every request |
+| 10 | `AgentTurnRequest` | 96 | **NEW** — canonical turn contract, all channels converge here |
 
 **Largest files (lines):**
 
@@ -914,15 +974,15 @@ From `graphify-out/GRAPH_REPORT.md` (2026-07-03):
 
 ### 4.2 Import Cycles — All 19
 
-From the graphify report:
+From the graphify report (2026-07-08):
 
 **1-file self-cycles (4):**
-- `empyralis-supervisor/src/capabilities/clipboard.rs` → self
+- `_archive/supervisor/empyralis-supervisor/src/capabilities/clipboard.rs` → self
 - `legacy/frontend/shared/nav-manifest.ts` → self
 - `scripts/orion_terminal/wizard/engine.py` → self
 - `shared/nav-manifest.ts` → self
 
-**3-file cycles (15):**
+**3-file cycles (13):**
 1. `gateway_execution_service.py → gateway_protocol_service.py → personal_channels_service.py → gateway_execution_service.py`
 2. `conversation_memory_policy.py → memory_service.py → memory_summary_service.py → conversation_memory_policy.py`
 3. `conversation_memory_policy.py → memory_service.py → workspace_context_memory_adapter.py → conversation_memory_policy.py`
@@ -932,21 +992,29 @@ From the graphify report:
 7. `local_queue.py → runtime_runs_api.py → runtime_route_registration_service.py → local_queue.py`
 8. `direct_chat_tool_catalog_service.py → skills_service.py → no_provider_service.py → direct_chat_tool_catalog_service.py`
 9. `policy_service.py → skills_service.py → runs_execution.py → policy_service.py`
-10. `policy_service.py → skills_service.py → runtime_config.py → policy_service.py`
-11. `runtime_config.py → setup_sessions.py → shared.py → runtime_config.py`
-12. `runtime_common.py → runtime_config.py → setup_sessions.py → runtime_common.py`
-13. `connector_validators.py → connectors/discord_connector.py → runtime_config.py → connector_validators.py`
-14. `local_queue.py → run_service.py → runtime_attachment_service.py → local_queue.py`
+10. `runtime_config.py → setup_sessions.py → shared.py → runtime_config.py`
+11. `runtime_common.py → runtime_config.py → setup_sessions.py → runtime_common.py`
+12. `connector_validators.py → connectors/discord_connector.py → runtime_config.py → connector_validators.py`
+13. `local_queue.py → run_service.py → runtime_attachment_service.py → local_queue.py`
+
+**3-file cycles — new since Fix-1 (1):**
+14. `agent_memory_tree_service.py → memory_service.py → workspace_context_memory_adapter.py → agent_memory_tree_service.py`
+
+**3-file cycles — resolved since Fix-1 (1):**
+- ~~`policy_service.py → skills_service.py → runtime_config.py`~~ — no longer present
 
 **4-file cycles (2):**
 15. `scripts/orion_terminal/__init__.py → app.py → flows.py → flows_shared.py → __init__.py`
-16. `auth.py → direct_tool_config_service.py → skills_service.py → gateway_protocol_service.py → auth.py`
+16. `local_queue.py → run_service.py → policy_service.py → runtime_policy.py → local_queue.py` ⚠️ **NEW**
 
-`local_queue.py` appears in 4 cycles — it's the most entangled file. `memory_service.py` and `runtime_config.py` each appear in multiple cycles.
+**4-file cycles — resolved since Fix-1 (1):**
+- ~~`auth.py → direct_tool_config_service.py → skills_service.py → gateway_protocol_service.py`~~ — no longer present
 
-### 4.3 Isolated Nodes — 1,079 with ≤1 Connection
+`local_queue.py` is now in **5 cycles** (was 4) — still the most entangled file. `memory_service.py` appears in 4 cycles (was 3, gained `agent_memory_tree_service.py`).
 
-The graph has 1,079 nodes with ≤1 connection. These are candidates for dead code, but many are dynamically called (test functions, route handlers registered via decorators). **Do not blindly delete** — each must be audited for dynamic dispatch.
+### 4.3 Isolated Nodes — 2,804 with ≤1 Connection
+
+The graph has 2,804 nodes with ≤1 connection. These are candidates for dead code, but many are dynamically called (test functions, route handlers registered via decorators). **Do not blindly delete** — each must be audited for dynamic dispatch.
 
 ### 4.4 Low-Cohesion Communities (2)
 
@@ -957,13 +1025,13 @@ The graph has 1,079 nodes with ≤1 connection. These are candidates for dead co
 
 Both should be split. Community 1 is a catch-all for UI components that don't really relate. Community 2 bundles run lifecycle functions with approval and workflow functions that have weak connections.
 
-### 4.5 Inferred Edges — 1,571 at 0.61 Avg Confidence
+### 4.5 Inferred Edges — 1,552 at 0.62 Avg Confidence
 
-1,571 edges are inferred (not extracted from AST). At 0.61 average confidence, a significant number may be wrong. Key risk: inferred edges involving god objects (`PATH`, `enforce_workspace_access`, `_scoped_connection`) could mislead navigation.
+1,552 edges are inferred (not extracted from AST). At 0.62 average confidence, a significant number may be wrong. Key risk: inferred edges involving god objects (`enforce_workspace_access`, `_scoped_connection`) could mislead navigation.
 
-### 4.6 Thin Communities — 321 of 1,162
+### 4.6 Thin Communities — 989 of 4,448
 
-321 communities have too few nodes or edges to be meaningful — they exist as isolated clusters in the graph. 293 are omitted from the report entirely.
+989 communities have too few nodes or edges to be meaningful — they exist as isolated clusters in the graph. They are omitted from the report entirely.
 
 ---
 
@@ -1105,7 +1173,6 @@ Auth: Bearer `empyralis_mcp_...` (SHA-256 hashed). Write tools gated behind `EMP
 |------|-------|--------|
 | `sage_command_dispatcher.py` | 3 | Fixed (platform_event.py constants) |
 | `sage_reply_dispatcher.py` | 1 | Fixed (platform_event.py) |
-| `channel_execution_service.py` | 2 | Fixed (platform_event.py) |
 | `quota_response_service.py` | 3 | Fixed (platform_event.py) |
 | `autopilot_runtime_support_service.py` | 7 | **Deferred** |
 | `inventory_skill.py` | 5 | **Deferred** |
@@ -1214,11 +1281,10 @@ To reach feature parity with `server_modules/`, the `server/` directory would ne
 
 Per the platform vision: the cure for doubt is ONE real user who finds it useful enough to come back the next day.
 
-### 9.1 What Works Today (updated 2026-07-05)
+### 9.1 What Works Today (updated 2026-07-09)
 
 - ✅ Platform boots (frontend :3000, backend :8001)
 - ✅ Preflight checks pass for local dev (Postgres/Redis can be skipped)
-- ✅ 141 tests pass (50 pre-existing failures in unrelated fixtures)
 - ✅ Telegram bot channel (PROVEN)
 - ✅ Discord bot channel (PROVEN)
 - ✅ Slack channel (PROVEN)
@@ -1227,8 +1293,8 @@ Per the platform vision: the cure for doubt is ONE real user who finds it useful
 - ✅ Empyralis as MCP server (9 tools, per-workspace API keys)
 - ✅ Fleet tools: create, configure, list agents
 - ✅ **Fleet Home UI** — agent grid, status strip, "New agent" button
-- ✅ **5-step create-agent wizard** — Name → Purpose → Provider → Channels → Hardware, all functional
-- ✅ **Agent detail modal** — 7 tabs (Overview, Chat, Memory, Channels, Connectors, Tools, Model)
+- ✅ **4-step create-agent wizard (v2)** — Placement → Brain → Channels → Connections, agent created on Step 1, auto-named from a curated pool, inline click-to-edit rename from the Overview tab (Part 2.5, Part 13)
+- ✅ **Agent detail modal** — 8 tabs (Overview, Work, Channels, Connectors, Tools, Hardware, Model, Memory)
 - ✅ **Interactive Model tab** — switch provider/mode/payment from agent modal
 - ✅ **Provider catalog** — 4 modes (platform_credits, byok_api, cli_subscription, local), 17 providers
 - ✅ **Memory browser** — per-agent MD file tree with editable textarea + Save
@@ -1237,33 +1303,42 @@ Per the platform vision: the cure for doubt is ONE real user who finds it useful
 - ✅ **SQLite fallback** — entire agent registry works without DATABASE_URL (local dev)
 - ✅ **Theme unification** — single `data-theme` attribute, dark mode consistent across all surfaces
 - ✅ **Chat composer** — attach button visible with real file picker, vision support gating
-- ✅ schedule_task for proactive agents
+- ✅ schedule_task for proactive agents, authority-tier-inherited (Part 10)
 - ✅ Operator/specialist agent roles with purpose_preset
-- ✅ Platform voice: 26 "I"/"my" strings fixed
+- ✅ **Kill switch** — workspace and per-agent emergency stop, hard-blocked before any LLM call, wired to real UI controls (Part 11)
+- ✅ **Authority Mandate** — owner/audience/system tiers, two fail-closed choke points on tool execution, owner-declared per-agent `audience_tools` allowlist (Part 10)
+- ✅ **Activity and usage attribution** — an agent's Overview activity feed and per-agent cost/usage now correctly filter by that agent's own install_id instead of returning empty or blending into Sage's identity (Part 12)
+- ✅ **First-run honesty** — a freshly created agent's Overview ("Now" status strip, recent-activity feed), chat transparency events, and Work tab conversation rows show true zero/empty state instead of stale or fabricated data
+- ✅ **One agent class** — Fleet is the only live agent path; Deployed/Studio is frozen as a dormant reference implementation, not active scaffolding (Part 13)
 
 ### 9.2 What Blocks a Real User
 
 | Blocker | Detail | Impact |
 |---------|--------|--------|
-| **No production deploy** | Frontend runs on localhost:3000 — no public URL, no HTTPS, no production build | Nobody outside this machine can use it |
-| **Rust Supervisor never compiled** | Node.js Gateway runs in dev (Telegram/WhatsApp personal PROVEN through it). Rust Supervisor binary never compiled — hardware security boundary is paper. | Hardware features are spec-level |
-| **No channel health monitoring** | If a Telegram bot token expires or Discord webhook fails, no alert | Silent failures lose messages |
-| **Per-agent hosted bots not built** | One shared workspace bot per channel — specialists can't have their own Telegram/Discord identities | Agent identity is invisible to end users |
-| **Per-agent wake/heartbeat UI not built** | Backend exists (`runtime_heartbeat_service.py`) but no per-agent schedule control in UI | Users can't schedule agent wake-ups |
-| **"Connect via MCP" tile not built** | Empyralis IS an MCP server but has no discovery surface in-product | Users must find docs outside the app |
-| **No real onboarding walkthrough** | Wizard works but no guided "create agent → bind channel → send first message → get reply" flow | New user has no idea what to do |
-| **~31 "I"/"my" strings remain** | Platform impersonates agent in autopilot, inventory, automation paths | User gets confused about who's talking |
+| **No production deploy** | Frontend runs on localhost:3000 — no public URL, no HTTPS, no production build. Unchanged since the last refresh — still the single biggest blocker. | Nobody outside this machine can use it |
+| **Per-agent channel identities not built** | One shared workspace bot per channel — specialists can't have their own Telegram/Discord identities | Agent identity is invisible to end users |
+| **No channel health alerts** | If a Telegram bot token expires or Discord webhook fails, no alert | Silent failures lose messages |
+| **No mandate/schedule UI** | The Authority Mandate's `mandate.audience_tools` allowlist (Part 10) and per-agent wake/heartbeat scheduling (`runtime_heartbeat_service.py`) are both real, enforced backend mechanisms with **zero frontend surface** — owners can only set either via a raw PATCH | Owners can't see or control what their agent lets end-customers trigger, or when it wakes up, without reading API docs |
+
+Smaller known gaps, not re-verified in this pass (carried forward from the
+prior version of this map — confirm against the tree before relying on
+them): no in-product MCP-server discovery tile, no guided
+first-message onboarding walkthrough, and an unknown remaining count of
+platform-voice "I"/"my" strings in lower-traffic paths (autopilot, inventory,
+automation).
 
 ### 9.3 Minimum Viable Onboarding
 
 To get ONE real user:
 
 1. **Deploy frontend** — production build, public URL, HTTPS
-2. **One guided path** — after signup, walk user through: name agent → pick brain → bind Telegram → send first message → get reply
-3. **Fix remaining impersonation strings** — at least the high-traffic ones
-4. **Per-agent hosted bots** — so specialists have their own Telegram identities
+2. **Per-agent channel identities** — so specialists have their own Telegram/Discord identities, not one shared workspace bot
+3. **Mandate/schedule UI** — a real settings surface for `audience_tools` and wake scheduling, so owners aren't PATCHing JSON by hand
+4. **Channel health alerts** — so a dead bot token fails loudly instead of silently
 
-That's the shortest path to validating with a real user. The fleet console, wizard, and provider system — previously the biggest gaps — are now built.
+That's the shortest path to validating with a real user. The fleet console,
+wizard, provider system, kill switch, and attribution — previously the
+biggest gaps — are now built.
 
 ### 9.4 SQLite Fallback Architecture (Fix-1)
 
@@ -1292,6 +1367,298 @@ same return shapes. They cannot tell which storage is active.
 
 ---
 
+## Part 10: Authority Mandate
+
+Distinguishes *who* is actually driving a turn — the workspace owner, an
+end-customer over some channel, or an unattended scheduled/system trigger —
+and hard-blocks non-owner-safe tool calls accordingly. Core module:
+`server_modules/authority_mandate_service.py`.
+
+**Tiers** (`authority_mandate_service.py:30-34`): `TIER_OWNER = "owner"`,
+`TIER_AUDIENCE = "audience"`, `TIER_SYSTEM = "system"`. `"system"` is a
+provenance label for scheduled/unattended turns, **not an elevated tier** —
+only `owner` bypasses enforcement; `system` is checked exactly like
+`audience`. `normalize_tier()` (`:76-86`) is the single coercion point:
+anything outside the three valid strings fails to `"audience"`, never
+`"owner"`.
+
+**Derivation at ingress** — two live sites, converging on the same
+vocabulary:
+- **Channel/sender path** — `triage_service.resolve_sender_identity()`
+  (`triage_service.py:83-137`) classifies a sender as `owner`/`audience`/
+  `unknown` from the workspace's identity-linked channel bindings, called
+  inside `handle_sage_chat` (`sage_agent_runtime_service.py:3020-3047`,
+  defaulting to owner only when there's no live channel sender at all — a
+  web/API session). Stamped as `authority_tier` at
+  `sage_agent_runtime_service.py:2097` via
+  `derive_tier_from_sender_class()` — the one site covering Sage and every
+  fleet specialist, on every channel.
+- **Web/API session path** — `agent_turn.build_direct_chat_turn_request`
+  (`agent_turn.py:1028-1030`) derives from
+  `derive_tier_from_owner_flag(_current_user_is_owner(current_user))`; a
+  parallel helper (`agent_registry_api._authority_tier_for_current_user`,
+  `:375-388`) does the same for registry/scheduler routes.
+
+**Two fail-closed choke points** — both hard execution blocks, not
+visibility filters, and both share one predicate,
+`authority_mandate_service.is_tool_call_allowed()` (`:102-111`: owner always
+passes; any other tier needs the tool marked `audience_safe`, either on its
+`ToolDescriptor` manifest or via `mandate.audience_tools` below):
+1. `skills_service._authority_mandate_gate()` (`:1506-1548`), gating both
+   live tool-dispatch entry points (`execute_single_direct_tool_call_async`
+   and its sync twin, `skills_service.py:3415-3417`/`3452` and
+   `:3797-3799`/`3838`). Raises `RuntimeError` with
+   `MANDATE_BLOCKED_MESSAGE` ("Heads up: that action is only available to
+   the workspace owner.").
+2. `runs_execution._connector_mandate_gate()` (`:2350-2389`), gating
+   connector/MCP tool calls inside the durable-run path
+   (`_workflow_execute_connector_action`, `:2481-2483`/`2522`).
+
+Fail-closed means exactly that: a `session_ctx`/run with no stamped tier at
+all is treated as `audience`, never `owner` — pinned by
+`test_missing_authority_tier_key_fails_closed_to_audience`
+(`test_skills_service.py:1214`) and `test_no_stamped_tier_blocked_fail_closed`
+(`test_runs_execution_graph.py:2012`). `bounded_scheduler_service.py` is
+**not** a third choke point — it only resolves/stamps a tier onto a wake
+request for the two gates above to check later; it never itself blocks a
+call.
+
+**Inheritance** — `inherit_tier()` (`authority_mandate_service.py:89-99`) is
+a thin fail-safe alias of `normalize_tier()`, and its only direct call site
+in the repo is `fleet_tools.schedule_task` (`fleet_tools.py:1488`), which
+persists the caller's tier onto the wake-request payload so a self-proposed
+wake-up can never execute at a higher tier than the turn that scheduled it.
+Run-to-run inheritance uses a different mechanism (dict propagation, not an
+`inherit_tier()` call) and is **not uniform**: workflow-subflow and
+local-tool child runs genuinely inherit — `build_workflow_child_metadata()`
+(`run_service.py:132-148`) shallow-copies the parent's full metadata dict,
+tier included. Orchestrator→specialist **delegation does not** —
+`build_delegated_child_run_request()` (`run_service.py:5428-5498`) copies
+ownership/lineage fields but not `authority_tier`, so a delegated child
+re-derives its tier from scratch and lands on `audience` (the safe
+direction — it can never escalate to owner this way — but it is
+re-derivation, not literal propagation; no test currently pins this specific
+path).
+
+**`mandate.audience_tools`** — a plain `list[str]` at
+`install_metadata["mandate"]["audience_tools"]`: an owner-declared allowlist
+of tools an audience-tier sender may trigger even though they aren't
+globally `audience_safe`. Set via `fleet_tools.fleet_configure_agent()`'s
+`"mandate"` patch branch (`:763-787`, capped at 200 entries) through
+`PATCH /api/w/{workspace_id}/fleet/agents/{agent_id}`. Consulted at both
+choke points: `skills_service` reads it off `session_ctx["mandate_audience_tools"]`
+(populated in `_resolve_specialist_toolset()`,
+`sage_agent_runtime_service.py:1510-1514`); `runs_execution` fetches it fresh
+via `_run_agent_mandate_audience_tools()` (`:2320-2347`). The tool that edits
+this field is itself marked `audience_safe=False`, so an audience-tier
+caller cannot grant itself more access.
+
+**Tests:** `test_authority_mandate_service.py` (primitives),
+`test_skills_service.py::AuthorityMandateGateTests` (choke point 1),
+`test_runs_execution_graph.py::ConnectorActionMandateGateTests` (choke point
+2), `test_hierarchy.py::FleetConfigureValidationTests` (mandate patch
+validation), `test_agent_turn.py` (run-start tier precedence),
+`test_bounded_scheduler_service.py` (wake-request tier grouping).
+
+---
+
+## Part 11: Kill Switch
+
+Emergency-stop system. Core module: `server_modules/kill_switch_gate.py`.
+
+**Scopes** (`kill_switch_gate.py:38-42`): `global_pilot` (flat key),
+`workspace:{id}`, `agent:{id}`, `gateway:{id}`, `channel:{workspace_id}:{channel_name}`
+(per the code comment — compound format, unverified in practice, see below).
+**Only workspace and agent are actually wired end-to-end** (route + UI + live
+enforcement). `gateway:` has routes but no UI. `global_pilot` and `channel:`
+are checked by `evaluate_kill_switch()` but have **zero write callers**
+anywhere in the codebase — nothing ever calls `set_kill_switch` with either
+key. Don't describe all five as equally live.
+
+**Core functions:** `evaluate_kill_switch()` (`:181-245`) — pure read, checks
+global → workspace → agent → gateway → channel in order, then falls through
+to a read-only bridge into the separate `safe_mode_service` system (below).
+Returns a `KillSwitchDecision`. `assert_not_killed()` (`:248-284`) calls it
+and raises `KillSwitchBlockedError` if blocked, after emitting a
+`kill_switch.denied` security-audit event.
+
+**Hard block, pre-LLM, on the primary chat pipeline:**
+`sage_agent_runtime_service._run_sage_action_loop_v3()` (`:2008-2038`) calls
+`evaluate_kill_switch()` as the very first thing it does — before tool
+bundling, ~190 lines before the actual provider call
+(`direct_chat_generation_service.stream_provider_backed_direct_chat()` at
+`:2210`). If tripped, the function returns early with a synthetic "stopped"
+reply; zero tokens are spent, no LLM call happens. (A second,
+explicitly-commented *informational-only* check at `:3220` only sets a
+prompt-context flag — it never blocks.) This path is reached by every
+channel and the web/API chat entry (`sage_chat_api.py` → `sage_turn_adapter.py`
+→ `handle_sage_chat`). Gateway/personal-channel dispatch has its own
+pre-dispatch hard gate via `assert_not_killed(gateway_id=...)`, called from
+`personal_channels_service.py`, `agent_channel_router.py`, and
+`gateway_protocol_service.py` (16 call sites total).
+**Known gap, not yet resolved:** `direct_chat_runtime_service.py`'s chat
+producer (still imported by `runtime_runs_api.py`, gated behind
+`ORION_DIRECT_CHAT_SESSION_MANAGER`) calls the same generation function
+directly and has zero references to `kill_switch_gate` — whether this older
+path is still reachable from any live route wasn't fully resolved in this
+pass; treat "kill switch blocks every turn" as true for the canonical path
+above, not yet verified as universal.
+
+**REST routes** — workspace and agent scopes only have write routes:
+`POST .../fleet/agents/{id}/stop` / `.../resume` (`routes_fleet.py:276,301`
+→ `fleet_tools.py:1008,1053`) and `POST .../fleet/stop-all` / `.../resume-all`
+(`routes_fleet.py:324,346` → `fleet_tools.py:1093,1130`). Gateway scope has
+routes (`routes_gateway.py:1339` emergency-stop, `:1384` clear) but no
+frontend control found. `routes_deployed_agents.py`'s kill/emergency-stop
+routes are a **separate, unrelated mechanism** — they key a deployed-agent's
+own metadata via a different Rust decision, not `kill_switch_gate`.
+
+**Duplicate mechanism, not unified — flag for Part 7/8's violation
+catalog:** `safe_mode_service.py` has its own independent `set_kill_switch()`
+with its own storage and a different, richer scope model
+(tenant/workspace/machine/capability/agent/channel/connector), exposed via
+`POST /admin/kill-switch` and `POST /agent-registry/security/kill-switches`.
+`kill_switch_gate` only reads it (read-only bridge,
+`_evaluate_safe_mode_emergency_kill()`, `:287-352`) for
+global/tenant/workspace/machine/agent — **not** channel, so a
+channel-scoped safe-mode kill never affects `kill_switch_gate`'s decision.
+A unifying reader, `safe_mode_service.resolve_operator_control_report()`,
+exists but has zero callers — built, never wired.
+
+**UI:** workspace scope — Settings page "Emergency stop"
+(`StopAllAgentsSection`, `frontend/app/(account)/w/[workspaceId]/settings/page.tsx:24-115`).
+Per-agent scope — `StopAgentControl` in the agent Overview header
+(`FleetAgentDetail.tsx:313-363`). Both components' own comments cite the
+exact backend key and enforcement site. No gateway- or global-scoped kill
+control exists in the frontend.
+
+**Rust kernel enforcement — write path only.** `set_kill_switch()`/
+`clear_kill_switch()` (`:139,147`) call
+`_enforce_kill_switch_state_decision()` (`:53-80`) *before* touching
+in-memory state or the JSON file — fail-closed via
+`rust_runtime_kernel_client.py` (unavailable kernel binary → block, per its
+own docstring "Thin fail-closed client"). The **read** path
+(`is_kill_active`/`evaluate_kill_switch`) is a plain in-memory/file lookup
+with no kernel call — a compromised/bypassed write is what the kernel
+guards against, not read latency or availability.
+
+---
+
+## Part 12: Attribution
+
+Whether a piece of activity or usage links back to the *specific agent
+install* that produced it, rather than blurring into the workspace or
+Sage's own identity. Two independent mechanisms — do not conflate them.
+
+**Activity ledger attribution** (`activity_ledger_events.install_id`,
+`control_plane_repository.py:1361`). `specialist_activity` is not a table —
+it's one whitelisted `event_class` value
+(`activity_ledger_service.py:14-31`, EVENT_CLASSES) emitted whenever a
+non-master agent handled a turn, as opposed to `sage_activity` for the
+operator itself.
+
+- **Write path:** `activity_ledger_service.append_activity_event()`
+  (`:425-487`, `install_id` param at `:433`) →
+  `control_plane_repository.append_activity_ledger_event()`
+  (`:11811-11917`, `install_id` bound into the INSERT at `:11893`). This
+  plumbing already existed. **What was actually broken and fixed in this
+  pass:** the two call sites inside `handle_sage_chat`
+  (`sage_agent_runtime_service.py:3649,4031`) previously didn't pass
+  `install_id=` at all (defaulting to `NULL`) and hardcoded
+  `event_class="sage_activity"`/`status="logged"` unconditionally — so
+  every specialist's turn got misattributed into Sage's own identity, and
+  failed turns were mislabeled as successfully "completed." They now pass
+  `install_id=_acting_install_id` (resolved at `:2915-2935`, with a
+  master-Sage fallback when no specialist is acting) and derive the correct
+  event_class/status per turn outcome via `_sage_chat_ledger_fields()`
+  (`:587-619`).
+- **Read path:** `fleet_tools.fleet_get_agent_activity()` (`:469-537`) and
+  `fleet_get_project_activity()` (`:540-599`) now filter
+  `WHERE install_id = $N` (`:501`, `:579`). **Also broken before this
+  pass:** both filtered on `actor_id` instead — which stores the *human*
+  sender, never an agent's install id — so these queries always returned
+  zero rows for any real agent turn, which is why an agent's Overview tab
+  read "No activity yet" even after real conversations happened.
+- **Tests:** `test_fleet_activity_install_id_attribution.py` (7 methods) —
+  pins both the corrected SQL filter and the four `_sage_chat_ledger_fields()`
+  outcome combinations (Sage/specialist × success/failure).
+
+**Usage/billing attribution** — a **separate** system, untouched by this
+pass, covered in full in the `usage_events` fix write-up: `usage_events.agent_install_id`
+(`usage_events_repository.py:87-106`), set via a `contextvars.ContextVar`
+(`USAGE_ATTRIBUTION`, `:24-30`) rather than an explicit parameter, read back
+by `record_usage_from_context()` (`:56-85`), queried per-agent by
+`summarize_usage(scope="agent", ...)` (`:202-290`).
+
+**Where the two meet:** both mechanisms are fed by the same upstream value —
+`sage_agent_runtime_service.py` computes `_acting_install_id` once per turn
+(`:2926-2953`) and threads it into *both* `set_usage_attribution(agent_install_id=...)`
+and the ledger writes' `install_id=...` — so a change to how the acting
+install is resolved affects both, but they otherwise write to different
+tables through different plumbing and should be reasoned about separately.
+
+---
+
+## Part 13: One Agent Class
+
+Part 8.1 lists "ONE Agent class" as a target-architecture gap — as of the
+2026-07-09 Phase 7B consolidation, this is now true in practice, not just
+aspiration.
+
+**Fleet (`workspace_agent_installs`) is the one live agent class.** 107 rows
+in the shared dev database as of this refresh. Every current creation path
+(the wizard, `fleet_create_agent`), read path (`fleet_list_agents`, agent
+detail), and configuration path (`fleet_configure_agent`) operates on this
+table exclusively.
+
+**Deployed/Studio agents are FROZEN, not deleted — a dormant reference
+implementation.** `server_modules/deployed_agent_service.py:1-19` (module
+docstring, added in this consolidation) states it directly: *"Fleet ...
+is now the one agent class. The live-channel delivery, quota/cost-cap
+enforcement, and every Studio UI surface that used to call into this file
+have been deleted as dead code ... What's left here is intentionally NOT
+deleted: the customer-facing, monetized agent product this file implements
+(public marketplace listing, daily message quotas with upsell CTAs, monthly
+cost caps, GDPR-style external-user deletion, escalation-to-owner policy,
+the Telegram shop-assistant vertical, computer-automation safety budgets) is
+novel capability Fleet doesn't have an equivalent for ... It stays as a
+dormant, fully-built reference implementation ... do not delete, do not
+extend, do not treat as dead code to clean up. Any change here needs an
+explicit owner decision first."*
+
+The backing `deployed_agents` table still holds 6 historical rows — nothing
+deletes them, but nothing live writes new ones either (`mcp_server.py`, the
+one-time path that used to provision them, has zero references to deployed
+agents left). The backend service files themselves
+(`deployed_agent_service.py`, `deployed_agent_config_schema.py`,
+`deployed_agent_runtime_contract_service.py`,
+`deployed_agent_virtual_runtime_service.py`,
+`deployed_agent_transparency_service.py`,
+`deployed_agent_admin_dashboard_service.py`,
+`deployed_agent_analytics_service.py`,
+`deployed_agent_business_insights_service.py`,
+`deployed_agent_marketplace_service.py`, `deployed_agent_test_turn_service.py`,
+`routes_deployed_agents.py`, `routes_marketplace.py`) all still exist on disk
+— D.10's file listing is still accurate. What's gone is everything that used
+to call INTO them from the live product: the entire
+`frontend/lib/workspace/deployed-agents/` directory (15 files, ~9,100 lines),
+`frontend/lib/marketplace/marketplace-pane.tsx`, the Studio-specific
+workstation panes, and three backend files that had zero real callers
+(`channel_execution_service.py`, `deployed_agent_daily_quota_adapter.py`,
+`deployed_agent_rate_limit_service.py` — see the changelog at the top of this
+document). Full inventory and the ordered strangler-fig plan this cleanup
+followed: `docs/DEPLOYED-AGENT-CONSOLIDATION-MAP.md`.
+
+**Practical implication for anyone touching agent code:** if you're adding a
+feature, it goes in the Fleet path (`fleet_tools.py`,
+`agent_registry_repository.py`, `sage_agent_runtime_service.py`). If you find
+yourself about to edit `deployed_agent_service.py` or its siblings for
+anything other than the frozen monetized-product surface, stop and check
+whether Fleet already has (or should have) the equivalent — that file's own
+docstring is the owner-level warning not to casually extend it.
+
+---
+
 ## Appendix A: Architecture Decisions (Why It's Built This Way)
 
 These are recorded in `docs/PLATFORM.md` Section 7. Do NOT reverse without explicit instruction.
@@ -1302,7 +1669,7 @@ These are recorded in `docs/PLATFORM.md` Section 7. Do NOT reverse without expli
 4. **No approval/deny flow** — agent is autonomous. Governance internalized. Hard boundaries at execution.
 5. **No "I"/"my" in platform messages** — infrastructure is not a person. Platform voice ≠ agent voice.
 6. **Dead routes preserved, not deleted** — Signal, iMessage, WeChat, Slack routes kept unmounted. One-line remount when bridges are ready.
-7. **Rust Supervisor separate from Node.js Gateway** — separate runtimes, separate blast radius. A Gateway crash can't take down safety layer.
+7. **Rust Supervisor separate from Node.js Gateway** — separate runtimes, separate blast radius. A Gateway crash can't take down safety layer. (Superseded 2026-07-04: the owner decided agents should not control user desktops at all, so the Supervisor was archived rather than kept as a separate-blast-radius safety layer — see §2.3.)
 8. **No fallback to cheaper models** — hard stop at zero credits. Honest, not silent degradation.
 
 ## Appendix B: Quick Reference — Key File Paths
@@ -1320,14 +1687,17 @@ Memory:             server_modules/memory_service.py (2,701 lines)
 Auth:               server_modules/auth.py (5,796 lines)
 Postgres:           server_modules/control_plane_repository.py (13,049 lines — LARGEST)
 Preflight:          server_modules/preflight.py (223 lines)
+Authority Mandate:  server_modules/authority_mandate_service.py (Part 10)
+Kill switch:        server_modules/kill_switch_gate.py (Part 11)
+Activity/usage attribution: server_modules/activity_ledger_service.py, usage_events_repository.py (Part 12)
 Gateway (Node.js):  empyralis-gateway/src/
-Supervisor (Rust):  empyralis-supervisor/src/ (UNCOMPILED)
+Supervisor (Rust):  ARCHIVED — _archive/supervisor/empyralis-supervisor/src/ (owner decision 2026-07-04, see §2.3)
 Kernel (Rust CLI):  empyralis-runtime-kernel/src/
 Frontend:           frontend/app/ + frontend/lib/workspace/
 Frontend channels:  frontend/lib/workspace/workspace-channel-pairing-surface.tsx (hardcoded types)
 Shared contracts:   shared/api-contract/
 Legacy (v1 ref):    legacy/
-Graph:              graphify-out/graph.json (40MB, 28,619 nodes)
+Graph:              graphify-out/graph.json (117MB, 97,296 nodes)
 Platform doc:       docs/PLATFORM.md (prescriptive rulebook)
 Hardware tiers:     docs/HARDWARE_TIERS.md
 CLI subscription:   docs/CLI_SUBSCRIPTION_SPEC.md (not built)
@@ -1375,7 +1745,7 @@ Organized by subsystem with verified one-line purposes. Files marked ⚠️ are 
 
 ### D.2 Channel Layer (60 files)
 
-**Core abstraction:** `channel_adapter.py` (ChannelOrigin enum), `channel_transport.py` (ABC — ~30 lines to add a channel), `channel_types.py`, `channel_sdk.py`, `channel_gateway_bridge.py` (ONLY interface channels may use for Gateway), `channel_execution_service.py`, `channel_lane_contract_service.py`, `channel_platform_service.py`, `channel_preflight_service.py`, `channel_activity_service.py`, `channel_event_journal_service.py`, `channel_identity_service.py`, `channel_memory_overlay_service.py`, `channel_pairing_service.py`, `channel_concurrency_service.py` (24-thread default), `channel_blocking_policy_service.py`, `channel_user_acquisition_service.py`, `business_messaging_channel_adapter_service.py`, `channel_routing_models.py`, `channel_turn_request_service.py`, `channel_execution_quota_adapter.py`, `channel_errors.py`
+**Core abstraction:** `channel_adapter.py` (ChannelOrigin enum), `channel_transport.py` (ABC — ~30 lines to add a channel), `channel_types.py`, `channel_sdk.py`, `channel_gateway_bridge.py` (ONLY interface channels may use for Gateway), `channel_lane_contract_service.py`, `channel_platform_service.py`, `channel_preflight_service.py`, `channel_activity_service.py`, `channel_event_journal_service.py`, `channel_identity_service.py`, `channel_memory_overlay_service.py`, `channel_pairing_service.py`, `channel_concurrency_service.py` (24-thread default), `channel_blocking_policy_service.py`, `channel_user_acquisition_service.py`, `business_messaging_channel_adapter_service.py`, `channel_routing_models.py`, `channel_turn_request_service.py`, `channel_execution_quota_adapter.py`, `channel_errors.py`
 
 **Telegram (12 files):** `connectors/telegram/transport.py`, `auth.py`, `keyboard.py`, `media.py`, `webhook.py`, `connector_support.py`; `connectors/telegram_connector_services.py`, `telegram_connector_context_service.py`, `telegram_connector_poll_service.py`, `telegram_inbound_context_service.py`, `telegram_ingress_service.py`, `telegram_run_action_service.py`, `telegram_run_dispatch_service.py`, `telegram_terminal_service.py`, `sage_telegram_hosted_service.py`
 
@@ -1441,11 +1811,11 @@ Organized by subsystem with verified one-line purposes. Files marked ⚠️ are 
 
 ### D.8 Billing / Quota / Credits (16 files)
 
-`billing_service.py` (Stripe), `billing_credit_config.py`, `credit_ledger_contract.py`, `ledger_audit.py`, `durable_quota_store.py`, `quota_policy_service.py`, `quota_response_service.py`, `request_window_quota_adapter.py`, `deployed_agent_daily_quota_adapter.py`, `deployed_agent_rate_limit_service.py`, `deployed_agent_cost_cap_service.py`, `usage_accounting_service.py`, `usage_reporting.py`, `entitlements_service.py`, `pricing_registry_service.py`, `routes_billing.py`, `virtual_computer_billing_hook.py`
+`billing_service.py` (Stripe), `billing_credit_config.py`, `credit_ledger_contract.py`, `ledger_audit.py`, `durable_quota_store.py`, `quota_policy_service.py`, `quota_response_service.py`, `request_window_quota_adapter.py`, `deployed_agent_cost_cap_service.py`, `usage_accounting_service.py`, `usage_reporting.py`, `entitlements_service.py`, `pricing_registry_service.py`, `routes_billing.py`, `virtual_computer_billing_hook.py`
 
 ### D.9 Governance / Safety (22 files)
 
-`unified_governance_gate.py` (single mandatory choke point), `kill_switch_gate.py` (emergency stop), `safe_mode_service.py` (scoped incident control), `policy_service.py`, `policy_presets.py`, `agent_policy_context.py` (internalized governance in system prompt), `execution_mode_policy.py`, `hybrid_policy_service.py`, `egress_policy.py`, `failure_policy_service.py`, `safety_error_contract.py`, `computer_action_safety.py`, `external_content_guard.py`, `external_write_safety.py`, `external_user_privacy_service.py`, `response_leak_guard_service.py`, `secret_redaction_service.py`, `file_mount_security.py`, `url_security.py`, `healthguide_safety_service.py`, `capability_risk_classifier_service.py`, `security_audit_service.py`, `transparency_settings_service.py`
+`unified_governance_gate.py` (single mandatory choke point — see Part 10 for the Authority Mandate layer inside it), `kill_switch_gate.py` (emergency stop — see Part 11), `safe_mode_service.py` (scoped incident control), `policy_service.py`, `policy_presets.py`, `agent_policy_context.py` (internalized governance in system prompt), `execution_mode_policy.py`, `hybrid_policy_service.py`, `egress_policy.py`, `failure_policy_service.py`, `safety_error_contract.py`, `computer_action_safety.py`, `external_content_guard.py`, `external_write_safety.py`, `external_user_privacy_service.py`, `response_leak_guard_service.py`, `secret_redaction_service.py`, `file_mount_security.py`, `url_security.py`, `healthguide_safety_service.py`, `capability_risk_classifier_service.py`, `security_audit_service.py`
 
 ### D.10 Agent Registry / Deployed Agents (18 files)
 
@@ -1494,8 +1864,8 @@ Organized by subsystem with verified one-line purposes. Files marked ⚠️ are 
 | `approval_contracts.py` | Pass-through stub — observability via activity_ledger_service |
 | `browser_approval_service.py` | Pass-through stub — observability via activity_ledger_service |
 | `gateway_approval_service.py` | Pass-through stub — all checks return approved/empty |
-| `computer_control.py` | DEPRECATED — must use gateway execution path |
-| `supervisor_client.py` | DEPRECATED — must route through gateway execution path |
+| ~~`computer_control.py`~~ | **Gone, not just deprecated** — moved to `_archive/supervisor/computer_control.py` in the 2026-07-04 Supervisor archival (see §2.3). Its test file (`test_computer_control.py`) still exists and now fails to collect. |
+| ~~`supervisor_client.py`~~ | **Gone, not just deprecated** — moved to `_archive/supervisor/supervisor_client.py` (see §2.3). Its test file (`test_supervisor_client.py`) still exists and now fails to collect. |
 | `runs_engine.py` (lines 6-10) | Phase 3 stubs: _approval_correlation_id, _append_approval_audit are no-ops |
 
 ### D.14 File Counts by Subsystem
