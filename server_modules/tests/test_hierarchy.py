@@ -421,6 +421,61 @@ class FleetConfigureValidationTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("Invalid model_config runtime", result["error"])
 
+    def _mandate_patch_result(self, mandate_patch, *, existing_mandate=None):
+        """mandate's shape validation runs AFTER the install-bundle lookup
+        (it merges into existing metadata, unlike model_config's up-front
+        checks), so exercising it needs a bundle mock — a nonexistent
+        agent_id short-circuits before ever reaching this code."""
+        bundle = {
+            "id": "agent-x",
+            "install_metadata": {"mandate": dict(existing_mandate or {})},
+        }
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=bundle),
+            ),
+        ):
+            return _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="agent-op-1",
+                    workspace_id="ws-test",
+                    agent_id="agent-x",
+                    patch={"mandate": mandate_patch},
+                )
+            )
+
+    def test_mandate_audience_tools_accepted_and_applied(self):
+        """The owner-declared mandate allowlist patch (mandate.audience_tools)
+        — the PATCHable contract runs_execution's connector mandate gate
+        reads — is validated, deduped, and applied."""
+        result = self._mandate_patch_result({"audience_tools": ["custom_api.http_request", "slack.post_message"]})
+        self.assertTrue(result["ok"])
+        self.assertIn("mandate", result["applied"])
+
+    def test_mandate_non_object_patch_rejected(self):
+        result = self._mandate_patch_result("not-an-object")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "mandate must be an object.")
+
+    def test_mandate_audience_tools_non_list_rejected(self):
+        result = self._mandate_patch_result({"audience_tools": "custom_api.http_request"})
+        self.assertFalse(result["ok"])
+        self.assertIn("mandate.audience_tools must be an array", result["error"])
+
+    def test_mandate_audience_tools_non_string_items_rejected(self):
+        result = self._mandate_patch_result({"audience_tools": ["custom_api.http_request", 42]})
+        self.assertFalse(result["ok"])
+        self.assertIn("mandate.audience_tools must be an array", result["error"])
+
+    def test_mandate_audience_tools_dedupes_and_normalizes(self):
+        result = self._mandate_patch_result({"audience_tools": [" custom_api.http_request ", "custom_api.http_request", ""]})
+        self.assertTrue(result["ok"])
+
     def test_gateway_binding_accepted_by_validation(self):
         """BYO-brain Phase 0: gateway_binding + runtime pass validation with no
         storage change (the call then fails only at the DB lookup)."""
@@ -667,6 +722,149 @@ class GatewayBrainDispatchTests(unittest.TestCase):
                     )
                 )
         self.assertIn("empty reply", str(ctx.exception).lower())
+
+
+class FleetStopControlTests(unittest.TestCase):
+    """Owner-only stop control: fleet_stop_agent/fleet_resume_agent (agent:{id})
+    and fleet_stop_workspace/fleet_resume_workspace (workspace:{id}). Not
+    _ALLOWED_CONFIGURE_KEYS, not wired into skills_service's tool dispatcher —
+    these are only ever called from routes_fleet.py's owner-gated routes."""
+
+    def _bundle(self, *, stopped=None):
+        return {
+            "id": "agent-x",
+            "install_metadata": {"stopped": dict(stopped)} if stopped is not None else {},
+        }
+
+    def test_stop_agent_persists_metadata_sets_kill_switch_and_ledgers(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value={"id": "agent-x"}),
+            ) as update_mock,
+            patch("server_modules.kill_switch_gate.set_kill_switch") as set_mock,
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as ledger_mock,
+        ):
+            result = _run(fleet_tools.fleet_stop_agent(
+                actor_id="user-1", actor_label="owner@example.com",
+                workspace_id="ws-test", agent_id="agent-x", reason="testing",
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stopped"]["active"])
+        self.assertEqual(result["stopped"]["reason"], "testing")
+        self.assertEqual(result["stopped"]["stopped_by_user_id"], "user-1")
+
+        set_mock.assert_called_once_with("agent:agent-x")
+        saved_metadata = update_mock.call_args.kwargs["metadata"]
+        self.assertTrue(saved_metadata["stopped"]["active"])
+
+        ledger_mock.assert_awaited_once()
+        self.assertEqual(ledger_mock.call_args.kwargs["action"], "agent_stopped")
+        self.assertEqual(ledger_mock.call_args.kwargs["actor_type"], "user")
+        self.assertEqual(ledger_mock.call_args.kwargs["install_id"], "agent-x")
+
+    def test_resume_agent_clears_metadata_and_kill_switch(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle(stopped={"active": True, "reason": "x", "stopped_by_user_id": "user-1"})),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value={"id": "agent-x"}),
+            ) as update_mock,
+            patch("server_modules.kill_switch_gate.clear_kill_switch") as clear_mock,
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as ledger_mock,
+        ):
+            result = _run(fleet_tools.fleet_resume_agent(
+                actor_id="user-1", actor_label="owner@example.com", workspace_id="ws-test", agent_id="agent-x",
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["stopped"]["active"])
+        clear_mock.assert_called_once_with("agent:agent-x")
+        self.assertFalse(update_mock.call_args.kwargs["metadata"]["stopped"]["active"])
+        self.assertEqual(ledger_mock.call_args.kwargs["action"], "agent_resumed")
+
+    def test_stop_agent_missing_agent_id_rejected(self):
+        result = _run(fleet_tools.fleet_stop_agent(actor_id="user-1", workspace_id="ws-test", agent_id=""))
+        self.assertFalse(result["ok"])
+
+    def test_stop_agent_nonexistent_agent_rejected(self):
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=None),
+        ):
+            result = _run(fleet_tools.fleet_stop_agent(actor_id="user-1", workspace_id="ws-test", agent_id="agent-ghost"))
+        self.assertFalse(result["ok"])
+        self.assertIn("not found", result["error"])
+
+    def test_stop_workspace_persists_metadata_sets_kill_switch_and_ledgers(self):
+        workspace = {"id": "ws-test", "name": "Acme", "workspace_type": "personal", "metadata": {}}
+        with (
+            patch("server_modules.control_plane_repository.get_workspace_by_id", new=AsyncMock(return_value=workspace)),
+            patch(
+                "server_modules.control_plane_repository.update_workspace_profile",
+                new=AsyncMock(return_value={"id": "ws-test"}),
+            ) as update_mock,
+            patch("server_modules.kill_switch_gate.set_kill_switch") as set_mock,
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as ledger_mock,
+        ):
+            result = _run(fleet_tools.fleet_stop_workspace(
+                actor_id="user-1", actor_label="owner@example.com", workspace_id="ws-test", reason="incident",
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stopped"]["active"])
+        set_mock.assert_called_once_with("workspace:ws-test")
+        saved_metadata = update_mock.call_args.args[1]["metadata"]
+        self.assertTrue(saved_metadata["kill_switch"]["active"])
+        self.assertEqual(ledger_mock.call_args.kwargs["action"], "workspace_stopped")
+
+    def test_resume_workspace_clears_kill_switch(self):
+        workspace = {"id": "ws-test", "name": "Acme", "workspace_type": "personal", "metadata": {"kill_switch": {"active": True}}}
+        with (
+            patch("server_modules.control_plane_repository.get_workspace_by_id", new=AsyncMock(return_value=workspace)),
+            patch(
+                "server_modules.control_plane_repository.update_workspace_profile",
+                new=AsyncMock(return_value={"id": "ws-test"}),
+            ),
+            patch("server_modules.kill_switch_gate.clear_kill_switch") as clear_mock,
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()),
+        ):
+            result = _run(fleet_tools.fleet_resume_workspace(actor_id="user-1", workspace_id="ws-test"))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["stopped"]["active"])
+        clear_mock.assert_called_once_with("workspace:ws-test")
+
+    def test_stop_workspace_nonexistent_workspace_rolls_back_kill_switch(self):
+        """If persistence fails after the kill switch was already set, the
+        switch must be rolled back — never leave a phantom stop active with
+        no record of who/why."""
+        with (
+            patch("server_modules.control_plane_repository.get_workspace_by_id", new=AsyncMock(return_value=None)),
+            patch("server_modules.kill_switch_gate.set_kill_switch") as set_mock,
+            patch("server_modules.kill_switch_gate.clear_kill_switch") as clear_mock,
+        ):
+            result = _run(fleet_tools.fleet_stop_workspace(actor_id="user-1", workspace_id="ws-ghost"))
+
+        self.assertFalse(result["ok"])
+        set_mock.assert_called_once_with("workspace:ws-ghost")
+        clear_mock.assert_called_once_with("workspace:ws-ghost")
+
+    def test_stop_and_resume_not_in_allowed_configure_keys(self):
+        """These are owner-only human actions — must never become PATCHable
+        via fleet_configure_agent (the same function the fleet__configure_
+        agent LLM tool calls), which would let an agent stop/resume itself
+        or another agent."""
+        self.assertNotIn("stopped", fleet_tools._ALLOWED_CONFIGURE_KEYS)
+        self.assertNotIn("kill_switch", fleet_tools._ALLOWED_CONFIGURE_KEYS)
 
 
 if __name__ == "__main__":

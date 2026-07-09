@@ -4747,186 +4747,6 @@ async def update_workspace_profile(workspace_id: str, updates: Dict[str, Any]) -
     return await get_workspace_by_id(clean_workspace_id)
 
 
-async def list_workspace_members(workspace_id: str) -> List[Dict[str, Any]]:
-    clean_workspace_id = str(workspace_id or "").strip()
-    if not clean_workspace_id:
-        return []
-    async with _scoped_connection(bypass_rls=True) as connection:
-        if connection is None:
-            with _LOCAL_IDENTITY_LOCK:
-                with _connect_local_identity_db() as fallback:
-                    rows = fallback.execute(
-                        """
-                        SELECT
-                            wm.user_id,
-                            wm.workspace_id,
-                            wm.role,
-                            wm.created_at,
-                            wm.updated_at,
-                            u.email,
-                            u.name AS display_name,
-                            u.avatar_url
-                        FROM workspace_memberships wm
-                        LEFT JOIN users u ON u.id = wm.user_id
-                        WHERE wm.workspace_id = ?
-                        ORDER BY wm.created_at ASC, wm.user_id ASC
-                        """,
-                        (clean_workspace_id,),
-                    ).fetchall()
-            return [
-                {
-                    "id": f"{row['user_id']}:{row['workspace_id']}",
-                    "workspace_id": str(row["workspace_id"] or "").strip(),
-                    "user_id": str(row["user_id"] or "").strip(),
-                    "role": str(row["role"] or "").strip() or "member",
-                    "status": "active",
-                    "created_at": int(row["created_at"]) if row["created_at"] is not None else None,
-                    "updated_at": int(row["updated_at"]) if row["updated_at"] is not None else None,
-                    "email": str(row["email"] or "").strip().lower() or None,
-                    "display_name": str(row["display_name"] or "").strip() or None,
-                    "avatar_url": str(row["avatar_url"] or "").strip() or None,
-                }
-                for row in rows
-            ]
-        rows = await connection.fetch(
-            """
-            SELECT
-                wm.id,
-                wm.workspace_id,
-                wm.user_id,
-                wm.role,
-                wm.status,
-                wm.created_at,
-                wm.updated_at,
-                u.email,
-                u.display_name,
-                u.avatar_url
-            FROM workspace_memberships wm
-            LEFT JOIN users u ON u.id = wm.user_id
-            WHERE wm.workspace_id = $1
-            ORDER BY wm.created_at ASC, wm.user_id ASC
-            """,
-            clean_workspace_id,
-        )
-    return [dict(row) for row in rows]
-
-
-async def list_workspace_invites(workspace_id: str) -> List[Dict[str, Any]]:
-    clean_workspace_id = str(workspace_id or "").strip()
-    if not clean_workspace_id:
-        return []
-    async with _scoped_connection(bypass_rls=True) as connection:
-        if connection is None:
-            with _LOCAL_IDENTITY_LOCK:
-                with _connect_local_identity_db() as fallback:
-                    rows = fallback.execute(
-                        """
-                        SELECT
-                            id,
-                            tenant_id,
-                            workspace_id,
-                            email,
-                            role,
-                            status,
-                            invited_by_user_id,
-                            accepted_by_user_id,
-                            metadata_json,
-                            created_at,
-                            updated_at,
-                            accepted_at,
-                            revoked_at
-                        FROM workspace_member_invites
-                        WHERE workspace_id = ?
-                        ORDER BY created_at DESC, id DESC
-                        """,
-                        (clean_workspace_id,),
-                    ).fetchall()
-            return [item for item in (_workspace_invite_record_from_row(row) for row in rows) if item]
-        rows = await connection.fetch(
-            """
-            SELECT
-                id,
-                tenant_id,
-                workspace_id,
-                email,
-                role,
-                status,
-                invited_by_user_id,
-                accepted_by_user_id,
-                metadata,
-                created_at,
-                updated_at,
-                accepted_at,
-                revoked_at
-            FROM workspace_member_invites
-            WHERE workspace_id = $1
-            ORDER BY created_at DESC, id DESC
-            """,
-            clean_workspace_id,
-        )
-    return [dict(row) for row in rows]
-
-
-async def get_workspace_invite(workspace_id: str, invite_id: str) -> Optional[Dict[str, Any]]:
-    clean_workspace_id = str(workspace_id or "").strip()
-    clean_invite_id = str(invite_id or "").strip()
-    if not clean_workspace_id or not clean_invite_id:
-        return None
-    async with _scoped_connection(bypass_rls=True) as connection:
-        if connection is None:
-            with _LOCAL_IDENTITY_LOCK:
-                with _connect_local_identity_db() as fallback:
-                    row = fallback.execute(
-                        """
-                        SELECT
-                            id,
-                            tenant_id,
-                            workspace_id,
-                            email,
-                            role,
-                            status,
-                            invited_by_user_id,
-                            accepted_by_user_id,
-                            metadata_json,
-                            created_at,
-                            updated_at,
-                            accepted_at,
-                            revoked_at
-                        FROM workspace_member_invites
-                        WHERE workspace_id = ?
-                          AND id = ?
-                        LIMIT 1
-                        """,
-                        (clean_workspace_id, clean_invite_id),
-                    ).fetchone()
-            return _workspace_invite_record_from_row(row)
-        row = await connection.fetchrow(
-            """
-            SELECT
-                id,
-                tenant_id,
-                workspace_id,
-                email,
-                role,
-                status,
-                invited_by_user_id,
-                accepted_by_user_id,
-                metadata,
-                created_at,
-                updated_at,
-                accepted_at,
-                revoked_at
-            FROM workspace_member_invites
-            WHERE workspace_id = $1
-              AND id = $2
-            LIMIT 1
-            """,
-            clean_workspace_id,
-            clean_invite_id,
-        )
-    return dict(row) if row is not None else None
-
-
 async def list_pending_workspace_invites_for_email(email: str) -> List[Dict[str, Any]]:
     email_token = str(email or "").strip().lower()
     if not email_token:
@@ -4985,129 +4805,6 @@ async def list_pending_workspace_invites_for_email(email: str) -> List[Dict[str,
     return [dict(row) for row in rows]
 
 
-async def create_workspace_invite(
-    *,
-    workspace_id: str,
-    email: str,
-    role: str,
-    invited_by_user_id: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    clean_workspace_id = str(workspace_id or "").strip()
-    email_token = str(email or "").strip().lower()
-    clean_role = str(role or "").strip().lower() or "member"
-    if not clean_workspace_id or not email_token:
-        return None
-    workspace = await get_workspace_by_id(clean_workspace_id)
-    tenant_id = str((workspace or {}).get("tenant_id") or "").strip()
-    if not tenant_id:
-        return None
-    invite_id = f"invite_{uuid.uuid4().hex}"
-    metadata_payload = dict(metadata or {})
-    _enforce_control_plane_service_decision(
-        operation="invite_create",
-        tenant_id=tenant_id,
-        workspace_id=clean_workspace_id,
-        actor_id=str(invited_by_user_id or "system").strip(),
-        actor_role=str(metadata_payload.get("actor_role") or "admin").strip(),
-        record_type="workspace_member_invite",
-        idempotency_key=f"invite:{clean_workspace_id}:{email_token}",
-    )
-    async with _scoped_connection(bypass_rls=True) as connection:
-        if connection is None:
-            now_ts = int(time.time())
-            with _LOCAL_IDENTITY_LOCK:
-                with _connect_local_identity_db() as fallback:
-                    existing = fallback.execute(
-                        """
-                        SELECT id, created_at
-                        FROM workspace_member_invites
-                        WHERE workspace_id = ?
-                          AND lower(email) = lower(?)
-                          AND status = 'pending'
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                        """,
-                        (clean_workspace_id, email_token),
-                    ).fetchone()
-                    effective_invite_id = str(existing["id"] or "").strip() if existing is not None else invite_id
-                    created_at = int(existing["created_at"]) if existing is not None and existing["created_at"] is not None else now_ts
-                    fallback.execute(
-                        """
-                        INSERT OR REPLACE INTO workspace_member_invites (
-                            id, tenant_id, workspace_id, email, role, status, invited_by_user_id, accepted_by_user_id,
-                            metadata_json, created_at, updated_at, accepted_at, revoked_at
-                        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, ?, ?, ?, NULL, NULL)
-                        """,
-                        (
-                            effective_invite_id,
-                            tenant_id,
-                            clean_workspace_id,
-                            email_token,
-                            clean_role,
-                            str(invited_by_user_id or "").strip() or None,
-                            _to_json(metadata_payload, default={}),
-                            created_at,
-                            now_ts,
-                        ),
-                    )
-                    row = fallback.execute(
-                        "SELECT * FROM workspace_member_invites WHERE id = ? LIMIT 1",
-                        (effective_invite_id,),
-                    ).fetchone()
-                    fallback.commit()
-            return _workspace_invite_record_from_row(row)
-        existing = await connection.fetchrow(
-            """
-            SELECT id, created_at
-            FROM workspace_member_invites
-            WHERE workspace_id = $1
-              AND lower(email) = lower($2)
-              AND status = 'pending'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            clean_workspace_id,
-            email_token,
-        )
-        effective_invite_id = str(existing["id"] or "").strip() if existing is not None else invite_id
-        created_at = existing["created_at"] if existing is not None else _utc_now_ts()
-        updated_at = _utc_now_ts()
-        await connection.execute(
-            """
-            INSERT INTO workspace_member_invites (
-                id, tenant_id, workspace_id, email, role, status, invited_by_user_id, accepted_by_user_id,
-                metadata, created_at, updated_at, accepted_at, revoked_at
-            ) VALUES (
-                $1, $2, $3, $4, $5, 'pending', $6, NULL, $7::jsonb, $8::timestamptz, $9::timestamptz, NULL, NULL
-            )
-            ON CONFLICT (id) DO UPDATE SET
-                role = EXCLUDED.role,
-                invited_by_user_id = EXCLUDED.invited_by_user_id,
-                metadata = EXCLUDED.metadata,
-                updated_at = EXCLUDED.updated_at,
-                status = 'pending',
-                accepted_by_user_id = NULL,
-                accepted_at = NULL,
-                revoked_at = NULL
-            """,
-            effective_invite_id,
-            tenant_id,
-            clean_workspace_id,
-            email_token,
-            clean_role,
-            str(invited_by_user_id or "").strip() or None,
-            _to_json(metadata_payload, default={}),
-            created_at,
-            updated_at,
-        )
-        row = await connection.fetchrow(
-            "SELECT * FROM workspace_member_invites WHERE id = $1 LIMIT 1",
-            effective_invite_id,
-        )
-    return dict(row) if row is not None else None
-
-
 async def accept_workspace_invite(
     *,
     invite_id: str,
@@ -5163,97 +4860,6 @@ async def accept_workspace_invite(
             """,
             clean_invite_id,
             clean_user_id,
-            _utc_now_ts(),
-        )
-        row = await connection.fetchrow(
-            "SELECT * FROM workspace_member_invites WHERE id = $1 LIMIT 1",
-            clean_invite_id,
-        )
-    return dict(row) if row is not None else None
-
-
-async def revoke_workspace_invite(invite_id: str) -> Optional[Dict[str, Any]]:
-    clean_invite_id = str(invite_id or "").strip()
-    if not clean_invite_id:
-        return None
-    async with _scoped_connection(bypass_rls=True) as connection:
-        if connection is None:
-            now_ts = int(time.time())
-            with _LOCAL_IDENTITY_LOCK:
-                with _connect_local_identity_db() as fallback:
-                    existing_row = fallback.execute(
-                        "SELECT * FROM workspace_member_invites WHERE id = ? LIMIT 1",
-                        (clean_invite_id,),
-                    ).fetchone()
-                    current_record = _workspace_invite_record_from_row(existing_row)
-                    if current_record is None:
-                        return None
-                    decision = _enforce_control_plane_service_decision(
-                        operation="invite_revoke",
-                        tenant_id="invite",
-                        workspace_id="invite",
-                        actor_id="invite-revoker",
-                        actor_role="admin",
-                        record_type="workspace_member_invite",
-                        idempotency_key=clean_invite_id,
-                        target_status=str(current_record.get("status") or "pending").strip().lower() or "pending",
-                        source="workspace_invite",
-                    )
-                    next_action = _control_plane_text(
-                        (decision.get("mutation_plan") if isinstance(decision.get("mutation_plan"), dict) else {}).get("next_action")
-                        or decision.get("next_action")
-                    )
-                    if next_action == "return_existing_control_plane_record":
-                        return current_record
-                    fallback.execute(
-                        """
-                        UPDATE workspace_member_invites
-                        SET status = 'revoked',
-                            revoked_at = ?,
-                            updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (now_ts, now_ts, clean_invite_id),
-                    )
-                    row = fallback.execute(
-                        "SELECT * FROM workspace_member_invites WHERE id = ? LIMIT 1",
-                        (clean_invite_id,),
-                    ).fetchone()
-                    fallback.commit()
-            return _workspace_invite_record_from_row(row)
-        existing_row = await connection.fetchrow(
-            "SELECT * FROM workspace_member_invites WHERE id = $1 LIMIT 1",
-            clean_invite_id,
-        )
-        if existing_row is None:
-            return None
-        current_record = dict(existing_row)
-        decision = _enforce_control_plane_service_decision(
-            operation="invite_revoke",
-            tenant_id="invite",
-            workspace_id="invite",
-            actor_id="invite-revoker",
-            actor_role="admin",
-            record_type="workspace_member_invite",
-            idempotency_key=clean_invite_id,
-            target_status=str(current_record.get("status") or "pending").strip().lower() or "pending",
-            source="workspace_invite",
-        )
-        next_action = _control_plane_text(
-            (decision.get("mutation_plan") if isinstance(decision.get("mutation_plan"), dict) else {}).get("next_action")
-            or decision.get("next_action")
-        )
-        if next_action == "return_existing_control_plane_record":
-            return current_record
-        await connection.execute(
-            """
-            UPDATE workspace_member_invites
-            SET status = 'revoked',
-                revoked_at = $2::timestamptz,
-                updated_at = $2::timestamptz
-            WHERE id = $1
-            """,
-            clean_invite_id,
             _utc_now_ts(),
         )
         row = await connection.fetchrow(
@@ -5607,6 +5213,42 @@ async def update_workspace_admin_defaults_metadata(
     next_metadata = {
         **existing_metadata,
         "admin_defaults": payload,
+    }
+    return await update_workspace_profile(
+        clean_workspace_id,
+        {
+            "name": str(workspace.get("name") or "").strip() or str(workspace.get("workspace_id") or "").strip(),
+            "workspace_type": str(workspace.get("workspace_type") or workspace.get("kind") or "personal"),
+            "preferred_shell_profile": _workspace_shell_metadata(existing_metadata).get("preferredProfile"),
+            "default_route": _workspace_shell_metadata(existing_metadata).get("defaultRoute"),
+            "setup_completed": _workspace_shell_metadata(existing_metadata).get("setupCompleted"),
+            "metadata": next_metadata,
+        },
+    )
+
+
+async def update_workspace_kill_switch_metadata(
+    workspace_id: str,
+    metadata: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Persist the workspace-wide 'stop all agents' state (who/when/reason).
+
+    Mirrors update_workspace_policy_metadata/update_workspace_admin_defaults_
+    metadata's read-merge-write shape — this is the "who/when/reason" record
+    alongside kill_switch_gate.py's own boolean enforcement state (that
+    module has no actor/timestamp fields; this is where they live).
+    """
+    clean_workspace_id = str(workspace_id or "").strip()
+    if not clean_workspace_id:
+        return None
+    payload = dict(metadata or {})
+    workspace = await get_workspace_by_id(clean_workspace_id)
+    if not isinstance(workspace, dict):
+        return None
+    existing_metadata = _coerce_dict(workspace.get("metadata"))
+    next_metadata = {
+        **existing_metadata,
+        "kill_switch": payload,
     }
     return await update_workspace_profile(
         clean_workspace_id,
@@ -10695,46 +10337,6 @@ async def ensure_workspace_tenant_binding(
             created_at,
         )
     return {"workspace_id": resolved_workspace_id, "tenant_id": resolved_tenant_id}
-
-
-async def remove_workspace_membership(
-    *,
-    user_id: str,
-    workspace_id: str,
-) -> bool:
-    resolved_user_id = str(user_id or "").strip()
-    resolved_workspace_id = str(workspace_id or "").strip()
-    if not resolved_user_id or not resolved_workspace_id:
-        return False
-    resolved_tenant_id = await tenant_id_for_workspace(resolved_workspace_id)
-    _enforce_control_plane_service_decision(
-        operation="membership_remove",
-        tenant_id=str(resolved_tenant_id or "").strip(),
-        workspace_id=resolved_workspace_id,
-        actor_id="system",
-        actor_role="admin",
-        target_actor_id=resolved_user_id,
-        record_type="membership",
-    )
-    async with _scoped_connection(bypass_rls=True) as connection:
-        if connection is None:
-            with _LOCAL_IDENTITY_LOCK:
-                with _connect_local_identity_db() as fallback:
-                    cursor = fallback.execute(
-                        "DELETE FROM workspace_memberships WHERE user_id = ? AND workspace_id = ?",
-                        (resolved_user_id, resolved_workspace_id),
-                    )
-                    fallback.commit()
-            return int(cursor.rowcount or 0) > 0
-        status = await connection.execute(
-            """
-            DELETE FROM workspace_memberships
-            WHERE user_id = $1 AND workspace_id = $2
-            """,
-            resolved_user_id,
-            resolved_workspace_id,
-        )
-    return status.endswith("DELETE 1")
 
 
 async def update_user_profile(

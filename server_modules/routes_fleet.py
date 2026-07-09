@@ -17,8 +17,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
+
+from server_modules import auth as auth_module
 
 router = APIRouter(tags=["fleet"])
 
@@ -59,15 +61,19 @@ async def fleet_usage(
 @router.get("/api/w/{workspace_id}/fleet/workspace")
 async def fleet_workspace(request: Request, workspace_id: str) -> Dict[str, Any]:
     """The workspace's own display name — the fleet shell's breadcrumb root
-    (not the platform brand, not "Home"; the actual workspace)."""
+    (not the platform brand, not "Home"; the actual workspace) — plus the
+    workspace-wide stop state (Settings' "Stop all agents")."""
     from server_modules import control_plane_repository
 
     try:
         ws = await control_plane_repository.get_workspace_by_id(workspace_id)
         name = str((ws or {}).get("name") or "").strip() or workspace_id
-        return {"ok": True, "workspace": {"id": workspace_id, "name": name}}
+        meta = (ws or {}).get("metadata") if isinstance((ws or {}).get("metadata"), dict) else {}
+        kill_switch = dict(meta.get("kill_switch") or {}) if isinstance(meta.get("kill_switch"), dict) else {}
+        stopped = kill_switch if kill_switch.get("active") else {"active": False}
+        return {"ok": True, "workspace": {"id": workspace_id, "name": name, "stopped": stopped}}
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "workspace": {"id": workspace_id, "name": workspace_id}}
+        return {"ok": False, "error": str(exc), "workspace": {"id": workspace_id, "name": workspace_id, "stopped": {"active": False}}}
 
 
 @router.get("/api/w/{workspace_id}/fleet/agents")
@@ -191,7 +197,7 @@ async def fleet_patch_project(
 
 
 class FleetCreateAgentRequest(BaseModel):
-    name: str = Field(min_length=1)
+    name: str = ""  # optional — server assigns a pool name when absent (see agent_name_pool.py)
     instructions: str = ""
     purpose_preset: str = ""
     capability_preset: str = "standard"  # Phase 5B: knowledge | standard
@@ -247,6 +253,112 @@ async def fleet_configure_agent_route(
             patch=body.patch,
         )
         return result
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ── Owner-only stop control ──────────────────────────────────────────────
+# Unlike every other route in this file, these are owner-gated: stopping an
+# agent (or the whole workspace) is a human/owner action, never something an
+# agent can do via a tool call — enforce_workspace_access(minimum_role=
+# "owner") raises 403 for anyone else, and fleet_tools.fleet_stop_agent/etc.
+# are not wired into the LLM tool dispatcher at all.
+
+
+class FleetStopAgentRequest(BaseModel):
+    reason: str = ""
+
+
+def _actor_label(current_user: Dict[str, Any]) -> str:
+    return str((current_user or {}).get("email") or (current_user or {}).get("user_id") or "").strip()
+
+
+@router.post("/api/w/{workspace_id}/fleet/agents/{agent_id}/stop")
+async def fleet_stop_agent_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    body: FleetStopAgentRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only emergency stop for a single agent."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_stop_agent
+
+    try:
+        return await fleet_stop_agent(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+            reason=body.reason,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.post("/api/w/{workspace_id}/fleet/agents/{agent_id}/resume")
+async def fleet_resume_agent_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only resume for a single stopped agent."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_resume_agent
+
+    try:
+        return await fleet_resume_agent(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.post("/api/w/{workspace_id}/fleet/stop-all")
+async def fleet_stop_workspace_route(
+    request: Request,
+    workspace_id: str,
+    body: FleetStopAgentRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only emergency stop for every agent in the workspace."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_stop_workspace
+
+    try:
+        return await fleet_stop_workspace(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+            reason=body.reason,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.post("/api/w/{workspace_id}/fleet/resume-all")
+async def fleet_resume_workspace_route(
+    request: Request,
+    workspace_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only resume for every agent in the workspace."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_resume_workspace
+
+    try:
+        return await fleet_resume_workspace(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+        )
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -476,6 +588,7 @@ async def fleet_agent_connectors(
     make it connected here.
     """
     from server_modules.connection_catalog_service import agent_status_items
+    from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS, oauth_provider_configured
 
     try:
         items = await agent_status_items(workspace_id=workspace_id, agent_id=agent_id, surface="apps")
@@ -484,6 +597,12 @@ async def fleet_agent_connectors(
         for item in items:
             if item.get("lane") != "work_app_connector":
                 continue
+            item_id = str(item.get("id") or "").strip().lower()
+            # Not every connector goes through the OAuth env-var path (manual
+            # credential entry doesn't need one) — only mark those as
+            # configurable-or-not; anything else is always "configured" since
+            # this check doesn't apply to it.
+            configured = item_id not in OAUTH_PROVIDER_CONFIGS or oauth_provider_configured(item_id)
             enriched.append({
                 "id": item.get("id"),
                 "label": item.get("display_name") or item.get("id"),
@@ -493,6 +612,7 @@ async def fleet_agent_connectors(
                 "nextAction": item.get("next_action") or "connect",
                 "healthStatus": item.get("health_status") or "unknown",
                 "authRequiredFields": item.get("auth_required_fields") or [],
+                "configured": configured,
             })
 
         return {"ok": True, "connectors": enriched}

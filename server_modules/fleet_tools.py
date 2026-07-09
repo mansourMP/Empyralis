@@ -28,8 +28,9 @@ _ALLOWED_CONFIGURE_KEYS = {
     "enabled_tools", "connectors", "channel_bindings",
     "subagents_enabled", "hardware_access", "model_config", "display_name",
     "purpose_preset", "instructions", "context_policy", "tool_toggles",
-    "preferred_gateway_id", "telegram_first_contact_reply",
+    "preferred_gateway_id", "telegram_first_contact_reply", "mandate",
 }
+_MAX_MANDATE_AUDIENCE_TOOLS = 200
 _MAX_INSTRUCTIONS_CHARS = 8000
 _VALID_CONTEXT_FULL_ACTIONS = {"compact", "fresh_session"}
 _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local"}
@@ -185,6 +186,17 @@ async def _ledger_fleet_action(
 # ── Phase U3: runtime target + hardware status helpers ────────────────────────
 
 
+def _runtime_profile_dict(inst: Dict[str, Any]) -> Dict[str, Any]:
+    """agent_registry_repository._row_to_install_summary() nests runtime
+    placement fields (runtime_id, machine_id, default_execution_target,
+    runtime_class, placement_mode, runtime_profile_label) under a
+    "runtime_profile" sub-dict — it is None when the install has no
+    runtime_profile_id set. Every reader in this module goes through this
+    helper so there is one place that knows about the nesting."""
+    profile = inst.get("runtime_profile")
+    return profile if isinstance(profile, dict) else {}
+
+
 def _resolve_runtime_target(inst: Dict[str, Any]) -> str:
     """Resolve human-readable runtime target for an agent install.
 
@@ -194,19 +206,20 @@ def _resolve_runtime_target(inst: Dict[str, Any]) -> str:
       - "vps:<name>" — agent runs on user-provisioned VPS
       - "unknown" — no runtime target information available
     """
-    target = str(inst.get("default_execution_target") or "").strip().lower()
-    runtime_id = str(inst.get("runtime_id") or "").strip()
-    machine_id = str(inst.get("machine_id") or "").strip()
-    runtime_class = str(inst.get("runtime_class") or "").strip().lower()
-    placement = str(inst.get("placement_mode") or "").strip().lower()
+    profile = _runtime_profile_dict(inst)
+    target = str(profile.get("default_execution_target") or "").strip().lower()
+    runtime_id = str(profile.get("runtime_id") or "").strip()
+    machine_id = str(profile.get("machine_id") or "").strip()
+    runtime_class = str(profile.get("runtime_class") or "").strip().lower()
+    placement = str(profile.get("placement_mode") or "").strip().lower()
 
     if target in ("cloud", "empyralis-cloud"):
         return "cloud"
     if target in ("gateway", "local_gateway", "desktop_companion"):
-        label = str(inst.get("runtime_profile_label") or machine_id or runtime_id or "").strip()
+        label = str(profile.get("label") or machine_id or runtime_id or "").strip()
         return f"gateway:{label}" if label else "gateway"
     if target in ("vps", "self_hosted", "self_hosted_business_node"):
-        label = str(inst.get("runtime_profile_label") or runtime_id or "").strip()
+        label = str(profile.get("label") or runtime_id or "").strip()
         return f"vps:{label}" if label else "vps"
     if target in ("local_companion", "local"):
         return "local_companion"
@@ -228,40 +241,49 @@ def _resolve_runtime_target(inst: Dict[str, Any]) -> str:
 def _resolve_hardware_status(
     inst: Dict[str, Any],
     heartbeats: Dict[str, dict],
-) -> tuple[str, Optional[str]]:
-    """Resolve hardware status and last heartbeat for an agent install.
+) -> tuple[str, Optional[str], Optional[str]]:
+    """Resolve hardware status, last heartbeat, and current run for an
+    agent install.
 
-    Returns (status, last_heartbeat_iso):
-      - "online" — heartbeat received within lease window
-      - "offline" — no recent heartbeat, agent may be down
-      - "unknown" — no heartbeat tracking for this agent type
+    Returns (status, last_heartbeat_iso, current_run_id):
+      - "online" — heartbeat received within the freshness window
+      - "offline" — a worker registered here before, but not recently
+      - "unknown" — no gateway/VPS worker has ever registered for this agent
     """
-    runtime_id = str(inst.get("runtime_id") or "").strip()
-    machine_id = str(inst.get("machine_id") or "").strip()
-    agent_id = str(inst.get("id") or "").strip()
+    profile = _runtime_profile_dict(inst)
+    machine_id = str(profile.get("machine_id") or "").strip()
 
-    # Check heartbeats by runtime_id first, then agent_id
-    hb = heartbeats.get(runtime_id) or heartbeats.get(agent_id) or heartbeats.get(machine_id)
+    hb = heartbeats.get(machine_id) if machine_id else None
 
     if hb and isinstance(hb, dict):
         status = "online" if bool(hb.get("online", False)) else "offline"
-        last_hb = str(hb.get("last_heartbeat_at") or hb.get("last_seen_at") or "").strip() or None
-        return status, last_hb
+        last_hb = str(hb.get("last_heartbeat_at") or "").strip() or None
+        current_run_id = str(hb.get("current_run_id") or "").strip() or None
+        return status, last_hb, current_run_id
 
-    # Cloud agents are always "online" (platform manages them)
-    target = str(inst.get("default_execution_target") or "").strip().lower()
+    # Cloud agents have no worker/heartbeat concept — the platform runs
+    # their turns synchronously, so "online" always, no run-in-progress
+    # tracking (there's no queue for a cloud text-agent turn to sit in).
+    target = str(profile.get("default_execution_target") or "").strip().lower()
     if target in ("cloud", "empyralis-cloud"):
-        return "online", None
+        return "online", None, None
 
-    # Agents without a runtime_id can't have heartbeat tracking yet
-    if not runtime_id and not machine_id:
-        return "unknown", None
+    # No machine_id at all — never paired with a gateway/VPS worker.
+    if not machine_id:
+        return "unknown", None, None
 
-    return "offline", None
+    return "offline", None, None
 
 
 async def _fetch_latest_heartbeats(workspace_id: str) -> Dict[str, dict]:
-    """Fetch latest heartbeat for each runtime in the workspace."""
+    """Fetch latest fleet_worker_registrations row per machine in the
+    workspace — the real heartbeat/current-run source for gateway and
+    self-hosted (VPS) agents. Keyed by machine_id.
+
+    "online" is derived from heartbeat freshness (matches the lease-window
+    convention used elsewhere in the fleet UI) rather than a stored flag,
+    since fleet_worker_registrations has no boolean "online" column.
+    """
     try:
         from server_modules import control_plane_repository as cpr
 
@@ -271,35 +293,37 @@ async def _fetch_latest_heartbeats(workspace_id: str) -> Dict[str, dict]:
 
         rows = await pool.fetch(
             """
-            SELECT DISTINCT ON (runtime_profile_id)
-                runtime_profile_id,
-                online,
+            SELECT DISTINCT ON (machine_id)
+                machine_id,
+                current_run_id,
                 last_heartbeat_at,
-                last_seen_at
-            FROM runtime_heartbeats
+                (last_heartbeat_at IS NOT NULL AND last_heartbeat_at > NOW() - INTERVAL '120 seconds') AS online
+            FROM fleet_worker_registrations
             WHERE workspace_id = $1
-            ORDER BY runtime_profile_id, last_heartbeat_at DESC
+              AND machine_id IS NOT NULL
+            ORDER BY machine_id, last_heartbeat_at DESC NULLS LAST
             """,
             str(workspace_id or "").strip(),
         )
         result: Dict[str, dict] = {}
         for r in (rows or []):
-            rid = str(r["runtime_profile_id"] or "").strip()
-            if rid:
-                result[rid] = {
+            mid = str(r["machine_id"] or "").strip()
+            if mid:
+                result[mid] = {
                     "online": bool(r["online"]),
                     "last_heartbeat_at": str(r["last_heartbeat_at"] or "").strip() or None,
-                    "last_seen_at": str(r["last_seen_at"] or "").strip() or None,
+                    "current_run_id": str(r["current_run_id"] or "").strip() or None,
                 }
         return result
     except Exception:
         return {}
 
 
-async def _fetch_latest_activity(workspace_id: str) -> Dict[str, str]:
-    """Latest activity_ledger_events timestamp per agent (actor_id) — one bulk
-    query for the whole workspace, not N+1. Backs the agents/project list's
-    "last active" column."""
+async def _fetch_latest_activity(workspace_id: str) -> Dict[str, Dict[str, Optional[str]]]:
+    """Latest activity_ledger_events row per agent (actor_id) — one bulk
+    DISTINCT ON query for the whole workspace, not N+1. Backs the
+    agents/project list's "last active" column and the row's activity-preview
+    line ("what it just did"). Keyed by actor_id -> {last_active_at, title}."""
     try:
         from server_modules import control_plane_repository as cpr
 
@@ -308,19 +332,24 @@ async def _fetch_latest_activity(workspace_id: str) -> Dict[str, str]:
             return {}
         rows = await pool.fetch(
             """
-            SELECT actor_id, MAX(created_at) AS last_active_at
+            SELECT DISTINCT ON (actor_id) actor_id, created_at, title, action
             FROM activity_ledger_events
             WHERE workspace_id = $1
-            GROUP BY actor_id
+            ORDER BY actor_id, created_at DESC
             """,
             str(workspace_id or "").strip(),
         )
-        out: Dict[str, str] = {}
+        out: Dict[str, Dict[str, Optional[str]]] = {}
         for r in rows or []:
             actor_id = str(r["actor_id"] or "").strip()
-            ts = r["last_active_at"]
-            if actor_id and ts is not None:
-                out[actor_id] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+            ts = r["created_at"]
+            if not actor_id or ts is None:
+                continue
+            title = str(r["title"] or "").strip() or str(r["action"] or "").strip().replace("_", " ")
+            out[actor_id] = {
+                "last_active_at": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                "title": title or None,
+            }
         return out
     except Exception:
         return {}
@@ -391,7 +420,7 @@ async def fleet_list_agents(
 
         # ── Phase U3: runtime target + hardware status ──
         _runtime_target = _resolve_runtime_target(inst_dict)
-        _hardware_status, _last_heartbeat = _resolve_hardware_status(
+        _hardware_status, _last_heartbeat, _current_run_id = _resolve_hardware_status(
             inst_dict, _heartbeats
         )
 
@@ -417,11 +446,14 @@ async def fleet_list_agents(
             "instructions": str(_meta_i.get("instructions") or "").strip(),
             "preferred_gateway_id": str(_meta_i.get("preferred_gateway_id") or "").strip(),
             "telegram_first_contact_reply": bool(_meta_i.get("telegram_first_contact_reply")),
+            "stopped": dict(_meta_i.get("stopped") or {}) if bool((_meta_i.get("stopped") or {}).get("active")) else {"active": False},
             # Phase U3: placement visibility
             "runtime_target": _runtime_target,
             "hardware_status": _hardware_status,
             "last_heartbeat": _last_heartbeat,
-            "last_activity": _last_active.get(str(inst_dict.get("id") or "").strip()),
+            "current_run_id": _current_run_id,
+            "last_activity": (_last_active.get(str(inst_dict.get("id") or "").strip()) or {}).get("last_active_at"),
+            "activity_preview": (_last_active.get(str(inst_dict.get("id") or "").strip()) or {}).get("title") or "",
             "channel": _channels.get(str(inst_dict.get("id") or "").strip(), ""),
         })
 
@@ -443,8 +475,13 @@ async def fleet_get_agent_activity(
 ) -> Dict[str, Any]:
     """Read recent ledger activity for a specific agent.
 
-    Queries the activity_ledger_events table for the given actor_id.
-    Redacts payloads — only returns event metadata, never raw content.
+    Queries the activity_ledger_events table for the given install_id — the
+    acting agent's own identity, stamped by every ledger writer (2026-07-09
+    attribution fix). actor_id tracks the human sender, not the agent, and
+    matching against it here always returned zero rows for any real agent
+    turn — this is why Overview read "No activity yet" even after real
+    conversations. Redacts payloads — only returns event metadata, never
+    raw content.
     """
     from server_modules import control_plane_repository as cpr
 
@@ -458,10 +495,10 @@ async def fleet_get_agent_activity(
 
         rows = await pool.fetch(
             """
-            SELECT id, action, event_class, title, status, created_at
+            SELECT id, action, event_class, title, status, channel, created_at
             FROM activity_ledger_events
             WHERE workspace_id = $1
-              AND actor_id = $2
+              AND install_id = $2
               AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz)
             ORDER BY created_at DESC
             LIMIT 50
@@ -477,6 +514,12 @@ async def fleet_get_agent_activity(
                 "event_class": str(r["event_class"] or ""),
                 "title": str(r["title"] or ""),
                 "status": str(r["status"] or ""),
+                # Who this ran for (channel) is present on the ledger row when
+                # the event came from a channel turn — None for owner/Sage-only
+                # activity. There is no customer_label on this table (that
+                # concept only exists on the separate deployed-agent
+                # conversation subsystem) — deliberately not fabricated here.
+                "channel": str(r["channel"] or "").strip() or None,
                 "created_at": str(r["created_at"] or ""),
             }
             for r in (rows or [])
@@ -504,7 +547,7 @@ async def fleet_get_project_activity(
     """Read recent ledger activity across every agent in a project — backs the
     project detail right panel's Activity section (panel-only, no separate
     tab). Same activity_ledger_events source as fleet_get_agent_activity, just
-    scoped to a set of actor_ids instead of one."""
+    scoped to a set of install_ids instead of one."""
     from server_modules import agent_registry_repository as repo
     from server_modules import control_plane_repository as cpr
 
@@ -530,10 +573,10 @@ async def fleet_get_project_activity(
 
         rows = await pool.fetch(
             """
-            SELECT id, actor_id, action, event_class, title, status, created_at
+            SELECT id, install_id, action, event_class, title, status, created_at
             FROM activity_ledger_events
             WHERE workspace_id = $1
-              AND actor_id = ANY($2::text[])
+              AND install_id = ANY($2::text[])
             ORDER BY created_at DESC
             LIMIT $3
             """,
@@ -544,7 +587,7 @@ async def fleet_get_project_activity(
         events = [
             {
                 "event_id": str(r["id"]),
-                "actor_id": str(r["actor_id"] or ""),
+                "agent_id": str(r["install_id"] or ""),
                 "action": str(r["action"] or ""),
                 "event_class": str(r["event_class"] or ""),
                 "title": str(r["title"] or ""),
@@ -608,14 +651,20 @@ async def fleet_get_agent_tools(
     definitions = skill_registry.list_skill_definitions(workspace_id=workspace_id, include_disabled=True)
     tools: List[Dict[str, Any]] = []
     for d in definitions:
+        # `id` is the canonical enforcement tool name (not skill_registry's
+        # own hyphenated id) so this list's toggle state — and the PATCH the
+        # frontend sends back using this same `id` — matches what
+        # _specialist_tool_allowed() actually checks. See
+        # skill_registry.enforcement_tool_name.
+        enforcement_id = skill_registry.enforcement_tool_name(d.id)
         tools.append({
-            "id": d.id,
+            "id": enforcement_id,
             "label": d.label,
             "description": d.description or "",
             "action_class": d.action_class,
             # Sage (operator) isn't gated by tool_toggles at all — every tool
             # is already available to it, so the toggle would be misleading.
-            "enabled": True if is_master else bool(toggles.get(d.id, False)),
+            "enabled": True if is_master else bool(toggles.get(enforcement_id, False)),
         })
 
     core_tools = sorted(_core_direct_tool_names())
@@ -695,6 +744,15 @@ async def fleet_configure_agent(
             meta["subagents_enabled"] = bool(clean_patch["subagents_enabled"])
         if "instructions" in clean_patch:
             meta["instructions"] = str(clean_patch["instructions"] or "").strip()[:_MAX_INSTRUCTIONS_CHARS]
+        _next_label: Optional[str] = None
+        if "display_name" in clean_patch:
+            # Inline rename (Overview tab). The real storage target is the
+            # workspace_agent_installs.label COLUMN, not metadata — same
+            # column fleet_create_agent seeds from `name`/the name pool.
+            requested_label = str(clean_patch["display_name"] or "").strip()[:200]
+            if not requested_label:
+                return {"ok": False, "error": "Name can't be empty."}
+            _next_label = requested_label
         if "telegram_first_contact_reply" in clean_patch:
             meta["telegram_first_contact_reply"] = bool(clean_patch["telegram_first_contact_reply"])
         if "preferred_gateway_id" in clean_patch:
@@ -702,6 +760,31 @@ async def fleet_configure_agent(
             if value is not None and not isinstance(value, str):
                 return {"ok": False, "error": "preferred_gateway_id must be a gateway id string."}
             meta["preferred_gateway_id"] = str(value or "").strip()
+        if "mandate" in clean_patch:
+            # The owner-declared mandate: which tools (connector/MCP actions,
+            # "{connector_id}.{action_id}") this agent's audience-tier callers
+            # (end-customers over a channel) may trigger, on top of whatever
+            # the tool catalog already marks audience_safe. Connector/MCP
+            # actions have no catalog-level audience_safe flag at all — they
+            # default to NOT audience_safe (fail-safe) until explicitly
+            # listed here. Consulted by both the skills_service and
+            # runs_execution mandate gates.
+            mandate_patch = clean_patch["mandate"]
+            if not isinstance(mandate_patch, dict):
+                return {"ok": False, "error": "mandate must be an object."}
+            next_mandate = dict(meta.get("mandate") or {})
+            if "audience_tools" in mandate_patch:
+                raw_tools = mandate_patch["audience_tools"]
+                if not isinstance(raw_tools, list) or not all(isinstance(t, str) for t in raw_tools):
+                    return {"ok": False, "error": "mandate.audience_tools must be an array of tool id strings."}
+                clean_tools = sorted({t.strip() for t in raw_tools if t.strip()})
+                if len(clean_tools) > _MAX_MANDATE_AUDIENCE_TOOLS:
+                    return {
+                        "ok": False,
+                        "error": f"mandate.audience_tools may list at most {_MAX_MANDATE_AUDIENCE_TOOLS} tools.",
+                    }
+                next_mandate["audience_tools"] = clean_tools
+            meta["mandate"] = next_mandate
         if "context_policy" in clean_patch:
             cp = clean_patch["context_policy"]
             if not isinstance(cp, dict):
@@ -782,6 +865,7 @@ async def fleet_configure_agent(
             agent_id,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
+            label=_next_label,
             metadata=meta,
             tool_toggles=_next_tool_toggles,
             hardware_access=_next_hardware_access,
@@ -877,6 +961,193 @@ async def fleet_message_agent(
     return {"ok": True, "agent_id": agent_id, "status": "enqueued"}
 
 
+# ── Owner-only stop control ────────────────────────────────────────────────
+# kill_switch_gate.py is the real enforcement (agent:{id}/workspace:{id}
+# keys, checked by sage_agent_runtime_service._run_sage_action_loop_v3
+# before any turn work happens) — it has no actor/timestamp fields of its
+# own, so who/when/reason live in the entity's own metadata here, same
+# pattern routes_gateway.py's agent-computer emergency-stop already uses.
+#
+# These four functions are deliberately NOT in _ALLOWED_CONFIGURE_KEYS and
+# NOT wired into skills_service.py's tool dispatcher — stopping/resuming is
+# an owner-only human action, never something an agent (or a turn acting on
+# an agent's behalf) can do to itself or another agent. Only routes_fleet.py
+# calls these, gated by enforce_workspace_access(..., minimum_role="owner").
+
+
+async def fleet_stop_agent(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+    reason: str = "",
+) -> Dict[str, Any]:
+    from server_modules import agent_registry_repository as repo
+    from server_modules import kill_switch_gate
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(agent_id, tenant_id=tenant_id, workspace_id=workspace_id)
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+
+    bundle_dict = dict(bundle) if isinstance(bundle, dict) else {}
+    meta = dict(bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {})
+    stopped_state = {
+        "active": True,
+        "reason": str(reason or "").strip()[:500],
+        "stopped_by_user_id": str(actor_id or "").strip(),
+        "stopped_by_label": str(actor_label or "").strip(),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    meta["stopped"] = stopped_state
+
+    kill_switch_gate.set_kill_switch(f"{kill_switch_gate.AGENT_KILL_PREFIX}{agent_id}")
+    await repo.update_workspace_agent_install(agent_id, tenant_id=tenant_id, workspace_id=workspace_id, metadata=meta)
+
+    await activity_ledger_service.append_activity_event(
+        tenant_id="system",
+        workspace_id=workspace_id,
+        actor_type="user",
+        actor_id=str(actor_id or "").strip() or "unknown",
+        install_id=agent_id,
+        event_class="fleet_control",
+        detail_level="audit_reference",
+        action="agent_stopped",
+        title=f"Agent stopped: {agent_id}",
+        summary=(
+            f"{actor_label or actor_id} stopped this agent."
+            + (f" Reason: {reason}" if str(reason or "").strip() else "")
+        ),
+        status="executed",
+        metadata={"agent_id": agent_id, "reason": str(reason or "").strip() or None, "stopped_by_user_id": actor_id},
+    )
+    return {"ok": True, "agent_id": agent_id, "stopped": stopped_state}
+
+
+async def fleet_resume_agent(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    from server_modules import agent_registry_repository as repo
+    from server_modules import kill_switch_gate
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(agent_id, tenant_id=tenant_id, workspace_id=workspace_id)
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+
+    bundle_dict = dict(bundle) if isinstance(bundle, dict) else {}
+    meta = dict(bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {})
+    meta["stopped"] = {"active": False}
+
+    kill_switch_gate.clear_kill_switch(f"{kill_switch_gate.AGENT_KILL_PREFIX}{agent_id}")
+    await repo.update_workspace_agent_install(agent_id, tenant_id=tenant_id, workspace_id=workspace_id, metadata=meta)
+
+    await activity_ledger_service.append_activity_event(
+        tenant_id="system",
+        workspace_id=workspace_id,
+        actor_type="user",
+        actor_id=str(actor_id or "").strip() or "unknown",
+        install_id=agent_id,
+        event_class="fleet_control",
+        detail_level="audit_reference",
+        action="agent_resumed",
+        title=f"Agent resumed: {agent_id}",
+        summary=f"{actor_label or actor_id} resumed this agent.",
+        status="executed",
+        metadata={"agent_id": agent_id, "resumed_by_user_id": actor_id},
+    )
+    return {"ok": True, "agent_id": agent_id, "stopped": {"active": False}}
+
+
+async def fleet_stop_workspace(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+    reason: str = "",
+) -> Dict[str, Any]:
+    from server_modules import control_plane_repository
+    from server_modules import kill_switch_gate
+
+    if not str(workspace_id or "").strip():
+        return {"ok": False, "error": "workspace_id is required"}
+
+    stopped_state = {
+        "active": True,
+        "reason": str(reason or "").strip()[:500],
+        "stopped_by_user_id": str(actor_id or "").strip(),
+        "stopped_by_label": str(actor_label or "").strip(),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    kill_switch_gate.set_kill_switch(f"{kill_switch_gate.WORKSPACE_KILL_PREFIX}{workspace_id}")
+    saved = await control_plane_repository.update_workspace_kill_switch_metadata(workspace_id, stopped_state)
+    if saved is None:
+        kill_switch_gate.clear_kill_switch(f"{kill_switch_gate.WORKSPACE_KILL_PREFIX}{workspace_id}")
+        return {"ok": False, "error": f"Workspace {workspace_id} not found"}
+
+    await activity_ledger_service.append_activity_event(
+        tenant_id="system",
+        workspace_id=workspace_id,
+        actor_type="user",
+        actor_id=str(actor_id or "").strip() or "unknown",
+        event_class="fleet_control",
+        detail_level="audit_reference",
+        action="workspace_stopped",
+        title=f"All agents stopped in workspace {workspace_id}",
+        summary=(
+            f"{actor_label or actor_id} stopped all agents in this workspace."
+            + (f" Reason: {reason}" if str(reason or "").strip() else "")
+        ),
+        status="executed",
+        metadata={"workspace_id": workspace_id, "reason": str(reason or "").strip() or None, "stopped_by_user_id": actor_id},
+    )
+    return {"ok": True, "workspace_id": workspace_id, "stopped": stopped_state}
+
+
+async def fleet_resume_workspace(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+) -> Dict[str, Any]:
+    from server_modules import control_plane_repository
+    from server_modules import kill_switch_gate
+
+    if not str(workspace_id or "").strip():
+        return {"ok": False, "error": "workspace_id is required"}
+
+    kill_switch_gate.clear_kill_switch(f"{kill_switch_gate.WORKSPACE_KILL_PREFIX}{workspace_id}")
+    saved = await control_plane_repository.update_workspace_kill_switch_metadata(workspace_id, {"active": False})
+    if saved is None:
+        return {"ok": False, "error": f"Workspace {workspace_id} not found"}
+
+    await activity_ledger_service.append_activity_event(
+        tenant_id="system",
+        workspace_id=workspace_id,
+        actor_type="user",
+        actor_id=str(actor_id or "").strip() or "unknown",
+        event_class="fleet_control",
+        detail_level="audit_reference",
+        action="workspace_resumed",
+        title=f"All agents resumed in workspace {workspace_id}",
+        summary=f"{actor_label or actor_id} resumed all agents in this workspace.",
+        status="executed",
+        metadata={"workspace_id": workspace_id, "resumed_by_user_id": actor_id},
+    )
+    return {"ok": True, "workspace_id": workspace_id, "stopped": {"active": False}}
+
+
 async def fleet_create_agent(
     *,
     actor_id: str,
@@ -915,7 +1186,21 @@ async def fleet_create_agent(
         }
     _preset_defaults = _caps.build_install_defaults(capability_preset)
 
-    agent_label = str(name or "").strip() or "Fleet Specialist"
+    clean_name = str(name or "").strip()
+    if clean_name:
+        agent_label = clean_name
+    else:
+        # NAME IS NOT A STEP: the create-agent wizard creates the agent on
+        # Placement, before the owner has picked a name. Auto-assign from the
+        # curated pool (collision-checked within this workspace) — the owner
+        # renames it anytime from the Overview tab.
+        from server_modules import agent_name_pool
+        _existing_installs = await repo.list_workspace_agent_installs(
+            tenant_id=tenant_id, workspace_id=workspace_id, include_master=True,
+        )
+        agent_label = agent_name_pool.assign_agent_name(
+            str(i.get("label") or "") for i in (_existing_installs or [])
+        )
     meta = seed_specialist_metadata()
     meta["fleet_created_by"] = actor_id
     meta["fleet_created_at"] = datetime.now(timezone.utc).isoformat()
@@ -988,18 +1273,27 @@ async def fleet_create_agent(
 
         agent_id = str(result.get("id") or "").strip()
 
-        # Assign to the chosen project (agents otherwise land in the default
-        # project). Best-effort: a bad project id shouldn't fail creation.
+        # Assign to the chosen project — an empty project_id resolves to the
+        # workspace's default ("General") project rather than leaving the
+        # agent unassigned, so the create-agent wizard's Placement step never
+        # needs its own project picker. Best-effort: a bad/unresolvable
+        # project id shouldn't fail creation.
         _project_id = str(project_id or "").strip()
-        if agent_id and _project_id:
+        if agent_id:
             try:
                 from server_modules import projects_repository as _projects
-                await _projects.assign_install_to_project(
-                    tenant_id=tenant_id,
-                    workspace_id=workspace_id,
-                    install_id=agent_id,
-                    project_id=_project_id,
-                )
+                if not _project_id:
+                    _default_project = await _projects.ensure_default_project(
+                        tenant_id=tenant_id, workspace_id=workspace_id,
+                    )
+                    _project_id = str((_default_project or {}).get("id") or "")
+                if _project_id:
+                    await _projects.assign_install_to_project(
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
+                        install_id=agent_id,
+                        project_id=_project_id,
+                    )
             except Exception:
                 pass
     except Exception as exc:
@@ -1019,7 +1313,7 @@ async def fleet_create_agent(
         target_agent_id=agent_id,
         metadata={"agent_name": agent_label},
     )
-    return {"ok": True, "agent_id": agent_id, "role": SPECIALIST_ROLE}
+    return {"ok": True, "agent_id": agent_id, "role": SPECIALIST_ROLE, "name": agent_label, "project_id": _project_id}
 
 
 # ── Phase M: Sage operator bootstrap ─────────────────────────────────────────
@@ -1153,6 +1447,7 @@ async def schedule_task(
     when: str = "",
     instruction: str = "",
     tenant_id: str = "system",
+    authority_tier: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Schedule a future task for this agent.
 
@@ -1163,6 +1458,14 @@ async def schedule_task(
       - ``"in 2 minutes"``, ``"in 30 min"`` — relative time
       - ``"in 1 hour"`` — relative hours
       - ``"2026-07-04T09:00:00Z"`` — ISO-8601 UTC datetime
+
+    Mandate: *authority_tier* is the tier of the turn that IS CALLING this
+    tool (pass the caller's session_ctx["authority_tier"]) — it is persisted
+    onto the wake request and must be carried by whatever later resumes this
+    instruction, per authority_mandate_service.inherit_tier(). An
+    audience-tier turn scheduling a task must never result in an owner-tier
+    execution later just because the wake-up has no live channel sender.
+    Defaults to the safe "audience" tier when the caller doesn't pass one.
 
     Returns ``{ok, wake_request_id, due_at, instruction}``.
     """
@@ -1180,6 +1483,10 @@ async def schedule_task(
     if due_at is None:
         return {"ok": False, "error": f"Could not parse 'when' expression: {resolved_when!r}. Use 'in N minutes' or ISO-8601 datetime."}
 
+    from server_modules import authority_mandate_service
+
+    resolved_tier = authority_mandate_service.inherit_tier(authority_tier)
+
     try:
         from server_modules.bounded_scheduler_service import propose_self_wakeup
 
@@ -1193,6 +1500,7 @@ async def schedule_task(
                 "instruction": resolved_instruction,
                 "agent_id": agent_id or actor_id,
                 "source": "schedule_task_tool",
+                "authority_tier": resolved_tier,
             },
             requested_by=agent_id or actor_id or "agent",
         )
@@ -1214,6 +1522,7 @@ async def schedule_task(
                 "due_at": str(due_at),
                 "wake_request_id": str(wake_id),
                 "accepted": result.get("accepted", False),
+                "authority_tier": resolved_tier,
             },
         )
         _log.info(
