@@ -363,6 +363,115 @@ async def fleet_resume_workspace_route(
         return {"ok": False, "error": str(exc)}
 
 
+# ── Owner-only schedule control ──────────────────────────────────────────
+# Part U2: when an agent wakes on its own. Same owner-gating as the stop
+# control above — fleet_tools.fleet_*_agent_schedule are not wired into the
+# LLM tool dispatcher; an agent proposes its own wake-ups only through the
+# fleet__schedule_task tool (mandate-gated, see authority_mandate_service),
+# never through these routes.
+
+
+class FleetCreateScheduleRequest(BaseModel):
+    when: str = ""
+    instruction: str = ""
+
+
+class FleetPreviewScheduleRequest(BaseModel):
+    when: str = ""
+
+
+@router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/schedule")
+async def fleet_list_agent_schedule_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only list of this agent's scheduled wake-ups."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_list_agent_schedule
+
+    try:
+        return await fleet_list_agent_schedule(
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "schedule": []}
+
+
+@router.post("/api/w/{workspace_id}/fleet/agents/{agent_id}/schedule/preview")
+async def fleet_preview_agent_schedule_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    body: FleetPreviewScheduleRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only preview of what a 'when' expression resolves to, before
+    confirming creation. Read-only — parses but never persists."""
+    auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_preview_schedule_when
+
+    try:
+        return fleet_preview_schedule_when(when=body.when)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.post("/api/w/{workspace_id}/fleet/agents/{agent_id}/schedule")
+async def fleet_create_agent_schedule_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    body: FleetCreateScheduleRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only: schedule a future wake-up for this agent. Always executes
+    at owner tier — see fleet_tools.fleet_create_agent_schedule."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_create_agent_schedule
+
+    try:
+        return await fleet_create_agent_schedule(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+            when=body.when,
+            instruction=body.instruction,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/agents/{agent_id}/schedule/{wake_request_id}")
+async def fleet_cancel_agent_schedule_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    wake_request_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only cancel of one of this agent's pending wake-ups."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_cancel_agent_schedule
+
+    try:
+        return await fleet_cancel_agent_schedule(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+            wake_request_id=wake_request_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/api/w/{workspace_id}/fleet/agent-activity")
 async def fleet_agent_activity(
     request: Request,

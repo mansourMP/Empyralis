@@ -11924,6 +11924,7 @@ async def list_agent_scheduler_wake_requests(
     status: Optional[str] = None,
     trigger_kind: Optional[str] = None,
     due_before: Any = None,
+    agent_id: Optional[str] = None,
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
     resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
@@ -11940,6 +11941,14 @@ async def list_agent_scheduler_wake_requests(
     if resolved_due_before is not None:
         params.append(resolved_due_before)
         conditions.append(f"due_at <= ${len(params)}::timestamptz")
+    if agent_id:
+        # master_agent_install_id is always the workspace's single Sage
+        # install (see append_agent_scheduler_wake_request) — it never
+        # discriminates specialists, so "which agent" only lives in this
+        # unindexed JSONB field. Fine at this table's expected scale (one
+        # owner's per-agent schedule list, not a hot path).
+        params.append(str(agent_id or "").strip())
+        conditions.append(f"payload->>'agent_id' = ${len(params)}")
     params.append(max(1, int(limit or 100)))
     async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
         if connection is None:
@@ -11955,6 +11964,29 @@ async def list_agent_scheduler_wake_requests(
             *params,
         )
     return [dict(row) for row in rows]
+
+
+async def get_agent_scheduler_wake_request(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    wake_id: str,
+) -> Optional[Dict[str, Any]]:
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    resolved_wake_id = str(wake_id or "").strip()
+    if not resolved_wake_id:
+        return None
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return None
+        row = await connection.fetchrow(
+            "SELECT * FROM agent_scheduler_wake_requests WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3 LIMIT 1",
+            resolved_wake_id,
+            resolved_tenant_id,
+            resolved_workspace_id,
+        )
+    return dict(row) if row is not None else None
 
 
 async def list_activity_ledger_events(

@@ -271,6 +271,11 @@ export type FleetTool = {
   description: string;
   action_class: string;
   enabled: boolean;
+  // Authority Mandate (Part 10) — Customer access. audience_safe is the
+  // platform's own manifest default (informational, never toggleable);
+  // mandate_granted reflects this owner's mandate.audience_tools list.
+  audience_safe: boolean;
+  mandate_granted: boolean;
 };
 
 export function useFleetAgentChannels(workspaceId: string, agentId: string | null) {
@@ -387,6 +392,105 @@ export function useFleetAgentTools(workspaceId: string, agentId: string | null) 
   useEffect(() => { void refresh(); }, [refresh]);
 
   return { tools, coreTools, isMaster, loading, refresh };
+}
+
+// ── Schedule (Part U2) — when an agent wakes on its own ────────────────────
+
+export type FleetScheduleItem = {
+  id: string;
+  description: string;
+  due_at: string;
+  created_at: string;
+  status: string;
+  authority_tier: "owner" | "audience" | "system";
+};
+
+export function useFleetAgentSchedule(workspaceId: string, agentId: string | null) {
+  const [schedule, setSchedule] = useState<FleetScheduleItem[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!agentId) { setSchedule([]); return; }
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/schedule`,
+        { credentials: "include" }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setSchedule(data.schedule || []);
+    } catch { setSchedule([]); }
+    finally { setLoading(false); }
+  }, [workspaceId, agentId]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  return { schedule, loading, refresh };
+}
+
+type FleetScheduleMutationResult = { ok: boolean; error?: string };
+
+export async function previewFleetAgentSchedule(
+  workspaceId: string, agentId: string, when: string
+): Promise<FleetScheduleMutationResult & { due_at?: string }> {
+  try {
+    const res = await fetch(
+      `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/schedule/preview`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ when }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) return { ok: false, error: String(data?.error || `HTTP ${res.status}`) };
+    return { ok: true, due_at: data.due_at };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
+  }
+}
+
+export async function createFleetAgentSchedule(
+  workspaceId: string, agentId: string, when: string, instruction: string
+): Promise<FleetScheduleMutationResult> {
+  try {
+    const res = await fetch(
+      `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/schedule`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ when, instruction }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) return { ok: false, error: String(data?.error || data?.detail || `HTTP ${res.status}`) };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
+  }
+}
+
+export async function deleteFleetAgentSchedule(
+  workspaceId: string, agentId: string, wakeRequestId: string
+): Promise<FleetScheduleMutationResult> {
+  try {
+    const res = await fetch(
+      `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/schedule/${encodeURIComponent(wakeRequestId)}`,
+      {
+        method: "DELETE",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("DELETE"),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) return { ok: false, error: String(data?.error || `HTTP ${res.status}`) };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
+  }
 }
 
 export type WorkspaceActivityEvent = {

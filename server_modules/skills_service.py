@@ -1475,6 +1475,23 @@ def first_non_empty_line(text: str) -> str:
     return ""
 
 
+def tool_descriptor_for_name(tool_name: str) -> ToolDescriptor | None:
+    """Look up a local/builtin ToolDescriptor by its literal tool-call name —
+    the same canonical enforcement id the Tools tab and tool_toggles key by
+    (skill_registry.enforcement_tool_name). For callers outside the dispatch
+    path (e.g. fleet_get_agent_tools) that need manifest fields like
+    audience_safe without executing anything. Returns None for connector/MCP
+    actions, which have no ToolDescriptor at all — only local/builtin tools
+    do."""
+    clean_name = str(tool_name or "").strip()
+    if not clean_name:
+        return None
+    for descriptor in list(_local_tool_descriptors()) + list(_builtin_tool_descriptors()):
+        if descriptor.tool_name == clean_name:
+            return descriptor
+    return None
+
+
 def _tool_descriptor_for_mandate_gate(
     connector_id: str,
     action_id: str,
@@ -1542,7 +1559,19 @@ def _authority_mandate_gate(
     manifest_audience_safe = bool(descriptor.audience_safe) if descriptor is not None else False
     mandate_audience_tools = session_metadata.get("mandate_audience_tools")
     tool_key = authority_mandate_service.connector_tool_key(connector_id, action_id)
-    mandate_audience_safe = authority_mandate_service.is_audience_tool_allowed(mandate_audience_tools, tool_key)
+    clean_tool_name = str(tool_name or "").strip()
+    # mandate.audience_tools holds two id spaces: "{connector_id}.{action_id}"
+    # for connector/MCP actions (no ToolDescriptor, checked via tool_key
+    # above), and the literal enforcement tool name for local/builtin tools
+    # granted through the Tools tab's Customer access control (checked via
+    # clean_tool_name here — that UI writes the same canonical id the tab
+    # already displays, not the dot form). Either match is sufficient.
+    mandate_audience_safe = authority_mandate_service.is_audience_tool_allowed(
+        mandate_audience_tools, tool_key
+    ) or (
+        bool(clean_tool_name)
+        and authority_mandate_service.is_audience_tool_allowed(mandate_audience_tools, clean_tool_name)
+    )
     audience_safe = manifest_audience_safe or mandate_audience_safe
     allowed = authority_mandate_service.is_tool_call_allowed(tier, audience_safe=audience_safe)
     return allowed, tier, audience_safe, unattributed

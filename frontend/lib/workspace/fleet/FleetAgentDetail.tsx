@@ -6,6 +6,7 @@ import {
   Brain,
   Check,
   ChevronRight,
+  Clock,
   Cpu,
   Inbox,
   LayoutGrid,
@@ -20,6 +21,7 @@ import {
   Radio,
   Sparkles,
   Square,
+  Trash2,
   Wrench,
   X,
   type LucideIcon,
@@ -37,9 +39,15 @@ import {
   useFleetAgentChannels,
   useFleetAgentConnectors,
   useFleetAgentTools,
+  useFleetAgentSchedule,
+  previewFleetAgentSchedule,
+  createFleetAgentSchedule,
+  deleteFleetAgentSchedule,
   type FleetAgent,
   type FleetAgentActivity,
   type FleetChannel,
+  type FleetTool,
+  type FleetScheduleItem,
 } from "./fleet-data";
 import { deriveStatus, derivePlacement, timeAgo, type AgentStatusTone } from "./fleet-presentation";
 import { StatusChip } from "./fleet-indicators";
@@ -405,6 +413,8 @@ function OverviewTab({
   const role = agent?.role || "agent";
   const isMaster = role === "operator";
   const dayGroups = groupActivityByDay(events);
+  const { tools: overviewTools } = useFleetAgentTools(workspaceId, agentId);
+  const customerAccessCount = overviewTools.filter((t) => t.enabled && (t.audience_safe || t.mandate_granted)).length;
 
   return (
     <div className="fleet-detail-overview">
@@ -428,10 +438,20 @@ function OverviewTab({
           <span className="fleet-config-label">Role</span>
           <span className="fleet-config-value" style={{ textTransform: "capitalize" }}>{role}</span>
         </div>
+        {!isMaster && (
+          <div className="fleet-config-row">
+            <span className="fleet-config-label">Customer access</span>
+            <span className="fleet-config-value">{customerAccessCount} {customerAccessCount === 1 ? "tool" : "tools"}</span>
+          </div>
+        )}
       </div>
 
       {!isMaster && agent && (
         <PersonaEditor workspaceId={workspaceId} agentId={agentId} agent={agent} />
+      )}
+
+      {!isMaster && agent && (
+        <ScheduleSection workspaceId={workspaceId} agentId={agentId} />
       )}
 
       <div className="fleet-detail-section-title">Recent activity</div>
@@ -638,6 +658,170 @@ function PersonaEditor({
   );
 }
 
+// ── Schedule (Part U2) — when this agent wakes on its own ──────────────────
+
+function formatDueAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function ScheduleTierBadge({ tier }: { tier: FleetScheduleItem["authority_tier"] }) {
+  if (tier === "owner") {
+    return <span className="fleet-badge fleet-badge--lock" style={{ marginLeft: 0 }}>Owner</span>;
+  }
+  if (tier === "system") {
+    return <span className="fleet-badge" style={{ marginLeft: 0 }}>System</span>;
+  }
+  return <span className="fleet-badge" style={{ marginLeft: 0 }}>Audience</span>;
+}
+
+function ScheduleSection({ workspaceId, agentId }: { workspaceId: string; agentId: string }) {
+  const { schedule, loading, refresh } = useFleetAgentSchedule(workspaceId, agentId);
+  const [creating, setCreating] = useState(false);
+  const [when, setWhen] = useState("");
+  const [instruction, setInstruction] = useState("");
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // Show the resolved next run before confirming — reparsed server-side via
+  // the same _parse_when schedule_task itself uses, so there's no drift
+  // between what's previewed and what actually gets created.
+  useEffect(() => {
+    if (!creating || !when.trim()) { setPreviewText(null); setPreviewError(null); return; }
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      void previewFleetAgentSchedule(workspaceId, agentId, when.trim()).then((result) => {
+        if (cancelled) return;
+        if (result.ok && result.due_at) {
+          setPreviewText(formatDueAt(result.due_at));
+          setPreviewError(null);
+        } else {
+          setPreviewText(null);
+          setPreviewError(result.error || "Couldn't parse that time.");
+        }
+      });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [creating, when, workspaceId, agentId]);
+
+  function cancelCreate() {
+    setCreating(false);
+    setWhen("");
+    setInstruction("");
+    setPreviewText(null);
+    setPreviewError(null);
+    setError(null);
+  }
+
+  async function handleCreate() {
+    setBusy(true);
+    setError(null);
+    const result = await createFleetAgentSchedule(workspaceId, agentId, when.trim(), instruction.trim());
+    setBusy(false);
+    if (result.ok) {
+      cancelCreate();
+      await refresh();
+    } else {
+      setError(result.error || "Could not schedule this wake-up.");
+    }
+  }
+
+  async function handleDelete(id: string) {
+    setDeletingId(id);
+    setError(null);
+    const result = await deleteFleetAgentSchedule(workspaceId, agentId, id);
+    setDeletingId(null);
+    if (result.ok) await refresh();
+    else setError(result.error || "Could not cancel this wake-up.");
+  }
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div className="fleet-detail-section-title" style={{ marginTop: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span>Schedule</span>
+        {!creating && (
+          <button type="button" className="fleet-btn" onClick={() => setCreating(true)}>
+            <Clock size={14} strokeWidth={1.75} /> Schedule a wake-up
+          </button>
+        )}
+      </div>
+
+      {creating && (
+        <div className="fleet-card" style={{ padding: "var(--space-3)", marginBottom: 12 }}>
+          <div className="fleet-wizard-label" style={{ marginTop: 0 }}>When</div>
+          <input
+            className="fleet-wizard-input"
+            placeholder="in 2 hours, or 2026-07-10T09:00:00Z"
+            value={when}
+            onChange={(e) => setWhen(e.target.value)}
+          />
+          {previewText && <p className="fleet-subtitle" style={{ marginTop: 4 }}>→ {previewText}</p>}
+          {previewError && <p className="fleet-channel-expand-error" style={{ marginTop: 4 }}>{previewError}</p>}
+          <div className="fleet-wizard-label">What should it do</div>
+          <textarea
+            className="fleet-wizard-input"
+            placeholder="Check the inbox and follow up on anything unanswered."
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            rows={2}
+            style={{ height: "auto", padding: "8px 12px", resize: "vertical" }}
+          />
+          {error && <p className="fleet-channel-expand-error" style={{ marginTop: 4 }}>{error}</p>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button type="button" className="fleet-btn" disabled={busy} onClick={cancelCreate}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="fleet-btn fleet-btn--accent"
+              disabled={busy || !when.trim() || !instruction.trim() || !previewText}
+              onClick={handleCreate}
+            >
+              {busy ? "Scheduling…" : "Confirm"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="fleet-activity-skeleton" aria-label="Loading schedule"><div className="fleet-skeleton-bar" style={{ width: "50%" }} /></div>
+      ) : schedule.length === 0 ? (
+        <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+          No scheduled wake-ups. This agent only acts when messaged.
+        </p>
+      ) : (
+        <div className="fleet-config" style={{ padding: 0 }}>
+          {schedule.map((item) => (
+            <div key={item.id} className="fleet-toggle-row">
+              <div style={{ minWidth: 0 }}>
+                <div className="fleet-toggle-row-label">{item.description || "Scheduled wake-up"}</div>
+                <div className="fleet-toggle-row-desc" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span>{formatDueAt(item.due_at)} · One-time</span>
+                  <ScheduleTierBadge tier={item.authority_tier} />
+                </div>
+              </div>
+              <button
+                type="button"
+                className="fleet-btn"
+                disabled={deletingId === item.id}
+                onClick={() => handleDelete(item.id)}
+                title="Cancel this scheduled wake-up"
+              >
+                <Trash2 size={14} strokeWidth={1.75} /> {deletingId === item.id ? "Cancelling…" : "Cancel"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {!creating && error && <p className="fleet-channel-expand-error" style={{ marginTop: 8 }}>{error}</p>}
+    </div>
+  );
+}
+
 // ── Chat ────────────────────────────────────────────────────────────────────
 
 // Runs as this specific agent — its own persona, model binding, and memory
@@ -818,7 +1002,12 @@ export function ChannelsTab({
     setOauthError(null);
   }
 
-  function handleCardClick(platform: typeof CHANNEL_GRID_PLATFORMS[number]) {
+  function handleCardClick(platform: typeof CHANNEL_GRID_PLATFORMS[number], pill: { tone: string }) {
+    // "Not configured here" must be a dead end before the click, matching the
+    // Connectors tab — not a click-through to a banner whose only path ends
+    // in a raw env-var error (e.g. "Set SLACK_CLIENT_ID..."). "Needs Gateway"
+    // stays clickable — pairing a Gateway is a real, actionable next step.
+    if (pill.tone === "locked") return;
     if (expanded === platform.id) {
       closeBanner();
       return;
@@ -850,7 +1039,8 @@ export function ChannelsTab({
               key={platform.id}
               type="button"
               className={`fleet-channel-card${isExpanded ? " fleet-channel-card--active" : ""}`}
-              onClick={() => handleCardClick(platform)}
+              onClick={() => handleCardClick(platform, pill)}
+              disabled={pill.tone === "locked"}
             >
               <span className="fleet-channel-card-icon">
                 {icon ? <img src={icon} alt="" width={32} height={32} /> : platform.label.charAt(0)}
@@ -1053,11 +1243,55 @@ function Disclosure({
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
+function ToolCustomerAccess({
+  tool, busy, onGrant, onRevoke,
+}: { tool: FleetTool; busy: boolean; onGrant: () => void; onRevoke: () => void }) {
+  const muted = !tool.enabled;
+  if (tool.audience_safe) {
+    return (
+      <span
+        className={`fleet-badge${muted ? " fleet-badge--muted" : ""}`}
+        style={{ marginLeft: 0 }}
+        title={muted ? "Enabled required to run" : "The platform marks this tool safe for anyone to trigger."}
+      >
+        Safe by default
+      </span>
+    );
+  }
+  if (tool.mandate_granted) {
+    return (
+      <button
+        type="button"
+        className={`fleet-badge fleet-badge--lock fleet-badge--action${muted ? " fleet-badge--muted" : ""}`}
+        style={{ marginLeft: 0 }}
+        disabled={busy}
+        onClick={onRevoke}
+        title={muted ? "Enabled required to run — click to revoke customer access" : "Customers can trigger this. Click to revoke."}
+      >
+        Granted by you
+      </button>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="fleet-badge fleet-badge--action"
+      style={{ marginLeft: 0 }}
+      disabled={busy}
+      onClick={onGrant}
+      title="Only the workspace owner can trigger this. Click to grant customer access."
+    >
+      Owner only
+    </button>
+  );
+}
+
 function ToolsTab({
   workspaceId, agentId, agent, onChat,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
   const { tools, coreTools, isMaster, loading, refresh } = useFleetAgentTools(workspaceId, agentId);
   const [pending, setPending] = useState<string | null>(null);
+  const [mandateBusy, setMandateBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function toggle(toolId: string, next: boolean) {
@@ -1077,6 +1311,31 @@ function ToolsTab({
       setError(e instanceof Error ? e.message : "Could not update this tool.");
     } finally {
       setPending(null);
+    }
+  }
+
+  async function setMandate(toolId: string, grant: boolean) {
+    setMandateBusy(toolId);
+    setError(null);
+    // mandate.audience_tools is replace-semantics server-side, so reconstruct
+    // the full desired set from what's currently visible on this tab.
+    const nextGranted = new Set(tools.filter((t) => t.mandate_granted).map((t) => t.id));
+    if (grant) nextGranted.add(toolId);
+    else nextGranted.delete(toolId);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { mandate: { audience_tools: Array.from(nextGranted) } } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update customer access for this tool.");
+    } finally {
+      setMandateBusy(null);
     }
   }
 
@@ -1105,25 +1364,43 @@ function ToolsTab({
           This is the operator agent — it has unrestricted tool access, not gated by these toggles.
         </p>
       ) : (
-        <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>
-          {enabledCount} of {tools.length} tools enabled
-        </div>
+        <>
+          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>
+            {enabledCount} of {tools.length} tools enabled
+          </div>
+          <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+            People who message this agent can request these. Everything else requires you.
+          </p>
+        </>
       )}
       {tools.map((t) => (
         <div key={t.id} className="fleet-toggle-row">
           <div style={{ minWidth: 0 }}>
             <div className="fleet-toggle-row-label">{t.label}</div>
             {t.description && <div className="fleet-toggle-row-desc">{t.description}</div>}
+            {!t.enabled && (t.audience_safe || t.mandate_granted) && (
+              <div className="fleet-toggle-row-desc">Enabled required to run</div>
+            )}
           </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={t.enabled}
-            aria-label={`${t.enabled ? "Disable" : "Enable"} ${t.label}`}
-            className={`fleet-toggle${t.enabled ? " is-on" : ""}`}
-            disabled={isMaster || pending === t.id}
-            onClick={() => toggle(t.id, !t.enabled)}
-          />
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+            {!isMaster && (
+              <ToolCustomerAccess
+                tool={t}
+                busy={mandateBusy === t.id}
+                onGrant={() => setMandate(t.id, true)}
+                onRevoke={() => setMandate(t.id, false)}
+              />
+            )}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={t.enabled}
+              aria-label={`${t.enabled ? "Disable" : "Enable"} ${t.label}`}
+              className={`fleet-toggle${t.enabled ? " is-on" : ""}`}
+              disabled={isMaster || pending === t.id}
+              onClick={() => toggle(t.id, !t.enabled)}
+            />
+          </div>
         </div>
       ))}
       {error && <p className="fleet-channel-expand-error">{error}</p>}

@@ -320,10 +320,17 @@ async def _fetch_latest_heartbeats(workspace_id: str) -> Dict[str, dict]:
 
 
 async def _fetch_latest_activity(workspace_id: str) -> Dict[str, Dict[str, Optional[str]]]:
-    """Latest activity_ledger_events row per agent (actor_id) — one bulk
+    """Latest activity_ledger_events row per agent (install_id) — one bulk
     DISTINCT ON query for the whole workspace, not N+1. Backs the
     agents/project list's "last active" column and the row's activity-preview
-    line ("what it just did"). Keyed by actor_id -> {last_active_at, title}."""
+    line ("what it just did"). Keyed by install_id -> {last_active_at, title}.
+
+    Was grouping on actor_id — the human sender, not the agent — the same
+    stale-attribution bug fleet_get_agent_activity() had before the 2026-07-09
+    fix. Since actor_id never matches an agent install id, fleet_list_agents()'s
+    lookup by install id always missed, showing "never" and no activity
+    preview on the list even when the agent's own detail page had real data.
+    """
     try:
         from server_modules import control_plane_repository as cpr
 
@@ -332,21 +339,21 @@ async def _fetch_latest_activity(workspace_id: str) -> Dict[str, Dict[str, Optio
             return {}
         rows = await pool.fetch(
             """
-            SELECT DISTINCT ON (actor_id) actor_id, created_at, title, action
+            SELECT DISTINCT ON (install_id) install_id, created_at, title, action
             FROM activity_ledger_events
-            WHERE workspace_id = $1
-            ORDER BY actor_id, created_at DESC
+            WHERE workspace_id = $1 AND install_id IS NOT NULL
+            ORDER BY install_id, created_at DESC
             """,
             str(workspace_id or "").strip(),
         )
         out: Dict[str, Dict[str, Optional[str]]] = {}
         for r in rows or []:
-            actor_id = str(r["actor_id"] or "").strip()
+            install_id = str(r["install_id"] or "").strip()
             ts = r["created_at"]
-            if not actor_id or ts is None:
+            if not install_id or ts is None:
                 continue
             title = str(r["title"] or "").strip() or str(r["action"] or "").strip().replace("_", " ")
-            out[actor_id] = {
+            out[install_id] = {
                 "last_active_at": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
                 "title": title or None,
             }
@@ -457,12 +464,10 @@ async def fleet_list_agents(
             "channel": _channels.get(str(inst_dict.get("id") or "").strip(), ""),
         })
 
-    await _ledger_fleet_action(
-        action="list_agents",
-        actor_id=actor_id,
-        workspace_id=workspace_id,
-        metadata={"count": len(agents)},
-    )
+    # Not ledgered: this is a pure read, polled every ~30s by the agents/
+    # project list UI. The ledger records actions, not observations — logging
+    # every list_agents call buried real events ("Meridian chat completed")
+    # under a wall of "Fleet: list_agents" noise within seconds.
     return {"ok": True, "agents": agents}
 
 
@@ -527,13 +532,11 @@ async def fleet_get_agent_activity(
     except Exception as exc:
         return {"ok": False, "error": str(exc), "events": []}
 
-    await _ledger_fleet_action(
-        action="get_agent_activity",
-        actor_id=actor_id,
-        workspace_id=workspace_id,
-        target_agent_id=agent_id,
-        metadata={"event_count": len(events), "since": since},
-    )
+    # Not ledgered: this is a pure read, polled every few seconds by the
+    # agent Overview tab. The ledger records actions, not observations —
+    # logging every get_agent_activity call buried real events ("Meridian
+    # chat completed") under a wall of "Fleet: get_agent_activity" noise
+    # within seconds of it happening.
     return {"ok": True, "agent_id": agent_id, "events": events}
 
 
@@ -623,7 +626,9 @@ async def fleet_get_agent_tools(
     aren't real toggles because there's nothing to turn off.
     """
     from server_modules import agent_registry_repository as repo
+    from server_modules import authority_mandate_service
     from server_modules import skill_registry
+    from server_modules import skills_service
     from server_modules.sage_agent_runtime_service import _core_direct_tool_names
 
     try:
@@ -647,6 +652,8 @@ async def fleet_get_agent_tools(
             toggles = {}
     if not isinstance(toggles, dict):
         toggles = {}
+    meta = bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {}
+    mandate_audience_tools = (meta.get("mandate") or {}).get("audience_tools") or []
 
     definitions = skill_registry.list_skill_definitions(workspace_id=workspace_id, include_disabled=True)
     tools: List[Dict[str, Any]] = []
@@ -657,6 +664,7 @@ async def fleet_get_agent_tools(
         # _specialist_tool_allowed() actually checks. See
         # skill_registry.enforcement_tool_name.
         enforcement_id = skill_registry.enforcement_tool_name(d.id)
+        descriptor = skills_service.tool_descriptor_for_name(enforcement_id)
         tools.append({
             "id": enforcement_id,
             "label": d.label,
@@ -665,6 +673,15 @@ async def fleet_get_agent_tools(
             # Sage (operator) isn't gated by tool_toggles at all — every tool
             # is already available to it, so the toggle would be misleading.
             "enabled": True if is_master else bool(toggles.get(enforcement_id, False)),
+            # Customer access (Authority Mandate, Part 10): audience_safe is
+            # the platform's own manifest default (informational, can't be
+            # toggled off); mandate_granted is this owner's explicit
+            # audience_tools grant (see the "mandate" patch branch below —
+            # same enforcement_id, checked case-insensitively).
+            "audience_safe": bool(descriptor.audience_safe) if descriptor is not None else False,
+            "mandate_granted": authority_mandate_service.is_audience_tool_allowed(
+                mandate_audience_tools, enforcement_id
+            ),
         })
 
     core_tools = sorted(_core_direct_tool_names())
@@ -761,13 +778,17 @@ async def fleet_configure_agent(
                 return {"ok": False, "error": "preferred_gateway_id must be a gateway id string."}
             meta["preferred_gateway_id"] = str(value or "").strip()
         if "mandate" in clean_patch:
-            # The owner-declared mandate: which tools (connector/MCP actions,
-            # "{connector_id}.{action_id}") this agent's audience-tier callers
-            # (end-customers over a channel) may trigger, on top of whatever
-            # the tool catalog already marks audience_safe. Connector/MCP
-            # actions have no catalog-level audience_safe flag at all — they
-            # default to NOT audience_safe (fail-safe) until explicitly
-            # listed here. Consulted by both the skills_service and
+            # The owner-declared mandate: which tools this agent's
+            # audience-tier callers (end-customers over a channel) may
+            # trigger, on top of whatever the tool catalog already marks
+            # audience_safe. Two id spaces share this one list: connector/MCP
+            # actions ("{connector_id}.{action_id}", no catalog-level
+            # audience_safe flag at all — fail-safe until listed here) and
+            # local/builtin tools by their literal canonical enforcement id
+            # (e.g. "memory_write" — what the Tools tab's Customer access
+            # control writes; see fleet_get_agent_tools' mandate_granted and
+            # skills_service._authority_mandate_gate, which checks both
+            # spaces). Consulted by both the skills_service and
             # runs_execution mandate gates.
             mandate_patch = clean_patch["mandate"]
             if not isinstance(mandate_patch, dict):
@@ -1540,3 +1561,157 @@ async def schedule_task(
     except Exception as exc:
         _log.warning("schedule_task failed: %s", exc)
         return {"ok": False, "error": str(exc)[:300]}
+
+
+# ── Phase U2: owner-facing schedule surface ─────────────────────────────────
+# The list/create/cancel/preview functions behind the Overview tab's Schedule
+# section. Deliberately NOT wired into skills_service.py's tool dispatcher —
+# same reasoning as fleet_stop_agent/fleet_resume_agent above: these are
+# owner-only human actions reached exclusively through the owner-gated REST
+# routes in routes_fleet.py, never something an agent calls on itself.
+
+
+def _schedule_row_view(row: Dict[str, Any]) -> Dict[str, Any]:
+    from server_modules import authority_mandate_service
+
+    payload = row.get("payload")
+    if isinstance(payload, str):
+        import json as _json
+        try:
+            payload = _json.loads(payload)
+        except Exception:
+            payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    due_at = row.get("due_at")
+    created_at = row.get("created_at")
+    description = str(payload.get("instruction") or row.get("summary") or row.get("reason") or "").strip()
+    return {
+        "id": str(row.get("id") or ""),
+        "description": description,
+        "due_at": due_at.isoformat() if hasattr(due_at, "isoformat") else str(due_at or ""),
+        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at or ""),
+        "status": str(row.get("status") or "pending").strip().lower(),
+        # "system" is provenance, never elevated privilege (authority_mandate_
+        # service module docstring) — still shown as its own badge so an
+        # audience-created wake-up is never mistaken for an owner one.
+        "authority_tier": authority_mandate_service.normalize_tier(payload.get("authority_tier")),
+    }
+
+
+async def fleet_list_agent_schedule(
+    *,
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Owner-facing list of this agent's not-yet-resolved scheduled wake-ups."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules.bounded_scheduler_service import list_wake_requests_for_agent
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+
+    rows = await list_wake_requests_for_agent(tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id)
+    return {"ok": True, "agent_id": agent_id, "schedule": [_schedule_row_view(row) for row in rows]}
+
+
+def fleet_preview_schedule_when(*, when: str) -> Dict[str, Any]:
+    """Resolve a natural-language 'when' expression to a concrete UTC time
+    without persisting anything, via the same _parse_when schedule_task uses
+    — lets the UI show the resolved next run before the owner confirms."""
+    from datetime import timezone as _timezone
+
+    resolved = _parse_when(when)
+    if resolved is None:
+        return {
+            "ok": False,
+            "error": f"Could not parse 'when' expression: {when!r}. Use 'in N minutes' or ISO-8601 datetime.",
+        }
+    normalized = resolved.astimezone(_timezone.utc) if resolved.tzinfo is not None else resolved.replace(tzinfo=_timezone.utc)
+    return {"ok": True, "due_at": normalized.isoformat()}
+
+
+async def fleet_create_agent_schedule(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+    when: str = "",
+    instruction: str = "",
+) -> Dict[str, Any]:
+    """Owner-only: schedule a future wake-up for this agent. Always stamps
+    owner tier — this is only reachable through the owner-gated REST route,
+    never agent-callable, so there's no caller turn to inherit a tier from;
+    this call IS the origin of authority for the schedule it creates."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules import authority_mandate_service
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+
+    return await schedule_task(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        actor_id=actor_id or "owner",
+        when=when,
+        instruction=instruction,
+        tenant_id=tenant_id,
+        authority_tier=authority_mandate_service.TIER_OWNER,
+    )
+
+
+async def fleet_cancel_agent_schedule(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+    wake_request_id: str = "",
+) -> Dict[str, Any]:
+    """Owner-only: cancel one of this agent's pending wake-ups."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules.bounded_scheduler_service import cancel_wake_request
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+    if not str(wake_request_id or "").strip():
+        return {"ok": False, "error": "wake_request_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+
+    result = await cancel_wake_request(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        wake_id=wake_request_id,
+        cancelled_by=actor_id or "owner",
+    )
+    if result.get("ok"):
+        await _ledger_fleet_action(
+            action="schedule_cancelled",
+            actor_id=actor_id or "owner",
+            workspace_id=workspace_id,
+            target_agent_id=agent_id,
+            metadata={"wake_request_id": wake_request_id},
+        )
+    return result

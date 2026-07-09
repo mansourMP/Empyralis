@@ -808,6 +808,85 @@ async def finalize_wake_requests(
     return updated
 
 
+# Wake requests that haven't resolved yet — what a "scheduled wake-ups" list
+# should show. Terminal states (executed/completed/failed/failed_permanent/
+# denied/cancelled/skipped) are history, not something still "scheduled".
+NON_TERMINAL_WAKE_STATUSES = {"pending", "claimed", "retry_scheduled"}
+
+
+async def list_wake_requests_for_agent(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Owner-facing schedule list for one agent. Self-proposed wake-ups only —
+    event_trigger rows carry no agent_id in their payload at all (see
+    maybe_schedule_event_trigger), so payload->>'agent_id' filtering excludes
+    them naturally; this list is specifically "what did/could this agent
+    schedule for itself", not the workspace's ambient context-engine
+    triggers."""
+    rows = await control_plane_repository.list_agent_scheduler_wake_requests(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        limit=max(1, int(limit or 50)),
+    )
+    return [
+        row for row in rows
+        if str(row.get("status") or "").strip().lower() in NON_TERMINAL_WAKE_STATUSES
+    ]
+
+
+async def cancel_wake_request(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    wake_id: str,
+    cancelled_by: str = "owner",
+) -> Dict[str, Any]:
+    """Owner-initiated cancel. A status transition, not a hard delete — this
+    table has no DELETE statement anywhere in the codebase; every other
+    resolution (executed/failed/denied/...) is also just a status update, so
+    cancellation follows the same append-only-history convention rather than
+    introducing a new one."""
+    existing = await control_plane_repository.get_agent_scheduler_wake_request(
+        tenant_id=tenant_id, workspace_id=workspace_id, wake_id=wake_id,
+    )
+    not_found = {"ok": False, "error": f"Scheduled wake-up {wake_id} not found."}
+    if existing is None:
+        return not_found
+    # A row read straight back from the DB (unlike payloads built in-process
+    # elsewhere in this module) carries `payload` as a raw JSON string — no
+    # jsonb codec is registered on this connection. _coerce_dict only accepts
+    # real dicts, so it would silently see {} here and reject every agent_id.
+    raw_payload = existing.get("payload")
+    if isinstance(raw_payload, str):
+        import json as _json
+        try:
+            raw_payload = _json.loads(raw_payload)
+        except Exception:
+            raw_payload = {}
+    existing_payload = _coerce_dict(raw_payload)
+    if str(existing_payload.get("agent_id") or "").strip() != str(agent_id or "").strip():
+        return not_found
+    current_status = str(existing.get("status") or "").strip().lower()
+    if current_status not in NON_TERMINAL_WAKE_STATUSES:
+        return {"ok": False, "error": f"Can't cancel a wake-up that's already {current_status}."}
+    row = await control_plane_repository.update_agent_scheduler_wake_request_status(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        wake_id=wake_id,
+        status="cancelled",
+        denial_reason=f"cancelled_by_{cancelled_by}",
+    )
+    if row is None:
+        return {"ok": False, "error": f"Could not cancel wake-up {wake_id}."}
+    return {"ok": True, "wake_request": row}
+
+
 def _wake_request_tier(item: Dict[str, Any]) -> "tuple[str, bool]":
     """Resolve a claimed wake request's authority tier.
 

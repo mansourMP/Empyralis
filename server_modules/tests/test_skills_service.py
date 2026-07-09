@@ -1349,6 +1349,31 @@ class AuthorityMandateGateTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "audience")
 
+    def test_schedule_task_audience_tier_allowed_when_owner_lists_it_by_enforcement_id(self) -> None:
+        """The Tools tab's Customer access control writes the tool's literal
+        canonical enforcement id ("fleet__schedule_task"), not the connector.
+        action dot form the tool above uses — mandate.audience_tools must
+        recognize both id spaces, since fleet_get_agent_tools/the PATCH
+        round-trip on the enforcement id exclusively."""
+        with patch(
+            "server_modules.bounded_scheduler_service.propose_self_wakeup",
+            new=AsyncMock(return_value={"accepted": True, "wake_request": {"id": "wake-3"}}),
+        ) as propose_mock:
+            raw = skills_service.execute_single_direct_tool_call(
+                tool_call={
+                    "name": "fleet__schedule_task",
+                    "arguments": {"agent_id": "agent-x", "when": "in 30 minutes", "instruction": "Follow up"},
+                },
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={"authority_tier": "audience", "mandate_audience_tools": ["fleet__schedule_task"]},
+                callbacks=self._callbacks(),
+            )
+        result = json.loads(raw)
+        self.assertTrue(result["ok"])
+        self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "audience")
+
 
 if __name__ == "__main__":
     unittest.main()

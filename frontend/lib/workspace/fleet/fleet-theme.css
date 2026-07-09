@@ -1596,6 +1596,22 @@ a.fleet-breadcrumb:hover {
   background: var(--accent-soft);
 }
 
+/* "Not configured here" must be a dead end before the click — same visual
+   contract as .fleet-connector-picker-item.is-inert (Connectors tab). */
+.fleet-channel-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fleet-channel-card:disabled:hover {
+  background: var(--bg-card);
+  border-color: var(--border);
+}
+
+.fleet-channel-card:disabled .fleet-channel-card-icon {
+  filter: grayscale(1);
+}
+
 .fleet-channel-card-icon,
 .fleet-connector-card-icon {
   width: 32px;
@@ -3873,6 +3889,16 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 .fleet-badge--lock { color: var(--accent); border-color: var(--accent-ring); background: var(--accent-soft); }
 .fleet-badge--preset { text-transform: capitalize; background: var(--bg-inset); border-color: transparent; }
+/* Customer access control (Tools tab) — a badge doubling as a button for the
+   two toggleable states ("Granted by you" / "Owner only"); "Safe by
+   default" stays a plain non-interactive span. */
+.fleet-badge--action {
+  cursor: pointer; font: inherit; -webkit-appearance: none; appearance: none;
+  transition: border-color var(--motion-base, 0.15s) ease-out, background var(--motion-base, 0.15s) ease-out;
+}
+.fleet-badge--action:hover:not(:disabled) { border-color: var(--accent-ring); }
+.fleet-badge--action:disabled { cursor: not-allowed; opacity: 0.6; }
+.fleet-badge--muted { opacity: 0.55; }
 
 /* WORK split view */
 .fleet-work-split { display: flex; height: 100%; min-height: 0; }
