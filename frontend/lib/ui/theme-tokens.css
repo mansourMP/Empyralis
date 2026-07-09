@@ -108,6 +108,7 @@ html[data-theme="dark"] {
   /* Ready = healthy but not executing — a calmer, desaturated green, not
      the vivid "actively working" green and not plain unknown-gray either. */
   --ready-dot: #5b8c73;
+  --degraded-dot: #f59e0b;
 }
 
 html[data-theme="light"] {

@@ -29,7 +29,6 @@ type VpsProgressStage = 'idle' | 'creating' | 'installing' | 'connecting' | 'con
 export type VpsProviderCard = {
   id: VpsProviderId;
   label: string;
-  price: string;
   tagline: string;
   accountMethod: string;
   tokenUrl: string;
@@ -59,6 +58,10 @@ type VpsPlan = {
   price_monthly: number;
   price_label: string;
   recommended?: boolean;
+  // Region slugs this plan is actually available in (DigitalOcean today).
+  // Empty/absent means "not threaded through for this provider" — treated
+  // as no restriction, not "available nowhere".
+  regions?: string[];
 };
 
 type VpsOAuthStartResponse = {
@@ -105,7 +108,6 @@ export const CLOUD_VPS_PROVIDERS: Record<VpsProviderId, VpsProviderCard> = {
   digitalocean: {
     id: 'digitalocean',
     label: 'DigitalOcean',
-    price: '$12/mo',
     tagline: 'Simplest setup',
     accountMethod: 'OAuth login',
     tokenUrl: 'https://cloud.digitalocean.com/account/api/oauth_apps',
@@ -115,7 +117,6 @@ export const CLOUD_VPS_PROVIDERS: Record<VpsProviderId, VpsProviderCard> = {
   hetzner: {
     id: 'hetzner',
     label: 'Hetzner',
-    price: '€4/mo',
     tagline: 'Best value',
     accountMethod: 'API token',
     tokenUrl: 'https://console.hetzner.cloud/projects',
@@ -125,7 +126,6 @@ export const CLOUD_VPS_PROVIDERS: Record<VpsProviderId, VpsProviderCard> = {
   vultr: {
     id: 'vultr',
     label: 'Vultr',
-    price: '$12/mo',
     tagline: 'Global regions',
     accountMethod: 'API token',
     tokenUrl: 'https://my.vultr.com/settings/#settingsapi',
@@ -262,6 +262,25 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     () => plans.find((plan) => plan.id === selectedPlanId) ?? null,
     [plans, selectedPlanId],
   );
+  // Regions the CHOSEN PLAN actually supports — an empty/absent regions list
+  // on the plan means it wasn't threaded through for this provider, treated
+  // as no restriction rather than "available nowhere".
+  const visibleRegions = useMemo(() => {
+    if (!selectedPlan?.regions?.length) return regions;
+    const allowed = new Set(selectedPlan.regions);
+    return regions.filter((region) => allowed.has(region.id));
+  }, [regions, selectedPlan]);
+
+  // If the plan changes underneath the current region choice and that region
+  // is no longer valid for it, snap to a region that is — the invalid
+  // (plan, region) pair must never be submittable.
+  useEffect(() => {
+    if (visibleRegions.length === 0) return;
+    if (!visibleRegions.some((region) => region.id === selectedRegionId)) {
+      setSelectedRegionId(visibleRegions[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleRegions]);
 
   useEffect(() => {
     if (!open) {
@@ -352,12 +371,13 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     }
   }
 
-  async function loadRegions(providerId: VpsProviderId): Promise<VpsRegion[]> {
+  async function loadRegions(providerId: VpsProviderId, nextTokenId: string): Promise<VpsRegion[]> {
     setLoadingRegions(true);
     setError(null);
     try {
       const payload = await requestJson<VpsProviderRegionsPayload>(
-        `/api/hardware/vps/regions?provider=${encodeURIComponent(providerId)}`,
+        `/api/hardware/vps/regions?provider=${encodeURIComponent(providerId)}`
+        + `&token_id=${encodeURIComponent(nextTokenId)}&workspace_id=${encodeURIComponent(workspaceId)}`,
       );
       const nextRegions = normalizeRegions(payload);
       if (!nextRegions.length) {
@@ -407,7 +427,7 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setStep('plans');
     const [nextPlans] = await Promise.all([
       loadPlans(providerId, nextTokenId),
-      loadRegions(providerId),
+      loadRegions(providerId, nextTokenId),
     ]);
     if (!nextPlans.length) {
       disconnectProvider(providerId);
@@ -661,7 +681,7 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
                       </span>
                     </span>
                     <span className="cloud-vps-provider-row__side">
-                      <strong>{item.price}</strong>
+                      <strong>{item.accountMethod}</strong>
                       <span>{connection ? 'Add server →' : 'Connect →'}</span>
                     </span>
                   </button>
@@ -790,12 +810,15 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
                 onChange={(event) => setSelectedRegionId(event.target.value)}
                 disabled={loadingRegions}
               >
-                {regions.map((region) => (
+                {visibleRegions.map((region) => (
                   <option key={region.id} value={region.id}>
                     {`${region.label} · ${region.id}`}
                   </option>
                 ))}
               </select>
+              {selectedPlan?.regions?.length ? (
+                <span className="cloud-vps-panel__note">{`Available where ${selectedPlan.label} is offered.`}</span>
+              ) : null}
             </label>
             {selectedPlan ? (
               <p className="cloud-vps-panel__note">{`${selectedPlan.label} · ${selectedPlan.price_label}`}</p>

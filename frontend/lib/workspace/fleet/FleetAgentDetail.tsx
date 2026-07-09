@@ -47,7 +47,7 @@ import {
   type FleetTool,
   type FleetScheduleItem,
 } from "./fleet-data";
-import { deriveStatus, derivePlacement, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, type AgentStatusTone } from "./fleet-presentation";
+import { deriveStatus, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, type AgentStatusTone } from "./fleet-presentation";
 import { StatusChip, StatusDot } from "./fleet-indicators";
 import { PanelSection, PanelRow } from "./FleetRightPanel";
 import { UsageStat, bucketSeries, type UsageBucket } from "./fleet-sparkline";
@@ -133,8 +133,12 @@ export function FleetAgentDetail({
   );
   // Lives in the permanent properties column now, so it's computed once
   // here rather than per-tab — every tab shows the same placement/role,
-  // not just Overview.
-  const placement = derivePlacement(agent?.runtime_target || "unknown", status.label !== "Not deployed");
+  // not just Overview. Built from hardware_access + preferred_gateway_id +
+  // a live registrations join — never runtime_target/derivePlacement(),
+  // which stay pinned to a runtime_profile FK real Fleet agents never
+  // update (see docs/HARDWARE-BRAIN-REALITY-REPORT.md).
+  const { gateways } = useWorkspaceGateways(workspaceId);
+  const placement = resolveHardwarePlacement(agent?.hardware_access, agent?.preferred_gateway_id, gateways);
   const role = agent?.role || "agent";
   const isMaster = role === "operator";
   const { tools: agentTools } = useFleetAgentTools(workspaceId, agentId);
@@ -191,7 +195,7 @@ export function FleetAgentDetail({
     <aside className="fleet-detail-properties" aria-label="Properties">
       <PanelSection title="Properties">
         <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
-        <PanelRow label="Placement" value={placement} />
+        <PanelRow label="Placement" value={placement.label} />
         <PanelRow label="Role" value={<span style={{ textTransform: "capitalize" }}>{role}</span>} />
         {!isMaster && (
           <PanelRow
@@ -269,7 +273,9 @@ export function FleetAgentDetail({
           {activeTab === "tools" && (
             <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
           )}
-          {activeTab === "hardware" && <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
+          {activeTab === "hardware" && (
+            <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
+          )}
           {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
           {activeTab === "memory" && (
             <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
@@ -1443,7 +1449,13 @@ import {
   COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, type ProviderMode,
   FREEFORM_MODEL_PROVIDERS, modelsForProvider, defaultModelForProvider,
 } from "./fleet-provider-constants";
-import { GatewayBoxPicker } from "./gateway-box-picker";
+import {
+  GatewayBoxPicker,
+  gatewayRuntimeReady,
+  resolveHardwarePlacement,
+  useWorkspaceGateways,
+  type FleetGateway,
+} from "./gateway-box-picker";
 
 function resolveDisplayMode(config: Record<string, any>): ProviderMode {
   const mode = config.mode;
@@ -1489,93 +1501,6 @@ function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: strin
         <span className="fleet-config-label">Cost today</span>
         <span className="fleet-config-value">{cost === null ? "…" : `$${cost.toFixed(4)}`}</span>
       </div>
-    </div>
-  );
-}
-
-// Which paired box this agent's TOOL calls (shell/file/browser) prefer — a
-// separate concept from the AI-brain gateway_binding below (which names the
-// box that HOSTS the model itself, only used in local/cli_subscription mode).
-// Backed by hardware_access (none/gateway column) + preferred_gateway_id
-// (metadata hint _resolve_direct_tool_gateway_id checks first, falling back
-// to any live gateway in the workspace when unset or offline).
-function HardwareBindingSection({
-  workspaceId, agentId, agent,
-}: { workspaceId: string; agentId: string; agent: FleetAgent }) {
-  const locked = !!agent.hardware_access_locked;
-  const [wantsHardware, setWantsHardware] = useState((agent.hardware_access || "none").toLowerCase() !== "none");
-  const [gatewayId, setGatewayId] = useState(agent.preferred_gateway_id || "");
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function save() {
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          patch: {
-            hardware_access: wantsHardware ? "gateway" : "none",
-            preferred_gateway_id: wantsHardware ? gatewayId : "",
-          },
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
-      setSaved(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div style={{ marginBottom: 20 }}>
-      <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Hardware</div>
-      {locked ? (
-        <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-          This is a knowledge agent — hardware access is off and policy-locked. Change its capability
-          preset to grant hardware.
-        </p>
-      ) : (
-        <>
-          <div className="fleet-wizard-options">
-            <button
-              type="button"
-              className={`fleet-wizard-option${!wantsHardware ? " is-selected" : ""}`}
-              onClick={() => { setWantsHardware(false); setSaved(false); }}
-            >
-              <span className="fleet-wizard-option-label">Cloud only</span>
-              <span className="fleet-wizard-option-body">No computer access — runs entirely in the cloud.</span>
-            </button>
-            <button
-              type="button"
-              className={`fleet-wizard-option${wantsHardware ? " is-selected" : ""}`}
-              onClick={() => { setWantsHardware(true); setSaved(false); }}
-            >
-              <span className="fleet-wizard-option-label">A paired computer</span>
-              <span className="fleet-wizard-option-body">Shell, filesystem, and browser access on a box you've paired.</span>
-            </button>
-          </div>
-          {wantsHardware && (
-            <>
-              <GatewayBoxPicker workspaceId={workspaceId} value={gatewayId} onChange={(id) => { setGatewayId(id); setSaved(false); }} />
-              <p className="fleet-channel-expand-hint">Optional — leave unset to use whichever paired computer is online.</p>
-            </>
-          )}
-          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
-              {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
-            </button>
-            {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
-          </div>
-        </>
-      )}
     </div>
   );
 }
@@ -1647,11 +1572,27 @@ function ContextPolicySection({
   );
 }
 
+/** channelStatePill-style dynamic hint for the still-locked "Your subscription"
+ *  option — real hardware state instead of a static "Coming soon", without
+ *  implying it's actually saveable yet (COMING_SOON_MODES stays locked; the
+ *  Gateway-side CLI runner isn't built). We don't know which CLI (Claude
+ *  Code vs Codex) they'll pick until the option is expanded, so this checks
+ *  for either. */
+function cliSubscriptionHint(gateways: FleetGateway[]): string {
+  if (gateways.length === 0) return "Needs a paired computer — none paired yet";
+  const anyReady = gateways.some(
+    (g) => gatewayRuntimeReady(g, "claude_code") || gatewayRuntimeReady(g, "codex"),
+  );
+  return anyReady ? "A paired computer has a CLI ready" : "No paired computer has Claude Code or Codex ready";
+}
+
 function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
   const config = agent?.model_config || {};
   const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
   const [provider, setProvider] = useState<string>(config.provider || "");
   const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
+  const { gateways: cliGateways } = useWorkspaceGateways(workspaceId);
+  const cliRuntime = runtimeForProvider(provider) === "codex" ? "codex" : "claude_code";
   const [selectedModel, setSelectedModel] = useState<string>(config.model || "");
   const [apiKey, setApiKey] = useState("");
   // Re-default the model choice when the provider changes AFTER mount (so an
@@ -1849,7 +1790,9 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
         >
           <span className="fleet-wizard-option-label">Your subscription</span>
           <span className="fleet-wizard-option-body">Claude Code or Codex via Gateway.</span>
-          <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> {COMING_SOON_NOTE}</span>
+          <span className="fleet-wizard-option-note fleet-wizard-option-note--gateway">
+            <Lock size={11} strokeWidth={2} /> {cliSubscriptionHint(cliGateways)}
+          </span>
         </button>
         <button
           type="button"
@@ -1909,7 +1852,17 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
             ))}
           </select>
           <p className="fleet-channel-expand-hint">{SUBSCRIPTION_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
-          <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={(id) => { setGatewayBinding(id); setSaved(false); }} />
+          <div className="fleet-detail-section-title" style={{ marginTop: 16 }}>Brain runs on</div>
+          <GatewayBoxPicker
+            workspaceId={workspaceId}
+            value={gatewayBinding}
+            onChange={(id) => { setGatewayBinding(id); setSaved(false); }}
+            requireRuntime={cliRuntime}
+          />
+          <p className="fleet-channel-expand-hint">
+            Not saveable yet on this deployment — the Gateway-side CLI runner isn't wired up. This just
+            previews what it'll need once it ships.
+          </p>
         </div>
       )}
 
@@ -1930,13 +1883,8 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
             This turn only works if this model is actually pulled on the box below — run{" "}
             <code>ollama pull {selectedModel || "llama3.2"}</code> there first if you haven't.
           </p>
+          <div className="fleet-detail-section-title" style={{ marginTop: 16 }}>Brain runs on</div>
           <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={(id) => { setGatewayBinding(id); setSaved(false); }} requireLocalModel />
-        </div>
-      )}
-
-      {agent && (
-        <div style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
-          <HardwareBindingSection workspaceId={workspaceId} agentId={agentId} agent={agent} />
         </div>
       )}
 

@@ -22,8 +22,8 @@ export const BYOK_PROVIDERS: ProviderOption[] = [
 ];
 
 export const SUBSCRIPTION_PROVIDERS: ProviderOption[] = [
-  { id: "claude_code_cli", label: "Claude Code", detail: "Local Claude Pro subscription via Gateway." },
-  { id: "openai-codex", label: "OpenAI Codex", detail: "ChatGPT / Codex subscription via Gateway." },
+  { id: "claude_code_cli", label: "Claude Code", detail: "Runs on your own hardware, using your own Claude Pro subscription." },
+  { id: "openai-codex", label: "OpenAI Codex", detail: "Runs on your own hardware, using your own ChatGPT/Codex subscription." },
 ];
 
 export const LOCAL_PROVIDERS: ProviderOption[] = [

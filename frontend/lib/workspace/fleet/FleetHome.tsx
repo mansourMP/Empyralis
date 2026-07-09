@@ -10,9 +10,13 @@ import { FleetCard } from "./FleetCard";
 import { FleetCreateAgentWizard } from "./FleetCreateAgentWizard";
 import { TelegramPairPanel } from "./TelegramPairPanel";
 import { isSageAgent, toAgentSummary, formatDateTime } from "./fleet-presentation";
+import { useWorkspaceGateways } from "./gateway-box-picker";
 
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
   const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
+  // Fetched once here (not per-card) — resolveHardwarePlacement needs it for
+  // every card's "where does this run" line.
+  const { gateways } = useWorkspaceGateways(workspaceId);
   const [wizardOpen, setWizardOpen] = useState(false);
   const router = useRouter();
 
@@ -88,6 +92,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
               <FleetCard
                 key={a.id}
                 agent={a}
+                gateways={gateways}
                 onSelect={(id) => goToAgentTab(id, "overview")}
                 onChat={openSageConsole}
               />

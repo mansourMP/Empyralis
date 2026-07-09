@@ -87,6 +87,11 @@ class VPSPlan:
     price_monthly: float
     price_label: str
     recommended: bool = False
+    # Region slugs this exact plan is actually available in. Populated for
+    # DigitalOcean (whose /v2/sizes response lists it per-size); empty for
+    # providers we don't thread this through yet, which the frontend treats
+    # as "no restriction" rather than "available nowhere".
+    regions: tuple[str, ...] = ()
 
 
 class VPSProvisioningError(RuntimeError):
@@ -320,6 +325,67 @@ def fetch_provider_plans(
     return {
         "provider": provider_id,
         "plans": [asdict(plan) for plan in plans],
+    }
+
+
+def _static_provider_regions(provider_id: str) -> Dict[str, Any]:
+    config = PROVIDER_CONFIGS[provider_id]
+    return {
+        "provider": provider_id,
+        "default_region": config.default_region,
+        "regions": [asdict(region) for region in config.regions],
+    }
+
+
+def _normalize_digitalocean_regions(payload: Mapping[str, Any]) -> list[Dict[str, str]]:
+    items = payload.get("regions") if isinstance(payload.get("regions"), list) else []
+    regions: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("available") is False:
+            continue
+        slug = str(item.get("slug") or "").strip()
+        if not slug:
+            continue
+        regions.append({"id": slug, "label": str(item.get("name") or "").strip() or slug})
+    return regions
+
+
+def fetch_provider_regions(
+    provider: str,
+    *,
+    token_id: str,
+    workspace_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Live region catalog. DigitalOcean's OAuth grant is already `read write`
+    (its only scope option — see create_digitalocean_oauth_start), which
+    already covers GET /v2/regions, so no re-auth is needed for accounts
+    connected before this existed. Falls back to the static curated list
+    (same one provider_catalog() serves pre-connection) for providers we
+    haven't wired a live regions call for yet, or if the live call fails —
+    never a hard error just for this."""
+    provider_id = _normalize_provider(provider)
+    if provider_id != "digitalocean":
+        return _static_provider_regions(provider_id)
+    try:
+        credentials = load_vps_provider_credentials(
+            token_id, provider=provider_id, workspace_id=workspace_id, user_id=user_id
+        )
+        token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+        raw = _http_json(
+            "GET", "https://api.digitalocean.com/v2/regions", token=token, payload=None, provider=provider_id
+        )
+        regions = _normalize_digitalocean_regions(raw)
+    except (KeyError, ValueError, VPSProvisioningError):
+        regions = []
+    if not regions:
+        return _static_provider_regions(provider_id)
+    return {
+        "provider": provider_id,
+        "default_region": PROVIDER_CONFIGS[provider_id].default_region,
+        "regions": regions,
     }
 
 
@@ -883,6 +949,8 @@ def _normalize_digitalocean_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
             continue
         if item.get("available") is False:
             continue
+        raw_regions = item.get("regions") if isinstance(item.get("regions"), list) else []
+        regions = tuple(str(r).strip() for r in raw_regions if str(r).strip())
         plans.append(
             VPSPlan(
                 id=slug,
@@ -893,6 +961,7 @@ def _normalize_digitalocean_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
                 disk_gb=disk_gb,
                 price_monthly=price,
                 price_label=f"${price:g}/mo",
+                regions=regions,
             )
         )
     return _mark_recommended(plans)
