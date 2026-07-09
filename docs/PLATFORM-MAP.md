@@ -1496,13 +1496,29 @@ channel and the web/API chat entry (`sage_chat_api.py` → `sage_turn_adapter.py
 pre-dispatch hard gate via `assert_not_killed(gateway_id=...)`, called from
 `personal_channels_service.py`, `agent_channel_router.py`, and
 `gateway_protocol_service.py` (16 call sites total).
-**Known gap, not yet resolved:** `direct_chat_runtime_service.py`'s chat
-producer (still imported by `runtime_runs_api.py`, gated behind
-`ORION_DIRECT_CHAT_SESSION_MANAGER`) calls the same generation function
-directly and has zero references to `kill_switch_gate` — whether this older
-path is still reachable from any live route wasn't fully resolved in this
-pass; treat "kill switch blocks every turn" as true for the canonical path
-above, not yet verified as universal.
+**Resolved (2026-07-09 follow-up audit):** `direct_chat_runtime_service.py`'s
+chat producer (`build_direct_operator_reply`/`build_chat_turn_event_stream`)
+calls the generation function directly with zero references to
+`kill_switch_gate` — genuinely unsafe if reachable. It is **confirmed
+unreachable**. Every real web-chat turn sends `execution_mode="sync",
+response_mode="stream"`; `turn_ingress_service.start_turn()` routes that
+shape through `build_agent_turn_stream_response()`, which re-enters
+`start_turn()` without a stream builder and falls to `agent_turn()` →
+`turn_runtime.execute_agent_turn_request()` (`turn_runtime.py:71`) →
+`direct_chat_service.execute_direct_chat_turn_request()` — the "UNIFIED
+ENTRY" function whose entire body touches its injected
+`DirectChatExecutionServices` exactly once (`chat_stream_key()`); it never
+calls `build_direct_operator_reply`/`build_chat_turn_event_stream`, always
+routing through `execute_sage_turn()` → `handle_sage_chat()` instead. The
+other route to this module —
+`direct_chat_service.build_direct_chat_event_producer()`, gated behind
+`ORION_DIRECT_CHAT_SESSION_MANAGER` — is separately unreachable: its only
+wrapper (`runtime_runs_api.py`'s `_build_direct_chat_event_producer` lambda)
+has zero call sites in the repo. `agent_turn.py`'s own construction of these
+services stubs them as `_unreachable` (`agent_turn.py:1467-1468`) — the code
+already agreed with this finding. All three sites now carry a `DORMANT`
+docstring/comment recording this evidence chain, so a future caller doesn't
+wire into this path believing it's kill-switch-safe.
 
 **REST routes** — workspace and agent scopes only have write routes:
 `POST .../fleet/agents/{id}/stop` / `.../resume` (`routes_fleet.py:276,301`

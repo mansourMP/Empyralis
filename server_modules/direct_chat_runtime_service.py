@@ -1,3 +1,39 @@
+"""DORMANT — confirmed unreachable from any live route (2026-07-09 audit).
+
+build_direct_operator_reply / build_chat_turn_event_stream / execute_chat_turn
+below (this module's chat producer) call direct_chat_generation_service
+directly, bypassing sage_agent_runtime_service.handle_sage_chat entirely —
+meaning no pre-LLM kill-switch check and no authority_tier stamping. Traced
+every path that could reach them for every real web-chat turn
+(execution_mode="sync", response_mode="stream", what every live client
+sends) and confirmed none do:
+
+  - The one live producer is turn_runtime.execute_agent_turn_request()
+    (called from agent_turn(), turn_runtime.py:71), which unconditionally
+    calls direct_chat_service.execute_direct_chat_turn_request() — the
+    "UNIFIED ENTRY" function that routes through
+    sage_turn_adapter.execute_sage_turn() -> handle_sage_chat() (the
+    kill-switch + mandate path). That function's entire body touches its
+    `services: DirectChatExecutionServices` parameter exactly once (for
+    chat_stream_key()) — build_direct_operator_reply/build_chat_turn_event_stream
+    are threaded all the way down through TurnExecutionServices but never
+    invoked.
+  - The other route to this module — direct_chat_service.build_direct_chat_event_producer()
+    (session_manager-gated, ORION_DIRECT_CHAT_SESSION_MANAGER) — is itself
+    unreachable: its only wrapper, runtime_runs_api.py's
+    `_build_direct_chat_event_producer` lambda, has zero call sites anywhere
+    in the repo.
+  - agent_turn.py's own construction of these services stubs them as
+    `_unreachable` explicitly (agent_turn.py:1467-1468) — the code already
+    agrees with this finding.
+
+Do not wire new callers to this module expecting it to enforce kill-switch
+or authority tier — it doesn't, and nothing here currently reaches it. If
+this module is ever revived, it needs the same evaluate_kill_switch() hard
+block and authority_tier derivation handle_sage_chat has before anything
+calls it live again.
+"""
+
 from __future__ import annotations
 
 import json

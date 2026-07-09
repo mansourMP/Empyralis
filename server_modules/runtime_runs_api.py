@@ -810,6 +810,11 @@ _direct_chat_execution_services = _direct_chat_stream_runtime_bindings.direct_ch
 _direct_chat_stream_response_services = _direct_chat_stream_runtime_bindings.direct_chat_stream_response_services
 _get_or_create_chat_stream_session = _direct_chat_stream_runtime_bindings.get_or_create_chat_stream_session
 
+# DORMANT — confirmed unreachable (2026-07-09 audit, see the module-level
+# docstring in direct_chat_runtime_service.py). This lambda itself has zero
+# call sites in the repo; kept only because it's still a valid binding of
+# build_direct_chat_event_producer (also dormant) should the session-manager
+# feature (ORION_DIRECT_CHAT_SESSION_MANAGER) ever be revived.
 _build_direct_chat_event_producer = lambda *, current_user, body, message, workspace_id, session_key, thread_id, client_request_id, agent_turn_request=None: _service_build_direct_chat_event_producer(
     current_user=current_user,
     body=body,

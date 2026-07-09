@@ -155,6 +155,14 @@ def build_direct_chat_request_meta(
     return bind_agent_turn_request_meta(request_meta, agent_turn_request)
 
 
+# DORMANT — confirmed unreachable (2026-07-09 audit, see the module-level
+# docstring in direct_chat_runtime_service.py for the full evidence chain).
+# Its only wrapper, runtime_runs_api.py's `_build_direct_chat_event_producer`
+# lambda, has zero call sites in the repo — nothing invokes this function.
+# The live producer for every real web-chat turn is
+# execute_direct_chat_turn_request() below, which routes through
+# handle_sage_chat() (kill-switch + authority_tier) instead of the
+# session_manager_enabled()/build_direct_operator_reply branch here.
 def build_direct_chat_event_producer(
     *,
     current_user: Any,

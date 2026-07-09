@@ -3574,6 +3574,51 @@ class RunServiceTests(unittest.TestCase):
         self.assertIsNone(request.credential_id)
         self.assertIsNone(request.max_iterations)
 
+    def test_build_delegated_child_run_request_does_not_inherit_authority_tier(self):
+        """Authority Mandate: build_delegated_child_run_request copies
+        ownership/lineage fields (owner_user_id, user_id,
+        master_agent_install_id, delegation_root_run_id, ...) from the
+        parent, but authority_tier is deliberately not among them — a
+        delegated child re-derives its own tier downstream (landing on
+        "audience" via the no-real-caller placeholder; see
+        test_agent_turn.py's test_build_run_start_turn_request_system_placeholder_user_is_not_owner)
+        rather than silently inheriting the parent's. This pins that
+        omission so a future refactor that starts copying parent metadata
+        wholesale can't let a delegated child of an owner-tier turn execute
+        as owner without an explicit, deliberate stamp."""
+        request = build_delegated_child_run_request(
+            {
+                "run_id": "parent-run",
+                "engine": "orion",
+                "agent_role": "builder",
+                "context": {
+                    "workflow_id": "workflow-1",
+                    "workspace_id": "default",
+                    "metadata": {
+                        "owner_user_id": "user-1",
+                        "master_agent_install_id": "install-master",
+                        "authority_tier": "owner",
+                        "agent_turn_request": {"authority_tier": "owner"},
+                    },
+                },
+            },
+            {
+                "user_goal": "Handle delegated work",
+                "agent_role": "research",
+                "metadata": {},
+            },
+            normalize_run_id_token=lambda value: str(value or "").strip() or None,
+            normalize_agent_role=lambda value: str(value or "").strip().lower(),
+            normalize_requested_max_iterations=lambda value: int(value) if value is not None else None,
+            valid_execution_targets={"local_companion", "cloud", "auto"},
+        )
+
+        self.assertNotIn("authority_tier", request.metadata)
+        self.assertNotIn("agent_turn_request", request.metadata)
+        # Ownership/lineage still propagate as designed — only the tier does not.
+        self.assertEqual(request.metadata["owner_user_id"], "user-1")
+        self.assertEqual(request.metadata["master_agent_install_id"], "install-master")
+
     def test_build_delegated_child_run_request_keeps_explicit_child_runtime_and_file_grants(self):
         request = build_delegated_child_run_request(
             {
