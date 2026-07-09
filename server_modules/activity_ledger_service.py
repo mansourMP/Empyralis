@@ -27,6 +27,7 @@ EVENT_CLASSES = {
     "gateway_hardware",
     "fleet_control",
     "platform_integrity",
+    "mandate_blocked",
 }
 
 

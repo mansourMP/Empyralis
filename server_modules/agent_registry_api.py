@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from server_modules import agent_registry_repository
 from server_modules import agent_specialist_repository
+from server_modules import authority_mandate_service
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
 from server_modules.api_contract import ApiAgentTurnResponse, normalize_agent_turn_result
 from server_modules.run_service import build_server_run_execution_services
@@ -369,6 +370,22 @@ def _workspace_id_from_query_or_body(
 
 def _tenant_id_for_request(current_user: Any, workspace_id: str) -> str:
     return workspace_tenant_id(current_user, workspace_id)
+
+
+def _authority_tier_for_current_user(current_user: Any) -> str:
+    """Owner/admin acting through an authenticated session or API key is
+    owner tier; any other member is audience tier. Mirrors agent_turn.py's
+    _current_user_is_owner (same is_admin/api_key/role checks), extended to
+    also treat "admin" as owner per authority_mandate_service's own
+    docstring ("the workspace owner/admin, acting directly")."""
+    if not isinstance(current_user, dict):
+        return authority_mandate_service.TIER_AUDIENCE
+    if bool(current_user.get("is_admin")):
+        return authority_mandate_service.TIER_OWNER
+    if str(current_user.get("auth_type") or "").strip().lower() == "api_key":
+        return authority_mandate_service.TIER_OWNER
+    role = str(current_user.get("role") or "").strip().lower()
+    return authority_mandate_service.derive_tier_from_owner_flag(role in {"owner", "admin"})
 
 
 def _shared_board_permission_for_actor(current_user: Any) -> str:
@@ -1570,7 +1587,10 @@ def register_agent_registry_routes(app) -> None:
                 summary=body.summary,
                 reason=body.reason,
                 due_at=body.due_at,
-                payload=_coerce_dict(body.payload),
+                payload={
+                    **_coerce_dict(body.payload),
+                    "authority_tier": _authority_tier_for_current_user(current_user),
+                },
                 policy_context={
                     **_coerce_dict(body.policy_context),
                     "requested_via": "agent_registry_api",

@@ -38,6 +38,12 @@ class SageTurnContract:
     actor_user_id: str = ""
     actor_email: str = ""
     actor_auth_type: str = ""
+    # Mandate: defaults to "owner" because SAGE_MODE ("owner_sage") is only
+    # ever constructed for an authenticated owner session today — see
+    # authority_mandate_service.py. Not currently constructed outside tests;
+    # a future caller reusing this contract for non-owner turns must set it
+    # explicitly rather than rely on this default.
+    authority_tier: str = "owner"
 
 
 @dataclass(frozen=True, slots=True)

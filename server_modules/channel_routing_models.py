@@ -35,6 +35,12 @@ class ChannelRoutingContext:
     business_plan: Optional[str] = None
     health_safety_context: Dict[str, Any] = field(default_factory=lambda: {"enabled": False})
     allow_master_fallback: bool = False
+    # Mandate: authority tier of the turn's initiating principal ("owner" |
+    # "audience" | "system"). Defaults to the least-privileged tier —
+    # nothing derives this from sender identity automatically (see
+    # authority_mandate_service.py), so callers that construct this context
+    # directly must set it explicitly to get owner-tier execution.
+    authority_tier: str = "audience"
 
 
 @dataclass

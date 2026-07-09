@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from server_modules import agent_registry_repository, control_plane_repository, entitlements_service, rust_runtime_kernel_client, workspace_context
+from server_modules import agent_registry_repository, authority_mandate_service, control_plane_repository, entitlements_service, rust_runtime_kernel_client, workspace_context
 
 
 DEFAULT_QUIET_HOURS_START = 23
@@ -609,6 +609,12 @@ async def maybe_schedule_event_trigger(
             "event_type": str(event.get("event_type") or "").strip(),
             "source_app": str(event.get("source_app") or "").strip(),
             "priority": priority,
+            # Context-engine events have no live sender to classify and no
+            # parent turn to inherit from — a "system turn with no traceable
+            # parent" per authority_mandate_service's model, which resolves
+            # directly to audience. Stamped explicitly (not left absent) so
+            # consumption never has to guess.
+            "authority_tier": authority_mandate_service.TIER_AUDIENCE,
         },
         policy=policy,
         due_at=due_at,
@@ -802,35 +808,38 @@ async def finalize_wake_requests(
     return updated
 
 
-async def build_wakeup_execution_bundle(
+def _wake_request_tier(item: Dict[str, Any]) -> "tuple[str, bool]":
+    """Resolve a claimed wake request's authority tier.
+
+    Returns (tier, unattributed). unattributed=True means the row carried no
+    tier AND the producing mechanism isn't a recognized no-tier-by-design
+    case — a real gap (a legacy row, or an unrecognized producer), not a
+    documented "system, no parent" default. Always fails toward audience,
+    never owner.
+    """
+    payload = _coerce_dict(item.get("payload"))
+    raw = payload.get("authority_tier")
+    if raw is not None and str(raw).strip():
+        return authority_mandate_service.normalize_tier(raw), False
+    # event_trigger rows are provably context-engine-originated with no live
+    # sender and no parent turn to inherit from — the model's own rule for a
+    # "system turn with no traceable parent" resolves directly to audience.
+    # Known by design, not unattributed (maybe_schedule_event_trigger also
+    # stamps this explicitly now; this branch covers pre-existing rows).
+    if str(item.get("trigger_kind") or "").strip() == "event_trigger":
+        return authority_mandate_service.TIER_AUDIENCE, False
+    return authority_mandate_service.TIER_AUDIENCE, True
+
+
+def _wake_group_message(
     *,
-    tenant_id: str,
-    workspace_id: str,
     heartbeat_tasks: List[str],
     wake_requests: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    workspace, master_install, policy = await _load_scheduler_scope(
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-    )
-    from server_modules import personal_context_engine
-
-    recent_changes = await personal_context_engine.list_events(
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        audience="sage",
-        limit=8,
-        unseen_only=False,
-    )
-    user_preferences = workspace_context.read_workspace_context_file(
-        "USER.md",
-        workspace_id=workspace_id,
-    ).strip()
-    workspace_meta = _coerce_dict(_coerce_dict(workspace).get("metadata"))
-    master_meta = _coerce_dict(_coerce_dict(master_install).get("metadata"))
-    goals = list(workspace_meta.get("goals") or master_meta.get("goals") or master_meta.get("scheduler_goals") or [])
-    goal_lines = [str(item or "").strip() for item in goals if str(item or "").strip()]
-
+    recent_changes: List[Dict[str, Any]],
+    goal_lines: List[str],
+    user_preferences: str,
+    policy: SchedulerPolicyBounds,
+) -> str:
     sections: list[str] = []
     if heartbeat_tasks:
         sections.append(
@@ -868,36 +877,147 @@ async def build_wakeup_execution_bundle(
         "Review the queued wake reasons and recent structured changes. Decide whether a follow-up is needed now. "
         "If no follow-up is needed, explain briefly and stop. If action is needed, stay inside policy and approval limits."
     )
+    return "\n\n".join(section for section in sections if section.strip())
 
-    wake_request_ids = [str(item.get("id") or "").strip() for item in wake_requests if str(item.get("id") or "").strip()]
-    context_event_ids = _extract_context_event_ids(wake_requests)
-    scheduler_mode = "mixed"
-    if wake_requests and not heartbeat_tasks:
-        scheduler_mode = "wakeup"
-    elif heartbeat_tasks and not wake_requests:
-        scheduler_mode = "heartbeat"
-    elif not wake_requests and not heartbeat_tasks:
-        scheduler_mode = "idle"
-    return {
-        "message": "\n\n".join(section for section in sections if section.strip()),
-        "metadata": {
-            "source": "bounded_scheduler",
-            "scheduler_mode": scheduler_mode,
+
+async def _ledger_unattributed_wake_request(
+    *, tenant_id: str, workspace_id: str, item: Dict[str, Any],
+) -> None:
+    try:
+        from server_modules import activity_ledger_service
+
+        wake_id = str(item.get("id") or "").strip()
+        await activity_ledger_service.append_activity_event(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            actor_type="system",
+            actor_id="bounded_scheduler",
+            event_class=authority_mandate_service.MANDATE_UNATTRIBUTED_EVENT_CLASS,
+            detail_level="audit_reference",
+            action="wake_request_tier_unattributed",
+            title="Wake request had no derivable authority tier",
+            summary=(
+                f"Wake request {wake_id or '(no id)'} (trigger_kind="
+                f"{str(item.get('trigger_kind') or '').strip() or 'unknown'}) carried no authority_tier "
+                "and its producer isn't a recognized no-tier mechanism. Defaulted to audience."
+            ),
+            status="logged",
+            metadata={
+                "wake_request_id": wake_id or None,
+                "trigger_kind": str(item.get("trigger_kind") or "").strip() or None,
+                "source": str(item.get("source") or "").strip() or None,
+            },
+        )
+    except Exception:
+        pass
+
+
+async def build_wakeup_execution_bundle(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    heartbeat_tasks: List[str],
+    wake_requests: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Group due wake requests BY AUTHORITY TIER and build one execution
+    bundle per tier — never a single composite that blends them.
+
+    This is the anti-laundering fix: previously every claimed wake request
+    (regardless of who/what scheduled it) was merged into one message and
+    executed as one turn with no tier at all, which — once a caller reads
+    tier from the resulting turn — would otherwise let an audience-scheduled
+    instruction (fleet_tools.schedule_task, called mid-conversation with an
+    end customer) execute alongside, and be indistinguishable from,
+    owner-configured work.
+
+    heartbeat_tasks (the HEARTBEAT.md checklist) are always owner tier — that
+    file is workspace-level configuration only the owner edits, never
+    audience-writable. Each wake request keeps (or is safely defaulted to)
+    its own tier via _wake_request_tier.
+    """
+    workspace, master_install, policy = await _load_scheduler_scope(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    from server_modules import personal_context_engine
+
+    recent_changes = await personal_context_engine.list_events(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        audience="sage",
+        limit=8,
+        unseen_only=False,
+    )
+    user_preferences = workspace_context.read_workspace_context_file(
+        "USER.md",
+        workspace_id=workspace_id,
+    ).strip()
+    workspace_meta = _coerce_dict(_coerce_dict(workspace).get("metadata"))
+    master_meta = _coerce_dict(_coerce_dict(master_install).get("metadata"))
+    goals = list(workspace_meta.get("goals") or master_meta.get("goals") or master_meta.get("scheduler_goals") or [])
+    goal_lines = [str(item or "").strip() for item in goals if str(item or "").strip()]
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    unattributed_ids: List[str] = []
+    for item in wake_requests:
+        tier, unattributed = _wake_request_tier(item)
+        grouped.setdefault(tier, []).append(item)
+        if unattributed:
+            wake_id = str(item.get("id") or "").strip()
+            if wake_id:
+                unattributed_ids.append(wake_id)
+            await _ledger_unattributed_wake_request(tenant_id=tenant_id, workspace_id=workspace_id, item=item)
+    if heartbeat_tasks and authority_mandate_service.TIER_OWNER not in grouped:
+        grouped[authority_mandate_service.TIER_OWNER] = []
+
+    groups: List[Dict[str, Any]] = []
+    for tier, items in grouped.items():
+        group_tasks = list(heartbeat_tasks) if tier == authority_mandate_service.TIER_OWNER else []
+        message = _wake_group_message(
+            heartbeat_tasks=group_tasks,
+            wake_requests=items,
+            recent_changes=recent_changes,
+            goal_lines=goal_lines,
+            user_preferences=user_preferences,
+            policy=policy,
+        )
+        wake_request_ids = [str(i.get("id") or "").strip() for i in items if str(i.get("id") or "").strip()]
+        context_event_ids = _extract_context_event_ids(items)
+        scheduler_mode = "mixed" if (items and group_tasks) else ("wakeup" if items else "heartbeat")
+        groups.append({
+            "authority_tier": tier,
+            "message": message,
+            "heartbeat_tasks": group_tasks,
+            "wake_requests": items,
             "wake_request_ids": wake_request_ids,
             "context_event_ids": context_event_ids,
-            "scheduler_policy": policy.as_dict(),
-            "scheduler_goals": goal_lines,
-            "recent_context_change_count": len(recent_changes),
-        },
+            "scheduler_mode": scheduler_mode,
+            "summary": (
+                f"Scheduler triggered {len(items)} wake request(s) and {len(group_tasks)} heartbeat task(s) as {tier}."
+            ),
+        })
+
+    return {
+        "groups": groups,
+        "unattributed_wake_request_ids": unattributed_ids,
         "recent_changes": recent_changes,
         "scheduler_goals": goal_lines,
         "user_preferences": user_preferences,
+        "policy": policy.as_dict(),
+        "metadata": {
+            "source": "bounded_scheduler",
+            "scheduler_policy": policy.as_dict(),
+            "scheduler_goals": goal_lines,
+            "recent_context_change_count": len(recent_changes),
+            "group_count": len(groups),
+            "group_tiers": [g["authority_tier"] for g in groups],
+        },
         "summary": (
-            f"Scheduler triggered {len(wake_requests)} wake request(s) and {len(heartbeat_tasks)} heartbeat task(s)."
+            f"Scheduler triggered {len(wake_requests)} wake request(s) across {len(groups)} tier group(s) "
+            f"and {len(heartbeat_tasks)} heartbeat task(s)."
             if wake_requests or heartbeat_tasks
             else "No due scheduler work."
         ),
-        "policy": policy.as_dict(),
     }
 
 

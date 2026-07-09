@@ -12,6 +12,7 @@ from server_modules.sage_command_dispatcher import (  # noqa: E402
 )
 from server_modules.error_notification import classify_error_notification  # noqa: E402
 
+from server_modules import authority_mandate_service
 from server_modules import channel_lane_contract_service
 
 
@@ -78,6 +79,17 @@ def _personal_channel_no_tools_session_ctx(
         {
             "personal_channel_tool_profile": "external_no_tools",
             "tools_allowed": False,
+            # This fallback (mandate hardening report) had no authority_tier
+            # at all — a real, live gap: an unauthenticated external contact
+            # on the owner's personal bridge could reach a turn where
+            # hardware__action/memory_write are genuinely offered (the
+            # "no tools" mechanisms above don't actually block them against
+            # the current tool-assembly path), gated only by whether the
+            # mandate gate's missing-key default happened to allow it.
+            # Stamped explicitly here (never just relying on the gate's
+            # own fail-closed default) — this path never resolves a live
+            # sender identity, so it can never be provably owner.
+            "authority_tier": authority_mandate_service.TIER_AUDIENCE,
             "external_content_guard": {
                 "wrapper_id": guarded.wrapper_id,
                 "suspicious_patterns": list(guarded.suspicious_patterns),

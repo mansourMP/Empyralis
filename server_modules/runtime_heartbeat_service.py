@@ -4,6 +4,8 @@ import asyncio
 import inspect
 from typing import Any, Callable, Optional
 
+from server_modules import authority_mandate_service
+
 
 def _resolve_sync(value: Any) -> Any:
     if not inspect.isawaitable(value):
@@ -40,6 +42,7 @@ def build_heartbeat_turn_request(
     tasks: list[str],
     metadata: dict[str, Any],
     pending_started: Any,
+    authority_tier: str,
     wake_requests: Optional[list[dict[str, Any]]] = None,
     recent_changes: Optional[list[dict[str, Any]]] = None,
     scheduler_goals: Optional[list[str]] = None,
@@ -163,6 +166,7 @@ def build_heartbeat_turn_request(
             or None
         ),
         policy_context={key: value for key, value in policy_context.items() if value not in (None, "", [], {})},
+        authority_tier=authority_mandate_service.normalize_tier(authority_tier),
     )
 
 
@@ -333,56 +337,125 @@ def build_heartbeat_run_callback(
                 "summary": "No pending heartbeat tasks.",
                 "scheduler_mode": "idle",
             }
-        try:
-            turn_request = build_heartbeat_turn_request(
-                build_inbound_agent_turn_request=build_inbound_agent_turn_request,
-                tasks=tasks,
-                metadata=scoped_metadata,
-                pending_started=pending_started,
-                wake_requests=wake_requests,
-                recent_changes=execution_bundle.get("recent_changes") if isinstance(execution_bundle, dict) else None,
-                scheduler_goals=execution_bundle.get("scheduler_goals") if isinstance(execution_bundle, dict) else None,
-                user_preferences=execution_bundle.get("user_preferences") if isinstance(execution_bundle, dict) else None,
-                policy_bounds=execution_bundle.get("policy") if isinstance(execution_bundle, dict) else None,
-            )
-        except ValueError as exc:
-            return {
-                "acted": False,
-                "summary": str(exc),
-            }
-        try:
-            result = execute_system_agent_turn(
-                turn_request=turn_request,
-                run_execution_services=run_execution_services(),
-            )
-        except Exception:
-            if wake_requests and tenant_id and callable(finalize_scheduler_wake_requests):
+        # Groups to execute this cycle -- one turn per authority tier, never
+        # blended. build_wakeup_execution_bundle already groups wake_requests
+        # this way when it ran (i.e. when there were wake_requests at all);
+        # otherwise (heartbeat-checklist-only tick, or a bundle builder that
+        # doesn't return the "groups" shape) synthesize the right single
+        # group ourselves -- HEARTBEAT.md is owner-only config, so a
+        # tasks-only tick is owner tier; an ungrouped wake_requests list
+        # (e.g. a caller supplying the legacy flat shape) fails safe to
+        # audience via normalize_tier(None), never owner.
+        groups = (
+            execution_bundle.get("groups")
+            if isinstance(execution_bundle, dict) and isinstance(execution_bundle.get("groups"), list)
+            else None
+        )
+        if not groups:
+            if wake_requests:
+                fallback_tier = authority_mandate_service.normalize_tier(
+                    execution_bundle.get("authority_tier") if isinstance(execution_bundle, dict) else None
+                )
+                bundle_metadata = execution_bundle.get("metadata") if isinstance(execution_bundle, dict) and isinstance(execution_bundle.get("metadata"), dict) else {}
+                groups = [{
+                    "authority_tier": fallback_tier,
+                    "heartbeat_tasks": list(tasks) if fallback_tier == authority_mandate_service.TIER_OWNER else [],
+                    "wake_requests": wake_requests,
+                    "context_event_ids": list(bundle_metadata.get("context_event_ids") or []),
+                    "scheduler_mode": str(bundle_metadata.get("scheduler_mode") or "").strip(),
+                }]
+            else:
+                groups = [{
+                    "authority_tier": authority_mandate_service.TIER_OWNER,
+                    "heartbeat_tasks": list(tasks),
+                    "wake_requests": [],
+                }]
+
+        results: list[dict[str, Any]] = []
+        first_error: Optional[BaseException] = None
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            group_tier = authority_mandate_service.normalize_tier(group.get("authority_tier"))
+            group_tasks = list(group.get("heartbeat_tasks") or [])
+            group_wake_requests = list(group.get("wake_requests") or [])
+            if not group_tasks and not group_wake_requests:
+                continue
+            try:
+                turn_request = build_heartbeat_turn_request(
+                    build_inbound_agent_turn_request=build_inbound_agent_turn_request,
+                    tasks=group_tasks,
+                    metadata=scoped_metadata,
+                    pending_started=pending_started,
+                    authority_tier=group_tier,
+                    wake_requests=group_wake_requests,
+                    recent_changes=execution_bundle.get("recent_changes") if isinstance(execution_bundle, dict) else None,
+                    scheduler_goals=execution_bundle.get("scheduler_goals") if isinstance(execution_bundle, dict) else None,
+                    user_preferences=execution_bundle.get("user_preferences") if isinstance(execution_bundle, dict) else None,
+                    policy_bounds=execution_bundle.get("policy") if isinstance(execution_bundle, dict) else None,
+                )
+            except ValueError as exc:
+                # Can only happen if workspace/tenant scope resolution itself
+                # fails -- already validated above, so this is defensive.
+                # Same as the pre-tier-grouping contract: abort the whole
+                # cycle rather than guess at a partial result.
+                return {"acted": False, "summary": str(exc)}
+            try:
+                result = execute_system_agent_turn(
+                    turn_request=turn_request,
+                    run_execution_services=run_execution_services(),
+                )
+            except Exception as exc:
+                if group_wake_requests and tenant_id and callable(finalize_scheduler_wake_requests):
+                    _resolve_sync(
+                        finalize_scheduler_wake_requests(
+                            tenant_id=tenant_id,
+                            workspace_id=workspace_id,
+                            wake_requests=group_wake_requests,
+                            status="failed",
+                            denial_reason="execution_failed",
+                            mark_context_seen=False,
+                        )
+                    )
+                if first_error is None:
+                    first_error = exc
+                continue
+            result_payload = result if isinstance(result, dict) else {}
+            if group_wake_requests and tenant_id and callable(finalize_scheduler_wake_requests):
                 _resolve_sync(
                     finalize_scheduler_wake_requests(
                         tenant_id=tenant_id,
                         workspace_id=workspace_id,
-                        wake_requests=wake_requests,
-                        status="failed",
-                        denial_reason="execution_failed",
-                        mark_context_seen=False,
+                        wake_requests=group_wake_requests,
+                        status="executed",
+                        mark_context_seen=True,
+                        metadata_patch={"run_id": str(result_payload.get("run_id") or "").strip() or None},
                     )
                 )
-            raise
-        result_payload = result if isinstance(result, dict) else {}
-        if wake_requests and tenant_id and callable(finalize_scheduler_wake_requests):
-            _resolve_sync(
-                finalize_scheduler_wake_requests(
-                    tenant_id=tenant_id,
-                    workspace_id=workspace_id,
-                    wake_requests=wake_requests,
-                    status="executed",
-                    mark_context_seen=True,
-                    metadata_patch={"run_id": str(result_payload.get("run_id") or "").strip() or None},
-                )
-            )
+            results.append({
+                "authority_tier": group_tier,
+                **result_payload,
+                "wake_request_ids": [
+                    str(item.get("id") or "").strip()
+                    for item in group_wake_requests
+                    if str(item.get("id") or "").strip()
+                ],
+                "context_event_ids": list(group.get("context_event_ids") or []),
+                "scheduler_mode": (
+                    str(group.get("scheduler_mode") or "").strip()
+                    or ("mixed" if group_wake_requests and group_tasks else ("wakeup" if group_wake_requests else "heartbeat"))
+                ),
+            })
+
+        if first_error is not None and not results:
+            raise first_error
+        if not results:
+            return {"acted": False, "summary": "No pending heartbeat tasks.", "scheduler_mode": "idle"}
+
+        primary = results[0]
         _heartbeat_result = {
             "acted": True,
-            **result_payload,
+            "run_id": primary.get("run_id"),
             "summary": (
                 str(execution_bundle.get("summary") or "").strip()
                 if isinstance(execution_bundle, dict) and str(execution_bundle.get("summary") or "").strip()
@@ -391,19 +464,19 @@ def build_heartbeat_run_callback(
                     + (f" Also started {len(pending_started)} pending schedule(s)." if pending_started else "")
                 )
             ),
-            "scheduler_mode": (
-                str(execution_bundle.get("metadata", {}).get("scheduler_mode") or "").strip()
-                if isinstance(execution_bundle, dict)
-                else ""
-            ) or ("mixed" if wake_requests and tasks else ("wakeup" if wake_requests else "heartbeat")),
-            "wake_request_ids": [
-                str(item.get("id") or "").strip()
-                for item in wake_requests
-                if str(item.get("id") or "").strip()
-            ],
-            "context_event_ids": list(execution_bundle.get("metadata", {}).get("context_event_ids") or []) if isinstance(execution_bundle, dict) else [],
+            "scheduler_mode": primary.get("scheduler_mode"),
+            "wake_request_ids": [wid for r in results for wid in (r.get("wake_request_ids") or [])],
+            "context_event_ids": [cid for r in results for cid in (r.get("context_event_ids") or [])],
+            "groups": results,
         }
         _append_heartbeat_entry(workspace_id, _heartbeat_result)
+        if first_error is not None:
+            # At least one tier group's turn failed -- surface it (matches
+            # the pre-tier-grouping contract of propagating turn-execution
+            # failures) even though other groups already succeeded and were
+            # finalized above; those results aren't lost, just not returned
+            # to this caller since the callback contract is raise-on-error.
+            raise first_error
         return _heartbeat_result
 
     def _start_heartbeat_run(tasks: list[str], metadata: dict[str, Any]) -> dict[str, Any]:

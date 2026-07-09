@@ -12,6 +12,7 @@ import uuid
 from server_modules.capability_registry import resolve_capability, workflow_tool_capability_id
 from server_modules import execution_mode_policy
 from server_modules import local_tool_executor
+from server_modules import authority_mandate_service
 
 
 @dataclass(slots=True)
@@ -1309,6 +1310,36 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             audience_safe=False,
             audience_note="Operator-only: messages another agent. Owner/operator access.",
         ),
+        ToolDescriptor(
+            tool_name="fleet__schedule_task",
+            label="Schedule Task",
+            connector_id="fleet",
+            action_id="schedule_task",
+            description=(
+                "Schedule a future task for an agent — it wakes at the given time and "
+                "executes the instruction. 'when' accepts 'in N minutes/hours' or an "
+                "ISO-8601 datetime."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "The agent install id to wake and run this instruction."},
+                    "when": {"type": "string", "description": "e.g. 'in 30 minutes', 'in 2 hours', or '2026-07-04T09:00:00Z'."},
+                    "instruction": {"type": "string", "description": "What the agent should do when it wakes."},
+                },
+                "required": ["agent_id", "when", "instruction"],
+            },
+            risk_level="moderate",
+            # Not audience_safe by default: scheduling future work is a
+            # standing instruction with no live sender to re-check against
+            # when it executes. An end customer must not be able to queue
+            # arbitrary future agent behavior — the mandate gate ORs this
+            # manifest flag with the calling agent's mandate.audience_tools
+            # allowlist, so the owner opts specific agents into it, not the
+            # platform by default.
+            audience_safe=False,
+            audience_note="Operator-only: schedules future work for an agent. Owner/operator access.",
+        ),
     ]
 
 
@@ -1442,6 +1473,149 @@ def first_non_empty_line(text: str) -> str:
         if token:
             return token
     return ""
+
+
+def _tool_descriptor_for_mandate_gate(
+    connector_id: str,
+    action_id: str,
+    tool_name: str,
+) -> ToolDescriptor | None:
+    """Resolve the ToolDescriptor for a call, tolerant of tool_name
+    conventions that don't round-trip through tool_name_for_action().
+
+    tool_name_for_action() always reconstructs "{connector_id}__{action_id}"
+    (double underscore). That matches most descriptors (shell__exec,
+    hardware__action, web__search) but NOT the memory/task-completion
+    descriptors, which are registered with a single underscore or no
+    connector prefix at all (memory_search, memory_read, memory_get,
+    memory_list_versions, task_complete) — several of which are exactly the
+    audience_safe=True tools the customer_facing preset relies on. Matching
+    the raw tool_name first — before falling back to the connector/action
+    reconstruction — avoids silently mis-resolving those to "not found" and
+    therefore "not audience_safe", which would wrongly block an audience-safe
+    tool for every non-owner tier.
+    """
+    clean_name = str(tool_name or "").strip()
+    if clean_name:
+        for descriptor in list(_local_tool_descriptors()) + list(_builtin_tool_descriptors()):
+            if descriptor.tool_name == clean_name:
+                return descriptor
+    return tool_descriptor_for_action(connector_id, action_id)
+
+
+def _authority_mandate_gate(
+    connector_id: str,
+    action_id: str,
+    session_ctx: Dict[str, Any] | None,
+    tool_name: str = "",
+) -> tuple[bool, Optional[str], Optional[bool], bool]:
+    """Phase-Mandate: is this tool call inside the caller's authority tier?
+
+    This is the hard-enforcement backstop behind audience_tool_filter's
+    visibility filter (server_modules/audience_tool_filter.py) — it holds
+    even if a non-audience_safe tool reached the LLM's tool list some other
+    way (a stale manifest, a bypassed filter, a durable run resuming outside
+    the turn that built its tool list).
+
+    FAIL-CLOSED: a session_ctx with no "authority_tier" key is treated as
+    audience, not owner — normalize_tier(None) already fails safe the same
+    way, so this just stops short-circuiting before that fail-safe engages.
+    Verified safe (see docs/mandate hardening report): the one live
+    stamping site, sage_agent_runtime_service.py's _run_sage_action_loop_v3,
+    covers every confirmed-live channel (Sage web/API chat, Telegram/
+    WhatsApp/Discord/Slack, personal channels), and a case that reached the
+    gate with a missing key turned out to be a genuine, live, unauthenticated
+    gap (a personal-channel fallback path offering hardware/memory-write
+    tools with no tier at all) — not a caller this default needed to protect.
+
+    Returns (allowed, tier, audience_safe, unattributed). unattributed=True
+    means the key was absent — the tier shown is the audience default, not
+    something the caller actually declared. Callers ledger this
+    (mandate_unattributed) as a distinct, non-blocking observability signal
+    from an actual mandate_blocked event, so a producer that still isn't
+    stamping a tier stays visible instead of silently defaulting forever.
+    """
+    session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
+    unattributed = "authority_tier" not in session_metadata
+    tier = authority_mandate_service.normalize_tier(session_metadata.get("authority_tier"))
+    descriptor = _tool_descriptor_for_mandate_gate(connector_id, action_id, tool_name)
+    manifest_audience_safe = bool(descriptor.audience_safe) if descriptor is not None else False
+    mandate_audience_tools = session_metadata.get("mandate_audience_tools")
+    tool_key = authority_mandate_service.connector_tool_key(connector_id, action_id)
+    mandate_audience_safe = authority_mandate_service.is_audience_tool_allowed(mandate_audience_tools, tool_key)
+    audience_safe = manifest_audience_safe or mandate_audience_safe
+    allowed = authority_mandate_service.is_tool_call_allowed(tier, audience_safe=audience_safe)
+    return allowed, tier, audience_safe, unattributed
+
+
+def _authority_mandate_blocked_ledger_kwargs(
+    *,
+    connector_id: str,
+    action_id: str,
+    tool_name: str,
+    tier: str,
+    audience_safe: bool,
+    workspace_id: str,
+    thread_id: str,
+    session_ctx: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
+    return dict(
+        tenant_id=_tenant_id_from_direct_tool_context(session_ctx),
+        workspace_id=str(workspace_id or "default").strip() or "default",
+        actor_type="agent",
+        actor_id=str(session_metadata.get("agent_id") or session_metadata.get("user_id") or "sage").strip() or "sage",
+        event_class=authority_mandate_service.MANDATE_BLOCKED_EVENT_CLASS,
+        detail_level="audit_reference",
+        action="mandate_blocked",
+        thread_id=str(thread_id or "").strip() or None,
+        title=f"Blocked: {tool_name or connector_id} requires the workspace owner",
+        summary=(
+            f"Tier '{tier}' attempted '{tool_name or f'{connector_id}.{action_id}'}', "
+            "which is not audience_safe. Blocked at the execution choke point."
+        ),
+        status="blocked",
+        metadata={
+            "connector_id": connector_id or None,
+            "action_id": action_id or None,
+            "tool_name": tool_name or None,
+            "authority_tier": tier,
+            "audience_safe": audience_safe,
+        },
+    )
+
+
+def _authority_mandate_unattributed_ledger_kwargs(
+    *,
+    connector_id: str,
+    action_id: str,
+    tool_name: str,
+    workspace_id: str,
+    thread_id: str,
+    session_ctx: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
+    return dict(
+        tenant_id=_tenant_id_from_direct_tool_context(session_ctx),
+        workspace_id=str(workspace_id or "default").strip() or "default",
+        actor_type="agent",
+        actor_id=str(session_metadata.get("agent_id") or session_metadata.get("user_id") or "sage").strip() or "sage",
+        event_class=authority_mandate_service.MANDATE_UNATTRIBUTED_EVENT_CLASS,
+        detail_level="audit_reference",
+        action="tool_call_tier_unattributed",
+        thread_id=str(thread_id or "").strip() or None,
+        title=f"Tool call reached the mandate gate with no authority_tier: {tool_name or connector_id}",
+        summary=(
+            f"'{tool_name or f'{connector_id}.{action_id}'}' reached the mandate gate with no authority_tier "
+            "stamped on session_ctx. Defaulted to audience (fail-closed)."
+        ),
+        status="logged",
+        metadata={
+            "connector_id": connector_id or None,
+            "action_id": action_id or None,
+            "tool_name": tool_name or None,
+        },
+    )
 
 
 def _approval_path_tool_descriptors() -> List[ToolDescriptor]:
@@ -3238,6 +3412,44 @@ async def execute_single_direct_tool_call_async(
         callbacks = _get_cb()
 
     connector_id, action_id = callbacks.parse_tool_name(str(tool_call.get("name") or ""))
+    mandate_allowed, mandate_tier, mandate_audience_safe, mandate_unattributed = _authority_mandate_gate(
+        connector_id, action_id, session_ctx, tool_name=str(tool_call.get("name") or "")
+    )
+    if mandate_unattributed:
+        try:
+            from server_modules import activity_ledger_service
+
+            await activity_ledger_service.append_activity_event(
+                **_authority_mandate_unattributed_ledger_kwargs(
+                    connector_id=connector_id,
+                    action_id=action_id,
+                    tool_name=str(tool_call.get("name") or ""),
+                    workspace_id=workspace_id,
+                    thread_id=thread_id,
+                    session_ctx=session_ctx,
+                )
+            )
+        except Exception:
+            pass
+    if not mandate_allowed:
+        try:
+            from server_modules import activity_ledger_service
+
+            await activity_ledger_service.append_activity_event(
+                **_authority_mandate_blocked_ledger_kwargs(
+                    connector_id=connector_id,
+                    action_id=action_id,
+                    tool_name=str(tool_call.get("name") or ""),
+                    tier=mandate_tier or "",
+                    audience_safe=bool(mandate_audience_safe),
+                    workspace_id=workspace_id,
+                    thread_id=thread_id,
+                    session_ctx=session_ctx,
+                )
+            )
+        except Exception:
+            pass
+        raise RuntimeError(authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
     timeout = _tool_timeout_seconds(connector_id, action_id)
 
     import asyncio as _asyncio
@@ -3582,6 +3794,48 @@ def execute_single_direct_tool_call(
     from server_modules import sage_services_service
 
     connector_id, action_id = callbacks.parse_tool_name(str(tool_call.get("name") or ""))
+    mandate_allowed, mandate_tier, mandate_audience_safe, mandate_unattributed = _authority_mandate_gate(
+        connector_id, action_id, session_ctx, tool_name=str(tool_call.get("name") or "")
+    )
+    if mandate_unattributed:
+        try:
+            from server_modules import activity_ledger_service
+
+            callbacks.run_async_tool_call(
+                activity_ledger_service.append_activity_event(
+                    **_authority_mandate_unattributed_ledger_kwargs(
+                        connector_id=connector_id,
+                        action_id=action_id,
+                        tool_name=str(tool_call.get("name") or ""),
+                        workspace_id=workspace_id,
+                        thread_id=thread_id,
+                        session_ctx=session_ctx,
+                    )
+                )
+            )
+        except Exception:
+            pass
+    if not mandate_allowed:
+        try:
+            from server_modules import activity_ledger_service
+
+            callbacks.run_async_tool_call(
+                activity_ledger_service.append_activity_event(
+                    **_authority_mandate_blocked_ledger_kwargs(
+                        connector_id=connector_id,
+                        action_id=action_id,
+                        tool_name=str(tool_call.get("name") or ""),
+                        tier=mandate_tier or "",
+                        audience_safe=bool(mandate_audience_safe),
+                        workspace_id=workspace_id,
+                        thread_id=thread_id,
+                        session_ctx=session_ctx,
+                    )
+                )
+            )
+        except Exception:
+            pass
+        raise RuntimeError(authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
     argument_payload = callbacks.tool_arguments_payload(tool_call.get("arguments"))
     session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
     tenant_id = str(
@@ -4027,6 +4281,7 @@ def execute_single_direct_tool_call(
             fleet_get_project_activity,
             fleet_configure_agent,
             fleet_message_agent,
+            schedule_task,
             resolve_agent_role,
             OPERATOR_ROLE,
         )
@@ -4141,6 +4396,31 @@ def execute_single_direct_tool_call(
                     tenant_id=tenant_id,
                     agent_id=agent_id,
                     message=message,
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "schedule_task":
+            agent_id = str(argument_payload.get("agent_id") or "").strip()
+            when = str(argument_payload.get("when") or "").strip()
+            instruction = str(argument_payload.get("instruction") or "").strip()
+            if not agent_id or not when or not instruction:
+                raise RuntimeError("Tool 'fleet__schedule_task' requires agent_id, when, and instruction.")
+            # Mandate: the wake request must carry THIS turn's tier, not a
+            # freshly-derived one — inherit_tier() (called inside
+            # schedule_task) is the enforcement; passing the raw session_ctx
+            # value through here is just plumbing. An audience-tier turn
+            # scheduling a task must never result in owner-tier execution
+            # later just because the wake-up has no live channel sender.
+            result = callbacks.run_async_tool_call(
+                schedule_task(
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    actor_id=actor_id,
+                    when=when,
+                    instruction=instruction,
+                    tenant_id=tenant_id,
+                    authority_tier=session_metadata.get("authority_tier"),
                 )
             )
             return json.dumps(result, ensure_ascii=False)

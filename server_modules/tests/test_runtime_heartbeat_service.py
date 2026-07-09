@@ -145,6 +145,7 @@ class RuntimeHeartbeatServiceTests(unittest.TestCase):
                 "trust_mode": "guarded",
             },
             pending_started=[{"run_id": "pending-1"}],
+            authority_tier="owner",
         )
 
         self.assertEqual(turn_request["tenant_id"], "tenant-1")
@@ -155,6 +156,17 @@ class RuntimeHeartbeatServiceTests(unittest.TestCase):
         self.assertEqual(turn_request["policy_context"]["execution_target"], "local_companion")
         self.assertEqual(turn_request["policy_context"]["trust_mode"], "guarded")
         self.assertEqual(turn_request["context_hints"]["metadata"]["source"], "heartbeat")
+        self.assertEqual(turn_request["authority_tier"], "owner")
+
+    def test_build_heartbeat_turn_request_normalizes_garbage_tier_to_audience(self):
+        turn_request = runtime_heartbeat_service.build_heartbeat_turn_request(
+            build_inbound_agent_turn_request=lambda **kwargs: kwargs,
+            tasks=[],
+            metadata={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+            pending_started=[],
+            authority_tier="owner_but_spoofed",
+        )
+        self.assertEqual(turn_request["authority_tier"], "audience")
 
     def test_build_heartbeat_notify_callback_uses_telegram_sender(self):
         seen = []
@@ -223,6 +235,152 @@ class RuntimeHeartbeatServiceTests(unittest.TestCase):
 
         self.assertEqual(finalized[0]["status"], "failed")
         self.assertEqual(finalized[0]["denial_reason"], "execution_failed")
+
+    def test_build_heartbeat_run_callback_executes_separate_turns_per_tier_group(self):
+        """Mixed-tier wake batch -> separate turns with correct tiers. The
+        core anti-laundering assertion: an owner-tier heartbeat checklist and
+        an audience-tier wake request in the SAME claimed batch must produce
+        TWO execute_system_agent_turn calls, each carrying only its own
+        tier's work, never one blended turn."""
+        turn_requests = []
+        finalized = []
+
+        def _capture_turn(**kwargs):
+            turn_requests.append(kwargs)
+            return kwargs
+
+        def _execute(*, turn_request, run_execution_services):
+            return {"run_id": f"run-{turn_request['authority_tier']}"}
+
+        callback = runtime_heartbeat_service.build_heartbeat_run_callback(
+            build_inbound_agent_turn_request=_capture_turn,
+            trigger_pending_heartbeat_schedules=lambda **kwargs: {"started": []},
+            execute_system_agent_turn=_execute,
+            run_execution_services=lambda: object(),
+            resolve_workspace_tenant_id=lambda workspace_id: "tenant-1",
+            claim_due_scheduler_wake_requests=lambda **kwargs: {
+                "items": [
+                    {"id": "wake-audience", "trigger_kind": "self_proposed", "summary": "Customer follow-up."},
+                    {"id": "wake-owner", "trigger_kind": "self_proposed", "summary": "Investor update."},
+                ]
+            },
+            build_wakeup_execution_bundle=lambda **kwargs: {
+                "groups": [
+                    {
+                        "authority_tier": "owner",
+                        "heartbeat_tasks": list(kwargs["heartbeat_tasks"]),
+                        "wake_requests": [{"id": "wake-owner", "trigger_kind": "self_proposed", "summary": "Investor update."}],
+                        "wake_request_ids": ["wake-owner"],
+                        "context_event_ids": [],
+                        "scheduler_mode": "mixed",
+                    },
+                    {
+                        "authority_tier": "audience",
+                        "heartbeat_tasks": [],
+                        "wake_requests": [{"id": "wake-audience", "trigger_kind": "self_proposed", "summary": "Customer follow-up."}],
+                        "wake_request_ids": ["wake-audience"],
+                        "context_event_ids": [],
+                        "scheduler_mode": "wakeup",
+                    },
+                ],
+                "policy": {"quiet_hours_start": 23, "quiet_hours_end": 7, "max_runtime_seconds": 20, "plan_tier": "standard"},
+            },
+            finalize_scheduler_wake_requests=lambda **kwargs: finalized.append(kwargs) or [{"status": kwargs["status"]}],
+        )
+
+        payload = callback(["Check inbox"], {"workspace_id": "ws-1"})
+
+        self.assertTrue(payload["acted"])
+        self.assertEqual(len(turn_requests), 2)
+        tiers_seen = {tr["authority_tier"] for tr in turn_requests}
+        self.assertEqual(tiers_seen, {"owner", "audience"})
+
+        owner_turn = next(tr for tr in turn_requests if tr["authority_tier"] == "owner")
+        audience_turn = next(tr for tr in turn_requests if tr["authority_tier"] == "audience")
+        self.assertIn("Check inbox", owner_turn["message"])
+        self.assertIn("Investor update", owner_turn["message"])
+        self.assertNotIn("Customer follow-up", owner_turn["message"])
+        self.assertIn("Customer follow-up", audience_turn["message"])
+        self.assertNotIn("Check inbox", audience_turn["message"])
+        self.assertNotIn("Investor update", audience_turn["message"])
+
+        self.assertEqual(len(finalized), 2)
+        finalized_ids = {tuple(w["id"] for w in f["wake_requests"]) for f in finalized}
+        self.assertEqual(finalized_ids, {("wake-owner",), ("wake-audience",)})
+        self.assertEqual(sorted(payload["wake_request_ids"]), ["wake-audience", "wake-owner"])
+
+    def test_build_heartbeat_run_callback_tasks_only_tick_is_owner_tier(self):
+        """A heartbeat-checklist-only tick (no wake requests at all) is
+        owner tier — HEARTBEAT.md is workspace-level config only the owner
+        edits. Owner unaffected: this is the plain, unmixed common case and
+        must keep working exactly as before, just with an explicit tier
+        now."""
+        captured = {}
+        callback = runtime_heartbeat_service.build_heartbeat_run_callback(
+            build_inbound_agent_turn_request=lambda **kwargs: captured.setdefault("request", kwargs) or kwargs,
+            trigger_pending_heartbeat_schedules=lambda **kwargs: {"started": []},
+            execute_system_agent_turn=lambda **kwargs: {"run_id": "run-1"},
+            run_execution_services=lambda: object(),
+            resolve_workspace_tenant_id=lambda workspace_id: "tenant-1",
+        )
+
+        payload = callback(["Check inbox"], {"workspace_id": "ws-1"})
+
+        self.assertTrue(payload["acted"])
+        self.assertEqual(captured["request"]["authority_tier"], "owner")
+
+    def test_build_heartbeat_run_callback_audience_failure_does_not_block_owner_group(self):
+        """Owner unaffected: if the audience-tier group's turn throws, the
+        owner-tier group must still execute and be finalized — tier groups
+        are isolated, one group's failure doesn't cascade to another."""
+        executed_tiers = []
+        finalized = []
+
+        def _execute(*, turn_request, run_execution_services):
+            executed_tiers.append(turn_request["authority_tier"])
+            if turn_request["authority_tier"] == "audience":
+                raise RuntimeError("audience turn failed")
+            return {"run_id": "run-owner"}
+
+        callback = runtime_heartbeat_service.build_heartbeat_run_callback(
+            build_inbound_agent_turn_request=lambda **kwargs: kwargs,
+            trigger_pending_heartbeat_schedules=lambda **kwargs: {"started": []},
+            execute_system_agent_turn=_execute,
+            run_execution_services=lambda: object(),
+            resolve_workspace_tenant_id=lambda workspace_id: "tenant-1",
+            claim_due_scheduler_wake_requests=lambda **kwargs: {
+                "items": [
+                    {"id": "wake-audience", "trigger_kind": "self_proposed", "summary": "Customer follow-up."},
+                    {"id": "wake-owner", "trigger_kind": "self_proposed", "summary": "Investor update."},
+                ]
+            },
+            build_wakeup_execution_bundle=lambda **kwargs: {
+                "groups": [
+                    {
+                        "authority_tier": "audience",
+                        "heartbeat_tasks": [],
+                        "wake_requests": [{"id": "wake-audience", "summary": "Customer follow-up."}],
+                    },
+                    {
+                        "authority_tier": "owner",
+                        "heartbeat_tasks": [],
+                        "wake_requests": [{"id": "wake-owner", "summary": "Investor update."}],
+                    },
+                ],
+                "policy": {"quiet_hours_start": 23, "quiet_hours_end": 7, "max_runtime_seconds": 20, "plan_tier": "standard"},
+            },
+            finalize_scheduler_wake_requests=lambda **kwargs: finalized.append(kwargs) or [{"status": kwargs["status"]}],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "audience turn failed"):
+            callback([], {"workspace_id": "ws-1"})
+
+        # Both groups got a real, isolated attempt.
+        self.assertEqual(set(executed_tiers), {"owner", "audience"})
+        # Both groups got finalized with THEIR OWN outcome.
+        by_status = {f["wake_requests"][0]["id"]: f["status"] for f in finalized}
+        self.assertEqual(by_status["wake-owner"], "executed")
+        self.assertEqual(by_status["wake-audience"], "failed")
 
 
 if __name__ == "__main__":

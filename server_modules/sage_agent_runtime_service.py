@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from server_modules import skills_service as _sage_skills_service
 from server_modules import thread_service
 from server_modules import runtime_config
+from server_modules import authority_mandate_service
 from server_modules import (
     activity_ledger_service,
     agent_trace_service,
@@ -36,6 +37,7 @@ from server_modules.conversation_memory_facade_service import (
     ConversationMemoryPersistRequest,
     persist_interaction,
 )
+from server_modules.platform_event import GENERIC_ERROR, TOOLS_LIMITED_NO_REPLY
 from server_modules.conversation_memory_policy import (
     DIRECT_CHAT_PROFILE,
     MemoryPolicyProfile,
@@ -511,6 +513,7 @@ async def _ledger_provider_unavailable(
             workspace_id=workspace_id,
             actor_type="agent",
             actor_id=str(agent_id or "").strip() or "unknown",
+            install_id=str(agent_id or "").strip() or None,
             event_class="system_activity",
             detail_level="audit_reference",
             action="provider_unavailable",
@@ -555,6 +558,7 @@ async def _ledger_gateway_brain_turn(
             workspace_id=workspace_id,
             actor_type="agent",
             actor_id=str(agent_id or "").strip() or "unknown",
+            install_id=str(agent_id or "").strip() or None,
             event_class="system_activity",
             detail_level="audit_reference",
             action="gateway_brain_turn",
@@ -578,6 +582,41 @@ async def _ledger_gateway_brain_turn(
         )
     except Exception:
         pass
+
+
+def _sage_chat_ledger_fields(
+    *,
+    spec_install_id: str,
+    agent_label: str,
+    failed: bool,
+) -> tuple[str, str, str, str]:
+    """Ledger identity + honesty for a completed (or failed) chat turn.
+
+    Returns (event_class, action, title, status).
+
+    Pure Sage turn (spec_install_id empty) — event_class/action/title stay
+    exactly "sage_activity"/"sage_chat.*"/"Sage chat *", same taxonomy as
+    before. Specialist turn — the already-reserved (but until now never
+    emitted) "specialist_activity" event_class carries the acting agent's
+    own label, never blended into Sage's identity.
+
+    Either way, a failed turn (failed=True) reads status="error" with an
+    honest "...failed" title — never the same "...completed"/status="logged"
+    a real success gets, so Overview/Inbox never go silent on a failure while
+    the Work tab shows the attempted conversation.
+    """
+    label = str(agent_label or "").strip()
+    verb = "failed" if failed else "completed"
+    if spec_install_id:
+        event_class = "specialist_activity"
+        action = f"agent_chat.{verb}"
+        title = f"{label or 'Agent'} chat {verb}"
+    else:
+        event_class = "sage_activity"
+        action = f"sage_chat.{verb}"
+        title = f"Sage chat {verb}"
+    status = "error" if failed else "logged"
+    return event_class, action, title, status
 
 
 def _friendly_gateway_brain_error(reason: str) -> str:
@@ -1439,6 +1478,7 @@ async def _resolve_specialist_toolset(
         return None
     connectors: set[str] = set()
     tools: set[str] = set()
+    mandate_audience_tools: list[str] = []
     try:
         from server_modules import agent_bindings_repository as _bind
         rows = await _bind.list_agent_connector_bindings(
@@ -1463,11 +1503,25 @@ async def _resolve_specialist_toolset(
             for name, enabled in toggles.items():
                 if enabled and str(name or "").strip():
                     tools.add(str(name).strip())
+        # The owner-declared mandate (fleet_tools "mandate" patch key) — read
+        # from the SAME bundle fetch so this costs no extra round-trip.
+        # Threaded onto session_ctx below so the mandate gate can consult it
+        # without a fetch of its own.
+        meta = bundle.get("install_metadata") if isinstance(bundle, dict) and isinstance(bundle.get("install_metadata"), dict) else (bundle.get("metadata") if isinstance(bundle, dict) else None)
+        mandate = meta.get("mandate") if isinstance(meta, dict) and isinstance(meta.get("mandate"), dict) else {}
+        raw_audience_tools = mandate.get("audience_tools")
+        if isinstance(raw_audience_tools, list):
+            mandate_audience_tools = [str(t) for t in raw_audience_tools]
     except Exception:
         logging.getLogger(__name__).warning(
             "specialist toolset: install bundle load failed for %s — core-only", aid, exc_info=True
         )
-    return {"core": _core_direct_tool_names(), "connectors": connectors, "tools": tools}
+    return {
+        "core": _core_direct_tool_names(),
+        "connectors": connectors,
+        "tools": tools,
+        "mandate_audience_tools": mandate_audience_tools,
+    }
 
 
 def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
@@ -1950,6 +2004,39 @@ async def _run_sage_action_loop_v3(
     # its tool whitelist, tool-call executor identity, and mid-turn memory
     # namespace all key off the install. Empty → master/Sage, unchanged.
     _acting_install_id = str(agent_install_id or "").strip()
+
+    # Owner stop control: a hard block, checked before ANY work (no LLM call,
+    # no tool bundling) — global_pilot / workspace:{id} / agent:{id}, in that
+    # priority order (kill_switch_gate.evaluate_kill_switch). Distinct from
+    # the informational kill_switch_active flag fed into the policy context
+    # elsewhere in this file, which only lets the LLM mention it — this
+    # actually refuses the turn.
+    from server_modules import kill_switch_gate
+
+    _kill_decision = kill_switch_gate.evaluate_kill_switch(
+        tenant_id=tenant_id, workspace_id=workspace_id, agent_id=_acting_install_id,
+    )
+    if _kill_decision.blocked:
+        _stop_reply = {
+            "agent": "This agent is stopped right now — an owner needs to resume it before it can reply.",
+            "workspace": "All agents in this workspace are stopped right now — an owner needs to resume them before they can reply.",
+        }.get(_kill_decision.scope, "Heads up: this is stopped right now. An owner needs to resume it before it can reply.")
+        return {
+            "message": _stop_reply,
+            "error": _kill_decision.reason or "kill_switch_active",
+            "tool_calls": [],
+            "blocked_tools": [],
+            "approvals_required": [],
+            "action_execution_mode": "blocked",
+            "available_tools": [],
+            "route_decision": None,
+            "action_loop_version": _SAGE_OPERATOR_LOOP_VERSION,
+            "loop_budget": {},
+            "raw_final_payload": {},
+            "trace_events": [],
+            "tool_progress_messages": [],
+        }
+
     _specialist_toolset = None
     if _acting_install_id:
         _specialist_toolset = await _resolve_specialist_toolset(
@@ -1999,6 +2086,21 @@ async def _run_sage_action_loop_v3(
         "thread_id": trace_id,
         "request_id": trace_id,
         "client_request_id": trace_id,
+        # Mandate: the tool-execution choke point (skills_service.py's
+        # execute_single_direct_tool_call{,_async}) reads this to decide
+        # whether a non-audience_safe tool call is in-mandate. Derived from
+        # the SAME sender_class this function already uses for tool
+        # visibility filtering (_direct_tool_bundle above) — owner sessions
+        # (no channel_origin) get "owner", channel sessions get whatever
+        # triage_service.resolve_sender_identity() resolved ("owner" stays
+        # owner; "audience"/"unknown" both collapse to "audience").
+        "authority_tier": authority_mandate_service.derive_tier_from_sender_class(sender_class),
+        # The owner-declared mandate allowlist (fleet_tools "mandate" patch)
+        # for THIS specialist, if any — consulted by the same gate alongside
+        # the ToolDescriptor manifest's audience_safe flag. Empty for Sage
+        # (no specialist toolset resolved) and for specialists with no
+        # mandate configured.
+        "mandate_audience_tools": list((_specialist_toolset or {}).get("mandate_audience_tools") or []),
         "metadata": {
             "source": "sage_chat",
             "surface": "sage",
@@ -2190,6 +2292,15 @@ async def _run_sage_action_loop_v3(
     )
     if not reply and not has_any_tool_activity:
         return None
+    # 2026-07-09 first-run integrity fix: a turn that ends with nothing
+    # substantive to say (empty, or the bare catch-all) while at least one
+    # tool got blocked by policy must say so — the Inbox already logs
+    # "Tools blocked by policy"; this surfaces the same fact where the
+    # customer is actually looking. Only fires on the true silence/generic
+    # case (not on a specific, already-honest error from classify_error)
+    # so it never overrides a more precise message with a vaguer one.
+    if collected.get("blocked_tools") and (not reply or reply.strip() == GENERIC_ERROR.channel_text):
+        reply = TOOLS_LIMITED_NO_REPLY.channel_text
     return {
         "message": reply,
         "error": _coerce_text(final_payload.get("error")) or None,
@@ -3524,17 +3635,24 @@ async def handle_sage_chat(
             pass
 
         try:
+            _turn_failed = bool(action_result.get("error"))
+            _ledger_event_class, _ledger_action, _ledger_title, _ledger_status = _sage_chat_ledger_fields(
+                spec_install_id=_spec_install_id,
+                agent_label=str(getattr(_spec, "agent_label", "") or "") if _spec is not None else "",
+                failed=_turn_failed,
+            )
             await activity_ledger_service.append_activity_event(
                 tenant_id=normalized_tenant_id,
                 workspace_id=normalized_workspace_id,
                 actor_type="user",
                 actor_id=actor_user_id or "unknown",
-                event_class="sage_activity",
-                action="sage_chat.completed",
+                install_id=_acting_install_id or None,
+                event_class=_ledger_event_class,
+                action=_ledger_action,
                 trace_id=trace_id,
-                title="Sage chat completed",
+                title=_ledger_title,
                 summary=(normalized_message[:120] + "..." if len(normalized_message) > 120 else normalized_message),
-                status="logged",
+                status=_ledger_status,
                 detail_level="timeline_detail",
                 metadata={
                     "used_context": used_context,
@@ -3899,17 +4017,24 @@ async def handle_sage_chat(
 
     # --- Emit activity ---
     try:
+        _turn_failed = bool(last_error)
+        _ledger_event_class, _ledger_action, _ledger_title, _ledger_status = _sage_chat_ledger_fields(
+            spec_install_id=_spec_install_id,
+            agent_label=str(getattr(_spec, "agent_label", "") or "") if _spec is not None else "",
+            failed=_turn_failed,
+        )
         await activity_ledger_service.append_activity_event(
             tenant_id=normalized_tenant_id,
             workspace_id=normalized_workspace_id,
             actor_type="user",
             actor_id=actor_user_id or "unknown",
-            event_class="sage_activity",
-            action="sage_chat.completed",
+            install_id=_acting_install_id or None,
+            event_class=_ledger_event_class,
+            action=_ledger_action,
             trace_id=trace_id,
-            title="Sage chat completed",
+            title=_ledger_title,
             summary=(normalized_message[:120] + "..." if len(normalized_message) > 120 else normalized_message),
-            status="logged",
+            status=_ledger_status,
             detail_level="timeline_detail",
             metadata={
                 "used_context": used_context,

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from server_modules.agent_turn import AgentTurnRequest, TurnActor
+from server_modules import authority_mandate_service
 from server_modules import direct_tool_execution_service
 from server_modules import no_provider_service
 from server_modules import skills_service
@@ -435,6 +436,7 @@ class SkillsServiceTests(unittest.TestCase):
             tool_call={"name": "memory_update", "arguments": {"filename": "GOALS.md", "content": "# Goals\n\n- Ship memory editing\n"}},
             workspace_id="default",
             thread_id="thread-1",
+            session_ctx={"authority_tier": "owner"},
             callbacks=self._execution_callbacks(),
         )
 
@@ -455,6 +457,7 @@ class SkillsServiceTests(unittest.TestCase):
             },
             workspace_id="default",
             thread_id="thread-1",
+            session_ctx={"authority_tier": "owner"},
             callbacks=self._execution_callbacks(),
         )
 
@@ -475,6 +478,7 @@ class SkillsServiceTests(unittest.TestCase):
             },
             workspace_id="default",
             thread_id="thread-1",
+            session_ctx={"authority_tier": "owner"},
             callbacks=self._execution_callbacks(),
         )
 
@@ -491,6 +495,7 @@ class SkillsServiceTests(unittest.TestCase):
             },
             workspace_id="default",
             thread_id="thread-1",
+            session_ctx={"authority_tier": "owner"},
             callbacks=self._execution_callbacks(),
         )
 
@@ -522,6 +527,7 @@ class SkillsServiceTests(unittest.TestCase):
             },
             workspace_id="default",
             thread_id="thread-1",
+            session_ctx={"authority_tier": "owner"},
             callbacks=callbacks,
         )
         payload = json.loads(raw)
@@ -540,6 +546,7 @@ class SkillsServiceTests(unittest.TestCase):
             },
             workspace_id="default",
             thread_id="thread-1",
+            session_ctx={"authority_tier": "owner"},
             callbacks=self._execution_callbacks(),
         )
         payload = json.loads(raw)
@@ -563,6 +570,7 @@ class SkillsServiceTests(unittest.TestCase):
             },
             workspace_id="default",
             thread_id="thread-1",
+            session_ctx={"authority_tier": "owner"},
             callbacks=self._execution_callbacks(),
         )
         payload = json.loads(raw)
@@ -592,6 +600,7 @@ class SkillsServiceTests(unittest.TestCase):
             },
             workspace_id="default",
             thread_id="thread-1",
+            session_ctx={"authority_tier": "owner"},
             callbacks=self._execution_callbacks(),
         )
         payload = json.loads(raw)
@@ -961,6 +970,7 @@ class SkillsServiceTests(unittest.TestCase):
                     "tenant_id": "tenant-1",
                     "request_id": "chat-request-1",
                     "client_request_id": "chat-request-1",
+                    "authority_tier": "owner",
                 },
                 callbacks=callbacks,
             )
@@ -1020,6 +1030,7 @@ class SkillsServiceTests(unittest.TestCase):
                     "tenant_id": "tenant-1",
                     "request_id": "chat-request-shell",
                     "client_request_id": "chat-request-shell",
+                    "authority_tier": "owner",
                 },
                 callbacks=callbacks,
             )
@@ -1075,6 +1086,7 @@ class SkillsServiceTests(unittest.TestCase):
                     "tenant_id": "tenant-1",
                     "request_id": "chat-request-shell-action-data",
                     "client_request_id": "chat-request-shell-action-data",
+                    "authority_tier": "owner",
                 },
                 callbacks=callbacks,
             )
@@ -1109,7 +1121,7 @@ class SkillsServiceTests(unittest.TestCase):
                 workspace_id="default",
                 thread_id="thread-1",
                 index=1,
-                session_ctx={"request_id": "chat-request-shell"},
+                session_ctx={"request_id": "chat-request-shell", "authority_tier": "owner"},
                 callbacks=callbacks,
             )
 
@@ -1120,6 +1132,222 @@ class SkillsServiceTests(unittest.TestCase):
         self.assertEqual(payload["execution_environment"], "local_gateway")
         self.assertIn("Agent Computer offline", payload["summary"])
         execute_hardware_mock.assert_not_called()
+
+
+class AuthorityMandateGateTests(unittest.TestCase):
+    """Phase-Mandate: execution-time enforcement in the tool-execution choke
+    point (skills_service.execute_single_direct_tool_call{,_async}) — the
+    hard backstop behind audience_tool_filter's visibility-only filter.
+    """
+
+    def _callbacks(self) -> direct_tool_execution_service.DirectToolExecutionCallbacks:
+        return direct_tool_execution_service.DirectToolExecutionCallbacks(
+            compact_step_detail=lambda value: None,
+            titleize_direct_step_token=lambda value: str(value or ""),
+            run_async_tool_call=lambda awaitable: asyncio.run(awaitable),
+            parse_tool_name=lambda name: (
+                tuple(str(name or "").split("__", 1)) if "__" in str(name or "") else tuple(str(name or "").split("_", 1))
+            ),
+            tool_arguments_payload=lambda payload: payload if isinstance(payload, dict) else {},
+            parse_json_object_loose=lambda value: {},
+            safe_positive_int=lambda value, default=0: int(value) if str(value or "").strip().isdigit() else default,
+            normalize_reasoning_effort=lambda value: str(value or "").strip().lower() or None,
+            build_direct_local_tool_config=skills_service.build_direct_local_tool_config,
+            format_direct_local_tool_result=lambda result: json.dumps(result, ensure_ascii=False),
+            build_direct_tool_config=lambda connector_id, action_id, tool_input: {
+                "connector": connector_id,
+                "action": action_id,
+                "input": tool_input,
+            },
+            format_direct_tool_result=lambda result: json.dumps(result, ensure_ascii=False),
+            llm_task=lambda *args, **kwargs: {"ok": True},
+            web_search=lambda query: [],
+            web_fetch=lambda url: f"Fetched {url}",
+            search_memory_notebook=lambda workspace_id, query, max_results=5: [
+                {"path": "MEMORY.md", "query": query, "max_results": max_results}
+            ],
+            get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None: {},
+        )
+
+    def test_audience_tier_blocks_non_audience_safe_tool_even_when_not_visibility_filtered(self) -> None:
+        """shell__exec is never audience_safe. Calling execute_single_direct_tool_call
+        directly (bypassing audience_tool_filter entirely, as if the visibility
+        filter had been skipped or a stale manifest let it through) must still
+        block for an audience-tier caller."""
+        with self.assertRaises(RuntimeError) as ctx:
+            skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "shell__exec", "arguments": {"command": "echo hi"}},
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={"authority_tier": "audience"},
+                callbacks=self._callbacks(),
+            )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+
+    def test_owner_tier_reaches_real_dispatch(self) -> None:
+        """Owner tier bypasses the mandate gate — proceeds to the same
+        local-dev dispatch as before the mandate existed. Forces the
+        deterministic in-process shortcut (rather than the gateway path,
+        which depends on environment state this test shouldn't couple to)
+        so the assertion is about the mandate gate, not about dispatch
+        routing."""
+        with (
+            patch("server_modules.local_tool_executor.is_local_dev", return_value=True),
+            patch("server_modules.skills_service._local_direct_shell_worker_online_exact", return_value=True),
+            patch(
+                "server_modules.local_tool_executor.shell_execute",
+                return_value={"command": "echo hi", "exit_code": 0, "stdout": "hi", "stderr": ""},
+            ) as shell_execute_mock,
+        ):
+            raw = skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "shell__exec", "arguments": {"command": "echo hi"}},
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={"authority_tier": "owner"},
+                callbacks=self._callbacks(),
+            )
+        shell_execute_mock.assert_called_once()
+        self.assertIn('"command": "echo hi"', raw)
+
+    def test_missing_authority_tier_key_fails_closed_to_audience(self) -> None:
+        """A session_ctx with no authority_tier key at all is FAIL-CLOSED,
+        not a pass-through: it's treated as audience (normalize_tier(None)'s
+        own fail-safe), so a non-audience_safe tool is blocked exactly as it
+        would be for an explicitly-audience-tier caller. Flipped from the
+        prior skip-enforcement behavior once the mandate hardening report
+        confirmed every live tier-stamping producer always stamps a tier —
+        a call site reaching this gate with the key missing is either a
+        genuine gap (see mandate_unattributed ledgering) or dead code, never
+        a caller this default needs to protect."""
+        with self.assertRaises(RuntimeError) as ctx:
+            skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "shell__exec", "arguments": {"command": "echo hi"}},
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={},
+                callbacks=self._callbacks(),
+            )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+
+    def test_missing_authority_tier_key_still_allows_audience_safe_tool(self) -> None:
+        """The fail-closed default only restricts non-audience_safe tools —
+        an audience_safe tool (e.g. memory_search) still dispatches normally
+        even with no authority_tier key, same as an explicit audience tier
+        would allow."""
+        raw = skills_service.execute_single_direct_tool_call(
+            tool_call={"name": "memory_search", "arguments": {"query": "goals"}},
+            workspace_id="ws-1",
+            thread_id="thread-1",
+            index=1,
+            session_ctx={},
+            callbacks=self._callbacks(),
+        )
+        self.assertIn("MEMORY.md", raw)
+
+    def test_audience_tier_allows_audience_safe_tool(self) -> None:
+        """memory_search is audience_safe=True (part of the customer_facing
+        preset's 8-tool set) — an audience-tier caller may call it. This is
+        also a regression guard for tool_name resolution: memory_search does
+        NOT follow the connector__action double-underscore convention most
+        other tools use, so the gate must resolve it by raw tool_name, not
+        only via the connector_id/action_id reconstruction."""
+        raw = skills_service.execute_single_direct_tool_call(
+            tool_call={"name": "memory_search", "arguments": {"query": "hello"}},
+            workspace_id="ws-1",
+            thread_id="thread-1",
+            index=1,
+            session_ctx={"authority_tier": "audience"},
+            callbacks=self._callbacks(),
+        )
+        self.assertIn("MEMORY.md", raw)
+
+    def test_async_entrypoint_blocks_hardware_bound_connector_for_audience_tier(self) -> None:
+        """execute_single_direct_tool_call_async handles hardware/file/shell/
+        screenshot/computer on its own branch rather than always delegating
+        to the sync function — the gate must be checked there too."""
+
+        async def _run() -> str:
+            return await skills_service.execute_single_direct_tool_call_async(
+                tool_call={"name": "shell__exec", "arguments": {"command": "echo hi"}},
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={"authority_tier": "audience"},
+                callbacks=self._callbacks(),
+            )
+
+        with self.assertRaises(RuntimeError) as ctx:
+            asyncio.run(_run())
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+
+    def test_schedule_task_owner_tier_wake_request_carries_owner_tier(self) -> None:
+        """fleet__schedule_task, now wired into the live dispatcher: an
+        owner-tier caller's wake request is persisted with authority_tier
+        'owner' (via inherit_tier, not re-derived)."""
+        with patch(
+            "server_modules.bounded_scheduler_service.propose_self_wakeup",
+            new=AsyncMock(return_value={"accepted": True, "wake_request": {"id": "wake-1"}}),
+        ) as propose_mock:
+            raw = skills_service.execute_single_direct_tool_call(
+                tool_call={
+                    "name": "fleet__schedule_task",
+                    "arguments": {"agent_id": "agent-x", "when": "in 30 minutes", "instruction": "Follow up"},
+                },
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={"authority_tier": "owner"},
+                callbacks=self._callbacks(),
+            )
+        result = json.loads(raw)
+        self.assertTrue(result["ok"])
+        self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "owner")
+
+    def test_schedule_task_audience_tier_blocked_by_default(self) -> None:
+        """An end customer must not be able to schedule future agent work —
+        fleet__schedule_task is audience_safe=False and no mandate override
+        is set."""
+        with self.assertRaises(RuntimeError) as ctx:
+            skills_service.execute_single_direct_tool_call(
+                tool_call={
+                    "name": "fleet__schedule_task",
+                    "arguments": {"agent_id": "agent-x", "when": "in 30 minutes", "instruction": "Follow up"},
+                },
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={"authority_tier": "audience"},
+                callbacks=self._callbacks(),
+            )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+
+    def test_schedule_task_audience_tier_allowed_when_owner_lists_it_in_mandate(self) -> None:
+        """The owner opts a specific agent into letting audience-tier callers
+        schedule work by listing 'fleet.schedule_task' in that agent's
+        mandate.audience_tools — the resulting wake request still carries
+        the audience tier (never upgraded), so its later execution stays
+        audience end-to-end."""
+        with patch(
+            "server_modules.bounded_scheduler_service.propose_self_wakeup",
+            new=AsyncMock(return_value={"accepted": True, "wake_request": {"id": "wake-2"}}),
+        ) as propose_mock:
+            raw = skills_service.execute_single_direct_tool_call(
+                tool_call={
+                    "name": "fleet__schedule_task",
+                    "arguments": {"agent_id": "agent-x", "when": "in 30 minutes", "instruction": "Follow up"},
+                },
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={"authority_tier": "audience", "mandate_audience_tools": ["fleet.schedule_task"]},
+                callbacks=self._callbacks(),
+            )
+        result = json.loads(raw)
+        self.assertTrue(result["ok"])
+        self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "audience")
 
 
 if __name__ == "__main__":

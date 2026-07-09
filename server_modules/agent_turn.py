@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Literal, Optional, Protocol
 
 from server_modules import agent_trace_service
 from server_modules import agent_registry_repository
+from server_modules import authority_mandate_service
 from server_modules import deployed_agent_virtual_runtime_service
 from server_modules import healthguide_safety_service
 from server_modules import session_service
@@ -130,6 +131,14 @@ class AgentTurnRequest:
     response_mode: ResponseMode = "stream"
     machine_target: Optional[str] = None
     policy_context: Dict[str, Any] = field(default_factory=dict)
+    # Mandate: authority tier of the turn's initiating principal ("owner" |
+    # "audience" | "system") — see authority_mandate_service.py. Defaults to
+    # the least-privileged tier so a builder that forgets to set it fails
+    # safe. Every function that reconstructs an AgentTurnRequest from an
+    # existing one (promotion, normalization, ...) MUST forward this field
+    # explicitly — it is not carried automatically the way dataclasses.replace
+    # would carry it, because those builders construct field-by-field.
+    authority_tier: str = "audience"
 
 
 @dataclass(slots=True)
@@ -396,7 +405,14 @@ def _current_user_is_owner(current_user: Any) -> bool:
         return True
     auth_type = str(current_user.get("auth_type") or "").strip().lower()
     if auth_type == "api_key":
-        return True
+        # Mandate: a genuinely api-key-authenticated request always carries
+        # the resolved key owner's identity. An api_key-typed dict with NO
+        # identity at all is turn_ingress_service._default_system_user()'s
+        # placeholder for "no real caller" (an unowned/system-triggered run
+        # or turn) — resolving that to owner would let any such trigger
+        # silently execute with owner authority. Require an actual identity
+        # before trusting the auth_type shortcut.
+        return bool(str(current_user.get("user_id") or "").strip() or str(current_user.get("email") or "").strip())
     return str(current_user.get("role") or "").strip().lower() == "owner"
 
 
@@ -756,6 +772,7 @@ def serialize_agent_turn_request(request: AgentTurnRequest) -> Dict[str, Any]:
         "response_mode": request.response_mode,
         "machine_target": str(request.machine_target or "").strip() or None,
         "policy_context": dict(request.policy_context or {}),
+        "authority_tier": authority_mandate_service.normalize_tier(request.authority_tier),
     }
 
 
@@ -859,6 +876,7 @@ def _promote_turn_request_to_primary_engine_path(request: AgentTurnRequest) -> A
         response_mode="artifact",
         machine_target=request.machine_target,
         policy_context=dict(request.policy_context or {}),
+        authority_tier=request.authority_tier,
     )
 
 
@@ -907,6 +925,7 @@ def build_agent_turn_request(payload: Dict[str, Any]) -> AgentTurnRequest:
         ),
         machine_target=str(payload.get("machine_target") or "").strip() or None,
         policy_context=payload.get("policy_context") if isinstance(payload.get("policy_context"), dict) else {},
+        authority_tier=authority_mandate_service.normalize_tier(payload.get("authority_tier")),
     )
     return _promote_turn_request_to_primary_engine_path(request)
 
@@ -930,6 +949,7 @@ def build_inbound_agent_turn_request(
     response_mode: ResponseMode = "stream",
     machine_target: Optional[str] = None,
     policy_context: Optional[Dict[str, Any]] = None,
+    authority_tier: Optional[str] = None,
 ) -> AgentTurnRequest:
     resolved_session_id = str(session_id or "agent-turn").strip() or "agent-turn"
     resolved_thread_id = str(thread_id or resolved_session_id).strip() or resolved_session_id
@@ -957,6 +977,7 @@ def build_inbound_agent_turn_request(
         response_mode=response_mode,
         machine_target=str(machine_target or "").strip() or None,
         policy_context=dict(policy_context or {}),
+        authority_tier=authority_mandate_service.normalize_tier(authority_tier),
     )
 
 
@@ -1004,6 +1025,9 @@ def build_direct_chat_turn_request(
         response_mode="stream",
         machine_target=str(body.get("machine_target") or "").strip() or None,
         policy_context=policy_context,
+        authority_tier=authority_mandate_service.derive_tier_from_owner_flag(
+            _current_user_is_owner(current_user)
+        ),
     )
     return _promote_turn_request_to_primary_engine_path(request)
 
@@ -1057,6 +1081,7 @@ def normalize_server_owned_turn_request(
         response_mode=turn_request.response_mode,
         machine_target=turn_request.machine_target,
         policy_context=dict(turn_request.policy_context or {}),
+        authority_tier=turn_request.authority_tier,
     )
 
 
@@ -1335,12 +1360,21 @@ def resolve_run_start_turn_request(
         request = stamp_request_owner_fn(request, current_user)
     return RunStartTurnResolution(
         request=request,
-        turn_request=build_run_start_turn_request(request),
+        turn_request=build_run_start_turn_request(request, current_user=current_user),
     )
 
 
-def build_run_start_turn_request(req: Any) -> AgentTurnRequest:
+def build_run_start_turn_request(req: Any, *, current_user: Any = None) -> AgentTurnRequest:
     metadata = _metadata_dict(getattr(req, "metadata", None))
+    # Mandate: an explicit authority_tier in metadata (e.g. a run spawned from
+    # an existing turn, carrying that turn's tier forward per
+    # authority_mandate_service.inherit_tier) always wins over deriving fresh
+    # from current_user — inheritance must not be clobbered by a re-derive.
+    resolved_authority_tier = (
+        authority_mandate_service.normalize_tier(metadata.get("authority_tier"))
+        if metadata.get("authority_tier") is not None
+        else authority_mandate_service.derive_tier_from_owner_flag(_current_user_is_owner(current_user))
+    )
     actor_id = _request_actor_id(None, metadata)
     workspace_id = str(getattr(req, "workspace_id", None) or metadata.get("workspace_id") or "default").strip() or "default"
     session_id = (
@@ -1392,6 +1426,7 @@ def build_run_start_turn_request(req: Any) -> AgentTurnRequest:
             or None
         ),
         policy_context={key: value for key, value in policy_context.items() if value not in (None, "", [], {})},
+        authority_tier=resolved_authority_tier,
     )
 
 

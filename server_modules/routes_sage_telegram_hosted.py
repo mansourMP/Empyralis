@@ -63,7 +63,7 @@ async def start_pairing(
     workspace_id = auth_module.enforce_workspace_access(
         current_user,
         body.workspace_id,
-        minimum_role="admin",
+        minimum_role="owner",
     )
     if not hosted.is_configured():
         raise HTTPException(status_code=503, detail="Sage Telegram hosted bot is not configured")
@@ -102,7 +102,7 @@ async def pairing_status(
     workspace_id = auth_module.enforce_workspace_access(
         current_user,
         workspace_id,
-        minimum_role="admin",
+        minimum_role="owner",
     )
     pending_code = hosted.pairing_code_for_workspace(workspace_id)
     already_paired = hosted.is_workspace_paired(workspace_id)
@@ -353,7 +353,7 @@ async def unpair(
     workspace_id = auth_module.enforce_workspace_access(
         current_user,
         workspace_id,
-        minimum_role="admin",
+        minimum_role="owner",
     )
     count = hosted.unpair_workspace(workspace_id)
     return {"unpaired": True, "removed": count}

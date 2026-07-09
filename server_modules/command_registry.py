@@ -136,12 +136,55 @@ def get_inline_shortcuts() -> list[str]:
     return result
 
 
-def _is_sender_owner(sender_id: str, workspace_id: str) -> bool:
+async def _is_sender_owner(sender_id: str, workspace_id: str) -> bool:
     """Check if *sender_id* is the workspace owner.
 
-    Stub — returns False until workspace ownership is wired.
-    When implemented, this queries the workspace's owner_id from the DB.
+    Matches *sender_id* against the workspace's identity_links — the same
+    owner-linkage triage_service.resolve_sender_identity() checks for channel
+    sender classification (identity_links[channel_type] = {user_id,
+    sender_hash}). Deliberately channel-agnostic: this signature has no
+    channel_origin, and a sender_id (a Telegram numeric id, a Discord
+    snowflake, ...) is not expected to collide across channel types, so a
+    match on ANY linked channel is treated as owner. Fails to False (not
+    owner) on any missing input or lookup error — an owner-gated command
+    must never execute for a sender we couldn't positively identify.
     """
+    clean_sender_id = str(sender_id or "").strip()
+    clean_workspace_id = str(workspace_id or "").strip()
+    if not clean_sender_id or not clean_workspace_id:
+        return False
+    try:
+        from server_modules.control_plane_repository import get_workspace_by_id
+
+        workspace = await get_workspace_by_id(clean_workspace_id)
+    except Exception:
+        return False
+    if not isinstance(workspace, dict):
+        return False
+
+    raw_links = workspace.get("identity_links")
+    identity_links: Dict[str, Any] = {}
+    if isinstance(raw_links, dict):
+        identity_links = raw_links
+    elif isinstance(raw_links, str) and raw_links.strip():
+        import json
+
+        try:
+            parsed = json.loads(raw_links)
+        except Exception:
+            return False
+        if isinstance(parsed, dict):
+            identity_links = parsed
+
+    for channel_data in identity_links.values():
+        if not isinstance(channel_data, dict):
+            continue
+        linked_user_id = str(channel_data.get("user_id") or "").strip()
+        owner_sender_hash = str(channel_data.get("sender_hash") or "").strip()
+        if linked_user_id and linked_user_id == clean_sender_id:
+            return True
+        if owner_sender_hash and owner_sender_hash == clean_sender_id:
+            return True
     return False
 
 
@@ -227,7 +270,7 @@ async def process_message(
         remaining = _re.sub(r"\s{2,}", " ", remaining).strip()
 
     # ── 3. Access control ──────────────────────────────────────────────
-    is_owner = _is_sender_owner(sender_id, workspace_id)
+    is_owner = await _is_sender_owner(sender_id, workspace_id)
     authorized_directives: list[tuple[str, str]] = []
     for name, args in found_directives:
         cmd = get(name)
@@ -332,7 +375,7 @@ async def dispatch(
     # do not reveal the command exists to an unauthorized sender.
     if cmd and cmd.access == "owner":
         sender_id = str(kwargs.get("sender_id") or kwargs.get("channel_sender_id") or "")
-        if not _is_sender_owner(sender_id, workspace_id):
+        if not await _is_sender_owner(sender_id, workspace_id):
             return None
 
     return await handler(

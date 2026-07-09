@@ -2,9 +2,9 @@ import queue
 import tempfile
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from server_modules import run_service, run_state_repository, runs_execution, runs_output, safe_mode_service, shared
+from server_modules import authority_mandate_service, run_service, run_state_repository, runs_execution, runs_output, safe_mode_service, shared
 from server_modules.runtime_state_store import init_runtime_state_db
 
 
@@ -975,7 +975,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
             runs_execution._workflow_execute_connector_action(
                 "run-private-url",
                 "node-private-url",
-                {"workspace_id": "default", "metadata": {}},
+                {"workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
                 {
                     "connector": "custom_api",
                     "action_id": "http_request",
@@ -992,7 +992,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         first = runs_execution._workflow_execute_connector_action(
             "run-dup-connector",
             "tool-dup-1",
-            {"workflow_id": "wf_dup", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_dup", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "custom_api",
                 "action_id": "http_request",
@@ -1005,7 +1005,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         second = runs_execution._workflow_execute_connector_action(
             "run-dup-connector",
             "tool-dup-1",
-            {"workflow_id": "wf_dup", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_dup", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "custom_api",
                 "action_id": "http_request",
@@ -1040,7 +1040,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         result = runs_execution._workflow_execute_connector_action(
             "run-incident",
             "tool-incident",
-            {"tenant_id": "tenant-1", "workspace_id": "workspace-1", "metadata": {}},
+            {"tenant_id": "tenant-1", "workspace_id": "workspace-1", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "telegram_bot",
                 "action_id": "send_message",
@@ -1062,7 +1062,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         first = runs_execution._workflow_execute_connector_action(
             "run-auth-1",
             "tool-auth-1",
-            {"workflow_id": "wf_auth", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_auth", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "custom_api",
                 "action_id": "http_request",
@@ -1076,7 +1076,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         second = runs_execution._workflow_execute_connector_action(
             "run-auth-1",
             "tool-auth-1",
-            {"workflow_id": "wf_auth", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_auth", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "custom_api",
                 "action_id": "http_request",
@@ -1102,6 +1102,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
             "workflow_id": "wf_retry_root",
             "workspace_id": "default",
             "metadata": {"retry_root_run_id": "retry-root-1"},
+            "authority_tier": "owner",
         }
         first = runs_execution._workflow_execute_connector_action(
             "run-root-1",
@@ -1150,7 +1151,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
             first = runs_execution._workflow_execute_connector_action(
                 "run-account-1",
                 "tool-account-1",
-                {"workflow_id": "wf_account", "workspace_id": "default", "metadata": {}},
+                {"workflow_id": "wf_account", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
                 {
                     "connector": "discord_bot",
                     "action_id": "send_message",
@@ -1161,7 +1162,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
             second = runs_execution._workflow_execute_connector_action(
                 "run-account-1",
                 "tool-account-1",
-                {"workflow_id": "wf_account", "workspace_id": "default", "metadata": {}},
+                {"workflow_id": "wf_account", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
                 {
                     "connector": "discord_bot",
                     "action_id": "send_message",
@@ -1187,7 +1188,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         first = runs_execution._workflow_execute_connector_action(
             "run-doc-1",
             "tool-doc-1",
-            {"workflow_id": "wf_doc", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_doc", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "google_workspace",
                 "action_id": "create_doc",
@@ -1198,7 +1199,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         second = runs_execution._workflow_execute_connector_action(
             "run-doc-1",
             "tool-doc-1",
-            {"workflow_id": "wf_doc", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_doc", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "google_workspace",
                 "action_id": "create_doc",
@@ -1228,7 +1229,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         first = runs_execution._workflow_execute_connector_action(
             "run-draft-new-1",
             "tool-draft-new-1",
-            {"workflow_id": "wf_draft_new", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_draft_new", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "google_workspace",
                 "action_id": "draft_email",
@@ -1241,7 +1242,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         second = runs_execution._workflow_execute_connector_action(
             "run-draft-new-2",
             "tool-draft-new-1",
-            {"workflow_id": "wf_draft_new", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_draft_new", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "google_workspace",
                 "action_id": "draft_email",
@@ -1282,14 +1283,14 @@ class RunsExecutionGraphTests(unittest.TestCase):
         first = runs_execution._workflow_execute_connector_action(
             "run-calendar-new-1",
             "tool-calendar-new-1",
-            {"workflow_id": "wf_calendar_new", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_calendar_new", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             dict(config),
             current_text="Create event twice on purpose",
         )
         second = runs_execution._workflow_execute_connector_action(
             "run-calendar-new-2",
             "tool-calendar-new-1",
-            {"workflow_id": "wf_calendar_new", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_calendar_new", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             dict(config),
             current_text="Create event twice on purpose",
         )
@@ -1311,7 +1312,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         first = runs_execution._workflow_execute_connector_action(
             "run-doc-token",
             "tool-doc-token",
-            {"workflow_id": "wf_doc_token", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_doc_token", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "google_workspace",
                 "action_id": "create_doc",
@@ -1323,7 +1324,7 @@ class RunsExecutionGraphTests(unittest.TestCase):
         second = runs_execution._workflow_execute_connector_action(
             "run-doc-token",
             "tool-doc-token",
-            {"workflow_id": "wf_doc_token", "workspace_id": "default", "metadata": {}},
+            {"workflow_id": "wf_doc_token", "workspace_id": "default", "metadata": {}, "authority_tier": "owner"},
             {
                 "connector": "google_workspace",
                 "action_id": "create_doc",
@@ -1988,6 +1989,164 @@ class RunsExecutionGraphTests(unittest.TestCase):
         self.assertEqual(items["subflow_1"]["status"], "succeeded")
         self.assertFalse(items["subflow_1"]["waiting_for_approval"])
         self.assertEqual(items["subflow_1"]["child_run_id"], "child-run-wait")
+
+
+class ConnectorActionMandateGateTests(unittest.TestCase):
+    """runs_execution._workflow_execute_connector_action historically bypassed
+    skills_service's mandate gate entirely — the second choke point. These
+    tests exercise the gate now applied there directly (not mocked). FAIL-
+    CLOSED (mandate completion follow-up): every other _workflow_execute_
+    connector_action call in this file was updated to pass authority_tier:
+    "owner" explicitly — they test pre-mandate dispatch/duplicate-guard
+    behavior, not the gate, and a real owner-configured/agent-turn-spawned
+    run is what they represent."""
+
+    def _bundle(self, *, audience_tools=None):
+        return {
+            "id": "install-1",
+            "install_metadata": {
+                "mandate": {"audience_tools": list(audience_tools or [])},
+            },
+        }
+
+    def test_no_stamped_tier_blocked_fail_closed(self):
+        """Enumerated every producer reaching run_service.create_run's single
+        call site (see the mandate hardening follow-up report) — none leave
+        a run with no derivable tier. A context with no authority_tier
+        anywhere now normalizes to audience, same as skills_service's gate,
+        and blocks a non-audience_safe connector action rather than passing
+        through."""
+        with self.assertRaises(RuntimeError) as ctx:
+            runs_execution._workflow_execute_connector_action(
+                "run-no-tier",
+                "node-no-tier",
+                {"workspace_id": "default", "agent_id": "agent-1", "metadata": {}},
+                {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
+                current_text="Call API",
+            )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+
+    def test_no_stamped_tier_ledgers_unattributed(self):
+        """A missing tier is logged as mandate_unattributed (non-blocking
+        observability) in addition to the mandate_blocked denial — so a
+        producer that still isn't stamping a tier stays visible instead of
+        silently defaulting forever."""
+        with patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as ledger_mock:
+            with self.assertRaises(RuntimeError):
+                runs_execution._workflow_execute_connector_action(
+                    "run-no-tier-2",
+                    "node-no-tier-2",
+                    {"workspace_id": "default", "agent_id": "agent-1", "metadata": {}},
+                    {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
+                    current_text="Call API",
+                )
+        event_classes = [call.kwargs.get("event_class") for call in ledger_mock.await_args_list]
+        self.assertIn(authority_mandate_service.MANDATE_UNATTRIBUTED_EVENT_CLASS, event_classes)
+        self.assertIn(authority_mandate_service.MANDATE_BLOCKED_EVENT_CLASS, event_classes)
+
+    def test_audience_tier_blocked_when_not_in_mandate_audience_tools(self):
+        """Connector/MCP actions default NOT audience_safe (fail-safe) — an
+        audience-tier caller is blocked unless the owner explicitly listed
+        this exact tool in the agent's mandate.audience_tools."""
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=self._bundle(audience_tools=[])),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                runs_execution._workflow_execute_connector_action(
+                    "run-audience-blocked",
+                    "node-audience-blocked",
+                    {
+                        "workspace_id": "default",
+                        "tenant_id": "tenant-1",
+                        "agent_id": "agent-1",
+                        "authority_tier": "audience",
+                        "metadata": {},
+                    },
+                    {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
+                    current_text="Call API",
+                )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+
+    def test_audience_tier_allowed_when_tool_in_mandate_audience_tools(self):
+        """The owner-declared mandate allowlist makes a connector/MCP action
+        audience-callable -- the ONLY way one becomes audience_safe."""
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle(audience_tools=["custom_api.http_request"])),
+            ),
+            patch(
+                "server_modules.runs_execution.http_json_request",
+                return_value={"status": 200, "json": {"ok": True}, "text": ""},
+            ),
+        ):
+            result = runs_execution._workflow_execute_connector_action(
+                "run-audience-allowed",
+                "node-audience-allowed",
+                {
+                    "workspace_id": "default",
+                    "tenant_id": "tenant-1",
+                    "agent_id": "agent-1",
+                    "authority_tier": "audience",
+                    "metadata": {},
+                },
+                {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
+                current_text="Call API",
+            )
+        self.assertIn("Connector action completed", result["summary"])
+
+    def test_owner_tier_unaffected_by_empty_mandate(self):
+        """Owner unaffected: owner tier bypasses the mandate check entirely,
+        with or without a mandate.audience_tools allowlist."""
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle(audience_tools=[])),
+            ),
+            patch(
+                "server_modules.runs_execution.http_json_request",
+                return_value={"status": 200, "json": {"ok": True}, "text": ""},
+            ),
+        ):
+            result = runs_execution._workflow_execute_connector_action(
+                "run-owner",
+                "node-owner",
+                {
+                    "workspace_id": "default",
+                    "tenant_id": "tenant-1",
+                    "agent_id": "agent-1",
+                    "authority_tier": "owner",
+                    "metadata": {},
+                },
+                {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
+                current_text="Call API",
+            )
+        self.assertIn("Connector action completed", result["summary"])
+
+    def test_tier_read_from_nested_agent_turn_request_metadata(self):
+        """A durable AgentTurnRequest's tier survives into the run context
+        nested at metadata.agent_turn_request.authority_tier (serialize_
+        agent_turn_request's shape) -- the gate must find it there too, not
+        only as a direct top-level key."""
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=self._bundle(audience_tools=[])),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                runs_execution._workflow_execute_connector_action(
+                    "run-nested-tier",
+                    "node-nested-tier",
+                    {
+                        "workspace_id": "default",
+                        "tenant_id": "tenant-1",
+                        "agent_id": "agent-1",
+                        "metadata": {"agent_turn_request": {"authority_tier": "audience"}},
+                    },
+                    {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
+                    current_text="Call API",
+                )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
 
 
 if __name__ == "__main__":

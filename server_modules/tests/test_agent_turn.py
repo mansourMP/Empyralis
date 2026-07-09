@@ -582,6 +582,58 @@ class AgentTurnTests(unittest.TestCase):
 
         self.assertEqual(turn_request.machine_target, "local-worker-1")
 
+    def test_build_run_start_turn_request_system_placeholder_user_is_not_owner(self):
+        """turn_ingress_service._default_system_user()'s placeholder for 'no
+        real caller' has auth_type='api_key' with an EMPTY identity — a
+        genuine api-key-authenticated request always resolves to a real
+        user_id/email. Without this fix, every unowned/system-triggered run
+        (e.g. a fired weekly schedule with no tier persisted on it) would
+        silently execute with owner authority."""
+        run_request = RunStartRequest(
+            engine="orion",
+            workspace_id="workspace-1",
+            user_goal="Scheduled check-in",
+            metadata={},
+        )
+        turn_request = build_run_start_turn_request(
+            run_request,
+            current_user={"auth_type": "api_key", "user_id": "", "email": ""},
+        )
+        self.assertEqual(turn_request.authority_tier, "audience")
+
+    def test_build_run_start_turn_request_real_api_key_owner_still_resolves_owner(self):
+        """A genuinely api-key-authenticated request — real user_id/email
+        resolved by the auth layer — still gets owner tier; the fix only
+        closes the empty-identity placeholder case, not real api-key auth."""
+        run_request = RunStartRequest(
+            engine="orion",
+            workspace_id="workspace-1",
+            user_goal="API-triggered run",
+            metadata={},
+        )
+        turn_request = build_run_start_turn_request(
+            run_request,
+            current_user={"auth_type": "api_key", "user_id": "user-42", "email": ""},
+        )
+        self.assertEqual(turn_request.authority_tier, "owner")
+
+    def test_build_run_start_turn_request_persisted_tier_wins_over_system_placeholder(self):
+        """A schedule created by the owner and persisted with its own tier
+        (gap-1-style, same pattern as wake requests) is inherited even when
+        it later fires through the system placeholder — inheritance must
+        not be clobbered by the safe default."""
+        run_request = RunStartRequest(
+            engine="orion",
+            workspace_id="workspace-1",
+            user_goal="Scheduled check-in",
+            metadata={"authority_tier": "owner"},
+        )
+        turn_request = build_run_start_turn_request(
+            run_request,
+            current_user={"auth_type": "api_key", "user_id": "", "email": ""},
+        )
+        self.assertEqual(turn_request.authority_tier, "owner")
+
     def test_build_direct_chat_turn_request_tracks_client_request_id_in_context_hints(self):
         request = build_direct_chat_turn_request(
             current_user={"user_id": "user-1", "email": "user@example.com"},
