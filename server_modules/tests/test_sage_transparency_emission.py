@@ -239,7 +239,6 @@ class SageTransparencyEmissionTests(unittest.TestCase):
                 tool_calls=[{"name": "search", "status": "completed"}],
             ),
             audience="owner",
-            visibility_level="standard",
         )
         payloads = events_to_payloads(events, audience="owner")
         tool_payload = [p for p in payloads if p.get("tool_name")]

@@ -529,6 +529,12 @@ class SageAgentRuntimePersistenceTests(unittest.TestCase):
 
 class SageAgentRuntimeAuditTests(unittest.TestCase):
     def test_activity_event_emitted(self):
+        # The action loop must itself succeed (not merely fall back to a
+        # successful generate_chat_reply_with_provider_fallback mock) — the
+        # 2026-07-09 attribution fix classifies the ledger event as failed
+        # whenever action_result carries an error, so a genuinely successful
+        # stream is required to test the "completed" event honestly.
+        stream_events = [{"type": "final", "payload": {"reply": "Reply", "actions": [], "error": ""}}]
         with (
             patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile") as mock_profile,
             patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
@@ -536,7 +542,9 @@ class SageAgentRuntimeAuditTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": True, "local_gateway_online": True}),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_activity,
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -545,7 +553,6 @@ class SageAgentRuntimeAuditTests(unittest.TestCase):
             mock_files.return_value = {}
             mock_mem.return_value = ""
             mock_provider.return_value = ("deepseek", {"api_key": "test-key"})
-            mock_generate.return_value = ("Reply", {}, "deepseek", "")
 
             _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", tenant_id="t-1", message="hello",
@@ -562,8 +569,55 @@ class SageAgentRuntimeAuditTests(unittest.TestCase):
             kwargs = sage_activity_calls[0].kwargs
             self.assertEqual(kwargs["event_class"], "sage_activity")
             self.assertEqual(kwargs["action"], "sage_chat.completed")
+            self.assertEqual(kwargs["status"], "logged")
             self.assertEqual(kwargs["workspace_id"], "ws-1")
             self.assertEqual(kwargs["tenant_id"], "t-1")
+
+    def test_activity_event_emitted_as_failed_on_provider_error(self):
+        """2026-07-09 attribution fix: a turn that fails must ledger as
+        failed/error, never silently as "completed"/"logged" — this is the
+        exact bug that made a failed conversation invisible on Overview
+        while the Work tab showed it happened. The action loop synthesizes a
+        user-facing reply (fix #1's honest classify_error text) even when
+        the underlying provider call failed — action_result still carries
+        that failure in its "error" key, which is what the ledger must key
+        off, not whether some reply text exists."""
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "The AI connection needs attention.", "actions": [], "error": "provider_generation_failed"},
+        }]
+        with (
+            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test-key"})),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": True, "local_gateway_online": True}),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_activity,
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", tenant_id="t-1", message="hello",
+                current_user={"user_id": "u-1"},
+            ))
+
+            failed_calls = [
+                call for call in mock_activity.await_args_list
+                if call.kwargs.get("action") == "sage_chat.failed"
+            ]
+            self.assertEqual(len(failed_calls), 1)
+            kwargs = failed_calls[0].kwargs
+            self.assertEqual(kwargs["status"], "error")
+            self.assertEqual(kwargs["title"], "Sage chat failed")
+            completed_calls = [
+                call for call in mock_activity.await_args_list
+                if call.kwargs.get("action") == "sage_chat.completed"
+            ]
+            self.assertEqual(len(completed_calls), 0)
 
     def test_security_audit_event_emitted(self):
         with (
@@ -1088,6 +1142,51 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
         # responds naturally instead of emitting a blocking approval card
         self.assertTrue(mock_stream.called)
 
+    def test_main_sage_chat_explains_blocked_tools_instead_of_silence(self):
+        """2026-07-09 first-run integrity fix: a turn that ends with nothing
+        substantive to say, with a tool blocked by policy along the way,
+        must say so honestly instead of returning silence or an unrelated
+        generic message."""
+        stream_events = [
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "trace.failed",
+                    "tool_call_id": "call-1",
+                    "data": {"code": "web__search", "message": "tool not enabled for this agent"},
+                },
+            },
+            {
+                "type": "final",
+                "payload": {"reply": "", "actions": [], "error": ""},
+            },
+        ]
+        with (
+            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
+            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": True, "local_gateway_online": True}),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            result = _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1",
+                message="search the web for today's news",
+            ))
+
+        self.assertTrue(result["blocked_tools"])
+        self.assertNotEqual(result["message"], "")
+        self.assertIn("doesn't have every tool turned on", result["message"])
+        self.assertIn("Tools", result["message"])
+        self.assertFalse(mock_generate.called)
+
     def test_main_sage_chat_invokes_matching_mcp_skill(self):
         mcp_skill = SimpleNamespace(
             id="mcp:inventory-feed:lookup_stock",
@@ -1325,6 +1424,96 @@ class SageTaskRouteDecisionTests(unittest.TestCase):
         self.assertEqual(decision["mode"], "gateway_required")
         self.assertEqual(decision["user_label"], "Computer Assistant")
         self.assertTrue(decision["approval_required"])
+
+
+class SageActionLoopKillSwitchTests(unittest.TestCase):
+    """The owner stop control's hard block — checked before any LLM call or
+    tool bundling, first thing in _run_sage_action_loop_v3."""
+
+    def _call(self, *, agent_install_id=""):
+        return _run(sage_agent_runtime_service._run_sage_action_loop_v3(
+            workspace_id="ws-1",
+            tenant_id="tenant-1",
+            message="hello",
+            provider="anthropic",
+            model="claude",
+            credentials={},
+            trace_id="trace-1",
+            actor_user_id="user-1",
+            system_prompt="",
+            prior_messages=[],
+            agent_install_id=agent_install_id,
+        ))
+
+    def test_agent_stopped_refuses_before_any_work(self):
+        from server_modules import kill_switch_gate
+
+        decision = kill_switch_gate.KillSwitchDecision(
+            blocked=True, reason="agent_kill_active", scope="agent",
+            detail="Agent agent-x has been stopped by its owner.",
+        )
+        with patch(
+            "server_modules.kill_switch_gate.evaluate_kill_switch", return_value=decision,
+        ) as evaluate_mock:
+            result = self._call(agent_install_id="agent-x")
+
+        evaluate_mock.assert_called_once_with(tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-x")
+        self.assertIsNotNone(result)
+        self.assertIn("stopped", result["message"].lower())
+        self.assertIn("owner", result["message"].lower())
+        self.assertEqual(result["error"], "agent_kill_active")
+        self.assertEqual(result["action_execution_mode"], "blocked")
+        self.assertEqual(result["tool_calls"], [])
+        self.assertEqual(result["available_tools"], [])
+
+    def test_workspace_stopped_refuses_every_agent(self):
+        from server_modules import kill_switch_gate
+
+        decision = kill_switch_gate.KillSwitchDecision(
+            blocked=True, reason="workspace_kill_active", scope="workspace",
+            detail="Workspace ws-1 has been stopped.",
+        )
+        with patch("server_modules.kill_switch_gate.evaluate_kill_switch", return_value=decision):
+            result = self._call(agent_install_id="agent-x")
+
+        self.assertIn("all agents", result["message"].lower())
+        self.assertIn("workspace", result["message"].lower())
+
+    def test_workspace_stop_also_refuses_sage_itself(self):
+        """agent_install_id="" (Sage/master, not a specialist) still hits the
+        workspace-wide block — 'stop all agents' means all agents, including
+        the operator's own conversation."""
+        from server_modules import kill_switch_gate
+
+        decision = kill_switch_gate.KillSwitchDecision(
+            blocked=True, reason="workspace_kill_active", scope="workspace",
+            detail="Workspace ws-1 has been stopped.",
+        )
+        with patch("server_modules.kill_switch_gate.evaluate_kill_switch", return_value=decision):
+            result = self._call(agent_install_id="")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["action_execution_mode"], "blocked")
+
+    def test_not_stopped_reaches_real_dispatch(self):
+        """A false decision must NOT trip the early return — proceeds past
+        the block into the real loop body. Patches the very next thing the
+        function touches (_resolve_specialist_toolset) to prove control
+        reached there, rather than asserting on an unmocked downstream
+        failure."""
+        from server_modules import kill_switch_gate
+
+        decision = kill_switch_gate.KillSwitchDecision(blocked=False, reason="", scope="")
+        with (
+            patch("server_modules.kill_switch_gate.evaluate_kill_switch", return_value=decision),
+            patch.object(
+                sage_agent_runtime_service, "_resolve_specialist_toolset",
+                new=AsyncMock(side_effect=RuntimeError("reached_specialist_toolset_resolution")),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._call(agent_install_id="agent-x")
+        self.assertEqual(str(ctx.exception), "reached_specialist_toolset_resolution")
 
 
 if __name__ == "__main__":

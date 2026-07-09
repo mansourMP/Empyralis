@@ -2141,6 +2141,14 @@ async def handle_cloud_channel_inbound(
 
     if not external_message_id or not text:
         raise ValueError("cloud_channel_inbound requires external_message_id and text")
+    if not remote_jid:
+        # sender_id (remote_jid) feeds straight into the Sage bridge's
+        # channel_origin+sender_id sender-classification (mandate hardening
+        # report). A missing sender_id there isn't "unclassifiable" — it's
+        # silently read as no live sender at all, which defaults to owner
+        # tier. Reject rather than let a malformed relay payload buy owner
+        # authority.
+        raise ValueError("cloud_channel_inbound requires a non-empty sender_id")
 
     # ── Shared command dispatcher ──
     from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd

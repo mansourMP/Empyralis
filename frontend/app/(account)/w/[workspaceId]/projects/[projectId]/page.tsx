@@ -1,16 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { Bot, Calendar, DollarSign, Hash, Zap } from "lucide-react";
+import { Bot, Calendar, DollarSign, Hash, PanelRightClose, PanelRightOpen, Zap } from "lucide-react";
 
 import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
 import { useBreadcrumbLabel, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { timeAgo, tintKeyForIndex, TINTS } from "@/lib/workspace/fleet/fleet-presentation";
-import { AgentsList } from "@/lib/workspace/fleet/AgentsList";
+import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
-import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "@/lib/workspace/fleet/FleetRightPanel";
+import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton } from "@/lib/workspace/fleet/fleet-states";
@@ -25,6 +25,21 @@ const SORT_OPTIONS = [
   { value: "cost", label: "Cost" },
   { value: "name", label: "Name" },
 ];
+
+type FilterState = { status: string; channel: string; sort: SortMode };
+
+// Same URL-backed view state as the flat agents list (agents/page.tsx) — so
+// leaving for an agent's detail and returning (including Esc-to-return's
+// browser-back) restores this project's filtered/sorted view too.
+function readFiltersFromLocation(): FilterState {
+  if (typeof window === "undefined") return { status: "all", channel: "all", sort: "last_active" };
+  const sp = new URLSearchParams(window.location.search);
+  return {
+    status: sp.get("status") || "all",
+    channel: sp.get("channel") || "all",
+    sort: (sp.get("sort") as SortMode) || "last_active",
+  };
+}
 
 type ActivityEvent = {
   event_id: string;
@@ -46,15 +61,30 @@ export default function ProjectDetailPage() {
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
 
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [channelFilter, setChannelFilter] = useState("all");
-  const [sort, setSort] = useState<SortMode>("last_active");
+  const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
+  const { status: statusFilter, channel: channelFilter, sort } = filterState;
+  const projectBase = `${base}/projects/${encodeURIComponent(projectId)}`;
+
+  const updateFilters = useCallback((patch: Partial<FilterState>) => {
+    setFilterState((prev) => {
+      const next = { ...prev, ...patch };
+      const sp = new URLSearchParams();
+      if (next.status !== "all") sp.set("status", next.status);
+      if (next.channel !== "all") sp.set("channel", next.channel);
+      if (next.sort !== "last_active") sp.set("sort", next.sort);
+      const qs = sp.toString();
+      router.replace(`${projectBase}${qs ? `?${qs}` : ""}`);
+      return next;
+    });
+  }, [router, projectBase]);
+
   const [wizardOpen, setWizardOpen] = useState(false);
+  // Properties drawer — closed by default, an overlay over the sheet.
+  const [panelOpen, setPanelOpen] = useState(false);
   const [rollup, setRollup] = useState<{ usd_cost: number; total_tokens: number; events: number } | null>(null);
   const [cost, setCost] = useState<Map<string, number>>(new Map());
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
-  const [panelOpen, togglePanel] = usePanelOpenState("project");
 
   useEffect(() => {
     let cancelled = false;
@@ -79,10 +109,10 @@ export default function ProjectDetailPage() {
     return () => { cancelled = true; };
   }, [workspaceId]);
 
-  // Activity is fetched lazily — only once the panel is opened, so a closed
-  // panel (the default) costs nothing extra.
+  // The properties panel is always visible on a project's detail page (no
+  // toggle, no reflow — see fleet-content-with-panel), so its Activity
+  // section fetches on mount rather than lazily on open.
   useEffect(() => {
-    if (!panelOpen) return;
     let cancelled = false;
     setActivityLoading(true);
     fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/project-activity?project_id=${encodeURIComponent(projectId)}`, { credentials: "include" })
@@ -91,7 +121,7 @@ export default function ProjectDetailPage() {
       .catch(() => { if (!cancelled) setActivity([]); })
       .finally(() => { if (!cancelled) setActivityLoading(false); });
     return () => { cancelled = true; };
-  }, [workspaceId, projectId, panelOpen]);
+  }, [workspaceId, projectId]);
 
   const inProject = agents.filter((a) => (a.project_id || "").trim() === projectId);
   const filtered = useMemo(() => inProject.filter((a) => {
@@ -111,7 +141,7 @@ export default function ProjectDetailPage() {
 
   const filters: ToolbarFilter[] = [
     {
-      key: "status", label: "Status", value: statusFilter, onChange: setStatusFilter,
+      key: "status", label: "Status", value: statusFilter, onChange: (v) => updateFilters({ status: v }),
       options: [
         { value: "all", label: "All statuses" },
         { value: "online", label: "Online" },
@@ -120,7 +150,7 @@ export default function ProjectDetailPage() {
       ],
     },
     {
-      key: "channel", label: "Channel", value: channelFilter, onChange: setChannelFilter,
+      key: "channel", label: "Channel", value: channelFilter, onChange: (v) => updateFilters({ channel: v }),
       options: [
         { value: "all", label: "All channels" },
         { value: "connected", label: "Connected" },
@@ -129,8 +159,10 @@ export default function ProjectDetailPage() {
     },
   ];
 
-  const goToAgent = (agentId: string) =>
-    router.push(`${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/overview`);
+  const goToAgent = (agentId: string) => {
+    rememberLastViewedAgent(agentId);
+    router.push(`${projectBase}/agents/${encodeURIComponent(agentId)}/overview`);
+  };
 
   return (
     <main className="fleet-content fleet-content--with-panel">
@@ -140,20 +172,38 @@ export default function ProjectDetailPage() {
         </button>
       </HeaderAction>
 
+      {/* trailingAction keeps the Properties toggle inside FleetToolbar's own
+          right-aligned action cluster — same row, same gap, same alignment
+          as Filter/Sort — rather than as a sibling that falls to its own
+          line. FleetToolbar always renders here (even with 0 agents) so the
+          toggle stays reachable; filters/sort still hide themselves when
+          there's nothing to filter/sort (each is independently optional). */}
       <div className="fleet-content-toolbar">
-        {inProject.length > 0 && (
-          <FleetToolbar
-            filters={filters}
-            sortOptions={SORT_OPTIONS}
-            sortValue={sort}
-            sortDefault="last_active"
-            onSortChange={(v) => setSort(v as SortMode)}
-            panelOpen={panelOpen}
-            onTogglePanel={togglePanel}
-          />
-        )}
+        <FleetToolbar
+          filters={inProject.length > 0 ? filters : undefined}
+          sortOptions={inProject.length > 0 ? SORT_OPTIONS : undefined}
+          sortValue={sort}
+          sortDefault="last_active"
+          onSortChange={(v) => updateFilters({ sort: v as SortMode })}
+          trailingAction={
+            <button
+              type="button"
+              className={`fleet-icon-btn${panelOpen ? " is-active" : ""}`}
+              onClick={() => setPanelOpen((v) => !v)}
+              aria-label="Properties"
+              aria-pressed={panelOpen}
+              title="Properties"
+            >
+              {panelOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
+            </button>
+          }
+        />
       </div>
 
+      {/* The sheet — full width always, whether the drawer below is open or
+          closed. fleet-content-with-panel is just the relative anchor the
+          drawer overlays against; it is no longer a flex row splitting width
+          with a permanent sibling. */}
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
           {loading && inProject.length === 0 ? (
@@ -167,11 +217,11 @@ export default function ProjectDetailPage() {
           ) : shown.length === 0 ? (
             <div className="fleet-page-state-body">No agents match these filters.</div>
           ) : (
-            <AgentsList agents={shown} costByAgent={cost} onSelect={goToAgent} />
+            <AgentsList workspaceId={workspaceId} agents={shown} costByAgent={cost} onSelect={goToAgent} onAgentStoppedChanged={refresh} />
           )}
         </div>
 
-        <FleetRightPanel open={panelOpen}>
+        <FleetRightPanel open={panelOpen} onClose={() => setPanelOpen(false)}>
           <PanelSection title="Properties">
             {project?.description && <PanelRow label="Description" value={project.description} />}
             <PanelRow label="Cost this month" value={money(rollup?.usd_cost)} icon={<DollarSign size={15} strokeWidth={1.75} />} tone="accent" />
