@@ -33,7 +33,7 @@ const SHELL_PROFILE_OPTIONS: Array<{ value: WorkspaceShellProfileId; label: stri
 
 const DEFAULT_ROUTE_OPTIONS = [
   { value: '/sage', label: 'Sage' },
-  { value: '/studio', label: 'Build' },
+  { value: '/agents', label: 'Build' },
   { value: '/settings', label: 'Settings' },
 ];
 

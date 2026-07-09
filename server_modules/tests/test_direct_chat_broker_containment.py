@@ -77,6 +77,9 @@ class DirectChatBrokerContainmentTests(unittest.TestCase):
                 provider="openai",
                 model="gpt-5.4",
                 credentials={"api_key": "sk-test"},
+                # Owner tier so the mandate gate (which runs first) doesn't
+                # preempt the containment check this test actually targets.
+                session_ctx={"authority_tier": "owner"},
                 callbacks=callbacks,
             )
 
@@ -92,6 +95,7 @@ class DirectChatBrokerContainmentTests(unittest.TestCase):
                     tool_call={"name": "http__request", "arguments": {"url": "https://example.com"}},
                     workspace_id="workspace-1",
                     thread_id="thread-1",
+                    session_ctx={"authority_tier": "owner"},
                     callbacks=callbacks,
                 )
 
@@ -106,6 +110,7 @@ class DirectChatBrokerContainmentTests(unittest.TestCase):
                 tool_call={"name": "shell__exec", "arguments": {"command": "pwd"}},
                 workspace_id="workspace-1",
                 thread_id="thread-1",
+                session_ctx={"authority_tier": "owner"},
                 callbacks=callbacks,
             )
 
@@ -121,6 +126,7 @@ class DirectChatBrokerContainmentTests(unittest.TestCase):
                     tool_call={"name": "shell__exec", "arguments": {"command": "rm -rf /tmp/test"}},
                     workspace_id="workspace-1",
                     thread_id="thread-1",
+                    session_ctx={"authority_tier": "owner"},
                     callbacks=callbacks,
                 )
 
@@ -136,6 +142,7 @@ class DirectChatBrokerContainmentTests(unittest.TestCase):
                     tool_call={"name": "slack__post_message", "arguments": {"input": "hello"}},
                     workspace_id="workspace-1",
                     thread_id="thread-1",
+                    session_ctx={"authority_tier": "owner"},
                     callbacks=callbacks,
                 )
 

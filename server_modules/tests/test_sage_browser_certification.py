@@ -376,20 +376,20 @@ class SageBrowserOnlineFlowTests(unittest.TestCase):
         self.assertTrue(browser_action_events,
                         "Expected at least one browser_action transparency event")
 
-    def test_browser_screenshot_transparency_event(self):
-        """browser__screenshot also emits a browser_action transparency event."""
+    def test_browser_extract_dom_transparency_event(self):
+        """browser__extract_dom also emits a browser_action transparency event."""
         stream_events = [
             _trace(
                 "tool.started",
                 tool_call_id="call-scr-1",
-                data={"tool_name": "browser__screenshot", "args_preview": {}},
+                data={"tool_name": "browser__extract_dom", "args_preview": {}},
             ),
             _trace(
                 "tool.result",
                 tool_call_id="call-scr-1",
-                data={"status": "ok", "summary": "Screenshot captured"},
+                data={"status": "ok", "summary": "DOM extracted"},
             ),
-            {"type": "final", "payload": {"reply": "Captured screenshot.", "actions": [], "error": ""}},
+            {"type": "final", "payload": {"reply": "Extracted DOM.", "actions": [], "error": ""}},
         ]
         with (
             patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
@@ -432,8 +432,8 @@ class SageBrowserOnlineFlowTests(unittest.TestCase):
             if e.event_type == "browser_action"
         ]
         self.assertTrue(browser_action,
-                        "Expected browser_action transparency event for screenshot")
-        self.assertIn("screenshot", browser_action[0].title)
+                        "Expected browser_action transparency event for extract_dom")
+        self.assertIn("extract_dom", browser_action[0].title)
 
 
 class SageBrowserToolFilteringTests(unittest.TestCase):
@@ -454,7 +454,7 @@ class SageBrowserToolFilteringTests(unittest.TestCase):
             sage_agent_runtime_service._tool_requires_agent_computer("browser__navigate")
         )
         self.assertTrue(
-            sage_agent_runtime_service._tool_requires_agent_computer("browser__screenshot")
+            sage_agent_runtime_service._tool_requires_agent_computer("browser__extract_dom")
         )
 
     def test_agent_computer_tool_prefixes(self):

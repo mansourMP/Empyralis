@@ -62,6 +62,12 @@ export type WorkstationTurnResponse = {
   interventions?: Record<string, unknown>[];
   route_decision?: SageTaskRouteDecision | null;
   metadata?: Record<string, unknown>;
+  /** Backend-emitted per-stage transparency events for this turn (see
+   *  AgentTransparencyEvent.to_user_payload() — event_id, trace_id,
+   *  event_type, title, status, timestamp, tool_name, channel). Previously
+   *  computed and persisted server-side but never serialized into this
+   *  response type — was silently discarded here. */
+  transparency_events?: Record<string, unknown>[];
 };
 
 export type SageChatAttachment = {
@@ -389,90 +395,6 @@ export type WorkstationAgentTraceListFilters = {
   limit?: number;
 };
 
-export type DeployedAgentRecord = Record<string, unknown> & {
-  id?: string | null;
-  owner_workspace_id?: string | null;
-  backing_install_id?: string | null;
-  name?: string | null;
-  avatar?: string | null;
-  persona?: string | null;
-  system_prompt?: string | null;
-  deployment_state?: string | null;
-  channels?: Record<string, unknown> | null;
-  knowledge_sources?: Record<string, unknown>[] | null;
-  runtime_target?: string | null;
-  billing_plan?: string | null;
-  is_public?: boolean | null;
-  quality_stars?: number | null;
-  cost_tier?: string | null;
-  category?: string | null;
-  provider?: string | null;
-  model?: string | null;
-  config?: Record<string, unknown> | null;
-  operational_state?: Record<string, unknown> | null;
-  metadata?: Record<string, unknown> | null;
-  created_at?: string | null;
-  updated_at?: string | null;
-};
-
-export type ConnectedExternalAgentRecord = Record<string, unknown> & {
-  id?: string | null;
-  surface_kind?: 'connected_external_agent' | string | null;
-  studio_object_type?: string | null;
-  workspace_id?: string | null;
-  tenant_id?: string | null;
-  name?: string | null;
-  label?: string | null;
-  description?: string | null;
-  provider_kind?: string | null;
-  status?: string | null;
-  enabled?: boolean | null;
-  connection_state?: string | null;
-  trust_state?: string | null;
-  endpoint_refs?: Record<string, unknown> | null;
-  secret_ref?: string | null;
-  capability_manifest?: Record<string, unknown> | null;
-  manifest_projection?: Record<string, unknown> | null;
-  surface_sections?: Record<string, unknown>[] | null;
-  object_types?: string[] | null;
-  external_sub_agents?: Record<string, unknown>[] | null;
-  protocols?: Record<string, unknown>[] | null;
-  local_connector?: Record<string, unknown> | null;
-  manifest?: Record<string, unknown> | null;
-  last_error?: string | null;
-  last_manifest_refresh_at?: string | null;
-  created_at?: string | null;
-  updated_at?: string | null;
-};
-
-export type StudioAgentComputerRecord = Record<string, unknown> & {
-  id?: string | null;
-  surface_kind?: 'agent_computer' | string | null;
-  name?: string | null;
-  status?: string | null;
-  record?: Record<string, unknown> | null;
-};
-
-export type StudioAgentSurfacesPayload = Record<string, unknown> & {
-  workspace_id?: string | null;
-  tenant_id?: string | null;
-  native_studio_agents?: Record<string, unknown>[] | null;
-  connected_external_agents?: ConnectedExternalAgentRecord[] | null;
-  agent_computers?: StudioAgentComputerRecord[] | null;
-  items?: Record<string, unknown>[] | null;
-};
-
-export type DeployedAgentMemoryRecord = Record<string, unknown> & {
-  id?: string | null;
-  channel?: string | null;
-  external_user_id?: string | null;
-  session_id?: string | null;
-  summary_text?: string | null;
-  recent_message_count?: number | null;
-  source_message_count?: number | null;
-  updated_at?: string | null;
-};
-
 export type ProviderCatalogModelRecord = Record<string, unknown> & {
   id?: string | null;
   label?: string | null;
@@ -557,255 +479,6 @@ export type VaultCredentialRecord = Record<string, unknown> & {
   metadata?: Record<string, unknown> | null;
   created_at?: string | null;
   updated_at?: string | null;
-};
-
-export type DeployedAgentConversationRecord = Record<string, unknown> & {
-  session_id?: string | null;
-  channel?: string | null;
-  last_message?: string | null;
-  last_message_at?: string | null;
-  customer?: Record<string, unknown> | null;
-  latest_run_id?: string | null;
-  escalation_state?: string | null;
-  outcome?: string | null;
-};
-
-export type DeployedAgentConversationDetail = Record<string, unknown> & {
-  deployed_agent_id?: string | null;
-  session_id?: string | null;
-  channel?: string | null;
-  thread_id?: string | null;
-  run_ids?: string[] | null;
-  customer?: Record<string, unknown> | null;
-  messages?: Record<string, unknown>[] | null;
-  tool_calls?: Record<string, unknown>[] | null;
-  approval_events?: Record<string, unknown>[] | null;
-  escalation_events?: Record<string, unknown>[] | null;
-  entries?: Record<string, unknown>[] | null;
-  outcome?: string | null;
-};
-
-export type DeployedAgentAnalyticsRecord = Record<string, unknown> & {
-  deployed_agent_id?: string | null;
-  active_users_last_30d?: number | null;
-  message_volume?: Record<string, unknown> | null;
-  escalation?: Record<string, unknown> | null;
-  outcomes?: Record<string, unknown> | null;
-  cost_burn?: Record<string, unknown> | null;
-};
-
-export type DeployedAgentAdminDashboardMessage = Record<string, unknown> & {
-  id?: string | null;
-  role?: string | null;
-  content?: string | null;
-  created_at?: string | null;
-  channel?: string | null;
-};
-
-export type DeployedAgentAdminDashboardUserRow = Record<string, unknown> & {
-  external_user_id?: string | null;
-  last_message_at?: string | null;
-  total_message_count?: number | null;
-  memory_entry_count?: number | null;
-  last_5_messages?: DeployedAgentAdminDashboardMessage[] | null;
-};
-
-export type DeployedAgentAdminDashboardQuestion = Record<string, unknown> & {
-  question?: string | null;
-  count?: number | null;
-};
-
-export type DeployedAgentCustomerEntryRecord = Record<string, unknown> & {
-  entry_url?: string | null;
-  cta_label?: string | null;
-  telegram_deep_link?: string | null;
-  bot_username?: string | null;
-  qr_image_url?: string | null;
-  qr_target?: string | null;
-};
-
-export type DeployedAgentAdminDashboardRecord = Record<string, unknown> & {
-  deployed_agent_id?: string | null;
-  total_users?: number | null;
-  messages_today?: number | null;
-  messages_this_calendar_month?: number | null;
-  orders_today?: number | null;
-  revenue_today_usd?: number | null;
-  users_at_limit_today?: number | null;
-  upgrade_clicks_this_month?: number | null;
-  common_questions?: DeployedAgentAdminDashboardQuestion[] | null;
-  customer_entry?: DeployedAgentCustomerEntryRecord | null;
-  specialist_profile?: Record<string, unknown> | null;
-  user_rows?: DeployedAgentAdminDashboardUserRow[] | null;
-  limit?: number | null;
-  offset?: number | null;
-  has_more?: boolean | null;
-};
-
-export type DeployedAgentBusinessInsightAction = 'approve' | 'dismiss' | 'archive' | 'apply';
-
-export type DeployedAgentBusinessInsightRecord = Record<string, unknown> & {
-  id?: string | null;
-  workspace_id?: string | null;
-  deployed_agent_id?: string | null;
-  pattern_key?: string | null;
-  insight_type?: string | null;
-  title?: string | null;
-  summary?: string | null;
-  recommendation?: string | null;
-  sensitivity?: string | null;
-  status?: string | null;
-  channel_key?: string | null;
-  event_count?: number | null;
-  confidence?: number | null;
-  window_start?: string | null;
-  window_end?: string | null;
-  redacted_examples?: unknown[] | null;
-  metadata?: Record<string, unknown> | null;
-  reviewed_at?: string | null;
-  applied_at?: string | null;
-  created_at?: string | null;
-  updated_at?: string | null;
-};
-
-export type DeployedAgentBusinessInsightsRecord = Record<string, unknown> & {
-  workspace_id?: string | null;
-  deployed_agent_id?: string | null;
-  count?: number | null;
-  items?: DeployedAgentBusinessInsightRecord[] | null;
-};
-
-export type MarketplacePackageRecord = Record<string, unknown> & {
-  package_id?: string | null;
-  kind?: string | null;
-  label?: string | null;
-  description?: string | null;
-  category?: string | null;
-  verification_status?: string | null;
-  review_state?: string | null;
-  health_state?: string | null;
-  installed?: boolean | null;
-  install_eligible?: boolean | null;
-  install_blockers?: string[] | null;
-  runtime_truth?: Record<string, unknown> | null;
-  billing?: Record<string, unknown> | null;
-  analytics?: Record<string, unknown> | null;
-  publisher?: Record<string, unknown> | null;
-  package?: Record<string, unknown> | null;
-};
-
-export type StudioProofAgentSeedRecord = Record<string, unknown> & {
-  slug?: string | null;
-  name?: string | null;
-  category?: string | null;
-  description?: string | null;
-  persona?: Record<string, unknown> | null;
-  default_data_sources?: Array<Record<string, unknown>> | null;
-  channels?: Array<Record<string, unknown>> | null;
-  tools_skills?: Array<Record<string, unknown>> | null;
-  runtime_tier_recommendation?: Record<string, unknown> | null;
-  approval_policy?: Record<string, unknown> | null;
-  customization?: Record<string, unknown> | null;
-};
-
-export type MarketplaceAgentCardRecord = Record<string, unknown> & {
-  id?: string | null;
-  name?: string | null;
-  description?: string | null;
-  category?: string | null;
-  quality_stars?: number | null;
-  cost_tier?: string | null;
-  telegram_bot_username?: string | null;
-};
-
-export type DeployedAgentTelegramReadinessRecord = Record<string, unknown> & {
-  channel?: string | null;
-  workspace_id?: string | null;
-  deployed_agent_id?: string | null;
-  ready_for_live?: boolean | null;
-  status?: string | null;
-  blockers?: Record<string, unknown>[] | null;
-  warnings?: Record<string, unknown>[] | null;
-  next_action?: string | null;
-  configured_binding?: Record<string, unknown> | null;
-  connectors?: Record<string, unknown>[] | null;
-  webhook?: Record<string, unknown> | null;
-  autopilot?: Record<string, unknown> | null;
-  whatsapp?: Record<string, unknown> | null;
-};
-
-export type ChannelCatalogItemRecord = Record<string, unknown> & {
-  channel_key?: string | null;
-  binding_channel_key?: string | null;
-  label?: string | null;
-  provider?: string | null;
-  connector_id?: string | null;
-  account_provider?: string | null;
-  runtime_lane?: string | null;
-  category?: string | null;
-  surface_kind?: string | null;
-  product_surface?: string | null;
-  navigation_group?: string | null;
-  extension_kind?: string | null;
-  ownership_boundary?: string | null;
-  conversation_capable?: boolean | null;
-  work_system_capable?: boolean | null;
-  status?: string | null;
-  stage?: string | null;
-  live_capable?: boolean | null;
-  launch_allowed?: boolean | null;
-  requires_agent_computer?: boolean | null;
-  surface_support?: string[] | null;
-  capabilities?: string[] | null;
-};
-
-export type ChannelAccountRecord = Record<string, unknown> & {
-  id?: string | null;
-  account_ref?: string | null;
-  secret_ref?: string | null;
-  credential_id?: string | null;
-  provider?: string | null;
-  label?: string | null;
-  scope?: string | null;
-  runtime_lane?: string | null;
-  status?: string | null;
-  gateway_id?: string | null;
-  requires_agent_computer?: boolean | null;
-  metadata?: Record<string, unknown> | null;
-};
-
-export type AgentChannelBindingRecord = Record<string, unknown> & {
-  channel_key?: string | null;
-  catalog_id?: string | null;
-  label?: string | null;
-  provider?: string | null;
-  connector_id?: string | null;
-  account_ref?: string | null;
-  account_label?: string | null;
-  account_status?: string | null;
-  endpoint_key?: string | null;
-  enabled?: boolean | null;
-  status?: string | null;
-  runtime_lane?: string | null;
-  launch_allowed?: boolean | null;
-  live_capable?: boolean | null;
-};
-
-export type ChannelCatalogPayload = Record<string, unknown> & {
-  items?: ChannelCatalogItemRecord[] | null;
-  reserved?: Record<string, unknown>[] | null;
-  count?: number | null;
-};
-
-export type ChannelAccountPayload = Record<string, unknown> & {
-  items?: ChannelAccountRecord[] | null;
-  count?: number | null;
-};
-
-export type AgentChannelBindingsPayload = Record<string, unknown> & {
-  deployed_agent_id?: string | null;
-  items?: AgentChannelBindingRecord[] | null;
-  count?: number | null;
 };
 
 export type WorkstationPlatformAnalyticsDeploymentRecord = Record<string, unknown> & {
@@ -944,7 +617,6 @@ export type WorkstationClientPaths = {
   workspaceAiRouteDefault: string;
   providerModels: (providerId: string, profileId?: string | null) => string;
   workspaceProviderModelsRefresh: (providerId: string) => string;
-  workspaceTransparencySettings: string;
   workspaceRuntimeSessions: (limit?: number) => string;
   speechToText: string;
   providerProfiles: (provider?: string | null) => string;
@@ -960,27 +632,6 @@ export type WorkstationClientPaths = {
   agentTraceDetail: (traceId: string) => string;
   agentTraceStream: (traceId: string) => string;
   sageTurnsStream: (workspaceId: string) => string;
-  deployedAgents: (deploymentState?: string | null) => string;
-  deployedAgentTelegramReadiness: (deployedAgentId?: string | null) => string;
-  deployedAgentDetail: (deployedAgentId: string) => string;
-  deployedAgentDeploy: (deployedAgentId: string) => string;
-  deployedAgentPause: (deployedAgentId: string) => string;
-  deployedAgentRuntimeKill: (deployedAgentId: string, sessionId: string) => string;
-  deployedAgentAuditExport: (deployedAgentId: string, limit?: number) => string;
-  deployedAgentTestTurn: (deployedAgentId: string) => string;
-  deployedAgentKnowledgeVerify: (deployedAgentId: string) => string;
-  deployedAgentKnowledgeFiles: (deployedAgentId: string) => string;
-  deployedAgentAnalyticsRoster: string;
-  deployedAgentAnalyticsDetail: (deployedAgentId: string) => string;
-  deployedAgentAdminDashboard: (deployedAgentId: string, limit?: number, offset?: number) => string;
-  deployedAgentBusinessInsights: (deployedAgentId: string, status?: string | null, limit?: number, offset?: number) => string;
-  deployedAgentBusinessInsightReview: (
-    deployedAgentId: string,
-    insightId: string,
-    action: DeployedAgentBusinessInsightAction,
-  ) => string;
-  studioAgentSurfaces: string;
-  studioChannelCatalog: string;
   connectionsCatalog: (surface?: string | null) => string;
   connectionsStatus: (surface?: string | null, selectedGatewayId?: string | null) => string;
   sageAgentComputerSelection: string;
@@ -988,35 +639,10 @@ export type WorkstationClientPaths = {
   connectionTest: (connectionId: string) => string;
   connectionVerify: (connectionId: string) => string;
   connectionDisconnect: (connectionId: string) => string;
-  studioChannelAccounts: string;
-  studioAgentChannelBindings: (deployedAgentId: string) => string;
-  studioAgentChannelBindingAction: (deployedAgentId: string, channelKey: string, action: 'pause' | 'resume' | 'revoke' | 'test') => string;
-  studioExternalAgents: string;
-  studioExternalAgent: (externalAgentId: string) => string;
-  studioExternalAgentRefreshManifest: (externalAgentId: string) => string;
-  studioExternalAgentChatTurn: (externalAgentId: string) => string;
-  studioExternalAgentSection: (externalAgentId: string, sectionId: string) => string;
-  studioExternalAgentDisconnect: (externalAgentId: string) => string;
-  deployedAgentMemory: (deployedAgentId: string, limit?: number, offset?: number) => string;
-  deployedAgentConversations: (deployedAgentId: string, limit?: number, offset?: number) => string;
-  deployedAgentConversationDetail: (deployedAgentId: string, sessionId: string) => string;
-  deployedAgentExternalUserDelete: (deployedAgentId: string, externalUserId: string) => string;
-  marketplaceAgents: (filters?: { category?: string | null; costTier?: string | null; limit?: number; offset?: number }) => string;
   discoveryFeed: (options?: { filter?: string | null }) => string;
   discoveryAdopt: (feedItemId: string) => string;
-  marketplacePackages: (options?: { kind?: string | null; runtimeType?: string | null; includeReviewQueue?: boolean }) => string;
-  studioTemplates: string;
-  marketplaceProviderRegister: string;
-  marketplaceAppRegister: string;
-  marketplaceAppSubmissions: string;
-  marketplacePackageReview: (packageId: string) => string;
-  marketplacePackageInstall: (packageId: string) => string;
   platformAnalytics: string;
   workspaceRouting: string;
-  workspaceMembers: string;
-  workspaceMemberInvites: string;
-  workspaceMemberInvite: (inviteId: string) => string;
-  workspaceMember: (userId: string) => string;
   workspacePolicies: string;
   usageSummary: (period?: string) => string;
   billingSummary: string;
@@ -1215,8 +841,6 @@ export type WorkstationClient = {
   }) => Promise<WorkspaceAiRoutePayload>;
   listProviderModels: (options: { providerId: string; profileId?: string | null }) => Promise<Record<string, unknown>>;
   refreshWorkspaceProviderModels: (options: { providerId: string }) => Promise<Record<string, unknown> | null>;
-  getWorkspaceTransparencySettings: () => Promise<Record<string, unknown>>;
-  updateWorkspaceTransparencySettings: (options: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
   listProviderProfiles: (options?: { provider?: string | null }) => Promise<Record<string, unknown>>;
   listVaultCredentials: () => Promise<Record<string, unknown>>;
   listConnectorsVault: () => Promise<Record<string, unknown>>;
@@ -1254,24 +878,13 @@ export type WorkstationClient = {
     threadId?: string | null;
     sessionId?: string | null;
   }) => Promise<Record<string, unknown> | null>;
-  killDeployedAgentRuntimeSession: (options: {
-    deployedAgentId: string;
-    sessionId: string;
-  }) => Promise<Record<string, unknown> | null>;
   listWorkspaceRuntimeSessions: (options?: { limit?: number }) => Promise<Record<string, unknown>>;
-  exportDeployedAgentAudit: (options: {
-    deployedAgentId: string;
-    limit?: number;
-  }) => Promise<Record<string, unknown>>;
   transcribeSpeech: (audio: Blob) => Promise<Record<string, unknown>>;
   listTraces: (filters?: WorkstationAgentTraceListFilters) => Promise<Record<string, unknown>>;
   getTraceReplay: (options: {
     traceId: string;
     allowMissing?: boolean;
   }) => Promise<Record<string, unknown> | null>;
-  listDeployedAgents: (options?: { deploymentState?: string | null }) => Promise<Record<string, unknown>>;
-  listStudioAgentSurfaces: () => Promise<StudioAgentSurfacesPayload>;
-  listStudioChannelCatalog: () => Promise<ChannelCatalogPayload>;
   listConnectionCatalog: (options?: { surface?: string | null }) => Promise<ConnectionCatalogPayload>;
   listConnectionStatus: (options?: {
     surface?: string | null;
@@ -1314,208 +927,17 @@ export type WorkstationClient = {
     surface?: string | null;
     selectedGatewayId?: string | null;
   }) => Promise<Record<string, unknown> | null>;
-  listStudioChannelAccounts: () => Promise<ChannelAccountPayload>;
-  createStudioChannelAccount: (options: {
-    provider: string;
-    label: string;
-    credentials: Record<string, unknown>;
-    metadata?: Record<string, unknown> | null;
-    skipValidation?: boolean;
-  }) => Promise<Record<string, unknown> | null>;
-  listAgentChannelBindings: (options: {
-    deployedAgentId: string;
-  }) => Promise<AgentChannelBindingsPayload>;
-  createAgentChannelBinding: (options: {
-    deployedAgentId: string;
-    catalogId: string;
-    accountRef?: string | null;
-    endpointKey?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  pauseAgentChannelBinding: (options: {
-    deployedAgentId: string;
-    channelKey: string;
-  }) => Promise<Record<string, unknown> | null>;
-  resumeAgentChannelBinding: (options: {
-    deployedAgentId: string;
-    channelKey: string;
-  }) => Promise<Record<string, unknown> | null>;
-  revokeAgentChannelBinding: (options: {
-    deployedAgentId: string;
-    channelKey: string;
-  }) => Promise<Record<string, unknown> | null>;
-  testAgentChannelBinding: (options: {
-    deployedAgentId: string;
-    channelKey: string;
-    message?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  listConnectedExternalAgents: () => Promise<Record<string, unknown>>;
-  createConnectedExternalAgent: (options: {
-    name: string;
-    providerKind?: string | null;
-    endpoints?: Record<string, unknown> | null;
-    manifest?: Record<string, unknown> | null;
-    secretRef?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  updateConnectedExternalAgent: (options: {
-    externalAgentId: string;
-    name?: string | null;
-    providerKind?: string | null;
-    endpoints?: Record<string, unknown> | null;
-    manifest?: Record<string, unknown> | null;
-    secretRef?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  refreshConnectedExternalAgentManifest: (options: {
-    externalAgentId: string;
-  }) => Promise<Record<string, unknown> | null>;
-  chatTurnConnectedExternalAgent: (options: {
-    externalAgentId: string;
-    message: string;
-    recentMessages?: Record<string, unknown>[];
-  }) => Promise<Record<string, unknown> | null>;
-  getConnectedExternalAgentSectionData: (options: {
-    externalAgentId: string;
-    sectionId: string;
-  }) => Promise<Record<string, unknown> | null>;
-  disconnectConnectedExternalAgent: (options: {
-    externalAgentId: string;
-  }) => Promise<Record<string, unknown> | null>;
-  createDeployedAgent: (options: {
-    name: string;
-    avatar?: string | null;
-    persona?: string | null;
-    systemPrompt?: string | null;
-    channels?: Record<string, unknown>;
-    knowledgeSources?: Record<string, unknown>[];
-    runtimeTarget?: string | null;
-    billingPlan?: string | null;
-    config?: Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-    runtimeProfileId?: string | null;
-    provider?: string | null;
-    model?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  getDeployedAgent: (options: {
-    deployedAgentId: string;
-    allowMissing?: boolean;
-  }) => Promise<Record<string, unknown> | null>;
-  getDeployedAgentTelegramReadiness: (options?: {
-    deployedAgentId?: string | null;
-    allowMissing?: boolean;
-  }) => Promise<Record<string, unknown> | null>;
-  updateDeployedAgent: (options: {
-    deployedAgentId: string;
-    name?: string | null;
-    avatar?: string | null;
-    persona?: string | null;
-    systemPrompt?: string | null;
-    deploymentState?: string | null;
-    channels?: Record<string, unknown>;
-    knowledgeSources?: Record<string, unknown>[];
-    runtimeTarget?: string | null;
-    billingPlan?: string | null;
-    config?: Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-    provider?: string | null;
-    model?: string | null;
-    isPublic?: boolean | null;
-    category?: string | null;
-    qualityStars?: number | null;
-    costTier?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  deployDeployedAgent: (options: { deployedAgentId: string }) => Promise<Record<string, unknown> | null>;
-  pauseDeployedAgent: (options: { deployedAgentId: string }) => Promise<Record<string, unknown> | null>;
-  testTurnDeployedAgent: (options: { deployedAgentId: string; body: Record<string, unknown> }) => Promise<Record<string, unknown> | null>;
-  verifyDeployedAgentKnowledge: (options: { deployedAgentId: string; query: string; limit?: number }) => Promise<Record<string, unknown> | null>;
-  uploadDeployedAgentKnowledgeFile: (options: {
-    deployedAgentId: string;
-    fileName: string;
-    contentText: string;
-  }) => Promise<Record<string, unknown> | null>;
-  listDeployedAgentAnalytics: () => Promise<Record<string, unknown>>;
-  getDeployedAgentAnalytics: (options: {
-    deployedAgentId: string;
-    allowMissing?: boolean;
-  }) => Promise<Record<string, unknown> | null>;
-  getDeployedAgentAdminDashboard: (options: {
-    deployedAgentId: string;
-    limit?: number;
-    offset?: number;
-    allowMissing?: boolean;
-  }) => Promise<Record<string, unknown> | null>;
-  listDeployedAgentBusinessInsights: (options: {
-    deployedAgentId: string;
-    status?: string | null;
-    limit?: number;
-    offset?: number;
-  }) => Promise<Record<string, unknown>>;
-  reviewDeployedAgentBusinessInsight: (options: {
-    deployedAgentId: string;
-    insightId: string;
-    action: DeployedAgentBusinessInsightAction;
-    note?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  listDeployedAgentMemory: (options: {
-    deployedAgentId: string;
-    limit?: number;
-    offset?: number;
-  }) => Promise<Record<string, unknown>>;
-  listDeployedAgentConversations: (options: {
-    deployedAgentId: string;
-    limit?: number;
-    offset?: number;
-  }) => Promise<Record<string, unknown>>;
-  getDeployedAgentConversationDetail: (options: {
-    deployedAgentId: string;
-    sessionId: string;
-    allowMissing?: boolean;
-  }) => Promise<Record<string, unknown> | null>;
-  deleteDeployedAgentExternalUserData: (options: {
-    deployedAgentId: string;
-    externalUserId: string;
-    channel: string;
-    sessionId?: string | null;
-    note?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  listMarketplaceAgents: (options?: {
-    category?: string | null;
-    costTier?: string | null;
-    limit?: number;
-    offset?: number;
-  }) => Promise<Record<string, unknown>>;
   listDiscoveryFeed: (options?: {
     filter?: string | null;
   }) => Promise<Record<string, unknown>>;
   adoptDiscoveryItem: (options: {
     feedItemId: string;
   }) => Promise<Record<string, unknown> | null>;
-  listMarketplacePackages: (options?: {
-    kind?: string | null;
-    runtimeType?: string | null;
-    includeReviewQueue?: boolean;
-  }) => Promise<Record<string, unknown>>;
-  listMarketplaceAppSubmissions: () => Promise<Record<string, unknown>>;
-  listStudioTemplates: () => Promise<Record<string, unknown>>;
-  registerMarketplaceProvider: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
-  registerMarketplaceApp: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
-  reviewMarketplaceAppSubmission: (options: {
-    packageId: string;
-    approved: boolean;
-    reason?: string | null;
-    verificationStatus?: string | null;
-  }) => Promise<Record<string, unknown> | null>;
-  installMarketplacePackage: (options: {
-    packageId: string;
-  }) => Promise<Record<string, unknown> | null>;
   getPlatformAnalytics: () => Promise<Record<string, unknown>>;
   getWorkspaceRouting: () => Promise<Record<string, unknown>>;
   updateWorkspaceRouting: (options: {
     adminDefaults?: Record<string, unknown>;
   }) => Promise<Record<string, unknown> | null>;
-  listWorkspaceMembers: () => Promise<Record<string, unknown>>;
-  inviteWorkspaceMember: (options: { email: string; role: string }) => Promise<Record<string, unknown> | null>;
-  revokeWorkspaceInvite: (options: { inviteId: string }) => Promise<Record<string, unknown> | null>;
-  updateWorkspaceMemberRole: (options: { userId: string; role: string }) => Promise<Record<string, unknown> | null>;
-  removeWorkspaceMember: (options: { userId: string }) => Promise<Record<string, unknown> | null>;
   getWorkspacePolicies: () => Promise<Record<string, unknown>>;
   updateWorkspacePolicies: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
   getUsageSummary: (options?: { period?: string }) => Promise<Record<string, unknown>>;
@@ -1774,7 +1196,6 @@ export function buildWorkstationApiPaths(workspaceId: string): WorkstationClient
       `/api/providers/${encodeURIComponent(providerId)}/models${buildQueryString({ workspace_id: workspaceId, profile_id: profileId })}`,
     workspaceProviderModelsRefresh: (providerId: string) =>
       `/api/workspaces/${encodeURIComponent(workspaceId)}/providers/${encodeURIComponent(providerId)}/models/refresh`,
-    workspaceTransparencySettings: `/api/workspaces/${encodeURIComponent(workspaceId)}/transparency-settings`,
     workspaceRuntimeSessions: (limit = 50) =>
       `/api/workspaces/${encodeURIComponent(workspaceId)}/runtime-sessions${buildQueryString({ limit })}`,
     speechToText: '/api/stt',
@@ -1803,57 +1224,6 @@ export function buildWorkstationApiPaths(workspaceId: string): WorkstationClient
       `/api/agent-traces/${encodeURIComponent(traceId)}${buildQueryString({ workspace_id: workspaceId })}`,
     agentTraceStream: (traceId) =>
       `/api/agent-traces/${encodeURIComponent(traceId)}/stream${buildQueryString({ workspace_id: workspaceId })}`,
-    deployedAgents: (deploymentState) =>
-      `/api/deployed-agents${buildQueryString({ workspace_id: workspaceId, deployment_state: deploymentState })}`,
-    deployedAgentTelegramReadiness: (deployedAgentId) =>
-      `/api/deployed-agents/telegram-readiness${buildQueryString({
-        workspace_id: workspaceId,
-        deployed_agent_id: deployedAgentId,
-      })}`,
-    deployedAgentDetail: (deployedAgentId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}${buildQueryString({ workspace_id: workspaceId })}`,
-    deployedAgentDeploy: (deployedAgentId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/deploy`,
-    deployedAgentPause: (deployedAgentId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/pause`,
-    deployedAgentRuntimeKill: (deployedAgentId, sessionId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/runtime-sessions/${encodeURIComponent(sessionId)}/kill`,
-    deployedAgentAuditExport: (deployedAgentId, limit = 500) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/audit-export${buildQueryString({
-        workspace_id: workspaceId,
-        limit,
-      })}`,
-    deployedAgentTestTurn: (deployedAgentId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/test-turn`,
-    deployedAgentKnowledgeVerify: (deployedAgentId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/knowledge/verify`,
-    deployedAgentKnowledgeFiles: (deployedAgentId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/knowledge/files`,
-    deployedAgentAnalyticsRoster:
-      `/api/deployed-agents/analytics${buildQueryString({ workspace_id: workspaceId })}`,
-    deployedAgentAnalyticsDetail: (deployedAgentId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/analytics${buildQueryString({ workspace_id: workspaceId })}`,
-    deployedAgentAdminDashboard: (deployedAgentId, limit = 50, offset = 0) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/admin-dashboard${buildQueryString({
-        workspace_id: workspaceId,
-        limit,
-        offset,
-      })}`,
-    deployedAgentBusinessInsights: (deployedAgentId, status = null, limit = 50, offset = 0) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/business-insights${buildQueryString({
-        workspace_id: workspaceId,
-        status,
-        limit,
-        offset,
-      })}`,
-    deployedAgentBusinessInsightReview: (deployedAgentId, insightId, action) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/business-insights/${encodeURIComponent(insightId)}/${action}${buildQueryString({
-        workspace_id: workspaceId,
-      })}`,
-    studioAgentSurfaces:
-      `/api/studio/agent-surfaces${buildQueryString({ workspace_id: workspaceId })}`,
-    studioChannelCatalog:
-      `/api/studio/channel-catalog${buildQueryString({ workspace_id: workspaceId })}`,
     connectionsCatalog: (surface = null) =>
       `/api/connections/catalog${buildQueryString({ workspace_id: workspaceId, surface })}`,
     connectionsStatus: (surface = null, selectedGatewayId = null) =>
@@ -1872,76 +1242,14 @@ export function buildWorkstationApiPaths(workspaceId: string): WorkstationClient
       `/api/connections/${encodeURIComponent(connectionId)}/verify`,
     connectionDisconnect: (connectionId) =>
       `/api/connections/${encodeURIComponent(connectionId)}/disconnect`,
-    studioChannelAccounts:
-      `/api/studio/channel-accounts${buildQueryString({ workspace_id: workspaceId })}`,
-    studioAgentChannelBindings: (deployedAgentId) =>
-      `/api/studio/agents/${encodeURIComponent(deployedAgentId)}/channel-bindings${buildQueryString({ workspace_id: workspaceId })}`,
-    studioAgentChannelBindingAction: (deployedAgentId, channelKey, action) =>
-      `/api/studio/agents/${encodeURIComponent(deployedAgentId)}/channel-bindings/${encodeURIComponent(channelKey)}/${action}`,
-    studioExternalAgents:
-      `/api/studio/external-agents${buildQueryString({ workspace_id: workspaceId })}`,
-    studioExternalAgent: (externalAgentId) =>
-      `/api/studio/external-agents/${encodeURIComponent(externalAgentId)}${buildQueryString({ workspace_id: workspaceId })}`,
-    studioExternalAgentRefreshManifest: (externalAgentId) =>
-      `/api/studio/external-agents/${encodeURIComponent(externalAgentId)}/refresh-manifest`,
-    studioExternalAgentChatTurn: (externalAgentId) =>
-      `/api/studio/external-agents/${encodeURIComponent(externalAgentId)}/chat-turn`,
-    studioExternalAgentSection: (externalAgentId, sectionId) =>
-      `/api/studio/external-agents/${encodeURIComponent(externalAgentId)}/sections/${encodeURIComponent(sectionId)}${buildQueryString({ workspace_id: workspaceId })}`,
-    studioExternalAgentDisconnect: (externalAgentId) =>
-      `/api/studio/external-agents/${encodeURIComponent(externalAgentId)}/disconnect`,
-    deployedAgentMemory: (deployedAgentId, limit = 50, offset = 0) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/memory${buildQueryString({
-        workspace_id: workspaceId,
-        limit,
-        offset,
-      })}`,
-    deployedAgentConversations: (deployedAgentId, limit = 50, offset = 0) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/conversations${buildQueryString({
-        workspace_id: workspaceId,
-        limit,
-        offset,
-      })}`,
-    deployedAgentConversationDetail: (deployedAgentId, sessionId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/conversations/${encodeURIComponent(sessionId)}${buildQueryString({
-        workspace_id: workspaceId,
-      })}`,
-    deployedAgentExternalUserDelete: (deployedAgentId, externalUserId) =>
-      `/api/deployed-agents/${encodeURIComponent(deployedAgentId)}/external-users/${encodeURIComponent(externalUserId)}/delete`,
-    marketplaceAgents: (filters = {}) =>
-      `/api/marketplace/agents${buildQueryString({
-        category: filters.category,
-        cost_tier: filters.costTier,
-        limit: filters.limit,
-        offset: filters.offset,
-      })}`,
     discoveryFeed: (options = {}) =>
       `/api/workspaces/${encodeURIComponent(workspaceId)}/discovery/feed${buildQueryString({
         filter: options.filter,
       })}`,
     discoveryAdopt: (feedItemId) =>
       `/api/workspaces/${encodeURIComponent(workspaceId)}/discovery/items/${encodeURIComponent(feedItemId)}/adopt`,
-    marketplacePackages: (options = {}) =>
-      `/api/workspaces/${encodeURIComponent(workspaceId)}/marketplace/packages${buildQueryString({
-        kind: options.kind,
-        runtime_type: options.runtimeType,
-        include_review_queue: options.includeReviewQueue ? 'true' : undefined,
-      })}`,
-    studioTemplates: `/api/workspaces/${encodeURIComponent(workspaceId)}/studio/templates`,
-    marketplaceProviderRegister: `/api/workspaces/${encodeURIComponent(workspaceId)}/marketplace/providers`,
-    marketplaceAppRegister: `/api/workspaces/${encodeURIComponent(workspaceId)}/marketplace/apps`,
-    marketplaceAppSubmissions: `/api/workspaces/${encodeURIComponent(workspaceId)}/marketplace/app-submissions`,
-    marketplacePackageReview: (packageId) =>
-      `/api/workspaces/${encodeURIComponent(workspaceId)}/marketplace/packages/${encodeURIComponent(packageId)}/review`,
-    marketplacePackageInstall: (packageId) =>
-      `/api/workspaces/${encodeURIComponent(workspaceId)}/marketplace/packages/${encodeURIComponent(packageId)}/install`,
     platformAnalytics: `/api/platform-analytics${buildQueryString({ workspace_id: workspaceId })}`,
     workspaceRouting: `/api/workspaces/${encodeURIComponent(workspaceId)}/routing`,
-    workspaceMembers: `/api/workspaces/${encodeURIComponent(workspaceId)}/members`,
-    workspaceMemberInvites: `/api/workspaces/${encodeURIComponent(workspaceId)}/members/invites`,
-    workspaceMemberInvite: (inviteId) =>
-      `/api/workspaces/${encodeURIComponent(workspaceId)}/members/invites/${encodeURIComponent(inviteId)}`,
-    workspaceMember: (userId) => `/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
     workspacePolicies: `/api/workspaces/${encodeURIComponent(workspaceId)}/policies`,
     usageSummary: (period = 'all') =>
       `/api/usage/summary${buildQueryString({ workspace_id: workspaceId, period })}`,
@@ -2128,13 +1436,6 @@ const READ_REQUEST_POLICY: WorkstationRequestPolicy = {
 const PROVIDER_READ_REQUEST_POLICY: WorkstationRequestPolicy = {
   timeoutMs: 25_000,
   retryCount: 1,
-  retryOnStatuses: [408, 425, 500, 502, 503, 504],
-  refreshSessionOn401: true,
-};
-
-const AGENT_STUDIO_READ_REQUEST_POLICY: WorkstationRequestPolicy = {
-  timeoutMs: 25_000,
-  retryCount: 2,
   retryOnStatuses: [408, 425, 500, 502, 503, 504],
   refreshSessionOn401: true,
 };
@@ -3345,21 +2646,6 @@ export function createWorkstationClient(
         },
         policy: WRITE_REQUEST_POLICY,
       }),
-    getWorkspaceTransparencySettings: () =>
-      requestJson<Record<string, unknown>>({
-        path: paths.workspaceTransparencySettings,
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    updateWorkspaceTransparencySettings: (options) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.workspaceTransparencySettings,
-        init: {
-          method: 'PATCH',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify(options),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
     listProviderProfiles: ({ provider = null } = {}) =>
       requestJson<Record<string, unknown>>({
         path: paths.providerProfiles(provider),
@@ -3472,26 +2758,9 @@ export function createWorkstationClient(
         },
         policy: WRITE_REQUEST_POLICY,
       }),
-    killDeployedAgentRuntimeSession: ({ deployedAgentId, sessionId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentRuntimeKill(deployedAgentId, sessionId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
     listWorkspaceRuntimeSessions: ({ limit = 50 } = {}) =>
       requestJson<Record<string, unknown>>({
         path: paths.workspaceRuntimeSessions(limit),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    exportDeployedAgentAudit: ({ deployedAgentId, limit = 500 }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentAuditExport(deployedAgentId, limit),
         policy: READ_REQUEST_POLICY,
       }) as Promise<Record<string, unknown>>,
     transcribeSpeech: (audio) =>
@@ -3518,21 +2787,6 @@ export function createWorkstationClient(
         allowStatuses: allowMissing ? [404] : [],
         policy: READ_REQUEST_POLICY,
       }),
-    listDeployedAgents: ({ deploymentState = null } = {}) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgents(deploymentState),
-        policy: AGENT_STUDIO_READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    listStudioAgentSurfaces: () =>
-      requestJson<StudioAgentSurfacesPayload>({
-        path: paths.studioAgentSurfaces,
-        policy: AGENT_STUDIO_READ_REQUEST_POLICY,
-      }) as Promise<StudioAgentSurfacesPayload>,
-    listStudioChannelCatalog: () =>
-      requestJson<ChannelCatalogPayload>({
-        path: paths.studioChannelCatalog,
-        policy: AGENT_STUDIO_READ_REQUEST_POLICY,
-      }) as Promise<ChannelCatalogPayload>,
     listConnectionCatalog: ({ surface = null } = {}) =>
       requestJson<ConnectionCatalogPayload>({
         path: paths.connectionsCatalog(surface),
@@ -3633,422 +2887,6 @@ export function createWorkstationClient(
         },
         policy: WRITE_REQUEST_POLICY,
       }),
-    listStudioChannelAccounts: () =>
-      requestJson<ChannelAccountPayload>({
-        path: paths.studioChannelAccounts,
-        policy: AGENT_STUDIO_READ_REQUEST_POLICY,
-      }) as Promise<ChannelAccountPayload>,
-    createStudioChannelAccount: ({ provider, label, credentials, metadata = null, skipValidation = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioChannelAccounts,
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            provider,
-            label,
-            credentials,
-            metadata: metadata ?? {},
-            skip_validation: Boolean(skipValidation),
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    listAgentChannelBindings: ({ deployedAgentId }) =>
-      requestJson<AgentChannelBindingsPayload>({
-        path: paths.studioAgentChannelBindings(deployedAgentId),
-        policy: AGENT_STUDIO_READ_REQUEST_POLICY,
-      }) as Promise<AgentChannelBindingsPayload>,
-    createAgentChannelBinding: ({ deployedAgentId, catalogId, accountRef = null, endpointKey = null }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioAgentChannelBindings(deployedAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            catalog_id: catalogId,
-            account_ref: accountRef,
-            endpoint_key: endpointKey,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    pauseAgentChannelBinding: ({ deployedAgentId, channelKey }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioAgentChannelBindingAction(deployedAgentId, channelKey, 'pause'),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({ workspace_id: scope.workspaceId }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    resumeAgentChannelBinding: ({ deployedAgentId, channelKey }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioAgentChannelBindingAction(deployedAgentId, channelKey, 'resume'),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({ workspace_id: scope.workspaceId }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    revokeAgentChannelBinding: ({ deployedAgentId, channelKey }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioAgentChannelBindingAction(deployedAgentId, channelKey, 'revoke'),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({ workspace_id: scope.workspaceId }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    testAgentChannelBinding: ({ deployedAgentId, channelKey, message = 'Studio channel binding test' }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioAgentChannelBindingAction(deployedAgentId, channelKey, 'test'),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            message: message || 'Studio channel binding test',
-            dry_run: true,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    listConnectedExternalAgents: () =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioExternalAgents,
-        policy: AGENT_STUDIO_READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    createConnectedExternalAgent: ({ name, providerKind = 'custom', endpoints = {}, manifest = {}, secretRef = null }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioExternalAgents,
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            name,
-            provider_kind: providerKind,
-            endpoints: endpoints ?? {},
-            manifest: manifest ?? {},
-            secret_ref: secretRef ?? null,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    updateConnectedExternalAgent: ({ externalAgentId, name, providerKind, endpoints, manifest, secretRef }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioExternalAgent(externalAgentId),
-        init: {
-          method: 'PATCH',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            name: name ?? undefined,
-            provider_kind: providerKind ?? undefined,
-            endpoints: endpoints ?? undefined,
-            manifest: manifest ?? undefined,
-            secret_ref: secretRef ?? undefined,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    refreshConnectedExternalAgentManifest: ({ externalAgentId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioExternalAgentRefreshManifest(externalAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    chatTurnConnectedExternalAgent: ({ externalAgentId, message, recentMessages = [] }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioExternalAgentChatTurn(externalAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            message,
-            recent_messages: Array.isArray(recentMessages) ? recentMessages : [],
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    getConnectedExternalAgentSectionData: ({ externalAgentId, sectionId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioExternalAgentSection(externalAgentId, sectionId),
-        policy: AGENT_STUDIO_READ_REQUEST_POLICY,
-      }),
-    disconnectConnectedExternalAgent: ({ externalAgentId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioExternalAgentDisconnect(externalAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    createDeployedAgent: ({
-      name,
-      avatar,
-      persona,
-      systemPrompt,
-      channels,
-      knowledgeSources,
-      runtimeTarget,
-      billingPlan,
-      config,
-      metadata,
-      runtimeProfileId,
-      provider,
-      model,
-    }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgents(),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            name,
-            avatar: avatar ?? null,
-            persona: persona ?? '',
-            system_prompt: systemPrompt ?? '',
-            channels: channels ?? {},
-            knowledge_sources: knowledgeSources ?? [],
-            runtime_target: runtimeTarget ?? 'cloud',
-            billing_plan: billingPlan ?? 'free',
-            config: config ?? undefined,
-            metadata: metadata ?? {},
-            runtime_profile_id: runtimeProfileId ?? null,
-            provider: provider ?? null,
-            model: model ?? null,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    getDeployedAgent: ({ deployedAgentId, allowMissing = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentDetail(deployedAgentId),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
-    getDeployedAgentTelegramReadiness: ({ deployedAgentId = null, allowMissing = false } = {}) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentTelegramReadiness(deployedAgentId),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
-    updateDeployedAgent: ({
-      deployedAgentId,
-      name,
-      avatar,
-      persona,
-      systemPrompt,
-      deploymentState,
-      channels,
-      knowledgeSources,
-      runtimeTarget,
-      billingPlan,
-      config,
-      metadata,
-      provider,
-      model,
-      isPublic,
-      category,
-      qualityStars,
-      costTier,
-    }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentDetail(deployedAgentId),
-        init: {
-          method: 'PATCH',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            name: name ?? undefined,
-            avatar: avatar ?? undefined,
-            persona: persona ?? undefined,
-            system_prompt: systemPrompt ?? undefined,
-            deployment_state: deploymentState ?? undefined,
-            channels: channels ?? undefined,
-            knowledge_sources: knowledgeSources ?? undefined,
-            runtime_target: runtimeTarget ?? undefined,
-            billing_plan: billingPlan ?? undefined,
-            config: config ?? undefined,
-            metadata: metadata ?? undefined,
-            provider: provider ?? undefined,
-            model: model ?? undefined,
-            is_public: isPublic ?? undefined,
-            category: category ?? undefined,
-            quality_stars: qualityStars ?? undefined,
-            cost_tier: costTier ?? undefined,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    deployDeployedAgent: ({ deployedAgentId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentDeploy(deployedAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    pauseDeployedAgent: ({ deployedAgentId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentPause(deployedAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    testTurnDeployedAgent: ({ deployedAgentId, body }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentTestTurn(deployedAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            message: body.message,
-            channel: body.channel ?? 'test',
-            runtime_mode: body.runtime_mode ?? 'text_agent',
-            customer_profile: body.customer_profile ?? null,
-            recent_messages: Array.isArray(body.recent_messages) ? body.recent_messages : [],
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    verifyDeployedAgentKnowledge: ({ deployedAgentId, query, limit = 5 }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentKnowledgeVerify(deployedAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            query,
-            limit,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    uploadDeployedAgentKnowledgeFile: ({ deployedAgentId, fileName, contentText }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentKnowledgeFiles(deployedAgentId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            file_name: fileName,
-            content_text: contentText,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    listDeployedAgentAnalytics: () =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentAnalyticsRoster,
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    getDeployedAgentAnalytics: ({ deployedAgentId, allowMissing = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentAnalyticsDetail(deployedAgentId),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
-    getDeployedAgentAdminDashboard: ({ deployedAgentId, limit = 50, offset = 0, allowMissing = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentAdminDashboard(deployedAgentId, limit, offset),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
-    listDeployedAgentBusinessInsights: ({ deployedAgentId, status = null, limit = 50, offset = 0 }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentBusinessInsights(deployedAgentId, status, limit, offset),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    reviewDeployedAgentBusinessInsight: ({ deployedAgentId, insightId, action, note = null }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentBusinessInsightReview(deployedAgentId, insightId, action),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            note: note ?? undefined,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    listDeployedAgentMemory: ({ deployedAgentId, limit = 50, offset = 0 }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentMemory(deployedAgentId, limit, offset),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    listDeployedAgentConversations: ({ deployedAgentId, limit = 50, offset = 0 }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentConversations(deployedAgentId, limit, offset),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    getDeployedAgentConversationDetail: ({ deployedAgentId, sessionId, allowMissing = false }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentConversationDetail(deployedAgentId, sessionId),
-        allowStatuses: allowMissing ? [404] : [],
-        policy: READ_REQUEST_POLICY,
-      }),
-    deleteDeployedAgentExternalUserData: ({ deployedAgentId, externalUserId, channel, sessionId, note }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.deployedAgentExternalUserDelete(deployedAgentId, externalUserId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            channel,
-            session_id: sessionId ?? undefined,
-            note: note ?? undefined,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    listMarketplaceAgents: ({ category = null, costTier = null, limit = 100, offset = 0 } = {}) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.marketplaceAgents({
-          category,
-          costTier,
-          limit,
-          offset,
-        }),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    listMarketplacePackages: ({ kind = null, runtimeType = null, includeReviewQueue = false } = {}) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.marketplacePackages({ kind, runtimeType, includeReviewQueue }),
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
     listDiscoveryFeed: ({ filter = null } = {}) =>
       requestJson<Record<string, unknown>>({
         path: paths.discoveryFeed({ filter }),
@@ -4057,59 +2895,6 @@ export function createWorkstationClient(
     adoptDiscoveryItem: ({ feedItemId }) =>
       requestJson<Record<string, unknown>>({
         path: paths.discoveryAdopt(feedItemId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    listMarketplaceAppSubmissions: () =>
-      requestJson<Record<string, unknown>>({
-        path: paths.marketplaceAppSubmissions,
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    listStudioTemplates: () =>
-      requestJson<Record<string, unknown>>({
-        path: paths.studioTemplates,
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    registerMarketplaceProvider: (payload: Record<string, unknown>) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.marketplaceProviderRegister,
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify(payload),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    registerMarketplaceApp: (payload: Record<string, unknown>) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.marketplaceAppRegister,
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify(payload),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    reviewMarketplaceAppSubmission: ({ packageId, approved, reason = null, verificationStatus = null }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.marketplacePackageReview(packageId),
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            approved,
-            reason: reason ?? undefined,
-            verification_status: verificationStatus ?? undefined,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    installMarketplacePackage: ({ packageId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.marketplacePackageInstall(packageId),
         init: {
           method: 'POST',
           headers: mergeJsonHeaders(),
@@ -4135,49 +2920,6 @@ export function createWorkstationClient(
           body: JSON.stringify({
             admin_defaults: adminDefaults ?? {},
           }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    listWorkspaceMembers: () =>
-      requestJson<Record<string, unknown>>({
-        path: paths.workspaceMembers,
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    inviteWorkspaceMember: ({ email, role }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.workspaceMemberInvites,
-        init: {
-          method: 'POST',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({ email, role }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    revokeWorkspaceInvite: ({ inviteId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.workspaceMemberInvite(inviteId),
-        init: {
-          method: 'DELETE',
-          headers: mergeJsonHeaders(),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    updateWorkspaceMemberRole: ({ userId, role }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.workspaceMember(userId),
-        init: {
-          method: 'PATCH',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({ role }),
-        },
-        policy: WRITE_REQUEST_POLICY,
-      }),
-    removeWorkspaceMember: ({ userId }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.workspaceMember(userId),
-        init: {
-          method: 'DELETE',
-          headers: mergeJsonHeaders(),
         },
         policy: WRITE_REQUEST_POLICY,
       }),

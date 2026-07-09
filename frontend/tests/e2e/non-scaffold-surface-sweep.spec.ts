@@ -5,7 +5,6 @@ import { loginAsOwner } from './support/auth';
 
 const SURFACES = [
   ['/w/ws-1/sage', '[data-workstation-surface="chat"]'],
-  ['/w/ws-1/studio', '[data-workstation-surface="deployed-agents"]'],
   ['/w/ws-1/settings', '[data-workstation-surface="settings"]'],
 ];
 

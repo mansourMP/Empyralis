@@ -438,36 +438,6 @@ class DirectToolExecutionServiceTests(unittest.TestCase):
         self.assertEqual(metadata["approval_reason"], "Shell execution")
         self.assertEqual(metadata["argument_target"], "ls -la ./docs")
 
-    def test_execute_single_direct_tool_call_emits_governance_metadata_for_browser_mutation(self) -> None:
-        callbacks = _callbacks()
-
-        class _FakeBrowser:
-            __empyralis_browser_adapter__ = True
-
-            def run_sync(self, action, *args):
-                return {"action": action, "args": list(args)}
-
-        with patch(
-            "server_modules.direct_tool_execution_service.security_audit_service.emit_security_audit_event"
-        ) as emit_audit, patch(
-            "server_modules.skills_service._resolve_direct_tool_browser_adapter",
-            return_value=_FakeBrowser(),
-        ):
-            service.execute_single_direct_tool_call(
-                tool_call={"name": "browser__fill", "arguments": {"selector": "#email", "value": "test@example.com"}},
-                workspace_id="workspace-1",
-                thread_id="thread-1",
-                callbacks=callbacks,
-            )
-
-        metadata = emit_audit.call_args_list[0].kwargs["metadata"]
-        self.assertEqual(metadata["action_class"], "browser_mutation")
-        self.assertEqual(metadata["risk_level"], "high")
-        self.assertEqual(metadata["governance_boundary"], "browser_session")
-        self.assertTrue(metadata["requires_approval"])
-        self.assertEqual(metadata["approval_reason"], "Browser mutation")
-        self.assertEqual(metadata["argument_target"], "#email")
-
     def test_execute_single_direct_tool_call_routes_cloud_computer_actions_through_runtime(self) -> None:
         callbacks = service.DirectToolExecutionCallbacks(
             **{

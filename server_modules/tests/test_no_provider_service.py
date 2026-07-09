@@ -202,7 +202,6 @@ class NoProviderServiceTests(unittest.TestCase):
             "Go to https://example.com and tell me the page title and main heading",
             [
                 {"name": "browser__navigate"},
-                {"name": "browser__observe"},
                 {"name": "browser__extract_text"},
                 {"name": "http_request"},
             ],
@@ -215,7 +214,6 @@ class NoProviderServiceTests(unittest.TestCase):
             tool_calls,
             [
                 {"name": "browser__navigate", "arguments": {"url": "https://example.com"}},
-                {"name": "browser__observe", "arguments": {}},
                 {"name": "browser__extract_text", "arguments": {"selector": "h1"}},
             ],
         )

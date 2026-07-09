@@ -1,3 +1,23 @@
+"""Deployed/Studio agents — FROZEN by owner decision (2026-07-09 Phase 7B).
+
+Fleet (workspace_agent_installs) is now the one agent class. The live-channel
+delivery, quota/cost-cap enforcement, and every Studio UI surface that used to
+call into this file have been deleted as dead code — see
+docs/DEPLOYED-AGENT-CONSOLIDATION-MAP.md for the full inventory and the
+ordered strangler plan this file's cleanup came from.
+
+What's left here is intentionally NOT deleted: the customer-facing, monetized
+agent product this file implements (public marketplace listing, daily message
+quotas with upsell CTAs, monthly cost caps, GDPR-style external-user deletion,
+escalation-to-owner policy, the Telegram shop-assistant vertical, computer-
+automation safety budgets) is novel capability Fleet doesn't have an
+equivalent for, not scaffolding Fleet already replaced. It stays as a dormant,
+fully-built reference implementation in case that product gets built on top
+of Fleet installs in the future — do not delete, do not extend, do not treat
+as dead code to clean up. Any change here needs an explicit owner decision
+first, the same way this freeze was one.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -3192,80 +3212,6 @@ async def _load_conversation_activity(
     )
 
 
-async def resolve_deployed_agent_for_channel_owner(
-    *,
-    tenant_id: str,
-    owner_workspace_id: str,
-    backing_install_id: str,
-    channel_key: str,
-    endpoint_key: Any,
-) -> Optional[Dict[str, Any]]:
-    deployed_agent = await control_plane_repository.get_deployed_agent_by_backing_install_id(
-        backing_install_id,
-        tenant_id=tenant_id,
-        owner_workspace_id=owner_workspace_id,
-    )
-    if not isinstance(deployed_agent, dict):
-        return None
-    if not _channel_config_matches_endpoint(
-        deployed_agent=deployed_agent,
-        channel_key=channel_key,
-        endpoint_key=endpoint_key,
-    ):
-        return None
-    return deployed_agent
-
-
-def paused_channel_reply(
-    *,
-    deployed_agent: Optional[Dict[str, Any]],
-) -> str:
-    config = _config_from_record(deployed_agent)
-    configured = _normalize_optional_text(config.customer_policy.paused_message)
-    if configured:
-        return configured
-    name = _normalize_optional_text((deployed_agent or {}).get("name")) or "This assistant"
-    return f"{name} is temporarily paused. Please try again shortly."
-
-
-def suspended_channel_reply(
-    *,
-    deployed_agent: Optional[Dict[str, Any]],
-) -> str:
-    name = _normalize_optional_text((deployed_agent or {}).get("name")) or "This assistant"
-    return (
-        f"{name} is temporarily suspended due to a policy, quota, or security control. "
-        "Please contact the owner."
-    )
-
-
-def daily_limit_channel_reply(
-    *,
-    deployed_agent: Optional[Dict[str, Any]],
-    upgrade_cta_url: Optional[str] = None,
-    upgrade_cta_label: Optional[str] = None,
-) -> str:
-    config = _config_from_record(deployed_agent)
-    name = _normalize_optional_text((deployed_agent or {}).get("name")) or "This assistant"
-    resolved_url = _normalize_optional_text(upgrade_cta_url) or _normalize_optional_text(
-        config.customer_policy.upgrade_cta_url
-    )
-    resolved_label = _normalize_optional_text(upgrade_cta_label) or _normalize_optional_text(
-        config.customer_policy.upgrade_cta_label
-    )
-    reply = f"{name} has reached today's free message limit."
-    if resolved_url and resolved_label:
-        reply = f"{reply} {resolved_label}: {resolved_url}"
-    elif resolved_url:
-        reply = f"{reply} Continue here: {resolved_url}"
-    else:
-        reply = f"{reply} Please come back tomorrow."
-    return external_user_privacy_service.get_external_user_privacy_service().append_privacy_policy_line(
-        reply,
-        workspace_id=_normalize_optional_text((deployed_agent or {}).get("owner_workspace_id")),
-    )
-
-
 def _require_live_channel_configuration(
     channels: Dict[str, Any],
     *,
@@ -3886,42 +3832,6 @@ async def get_deployed_agent_detail(
         **dict(project_deployed_agent(deployed_agent, include_internal=True) or {}),
         "backing_install": backing_install,
     }
-
-
-async def execute_deployed_agent_catalog_action(
-    *,
-    deployed_agent_id: str,
-    current_user: Optional[Dict[str, Any]],
-    owner_workspace_id: str,
-    action_id: str,
-    arguments: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    resolved_workspace_id = require_deployed_agent_admin_access(
-        current_user=current_user,
-        workspace_id=owner_workspace_id,
-    )
-    workspace = await control_plane_repository.get_workspace_by_id(resolved_workspace_id)
-    if not isinstance(workspace, dict):
-        raise _http_bad_request("Workspace is unavailable.")
-    tenant_id = _normalize_text(workspace.get("tenant_id"))
-    deployed_agent = await control_plane_repository.get_deployed_agent_by_id(
-        deployed_agent_id,
-        tenant_id=tenant_id,
-        owner_workspace_id=resolved_workspace_id,
-    )
-    if not isinstance(deployed_agent, dict):
-        raise HTTPException(status_code=404, detail="Deployed agent is unavailable.")
-    try:
-        return product_catalog_live_data_service.execute_read_only_catalog_action(
-            deployed_agent,
-            workspace_id=resolved_workspace_id,
-            action_id=action_id,
-            arguments=arguments,
-        )
-    except PermissionError as error:
-        raise HTTPException(status_code=403, detail=str(error)) from error
-    except ValueError as error:
-        raise _http_bad_request(str(error)) from error
 
 
 async def evaluate_deployed_shop_assistant_customer_question(

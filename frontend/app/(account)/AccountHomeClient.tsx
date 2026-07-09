@@ -17,8 +17,8 @@ function canonicalSageHref(workspaceId: string): string {
   return `/w/${encodeURIComponent(workspaceId)}/sage`;
 }
 
-function canonicalStudioHref(workspaceId: string, agentId: string): string {
-  return `/w/${encodeURIComponent(workspaceId)}/studio?agent=${encodeURIComponent(agentId)}`;
+function canonicalFleetAgentHref(workspaceId: string, projectId: string, agentId: string): string {
+  return `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/overview`;
 }
 
 function canonicalIntegrationsHref(workspaceId: string, channel?: string): string {
@@ -71,7 +71,7 @@ export function AccountHomeClient() {
       for (const membership of readyMemberships) {
         const workspaceId = membership.workspace.id;
         const response = await fetch(
-          `/api/deployed-agents/${encodeURIComponent(agentId)}?workspace_id=${encodeURIComponent(workspaceId)}`,
+          `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`,
           {
             method: 'GET',
             credentials: 'include',
@@ -80,11 +80,15 @@ export function AccountHomeClient() {
             },
           },
         );
-        if (response.ok) {
-          return canonicalStudioHref(workspaceId, agentId);
+        if (!response.ok) {
+          continue;
         }
-        if (response.status !== 404) {
-          break;
+        const payload = (await response.json().catch(() => null)) as
+          | { agents?: Array<{ agent_id?: string; project_id?: string }> }
+          | null;
+        const match = payload?.agents?.find((a) => a.agent_id === agentId);
+        if (match) {
+          return canonicalFleetAgentHref(workspaceId, match.project_id || '', agentId);
         }
       }
       return null;

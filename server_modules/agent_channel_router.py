@@ -107,52 +107,6 @@ def _resolve_agent_for_inbound(
     return str(sage_agent_id or "").strip()
 
 
-_DISCORD_CHANNEL_ALIASES = {"discord", "discord_bot"}
-
-
-async def resolve_agent_install_by_inbound_endpoint(
-    *,
-    tenant_id: str,
-    workspace_id: str,
-    channel_key: str,
-    endpoint_key: str,
-) -> Optional[str]:
-    """Resolve the agent that owns an inbound channel endpoint (Phase 3D).
-
-    Reads the ``agent_channel_bindings`` control-plane table — the store the
-    ``uq_agent_channel_bindings_active_inbound_owner`` unique index protects — and
-    returns the ``agent_install_id`` whose enabled inbound-owner binding matches
-    ``channel_key`` + ``endpoint_key``. Returns ``None`` when nothing matches, so
-    callers fall back to Sage (never to another specialist).
-
-    ``channel_key`` is normalized across aliases: the Discord runtime tags inbound
-    events ``discord`` while bindings are keyed ``discord_bot``.
-    """
-    target_endpoint = str(endpoint_key or "").strip().lower()
-    if not target_endpoint:
-        return None
-    requested = str(channel_key or "").strip().lower()
-    candidates = _DISCORD_CHANNEL_ALIASES if requested in _DISCORD_CHANNEL_ALIASES else {requested}
-
-    from server_modules import agent_bindings_repository as _bindings
-
-    rows = await _bindings.list_workspace_channel_bindings(
-        tenant_id=tenant_id, workspace_id=workspace_id, enabled_only=True,
-    )
-    for row in rows:
-        if str(row.get("key") or "").strip().lower() not in candidates:
-            continue
-        meta = row.get("binding") or {}
-        if str(meta.get("is_inbound_owner") or "").strip().lower() != "true":
-            continue
-        if str(meta.get("endpoint_key") or "").strip().lower() != target_endpoint:
-            continue
-        agent_id = str(row.get("agent_install_id") or "").strip()
-        if agent_id:
-            return agent_id
-    return None
-
-
 def _enforce_personal_gateway_config_decision(
     *,
     gateway_id: str,

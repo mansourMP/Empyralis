@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -11,11 +10,6 @@ from server_modules import control_plane_repository
 from server_modules import rust_runtime_kernel_client
 from server_modules import session_service
 from server_modules import workspace_admin_service
-from server_modules.transparency_settings_service import (
-    TransparencySettings,
-    get_transparency_settings,
-    put_transparency_settings,
-)
 from server_modules.workspace_ai_route_service import (
     build_workspace_ai_route_payload,
     update_workspace_default_ai_route,
@@ -176,15 +170,9 @@ def _enforce_control_plane_route_decision(**payload: Any) -> Dict[str, Any]:
     expected_next_actions = {
         "workspace_create": {"apply_control_plane_write"},
         "workspace_update": {"apply_control_plane_write"},
-        "transparency_settings_update": {"apply_control_plane_write"},
         "workspace_routing_update": {"apply_control_plane_write"},
         "workspace_policy_update": {"apply_control_plane_write"},
         "sage_tool_policy_update": {"apply_control_plane_write"},
-        "invite_create": {"apply_control_plane_write"},
-        "invite_revoke": {
-            "apply_control_plane_write",
-            "return_existing_control_plane_record",
-        },
         "secret_reference_write": {"apply_control_plane_write"},
         "provider_models_refresh": {"apply_control_plane_write"},
     }.get(operation, {"apply_control_plane_write"})
@@ -267,15 +255,6 @@ class WorkspaceSettingsUpdateRequest(BaseModel):
     notification_channel_id: Optional[str] = None
 
 
-class WorkspaceInviteRequest(BaseModel):
-    email: str
-    role: str = "member"
-
-
-class WorkspaceMemberUpdateRequest(BaseModel):
-    role: str
-
-
 class WorkspacePoliciesUpdateRequest(BaseModel):
     capabilities: Optional[Dict[str, list[str]]] = None
     dangerous_action_classes: Optional[Dict[str, list[str]]] = None
@@ -312,18 +291,6 @@ class WorkspaceAiRouteDefaultUpdateRequest(BaseModel):
     model: Optional[str] = None
     model_preset: Optional[str] = None
     modelPreset: Optional[str] = None
-
-
-class WorkspaceTransparencySettingsUpdateRequest(BaseModel):
-    default_mode: Optional[str] = None
-    sage_mode: Optional[str] = None
-    studio_test_mode: Optional[str] = None
-    customer_mode: Optional[str] = None
-    show_trace_ids: Optional[bool] = None
-    show_tool_names: Optional[bool] = None
-    show_memory_usage: Optional[bool] = None
-    show_policy_blocks: Optional[bool] = None
-    show_sources: Optional[bool] = None
 
 
 @router.get("/workspaces")
@@ -614,66 +581,6 @@ async def workspace_ai_route_default_update(
     )
 
 
-@router.get("/workspaces/{workspace_id}/transparency-settings")
-async def workspace_transparency_settings(
-    workspace_id: str,
-    current_user=Depends(get_current_user),
-):
-    resolved_workspace_id = auth_module.enforce_workspace_access(
-        current_user,
-        workspace_id,
-        minimum_role="viewer",
-    )
-    return get_transparency_settings(resolved_workspace_id).to_dict()
-
-
-@router.patch("/workspaces/{workspace_id}/transparency-settings")
-async def workspace_transparency_settings_update(
-    workspace_id: str,
-    body: WorkspaceTransparencySettingsUpdateRequest,
-    request: Request,
-    current_user=Depends(get_current_user),
-):
-    auth_module.validate_csrf(request)
-    resolved_workspace_id = auth_module.enforce_workspace_access(
-        current_user,
-        workspace_id,
-        minimum_role="owner",
-    )
-    current = get_transparency_settings(resolved_workspace_id).to_dict()
-    updates = (
-        body.model_dump(exclude_none=True)
-        if hasattr(body, "model_dump")
-        else body.dict(exclude_none=True)
-    )
-    next_settings = TransparencySettings.from_dict({
-        **current,
-        **updates,
-        "workspace_id": resolved_workspace_id,
-    })
-    _enforce_control_plane_route_decision(
-        operation="transparency_settings_update",
-        record_type="workspace_transparency_settings",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
-        workspace_id=resolved_workspace_id,
-        actor_id=_control_plane_actor_id(current_user),
-        actor_role="owner",
-        target_status="active",
-        idempotency_key=f"transparency_settings_update:{resolved_workspace_id}",
-        owner_access=True,
-        admin_access=True,
-        workspace_access=True,
-        billing_entitled=True,
-        quota_ok=True,
-        approval_provided=True,
-        owner_approval_provided=True,
-    )
-    try:
-        return put_transparency_settings(next_settings).to_dict()
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-
-
 @router.patch("/workspaces/{workspace_id}/routing")
 async def workspace_routing_update(
     workspace_id: str,
@@ -712,125 +619,6 @@ async def workspace_routing_update(
             if hasattr(body, "model_dump")
             else body.dict(exclude_none=True)
         ),
-    )
-
-
-@router.get("/workspaces/{workspace_id}/members")
-async def workspace_members(
-    workspace_id: str,
-    current_user=Depends(get_current_user),
-):
-    return await workspace_admin_service.build_workspace_members_payload(
-        workspace_id=workspace_id,
-        current_user=current_user,
-    )
-
-
-@router.post("/workspaces/{workspace_id}/members/invites")
-async def workspace_member_invites(
-    workspace_id: str,
-    body: WorkspaceInviteRequest,
-    current_user=Depends(get_current_user),
-):
-    if str(os.getenv("EMPYRALIS_ENABLE_WORKSPACE_INVITES", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
-        raise HTTPException(status_code=404, detail="Not available")
-    resolved_workspace_id = auth_module.enforce_workspace_access(
-        current_user,
-        workspace_id,
-        minimum_role="owner",
-    )
-    _enforce_control_plane_route_decision(
-        operation="invite_create",
-        record_type="workspace_invite",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
-        workspace_id=resolved_workspace_id,
-        actor_id=_control_plane_actor_id(current_user),
-        actor_role="owner",
-        target_actor_id=str(body.email or "").strip(),
-        target_status=str(body.role or "member").strip(),
-        idempotency_key=f"invite_create:{resolved_workspace_id}:{str(body.email or '').strip().lower()}",
-        owner_access=True,
-        admin_access=True,
-        workspace_access=True,
-        billing_entitled=True,
-        quota_ok=True,
-        approval_provided=True,
-        owner_approval_provided=True,
-    )
-    return await workspace_admin_service.invite_workspace_member(
-        workspace_id=resolved_workspace_id,
-        current_user=current_user,
-        email=body.email,
-        role=body.role,
-    )
-
-
-@router.delete("/workspaces/{workspace_id}/members/invites/{invite_id}")
-async def workspace_member_invite_revoke(
-    workspace_id: str,
-    invite_id: str,
-    current_user=Depends(get_current_user),
-):
-    if str(os.getenv("EMPYRALIS_ENABLE_WORKSPACE_INVITES", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
-        raise HTTPException(status_code=404, detail="Not available")
-    resolved_workspace_id = auth_module.enforce_workspace_access(
-        current_user,
-        workspace_id,
-        minimum_role="owner",
-    )
-    _enforce_control_plane_route_decision(
-        operation="invite_revoke",
-        record_type="workspace_invite",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
-        workspace_id=resolved_workspace_id,
-        actor_id=_control_plane_actor_id(current_user),
-        actor_role="owner",
-        target_status="revoked",
-        idempotency_key=f"invite_revoke:{resolved_workspace_id}:{str(invite_id or '').strip()}",
-        owner_access=True,
-        admin_access=True,
-        workspace_access=True,
-        billing_entitled=True,
-        quota_ok=True,
-        approval_provided=True,
-        owner_approval_provided=True,
-    )
-    return await workspace_admin_service.revoke_workspace_invite(
-        workspace_id=resolved_workspace_id,
-        current_user=current_user,
-        invite_id=invite_id,
-    )
-
-
-@router.patch("/workspaces/{workspace_id}/members/{user_id}")
-async def workspace_member_update(
-    workspace_id: str,
-    user_id: str,
-    body: WorkspaceMemberUpdateRequest,
-    current_user=Depends(get_current_user),
-):
-    if str(os.getenv("EMPYRALIS_ENABLE_WORKSPACE_INVITES", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
-        raise HTTPException(status_code=404, detail="Not available")
-    return await workspace_admin_service.update_workspace_member_role(
-        workspace_id=workspace_id,
-        current_user=current_user,
-        user_id=user_id,
-        role=body.role,
-    )
-
-
-@router.delete("/workspaces/{workspace_id}/members/{user_id}")
-async def workspace_member_remove(
-    workspace_id: str,
-    user_id: str,
-    current_user=Depends(get_current_user),
-):
-    if str(os.getenv("EMPYRALIS_ENABLE_WORKSPACE_INVITES", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
-        raise HTTPException(status_code=404, detail="Not available")
-    return await workspace_admin_service.remove_workspace_member(
-        workspace_id=workspace_id,
-        current_user=current_user,
-        user_id=user_id,
     )
 
 

@@ -1010,22 +1010,9 @@ def _cloud_runtime_tool_action(
     action = _text(action_id).lower()
     arguments = _coerce_dict(argument_payload)
     if connector == "browser":
-        if action in {"navigate", "new_tab"}:
-            url = _text(arguments.get("url"))
-            if not url:
-                raise RuntimeError(f"browser__{action} requires url.")
-            return "open_url", {"url": url}
-        if action == "download_file":
-            url = _text(arguments.get("url"))
-            if not url:
-                raise RuntimeError("browser__download_file requires url.")
-            return "download_artifact", {"url": url}
-        if action == "screenshot":
-            if _text(arguments.get("selector")):
-                raise RuntimeError("Cloud Computer browser__screenshot does not support selector targeting.")
-            return "screenshot", {}
         raise RuntimeError(
-            f"Cloud Computer runtime does not support browser__{action}. Use runtime-safe computer/browser actions instead."
+            f"Cloud Computer runtime does not support browser__{action}. "
+            "Browser tools run through the headless-fetch adapter, not the cloud runtime."
         )
     if connector == "computer":
         if action == "click":

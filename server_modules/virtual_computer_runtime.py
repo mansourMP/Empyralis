@@ -4296,175 +4296,6 @@ class DigitalOceanSSHRuntimeCommandResult:
     stderr: str = ""
 
 
-# ── Persistent browser session: filesystem-based command loop ──────────────────
-# This script runs inside a long-lived Docker container on the droplet.  It
-# launches ONE Chromium browser and loops, reading JSON command files written
-# by the Python runtime and writing JSON result files back.  The browser process
-# (and its page state, cookies, JS heap) persists across actions — a click after
-# an open_url clicks on the same page, not a blank one.
-_BROWSER_LOOP_SCRIPT = r"""
-import { chromium } from 'playwright';
-import fs from 'fs';
-
-const WORKSPACE = '/workspace';
-const READY_FILE = WORKSPACE + '/browser_ready';
-const BROWSER_PROFILE = WORKSPACE + '/browser-profile';
-
-// Write ready signal so the runtime knows the loop is alive
-async function signalReady() {
-  fs.writeFileSync(READY_FILE, String(Date.now()));
-}
-
-// Take a full-page screenshot and return its path
-async function capture(page, outPath) {
-  await page.screenshot({ path: outPath, fullPage: true });
-  return outPath;
-}
-
-// Build a result object and write it to result_N.json
-function writeResult(key, ok, payload) {
-  const result = { ok, ...payload };
-  fs.writeFileSync(WORKSPACE + '/result_' + key + '.json', JSON.stringify(result));
-  // Remove the consumed command file to signal completion
-  try { fs.unlinkSync(WORKSPACE + '/cmd_' + key + '.json'); } catch (_) {}
-}
-
-async function main() {
-  const browser = await chromium.launchPersistentContext(BROWSER_PROFILE, {
-    headless: true,
-    viewport: { width: 1280, height: 900 },
-  });
-  const page = browser.pages().length ? browser.pages()[0] : await browser.newPage();
-
-  await signalReady();
-
-  let idx = 0;
-  // Keep-alive tracking
-  let lastActionAt = Date.now();
-  const MAX_IDLE_MS = 30 * 60 * 1000; // 30 min idle → exit (container will be swept)
-
-  while (true) {
-    // Scan for the next command file (any cmd_*.json that hasn't been
-    // processed yet).  The Python side writes timestamp-based names, not
-    // sequential indices, so we scan by pattern.
-    let cmdFile = null;
-    while (!cmdFile) {
-      const entries = fs.readdirSync(WORKSPACE).filter(f => f.startsWith('cmd_') && f.endsWith('.json'));
-      if (entries.length) {
-        entries.sort(); // oldest first
-        cmdFile = WORKSPACE + '/' + entries[0];
-        break;
-      }
-      await new Promise(r => setTimeout(r, 250));
-      // Idle timeout
-      if (Date.now() - lastActionAt > MAX_IDLE_MS) {
-        await browser.close();
-        process.exit(0);
-      }
-    }
-    lastActionAt = Date.now();
-
-    const baseIdx = cmdFile.replace(/.*cmd_/, '').replace('.json', '');
-
-    let cmd;
-    try {
-      cmd = JSON.parse(fs.readFileSync(cmdFile, 'utf-8'));
-    } catch (e) {
-      writeResult(baseIdx, false, { error: 'unreadable command: ' + e.message });
-      continue;
-    }
-
-    const { action, args } = cmd;
-    const artifactId = (args && args.artifact_id) || ('cmd_' + baseIdx);
-    const ssPath = WORKSPACE + '/artifacts/' + artifactId + '.png';
-
-    try {
-      if (action === 'open_url') {
-        const url = args.url || 'about:blank';
-        const waitUntil = args.wait_until || 'domcontentloaded';
-        const settleMs = typeof args.settle_ms === 'number' ? args.settle_ms : 800;
-        await page.goto(url, { waitUntil, timeout: 15000 });
-        if (settleMs > 0) await page.waitForTimeout(Math.min(settleMs, 5000));
-        await capture(page, ssPath);
-        const title = await page.title();
-        const text = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
-        writeResult(baseIdx, true, { title, text: String(text).slice(0, 4000), screenshot: ssPath, url });
-
-      } else if (action === 'click') {
-        if (args.selector) {
-          await page.click(args.selector, { timeout: 10000 });
-        } else if (args.x !== undefined && args.y !== undefined) {
-          await page.mouse.click(args.x, args.y);
-        } else if (args.text) {
-          await page.getByText(args.text).first().click({ timeout: 10000 });
-        } else {
-          throw new Error('click requires selector, (x,y), or text');
-        }
-        await page.waitForTimeout(500); // let the page react
-        await capture(page, ssPath);
-        const title = await page.title();
-        writeResult(baseIdx, true, { title, screenshot: ssPath, url: page.url() });
-
-      } else if (action === 'type' || action === 'fill') {
-        const selector = args.selector || 'input, textarea, [contenteditable="true"]';
-        const text = args.text || '';
-        await page.fill(selector, text, { timeout: 10000 });
-        await page.waitForTimeout(300);
-        await capture(page, ssPath);
-        writeResult(baseIdx, true, { screenshot: ssPath, url: page.url() });
-
-      } else if (action === 'scroll') {
-        const dx = args.delta_x || 0;
-        const dy = args.delta_y || (args.y || 0);
-        await page.evaluate(([x, y]) => window.scrollBy(x, y), [dx, dy]);
-        await page.waitForTimeout(300);
-        await capture(page, ssPath);
-        writeResult(baseIdx, true, { screenshot: ssPath, url: page.url() });
-
-      } else if (action === 'back') {
-        await page.goBack({ timeout: 10000 });
-        await page.waitForTimeout(500);
-        await capture(page, ssPath);
-        const title = await page.title();
-        writeResult(baseIdx, true, { title, screenshot: ssPath, url: page.url() });
-
-      } else if (action === 'wait') {
-        const ms = args.duration_ms || (args.seconds || 1) * 1000;
-        await page.waitForTimeout(Math.min(ms, 30000));
-        await capture(page, ssPath);
-        writeResult(baseIdx, true, { screenshot: ssPath, url: page.url() });
-
-      } else if (action === 'screenshot') {
-        await capture(page, ssPath);
-        writeResult(baseIdx, true, { screenshot: ssPath, url: page.url() });
-
-      } else {
-        writeResult(baseIdx, false, { error: 'unknown browser action: ' + action });
-      }
-    } catch (err) {
-      writeResult(baseIdx, false, { error: err.message || String(err) });
-    }
-    // (command file already unlinked by writeResult)
-  }
-}
-
-main().catch(err => {
-  // Write error to a file so the runtime can see it even if the loop dies
-  fs.writeFileSync(WORKSPACE + '/browser_error', String(err.stack || err.message || err));
-  process.exit(1);
-});
-"""
-
-# Timeout for the browser container to become ready after start
-_BROWSER_START_TIMEOUT_SECONDS = 30
-# Default per-action timeout (waiting for result file)
-_BROWSER_ACTION_TIMEOUT_SECONDS = 60
-# Max idle time for the browser loop before it self-terminates
-_BROWSER_MAX_IDLE_SECONDS = 30 * 60
-# Max total session lifetime for the browser container (zombie backstop)
-_BROWSER_MAX_SESSION_SECONDS = 60 * 60
-
-
 class DigitalOceanSSHVirtualComputerRuntime:
     """Minimal SSH/Docker cloud-computer adapter.
 
@@ -4482,7 +4313,6 @@ class DigitalOceanSSHVirtualComputerRuntime:
         key_path: Optional[str] = None,
         base_dir: Optional[str] = None,
         docker_image: Optional[str] = None,
-        browser_image: Optional[str] = None,
         connect_timeout_seconds: Optional[int] = None,
         command_runner: Optional[Callable[[List[str], int], Any]] = None,
     ) -> None:
@@ -4492,10 +4322,6 @@ class DigitalOceanSSHVirtualComputerRuntime:
         self.key_path = _token(key_path or os.environ.get("EMPYRALIS_DO_SSH_KEY_PATH"))
         self.base_dir = _token(base_dir or os.environ.get("EMPYRALIS_DO_SSH_BASE_DIR")) or "/tmp/empyralis-cloud-computer"
         self.docker_image = _token(docker_image or os.environ.get("EMPYRALIS_DO_SSH_DOCKER_IMAGE")) or "alpine:3.20"
-        self.browser_image = (
-            _token(browser_image or os.environ.get("EMPYRALIS_DO_SSH_BROWSER_IMAGE"))
-            or "empyralis-browser:v1.55.0"
-        )
         self.connect_timeout_seconds = int(
             connect_timeout_seconds or os.environ.get("EMPYRALIS_DO_SSH_CONNECT_TIMEOUT_SECONDS") or 10
         )
@@ -4703,310 +4529,6 @@ class DigitalOceanSSHVirtualComputerRuntime:
             ),
         }
 
-    # ── Persistent browser container management ──────────────────────────
-
-    def _browser_container_name(self, session_id: Any) -> str:
-        """Predictable container name scoped to this session."""
-        safe = self._session_dir_name(session_id)
-        return f"empyralis-browser-{safe}"
-
-    async def _sweep_stale_browser_containers(self, max_age_seconds: int = _BROWSER_MAX_SESSION_SECONDS) -> None:
-        """Kill empyralis-browser-* containers older than max_age_seconds.
-
-        Called before starting a new browser container.  This is the zombie
-        reaper — it doesn't rely on a clean terminate_session.
-        """
-        sweep_cmd = (
-            f"docker ps -a --filter name=empyralis-browser- --format '{{{{.Names}}}} {{{{.CreatedAt}}}}' 2>/dev/null"
-        )
-        try:
-            result = await self._run_remote(sweep_cmd, timeout_seconds=15)
-        except Exception:
-            return  # sweep is best-effort
-        if result.returncode != 0 or not result.stdout.strip():
-            return
-        now = time.time()
-        for line in result.stdout.strip().splitlines():
-            parts = line.split(" ", 1)
-            if len(parts) < 2:
-                continue
-            container_name = parts[0].strip()
-            created_str = parts[1].strip()
-            # docker ps --format CreatedAt returns e.g. "2026-06-22 10:30:00 +0000 UTC"
-            try:
-                created_ts = time.mktime(time.strptime(created_str[0:19], "%Y-%m-%d %H:%M:%S"))
-            except Exception:
-                continue
-            age = now - created_ts
-            if age > max_age_seconds:
-                try:
-                    await self._run_remote(
-                        f"docker stop -t 5 {shlex.quote(container_name)} && docker rm {shlex.quote(container_name)}",
-                        timeout_seconds=20,
-                    )
-                except Exception:
-                    pass  # best-effort per container
-
-    async def _start_browser_container(self, session: Dict[str, Any]) -> None:
-        """Start the long-lived Playwright container for this session.
-
-        Writes the browser loop script, sweeps stale containers, then starts
-        a detached Docker container.  Blocks until the browser_ready signal
-        appears or _BROWSER_START_TIMEOUT_SECONDS elapses.
-        """
-        session_id = _token(session.get("session_id"))
-        session_dir = _token(session.get("session_dir"))
-        container_name = self._browser_container_name(session_id)
-
-        # Already running?
-        check = await self._run_remote(
-            f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)} 2>/dev/null",
-            timeout_seconds=10,
-        )
-        if check.returncode == 0 and check.stdout.strip() == "true":
-            return  # container already alive
-
-        # Sweep zombies before starting a new one
-        await self._sweep_stale_browser_containers()
-
-        # Write the browser loop script
-        write_script = (
-            f"printf %s {shlex.quote(_BROWSER_LOOP_SCRIPT)} > {shlex.quote(session_dir)}/browser_loop.mjs"
-        )
-        wr = await self._run_remote(write_script, timeout_seconds=15)
-        if wr.returncode != 0:
-            raise RuntimeError(
-                f"DigitalOcean SSH runtime failed to write browser loop script: {wr.stderr.strip()}"
-            )
-
-        # Remove stale ready file from a previous crashed container
-        await self._run_remote(
-            f"rm -f -- {shlex.quote(session_dir)}/browser_ready "
-            f"{shlex.quote(session_dir)}/browser_error",
-            timeout_seconds=10,
-        )
-
-        # Symlink global playwright into the session dir so ESM imports resolve.
-        # (ESM does not respect NODE_PATH, but it resolves through node_modules.)
-        link_cmd = (
-            f"mkdir -p {shlex.quote(session_dir)}/node_modules && "
-            f"ln -sf /usr/lib/node_modules/playwright {shlex.quote(session_dir)}/node_modules/playwright"
-        )
-        await self._run_remote(link_cmd, timeout_seconds=15)
-
-        # Start the container in detached mode
-        start_cmd = " ".join(
-            [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                shlex.quote(container_name),
-                "--shm-size=1g",
-                "-e",
-                "NODE_PATH=/usr/lib/node_modules",
-                "-v",
-                f"{shlex.quote(session_dir)}:/workspace",
-                "-w",
-                "/workspace",
-                shlex.quote(self.browser_image),
-                "node",
-                "/workspace/browser_loop.mjs",
-            ]
-        )
-        result = await self._run_remote(start_cmd, timeout_seconds=20)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"DigitalOcean SSH runtime failed to start browser container: {result.stderr.strip() or result.stdout.strip()}"
-            )
-
-        # Wait for browser_ready
-        deadline = time.monotonic() + _BROWSER_START_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            ready_check = await self._run_remote(
-                f"test -f {shlex.quote(session_dir)}/browser_ready && echo ready || echo waiting",
-                timeout_seconds=10,
-            )
-            if ready_check.stdout.strip() == "ready":
-                return
-            # Check if the container crashed
-            status_check = await self._run_remote(
-                f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)} 2>/dev/null",
-                timeout_seconds=10,
-            )
-            if status_check.stdout.strip() != "true":
-                # Read error log if any
-                err_result = await self._run_remote(
-                    f"cat {shlex.quote(session_dir)}/browser_error 2>/dev/null",
-                    timeout_seconds=10,
-                )
-                err_detail = err_result.stdout.strip() or "container exited without error log"
-                raise RuntimeError(
-                    f"Browser container crashed during startup: {err_detail}"
-                )
-            await asyncio.sleep(1.0)
-
-        # Timeout — kill the container and raise
-        await self._run_remote(
-            f"docker stop -t 5 {shlex.quote(container_name)} && docker rm {shlex.quote(container_name)}",
-            timeout_seconds=20,
-        )
-        raise RuntimeError(
-            f"Browser container did not become ready within {_BROWSER_START_TIMEOUT_SECONDS}s"
-        )
-
-    async def _send_browser_command(
-        self,
-        session: Dict[str, Any],
-        action: str,
-        action_args: Dict[str, Any],
-        *,
-        timeout_seconds: int = _BROWSER_ACTION_TIMEOUT_SECONDS,
-    ) -> Dict[str, Any]:
-        """Send a command to the persistent browser and wait for the result.
-
-        Writes cmd_N.json, polls for result_N.json.  Returns the parsed result.
-        Raises RuntimeError on timeout or browser error.
-        """
-        session_id = _token(session.get("session_id"))
-        session_dir = _token(session.get("session_dir"))
-        container_name = self._browser_container_name(session_id)
-
-        # Ensure container is alive
-        status_check = await self._run_remote(
-            f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)} 2>/dev/null",
-            timeout_seconds=10,
-        )
-        if status_check.stdout.strip() != "true":
-            raise RuntimeError(
-                f"Browser container {container_name} is not running. The session may have expired."
-            )
-
-        # Pick a command index — use a timestamp-based suffix to avoid collisions
-        cmd_idx = str(int(time.time() * 1_000_000))
-        artifact_id = f"artifact_{uuid.uuid4().hex[:12]}"
-        command = {
-            "action": action,
-            "args": {**action_args, "artifact_id": artifact_id},
-        }
-        cmd_json = json.dumps(command, sort_keys=True)
-        cmd_file = f"{session_dir}/cmd_{cmd_idx}.json"
-        result_file = f"{session_dir}/result_{cmd_idx}.json"
-
-        # Write the command file
-        wr = await self._run_remote(
-            f"printf %s {shlex.quote(cmd_json)} > {shlex.quote(cmd_file)}",
-            timeout_seconds=15,
-        )
-        if wr.returncode != 0:
-            raise RuntimeError("Failed to write browser command file.")
-
-        # Poll for result
-        deadline = time.monotonic() + timeout_seconds
-        last_error = ""
-        while time.monotonic() < deadline:
-            # Check if the container is still alive
-            alive = await self._run_remote(
-                f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)} 2>/dev/null",
-                timeout_seconds=10,
-            )
-            if alive.stdout.strip() != "true":
-                # Read error log
-                err_result = await self._run_remote(
-                    f"cat {shlex.quote(session_dir)}/browser_error 2>/dev/null",
-                    timeout_seconds=10,
-                )
-                raise RuntimeError(
-                    f"Browser container died during {action}: {err_result.stdout.strip() or 'no error log'}"
-                )
-
-            # Check if result file exists
-            result_check = await self._run_remote(
-                f"cat {shlex.quote(result_file)} 2>/dev/null",
-                timeout_seconds=15,
-            )
-            if result_check.returncode == 0 and result_check.stdout.strip():
-                try:
-                    result_data = json.loads(result_check.stdout)
-                except Exception:
-                    raise RuntimeError(f"Unreadable browser result for {action}.")
-                if not result_data.get("ok"):
-                    last_error = result_data.get("error") or "unknown browser error"
-                    raise RuntimeError(f"Browser action {action} failed: {last_error}")
-                # Success — build artifact
-                screenshot_path = result_data.get("screenshot") or ""
-                artifact = {
-                    "artifact_id": artifact_id,
-                    "artifact_type": ARTIFACT_TYPE_SCREENSHOT,
-                    "type": ARTIFACT_TYPE_SCREENSHOT,
-                    # Host path (for sha256sum / collect_artifact which run via SSH)
-                    "path": f"{session_dir}/artifacts/{artifact_id}.png",
-                    "remote_path": f"{session_dir}/artifacts/{artifact_id}.png",
-                    "file_name": f"{artifact_id}.png",
-                    "content_type": "image/png",
-                    "url": result_data.get("url") or session.get("current_url") or "",
-                    "title": _token(result_data.get("title")) or None,
-                    "created_at_epoch": time.time(),
-                    "proof_envelope": {
-                        "provider_id": PROVIDER_ID_DIGITALOCEAN_SSH,
-                        "runtime_kind": "digitalocean_ssh_cloud_computer",
-                        "runtime_session_id": session_id,
-                        "remote_host": self.host,
-                        "action": action,
-                        "url": result_data.get("url") or "",
-                    },
-                }
-                # SHA256 the screenshot (use host path, not container path)
-                host_screenshot_path = f"{session_dir}/artifacts/{artifact_id}.png"
-                sha_result = await self._run_remote(
-                    f"sha256sum -- {shlex.quote(host_screenshot_path)}", timeout_seconds=20
-                )
-                if sha_result.returncode == 0:
-                    digest = _token(sha_result.stdout.split()[0] if sha_result.stdout.split() else "")
-                    if digest:
-                        artifact["sha256"] = digest
-                        artifact["proof_envelope"]["sha256"] = digest
-                # Update session state
-                session.setdefault("artifacts", []).append(artifact)
-                if result_data.get("url"):
-                    session["current_url"] = result_data["url"]
-                if result_data.get("title"):
-                    session["app_title"] = _token(result_data["title"])
-                # Clean up result file
-                await self._run_remote(f"rm -f -- {shlex.quote(result_file)}", timeout_seconds=10)
-                return artifact
-
-            await asyncio.sleep(0.5)
-
-        # Timeout — the action hung; kill the container so it doesn't stay stuck
-        try:
-            await self._run_remote(
-                f"docker stop -t 5 {shlex.quote(container_name)} && docker rm {shlex.quote(container_name)}",
-                timeout_seconds=20,
-            )
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"Browser action {action} timed out after {timeout_seconds}s. "
-            f"The browser container has been terminated."
-        )
-
-    async def _stop_browser_container(self, session: Dict[str, Any]) -> None:
-        """Stop and remove the persistent browser container for this session.
-
-        Best-effort — failures are logged but not raised (the container will
-        be swept by _sweep_stale_browser_containers on the next session).
-        """
-        session_id = _token(session.get("session_id"))
-        container_name = self._browser_container_name(session_id)
-        try:
-            await self._run_remote(
-                f"docker stop -t 5 {shlex.quote(container_name)} && docker rm {shlex.quote(container_name)}",
-                timeout_seconds=20,
-            )
-        except Exception:
-            pass  # best-effort — the sweep will catch orphans
-
     async def create_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         body = dict(payload or {})
         session_id = _token(body.get("session_id")) or f"doss_{uuid.uuid4().hex}"
@@ -5061,8 +4583,6 @@ class DigitalOceanSSHVirtualComputerRuntime:
     async def terminate_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         session = await self._require_session(payload.get("session_id"))
         session_dir = _token(session.get("session_dir"))
-        # Stop the persistent browser container before removing its volume
-        await self._stop_browser_container(session)
         result = await self._run_remote(f"rm -rf -- {shlex.quote(session_dir)}", timeout_seconds=20)
         if result.returncode != 0:
             cleanup_command = " ".join(
@@ -5113,50 +4633,25 @@ class DigitalOceanSSHVirtualComputerRuntime:
             risk_class=str(action_policy.get("risk_class") or ""),
         )
         if action == ACTION_SCREENSHOT:
-            # Prefer a FRESH screenshot from the persistent browser container.
-            # Falls back to the last cached artifact if the container isn't
-            # available (e.g. session was created without browser image).
-            _session_id = _token(session.get("session_id"))
-            container_name = self._browser_container_name(_session_id)
-            status_check = await self._run_remote(
-                f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)} 2>/dev/null",
-                timeout_seconds=10,
+            artifacts = [dict(item) for item in list(session.get("artifacts") or []) if isinstance(item, dict)]
+            artifact = next(
+                (
+                    item
+                    for item in reversed(artifacts)
+                    if _token(item.get("artifact_type") or item.get("type")).lower() == ARTIFACT_TYPE_SCREENSHOT
+                ),
+                None,
             )
-            if status_check.stdout.strip() == "true":
-                # Take a fresh screenshot via the browser loop
-                timeout_s = int(payload.get("timeout_seconds") or _BROWSER_ACTION_TIMEOUT_SECONDS)
-                artifact = await self._send_browser_command(
-                    session, "screenshot", {}, timeout_seconds=timeout_s
-                )
-                _append_timeline_event(
-                    timeline,
-                    event_type="stream",
-                    action=action,
-                    status="streaming",
-                    risk_class=str(action_policy.get("risk_class") or ""),
-                    details={"artifact_id": _token(artifact.get("artifact_id")), "source": "fresh_capture"},
-                )
-            else:
-                # Fallback: last cached artifact
-                artifacts = [dict(item) for item in list(session.get("artifacts") or []) if isinstance(item, dict)]
-                artifact = next(
-                    (
-                        item
-                        for item in reversed(artifacts)
-                        if _token(item.get("artifact_type") or item.get("type")).lower() == ARTIFACT_TYPE_SCREENSHOT
-                    ),
-                    None,
-                )
-                if artifact is None:
-                    raise RuntimeError("DigitalOcean SSH runtime does not have a screenshot artifact yet.")
-                _append_timeline_event(
-                    timeline,
-                    event_type="stream",
-                    action=action,
-                    status="streaming",
-                    risk_class=str(action_policy.get("risk_class") or ""),
-                    details={"artifact_id": _token(artifact.get("artifact_id")), "source": "cached"},
-                )
+            if artifact is None:
+                raise RuntimeError("DigitalOcean SSH runtime does not have a screenshot artifact yet.")
+            _append_timeline_event(
+                timeline,
+                event_type="stream",
+                action=action,
+                status="streaming",
+                risk_class=str(action_policy.get("risk_class") or ""),
+                details={"artifact_id": _token(artifact.get("artifact_id")), "source": "cached"},
+            )
             await self._persist_session(session)
             response = self._base_response(session, status="streaming")
             response.update(
@@ -5222,81 +4717,21 @@ class DigitalOceanSSHVirtualComputerRuntime:
             if result.returncode != 0:
                 response["error"] = result.stderr.strip() or result.stdout.strip() or "Remote command failed."
             return response
-        # ── Browser actions (persistent container) ──────────────────────
-        _BROWSER_ACTIONS = {
-            ACTION_OPEN_URL,
-            ACTION_CLICK,
-            ACTION_TYPE,
-            ACTION_SCROLL,
-            ACTION_WAIT,
-            ACTION_BACK,
-        }
-        if action in _BROWSER_ACTIONS:
-            # Start the persistent browser container if not already running
-            await self._start_browser_container(session)
-
-            # Dispatch to the browser loop
-            timeout_s = int(payload.get("timeout_seconds") or _BROWSER_ACTION_TIMEOUT_SECONDS)
-            artifact = await self._send_browser_command(
-                session, action, action_args, timeout_seconds=timeout_s
-            )
-
-            _append_timeline_event(
-                timeline,
-                event_type="artifact",
-                action=action,
-                status="captured",
-                risk_class=str(action_policy.get("risk_class") or ""),
-                details={
-                    "artifact_id": _token(artifact.get("artifact_id")),
-                    "artifact_type": ARTIFACT_TYPE_SCREENSHOT,
-                    "url": artifact.get("url") or "",
-                },
-            )
-            await self._persist_session(session)
-            response = self._base_response(session, status="completed")
-            response.update(
-                {
-                    "action_result": {
-                        "action": action,
-                        "artifact": artifact,
-                        "title": artifact.get("title"),
-                    },
-                    "artifact": artifact,
-                    "action_policy": action_policy,
-                    "wrapped_external_content": wrapped_external,
-                }
-            )
-            return response
         raise RuntimeError(f"DigitalOcean SSH runtime does not support action '{action}'.")
 
     async def stream_screenshot(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         session = await self._require_session(payload.get("session_id"))
-        session_id = _token(session.get("session_id"))
-
-        # Prefer a FRESH screenshot from the persistent browser container.
-        container_name = self._browser_container_name(session_id)
-        status_check = await self._run_remote(
-            f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)} 2>/dev/null",
-            timeout_seconds=10,
+        artifacts = [dict(item) for item in list(session.get("artifacts") or []) if isinstance(item, dict)]
+        artifact = next(
+            (
+                item
+                for item in reversed(artifacts)
+                if _token(item.get("artifact_type") or item.get("type")).lower() == ARTIFACT_TYPE_SCREENSHOT
+            ),
+            None,
         )
-        if status_check.stdout.strip() == "true":
-            artifact = await self._send_browser_command(
-                session, "screenshot", {}, timeout_seconds=_BROWSER_ACTION_TIMEOUT_SECONDS
-            )
-        else:
-            # Fallback: last cached artifact
-            artifacts = [dict(item) for item in list(session.get("artifacts") or []) if isinstance(item, dict)]
-            artifact = next(
-                (
-                    item
-                    for item in reversed(artifacts)
-                    if _token(item.get("artifact_type") or item.get("type")).lower() == ARTIFACT_TYPE_SCREENSHOT
-                ),
-                None,
-            )
-            if artifact is None:
-                raise RuntimeError("DigitalOcean SSH runtime does not have a screenshot artifact yet.")
+        if artifact is None:
+            raise RuntimeError("DigitalOcean SSH runtime does not have a screenshot artifact yet.")
 
         response = self._base_response(session, status="streaming")
         response.update({"artifact": artifact, "action_result": {"action": ACTION_SCREENSHOT, "artifact": artifact}})

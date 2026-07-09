@@ -973,29 +973,6 @@ def test_stale_mobile_bearer_can_be_recovered_with_refresh(monkeypatch: pytest.M
     assert current_user["user_id"] == created["user"]["id"]
 
 
-def test_removed_workspace_membership_revokes_old_bearer_and_drops_access(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    auth, _, _ = _reload_auth(monkeypatch, tmp_path)
-    created = auth.register_user("membership.remove@example.com", "password-123", name="Removal User")
-    user_id = created["user"]["id"]
-    home_workspace_id = created["workspace_access"][0]["workspace_id"]
-    home_tenant_id = created["workspace_access"][0]["tenant_id"]
-    extra_workspace_id = f"ops-{tmp_path.name}"
-    auth.ensure_workspace_tenant_binding(extra_workspace_id, home_tenant_id)
-    auth.upsert_workspace_membership(user_id, extra_workspace_id, "viewer")
-    token = auth.login_user("membership.remove@example.com", "password-123")["token"]
-
-    removed = auth.remove_workspace_membership(user_id, extra_workspace_id)
-
-    assert removed["removed"] is True
-    with pytest.raises(HTTPException) as exc:
-        auth.get_current_user(_Request(), authorization=f"Bearer {token}")
-
-    assert exc.value.detail == "Bearer token is stale and must be refreshed."
-    relogged = auth.login_user("membership.remove@example.com", "password-123")
-    relogged_user = auth.get_current_user(_Request(), authorization=f"Bearer {relogged['token']}")
-    assert auth.enforce_workspace_access(relogged_user, home_workspace_id, minimum_role="viewer") == home_workspace_id
-    with pytest.raises(HTTPException):
-        auth.enforce_workspace_access(relogged_user, extra_workspace_id, minimum_role="viewer")
 
 
 def test_revoked_device_link_blocks_refresh_recovery(monkeypatch: pytest.MonkeyPatch, tmp_path):

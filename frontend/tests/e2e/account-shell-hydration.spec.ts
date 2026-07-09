@@ -10,7 +10,6 @@ const HYDRATION_WARNING_PATTERNS = [
 
 const CORE_SURFACES = [
   { href: '/w/ws-1/sage', selector: '[data-workstation-surface="chat"]' },
-  { href: '/w/ws-1/studio', selector: '[data-workstation-surface="deployed-agents"]' },
   { href: '/w/ws-1/settings', selector: '[data-workstation-surface="settings"]' },
 ];
 const ACCOUNT_SHELL_STORAGE_KEY = 'empyralis.account-shell.v2';

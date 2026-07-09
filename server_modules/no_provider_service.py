@@ -441,10 +441,6 @@ def plan_tool_calls(
         planned.append({"name": "http_request", "arguments": {"method": "GET", "url": url}})
     if url and "browser__navigate" in tool_names and browser_requested:
         planned.append({"name": "browser__navigate", "arguments": {"url": url}})
-        if "browser__observe" in tool_names:
-            planned.append({"name": "browser__observe", "arguments": {}})
-        elif "browser__get_page_state" in tool_names:
-            planned.append({"name": "browser__get_page_state", "arguments": {}})
         if "heading" in compact and "browser__extract_text" in tool_names:
             planned.append({"name": "browser__extract_text", "arguments": {"selector": "h1"}})
     shell_command = extract_shell_command(
@@ -737,7 +733,7 @@ def execute_no_provider_request(
         main_heading = ""
         for item in results:
             tool_name = str(item.get("tool_call", {}).get("name") or "").strip()
-            if tool_name in {"browser__get_page_state", "browser__observe"}:
+            if tool_name == "browser__navigate":
                 parsed = services.parse_page_state(str(item.get("output") or ""))
                 if isinstance(parsed, dict):
                     page_title = str(parsed.get("title") or "").strip()

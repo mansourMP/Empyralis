@@ -19,7 +19,6 @@ from server_modules.conversation_memory_policy import (
 
 
 _REAL_MACHINE_LOCAL_TOOL_PREFIXES = ("screenshot__", "computer__")
-_REAL_MACHINE_SCREEN_TOOL_NAMES = {"browser__screenshot"}
 _HARDWARE_ACTION_TOOL_NAME = "hardware__action"
 
 
@@ -105,9 +104,7 @@ def _tools_for_verified_user_device(
     prepared: List[Dict[str, Any]] = []
     for tool in tools:
         name = _direct_tool_name(tool)
-        if name in _REAL_MACHINE_SCREEN_TOOL_NAMES or any(
-            name.startswith(prefix) for prefix in _REAL_MACHINE_LOCAL_TOOL_PREFIXES
-        ):
+        if any(name.startswith(prefix) for prefix in _REAL_MACHINE_LOCAL_TOOL_PREFIXES):
             continue
         if name == _HARDWARE_ACTION_TOOL_NAME and isinstance(tool, dict):
             prepared.append(

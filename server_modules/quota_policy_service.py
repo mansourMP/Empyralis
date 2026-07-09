@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from server_modules import deployed_agent_daily_quota_adapter, request_window_quota_adapter
+from server_modules import request_window_quota_adapter
 
 
 @dataclass(frozen=True)
@@ -246,52 +246,6 @@ def evaluate_request_window_quota(
         reason=profile.deny_reason or "rate_limited",
         retry_after_seconds=int(window.get("retry_after_seconds") or 1),
         metadata=metadata,
-    )
-
-
-async def evaluate_channel_quota(
-    *,
-    profile_name: str,
-    subject: QuotaSubject,
-    deployed_agent: Optional[Dict[str, Any]],
-    message_id: Optional[str] = None,
-) -> QuotaDecision:
-    profile = get_quota_policy_profile(profile_name)
-    quota_verdict = await deployed_agent_daily_quota_adapter.evaluate_daily_quota(
-        tenant_id=str(subject.tenant_id or "").strip(),
-        workspace_id=str(subject.workspace_id or "").strip(),
-        deployed_agent=deployed_agent,
-        channel_key=str(subject.channel_key or "").strip(),
-        external_user_id=str(subject.external_user_id or "").strip() or None,
-        message_id=str(message_id or "").strip() or None,
-    )
-    if not quota_verdict.get("applied") or quota_verdict.get("allowed", True):
-        return allow_quota_decision(
-            profile=profile,
-            metadata={
-                "applied": bool(quota_verdict.get("applied")),
-                "deployed_agent_id": subject.deployed_agent_id,
-                "daily_message_limit": quota_verdict.get("daily_message_limit"),
-                "message_count": quota_verdict.get("message_count"),
-                "remaining": quota_verdict.get("remaining"),
-                "usage_day": quota_verdict.get("usage_day"),
-                "warning_sent": quota_verdict.get("warning_sent"),
-            },
-        )
-    return deny_quota_decision(
-        profile=profile,
-        reason="deployed_agent_daily_limit_exceeded",
-        retry_after_seconds=int(quota_verdict.get("retry_after_seconds") or 1),
-        metadata={
-            "deployed_agent_id": subject.deployed_agent_id,
-            "daily_message_limit": quota_verdict.get("daily_message_limit"),
-            "message_count": quota_verdict.get("message_count"),
-            "remaining": quota_verdict.get("remaining"),
-            "usage_day": quota_verdict.get("usage_day"),
-            "upgrade_cta_url": quota_verdict.get("upgrade_cta_url"),
-            "upgrade_cta_label": quota_verdict.get("upgrade_cta_label"),
-            "channel_attribution": quota_verdict.get("channel_attribution"),
-        },
     )
 
 

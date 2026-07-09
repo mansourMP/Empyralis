@@ -2779,28 +2779,6 @@ def upsert_workspace_membership(user_id: str, workspace_id: str, role: str) -> d
     return {"user_id": clean_user_id, "workspace_id": clean_workspace_id, "role": clean_role}
 
 
-def remove_workspace_membership(user_id: str, workspace_id: str) -> dict[str, Any]:
-    clean_user_id = str(user_id or "").strip()
-    clean_workspace_id = _require_workspace_token(workspace_id, detail="workspace_id is required.", status_code=400)
-    if not clean_user_id:
-        raise HTTPException(status_code=400, detail="user_id is required.")
-    removed = bool(
-        _control_plane_call(
-            control_plane_repository.remove_workspace_membership(
-                user_id=clean_user_id,
-                workspace_id=clean_workspace_id,
-            )
-        )
-    )
-    if removed:
-        _bump_user_identity_versions(clean_user_id, membership=True)
-        revoke_user_auth_sessions(
-            clean_user_id,
-            reason=f"Workspace membership for '{clean_workspace_id}' was removed.",
-        )
-    return {"user_id": clean_user_id, "workspace_id": clean_workspace_id, "removed": removed}
-
-
 def accept_workspace_invites_for_user(user_id: str, email: str) -> list[dict[str, Any]]:
     clean_user_id = str(user_id or "").strip()
     email_token = str(email or "").strip().lower()

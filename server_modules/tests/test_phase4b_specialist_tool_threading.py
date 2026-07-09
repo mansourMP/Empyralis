@@ -139,7 +139,7 @@ class MidTurnMemoryIsolationTests(unittest.TestCase):
             return {"filename": filename, "workspace_id": workspace_id, "new_hash": "hash"}
 
         callbacks = _make_callbacks(memory_write_file=_spy_memory_write_file)
-        session_ctx = {"workspace_id": "default", "tenant_id": "t1"}
+        session_ctx = {"workspace_id": "default", "tenant_id": "t1", "authority_tier": "owner"}
         if active_install_id:
             session_ctx["active_agent_install_id"] = active_install_id
         skills_service.execute_single_direct_tool_call(

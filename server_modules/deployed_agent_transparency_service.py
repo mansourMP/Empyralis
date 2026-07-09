@@ -19,7 +19,6 @@ from uuid import uuid4
 from server_modules.agent_transparency_events import (
     AgentTransparencyEvent,
     Audience,
-    VisibilityLevel,
 )
 
 
@@ -35,7 +34,6 @@ def emit_deployed_agent_test_turn_events(
     user_message: str,
     test_result: Dict[str, Any],
     audience: Audience = "owner",
-    visibility_level: VisibilityLevel = "standard",
 ) -> List[AgentTransparencyEvent]:
     """
     Emit transparency events for a Studio Agent test turn.
@@ -57,7 +55,6 @@ def emit_deployed_agent_test_turn_events(
                 actor_type="studio_agent",
                 surface="studio_test",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="user_message_received",
                 title="Test message received",
                 summary=f"Test message: {msg[:200]}",
@@ -78,7 +75,6 @@ def emit_deployed_agent_test_turn_events(
                 actor_type="studio_agent",
                 surface="studio_test",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="memory_loaded",
                 title="Memory loaded",
                 summary="Deployed agent memory context applied",
@@ -97,7 +93,6 @@ def emit_deployed_agent_test_turn_events(
                 actor_type="studio_agent",
                 surface="studio_test",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="memory_excluded",
                 title="Memory excluded",
                 summary="Memory was not applied for this test turn",
@@ -123,7 +118,6 @@ def emit_deployed_agent_test_turn_events(
                         actor_type="studio_agent",
                         surface="studio_test",
                         audience=audience,
-                        visibility_level=visibility_level,
                         event_type="policy_blocked",
                         title=f"Policy blocked: {policy_name}",
                         summary=f"Policy '{policy_name}' blocked this action",
@@ -151,7 +145,6 @@ def emit_deployed_agent_test_turn_events(
                         actor_type="studio_agent",
                         surface="studio_test",
                         audience=audience,
-                        visibility_level=visibility_level,
                         event_type="tool_selected",
                         title=f"Tool available: {skill_id}",
                         summary=f"Tool {skill_id} is allowed and available",
@@ -170,7 +163,6 @@ def emit_deployed_agent_test_turn_events(
                         actor_type="studio_agent",
                         surface="studio_test",
                         audience=audience,
-                        visibility_level=visibility_level,
                         event_type="policy_blocked",
                         title=f"Tool blocked: {skill_id}",
                         summary=f"Tool {skill_id} is blocked by policy",
@@ -193,7 +185,6 @@ def emit_deployed_agent_test_turn_events(
                     actor_type="studio_agent",
                     surface="studio_test",
                     audience=audience,
-                    visibility_level=visibility_level,
                     event_type="tool_completed",
                     title=f"Tool used: {tu}",
                     summary=f"Tool {tu} was used in this turn",
@@ -214,7 +205,6 @@ def emit_deployed_agent_test_turn_events(
                 actor_type="studio_agent",
                 surface="studio_test",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="safety_gate",
                 title="Safety gate",
                 summary="This action is gated by the current safety mode",
@@ -235,7 +225,6 @@ def emit_deployed_agent_test_turn_events(
                 actor_type="studio_agent",
                 surface="studio_test",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="final_response_sent",
                 title="Response sent",
                 summary=f"Test reply ({len(reply)} chars)",

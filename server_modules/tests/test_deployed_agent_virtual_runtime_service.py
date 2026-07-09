@@ -1,4 +1,3 @@
-import json
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -1236,46 +1235,14 @@ class DeployedAgentVirtualRuntimeServiceTests(unittest.TestCase):
 
         asyncio.run(_run())
 
-    def test_execute_bound_cloud_runtime_tool_call_uses_execute_action(self):
+    def test_execute_bound_cloud_runtime_tool_call_rejects_browser_navigate(self):
+        """Browser tools no longer run through the cloud computer runtime at all —
+        navigate now fails closed the same way mutating actions already did."""
         async def _run():
-            runtime = Mock()
-            runtime.execute_action = AsyncMock(
-                return_value={
-                    "status": "ok",
-                    "browser_session": {"browser_session_id": "vcsess_1"},
-                    "action_result": {"ok": True, "action": "open_url"},
-                }
-            )
-            registry = Mock()
-            registry.resolve.return_value = runtime
-            session_ctx = {
-                "tenant_id": "tenant-1",
-                "agent_turn_request": {
-                    "context_hints": {
-                        "metadata": {
-                            "deployed_agent_id": "dagent_1",
-                            "runtime_session_id": "vcsess_1",
-                            "runtime_session_binding": "cloud_computer_agent",
-                        }
-                    }
-                },
-            }
-            with (
-                patch.object(
-                    deployed_agent_virtual_runtime_service.control_plane_repository,
-                    "get_deployed_agent_by_id",
-                    new=AsyncMock(return_value=_deployed_agent()),
-                ),
-                patch.object(
-                    deployed_agent_virtual_runtime_service,
-                    "get_runtime_registry",
-                    return_value=registry,
-                ),
-                patch.object(
-                    deployed_agent_virtual_runtime_service.activity_ledger_service,
-                    "append_activity_event",
-                    new=AsyncMock(),
-                ) as append_activity_event,
+            with patch.object(
+                deployed_agent_virtual_runtime_service.control_plane_repository,
+                "get_deployed_agent_by_id",
+                new=AsyncMock(return_value=_deployed_agent()),
             ):
                 return await deployed_agent_virtual_runtime_service.execute_bound_cloud_runtime_tool_call(
                     connector_id="browser",
@@ -1283,159 +1250,24 @@ class DeployedAgentVirtualRuntimeServiceTests(unittest.TestCase):
                     argument_payload={"url": "https://supplier.example"},
                     workspace_id="ws-1",
                     thread_id="thread-1",
-                    session_ctx=session_ctx,
-                ), runtime, append_activity_event
-
-        import asyncio
-
-        result, runtime, append_activity_event = asyncio.run(_run())
-        payload = runtime.execute_action.await_args.args[0]
-        self.assertEqual(payload["browser_session_id"], "vcsess_1")
-        self.assertEqual(payload["action"], "open_url")
-        self.assertEqual(payload["action_args"]["url"], "https://supplier.example")
-        self.assertEqual(payload["metadata"]["runtime_session_binding"], "cloud_computer_agent")
-        self.assertIn("\"open_url\"", result)
-        self.assertEqual(
-            append_activity_event.await_args.kwargs["action"],
-            "deployed_agent_cloud_runtime_action_admitted",
-        )
-
-    def test_execute_bound_cloud_runtime_tool_call_stores_screenshot_proof(self):
-        async def _run():
-            runtime = Mock()
-            runtime.execute_action = AsyncMock(
-                return_value={
-                    "status": "completed",
-                    "state": "running",
-                    "provider_id": "digitalocean_ssh",
-                    "runtime_kind": "digitalocean_ssh_cloud_computer",
-                    "artifact": {
-                        "artifact_id": "artifact_cloud_1",
-                        "artifact_type": "screenshot",
-                        "type": "screenshot",
-                        "remote_path": "/tmp/empyralis/artifact_cloud_1.png",
-                        "url": "https://supplier.example",
-                        "title": "Supplier",
+                    session_ctx={
+                        "tenant_id": "tenant-1",
+                        "agent_turn_request": {
+                            "context_hints": {
+                                "metadata": {
+                                    "deployed_agent_id": "dagent_1",
+                                    "runtime_session_id": "vcsess_1",
+                                    "runtime_session_binding": "cloud_computer_agent",
+                                }
+                            }
+                        },
                     },
-                    "artifacts": [
-                        {
-                            "artifact_id": "artifact_cloud_1",
-                            "artifact_type": "screenshot",
-                            "type": "screenshot",
-                            "remote_path": "/tmp/empyralis/artifact_cloud_1.png",
-                            "url": "https://supplier.example",
-                            "title": "Supplier",
-                        }
-                    ],
-                    "streaming_ui": {
-                        "current_url": "https://supplier.example",
-                        "app_title": "Supplier",
-                    },
-                    "action_result": {"ok": True, "action": "open_url"},
-                }
-            )
-            runtime.collect_artifact = AsyncMock(
-                return_value={
-                    "artifact": {
-                        "artifact_id": "artifact_cloud_1",
-                        "artifact_type": "screenshot",
-                        "content_base64": "ZmFrZS1wbmc=",
-                        "file_name": "artifact_cloud_1.png",
-                        "content_type": "image/png",
-                        "remote_path": "/tmp/empyralis/artifact_cloud_1.png",
-                        "url": "https://supplier.example",
-                        "title": "Supplier",
-                        "proof_envelope": {"sha256": "abc123"},
-                    }
-                }
-            )
-            registry = Mock()
-            registry.resolve.return_value = runtime
-            stored_record = Mock()
-            stored_record.as_payload.return_value = {
-                "artifact_id": "artifact_cloud_1",
-                "run_id": "run-1",
-                "uri": "artifact://artifact_cloud_1/artifact_cloud_1.png",
-                "uri_or_path": "artifact://artifact_cloud_1/artifact_cloud_1.png",
-                "kind": "screenshot",
-                "content_type": "image/png",
-                "byte_size": 8,
-                "file_name": "artifact_cloud_1.png",
-            }
-            session_ctx = {
-                "tenant_id": "tenant-1",
-                "run_id": "run-1",
-                "agent_turn_request": {
-                    "context_hints": {
-                        "metadata": {
-                            "deployed_agent_id": "dagent_1",
-                            "runtime_session_id": "vcsess_1",
-                            "runtime_session_binding": "cloud_computer_agent",
-                            "run_id": "run-1",
-                        }
-                    }
-                },
-            }
-            with (
-                patch.object(
-                    deployed_agent_virtual_runtime_service.control_plane_repository,
-                    "get_deployed_agent_by_id",
-                    new=AsyncMock(return_value=_deployed_agent()),
-                ),
-                patch.object(
-                    deployed_agent_virtual_runtime_service,
-                    "get_runtime_registry",
-                    return_value=registry,
-                ),
-                patch.object(
-                    deployed_agent_virtual_runtime_service.activity_ledger_service,
-                    "append_activity_event",
-                    new=AsyncMock(),
-                ) as append_activity_event,
-                patch.object(
-                    deployed_agent_virtual_runtime_service.session_service,
-                    "extend_session",
-                    new=AsyncMock(),
-                ) as extend_session,
-                patch.object(
-                    deployed_agent_virtual_runtime_service.artifact_service,
-                    "store_artifact_bytes",
-                    return_value=stored_record,
-                ) as store_artifact_bytes,
-            ):
-                result = await deployed_agent_virtual_runtime_service.execute_bound_cloud_runtime_tool_call(
-                    connector_id="browser",
-                    action_id="navigate",
-                    argument_payload={"url": "https://supplier.example"},
-                    workspace_id="ws-1",
-                    thread_id="thread-1",
-                    session_ctx=session_ctx,
                 )
-                return result, runtime, append_activity_event, extend_session, store_artifact_bytes
 
         import asyncio
 
-        result, runtime, append_activity_event, extend_session, store_artifact_bytes = asyncio.run(_run())
-        runtime.collect_artifact.assert_awaited_once()
-        self.assertEqual(store_artifact_bytes.call_args.args[0], b"fake-png")
-        self.assertEqual(store_artifact_bytes.call_args.kwargs["run_id"], "run-1")
-        self.assertEqual(store_artifact_bytes.call_args.kwargs["tenant_id"], "tenant-1")
-        self.assertEqual(store_artifact_bytes.call_args.kwargs["workspace_id"], "ws-1")
-        self.assertEqual(store_artifact_bytes.call_args.kwargs["agent_install_id"], "ainstall_1")
-        self.assertEqual(store_artifact_bytes.call_args.kwargs["artifact_id"], "artifact_cloud_1")
-        extend_session.assert_awaited_once()
-        proof = extend_session.await_args.kwargs["metadata_updates"]["latest_computer_proof"]
-        self.assertEqual(proof["artifact_uri"], "artifact://artifact_cloud_1/artifact_cloud_1.png")
-        self.assertEqual(append_activity_event.await_args.kwargs["run_id"], "run-1")
-        self.assertEqual(append_activity_event.await_args.kwargs["thread_id"], "thread-1")
-        self.assertEqual(append_activity_event.await_args.kwargs["session_key"], "vcsess_1")
-        self.assertEqual(
-            append_activity_event.await_args.kwargs["artifacts"][0]["uri"],
-            "artifact://artifact_cloud_1/artifact_cloud_1.png",
-        )
-        parsed = json.loads(result)
-        self.assertEqual(parsed["computer_proof"]["artifact_id"], "artifact_cloud_1")
-        self.assertEqual(parsed["artifact"]["uri"], "artifact://artifact_cloud_1/artifact_cloud_1.png")
+        with self.assertRaisesRegex(RuntimeError, "does not support browser__navigate"):
+            asyncio.run(_run())
 
     def test_execute_bound_cloud_runtime_tool_call_rejects_missing_runtime_session(self):
         async def _run():

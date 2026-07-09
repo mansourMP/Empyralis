@@ -151,10 +151,6 @@ async def test_provider_admin_routes_reject_missing_csrf(
             },
         ),
         ("PATCH", "/workspaces/ws-1", {"name": "Updated Workspace"}),
-        ("POST", "/workspaces/ws-1/members/invites", {"email": "guest@example.com", "role": "member"}),
-        ("DELETE", "/workspaces/ws-1/members/invites/invite-1", None),
-        ("PATCH", "/workspaces/ws-1/members/user-2", {"role": "viewer"}),
-        ("DELETE", "/workspaces/ws-1/members/user-2", None),
         ("PATCH", "/workspaces/ws-1/policies", {"machine_enrollment_scope": "tenant"}),
         ("PATCH", "/workspaces/ws-1/sage/tool-policy", {"tool": "web_search", "enabled": False}),
     ],
@@ -305,90 +301,6 @@ async def test_platform_analytics_route_rejects_non_admin() -> None:
 
 
 @pytest.mark.anyio
-async def test_workspace_members_route_returns_members_and_invites(monkeypatch: pytest.MonkeyPatch):
-    app = _build_app()
-    app.dependency_overrides[routes_workspaces.get_current_user] = lambda: {"user_id": "user-1"}
-
-    async def fake_build_workspace_members_payload(*, workspace_id: str, current_user):
-        assert workspace_id == "ws-1"
-        return {
-            "workspace": {"id": "ws-1"},
-            "members": [{"user_id": "user-1", "role": "owner"}],
-            "invites": [{"id": "invite-1", "email": "guest@example.com", "role": "member"}],
-        }
-
-    monkeypatch.setattr(
-        routes_workspaces.workspace_admin_service,
-        "build_workspace_members_payload",
-        fake_build_workspace_members_payload,
-    )
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.get("/workspaces/ws-1/members")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["members"][0]["role"] == "owner"
-    assert payload["invites"][0]["email"] == "guest@example.com"
-
-
-@pytest.mark.anyio
-async def test_workspace_invite_route_passes_email_and_role(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("EMPYRALIS_ENABLE_WORKSPACE_INVITES", "1")
-    app = _build_app()
-    app.dependency_overrides[routes_workspaces.get_current_user] = lambda: {"user_id": "user-1"}
-
-    async def fake_invite_workspace_member(*, workspace_id: str, current_user, email: str, role: str):
-        assert workspace_id == "ws-1"
-        assert email == "invitee@example.com"
-        assert role == "member"
-        return {"id": "invite-1", "email": email, "role": role, "status": "pending"}
-
-    monkeypatch.setattr(
-        routes_workspaces.workspace_admin_service,
-        "invite_workspace_member",
-        fake_invite_workspace_member,
-    )
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post(
-            "/workspaces/ws-1/members/invites",
-            json={"email": "invitee@example.com", "role": "member"},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "pending"
-
-
-@pytest.mark.anyio
-async def test_workspace_invite_revoke_route_delegates_to_admin_service(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("EMPYRALIS_ENABLE_WORKSPACE_INVITES", "1")
-    app = _build_app()
-    app.dependency_overrides[routes_workspaces.get_current_user] = lambda: {"user_id": "user-1"}
-
-    async def fake_revoke_workspace_invite(*, workspace_id: str, current_user, invite_id: str):
-        assert workspace_id == "ws-1"
-        assert current_user["user_id"] == "user-1"
-        assert invite_id == "invite-1"
-        return {"id": invite_id, "status": "revoked"}
-
-    monkeypatch.setattr(
-        routes_workspaces.workspace_admin_service,
-        "revoke_workspace_invite",
-        fake_revoke_workspace_invite,
-    )
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.delete("/workspaces/ws-1/members/invites/invite-1")
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "revoked"
-
-
-@pytest.mark.anyio
 async def test_workspace_policies_patch_delegates_payload(monkeypatch: pytest.MonkeyPatch):
     app = _build_app()
     app.dependency_overrides[routes_workspaces.get_current_user] = lambda: {"user_id": "user-1"}
@@ -415,76 +327,3 @@ async def test_workspace_policies_patch_delegates_payload(monkeypatch: pytest.Mo
     assert response.json()["policy"]["machine_enrollment_scope"] == "tenant"
 
 
-@pytest.mark.anyio
-async def test_update_workspace_member_role_blocks_demoting_last_owner(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        workspace_admin_service.auth_module,
-        "enforce_workspace_access",
-        lambda current_user, workspace_id, minimum_role='owner': workspace_id,
-    )
-
-    async def fake_list_workspace_members(workspace_id: str):
-        assert workspace_id == "ws-1"
-        return [
-            {
-                "user_id": "owner-1",
-                "workspace_id": "ws-1",
-                "role": "owner",
-                "status": "active",
-            },
-        ]
-
-    monkeypatch.setattr(
-        workspace_admin_service.control_plane_repository,
-        "list_workspace_members",
-        fake_list_workspace_members,
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        await workspace_admin_service.update_workspace_member_role(
-            workspace_id="ws-1",
-            current_user={"user_id": "owner-1"},
-            user_id="owner-1",
-            role="member",
-        )
-
-    error = exc_info.value
-    assert getattr(error, "status_code", None) == 409
-    assert "last workspace owner" in str(getattr(error, "detail", ""))
-
-
-@pytest.mark.anyio
-async def test_remove_workspace_member_blocks_removing_last_owner(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        workspace_admin_service.auth_module,
-        "enforce_workspace_access",
-        lambda current_user, workspace_id, minimum_role='owner': workspace_id,
-    )
-
-    async def fake_list_workspace_members(workspace_id: str):
-        assert workspace_id == "ws-1"
-        return [
-            {
-                "user_id": "owner-1",
-                "workspace_id": "ws-1",
-                "role": "owner",
-                "status": "active",
-            },
-        ]
-
-    monkeypatch.setattr(
-        workspace_admin_service.control_plane_repository,
-        "list_workspace_members",
-        fake_list_workspace_members,
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        await workspace_admin_service.remove_workspace_member(
-            workspace_id="ws-1",
-            current_user={"user_id": "owner-1"},
-            user_id="owner-1",
-        )
-
-    error = exc_info.value
-    assert getattr(error, "status_code", None) == 409
-    assert "last workspace owner" in str(getattr(error, "detail", ""))

@@ -10,7 +10,6 @@ const SURFACES: Array<{
   selector: string;
 }> = [
   { id: 'sage', href: '/w/ws-1/sage', selector: '[data-workstation-surface="chat"]' },
-  { id: 'studio', href: '/w/ws-1/studio', selector: '[data-workstation-surface="deployed-agents"]' },
   { id: 'settings', href: '/w/ws-1/settings', selector: '[data-workstation-surface="settings"]' },
 ];
 
