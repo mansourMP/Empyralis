@@ -1419,18 +1419,33 @@ def stream_provider_backed_direct_chat(
                         argument_payload: Dict[str, Any] = {}
                         step_id = f"tool:{thinking_iteration}:0"
                         for tool_index, tool_call in enumerate(iteration_tool_calls, start=1):
-                            connector_id, action_id = services.parse_tool_name(str(tool_call.get("name") or ""))
-                            argument_payload = services.tool_arguments_payload(tool_call.get("arguments"))
-                            if connector_id in {"file", "shell", "screenshot", "computer"} and isinstance(argument_payload.get("input"), str):
-                                nested_input = services.parse_page_state(str(argument_payload.get("input") or ""))
-                                if isinstance(nested_input, dict):
-                                    argument_payload = nested_input
+                            # Assigned up front, before anything below that can raise
+                            # (parse_tool_name included) — an exception mid-iteration must
+                            # never leave these referenced-but-unset in whatever error
+                            # path handles it further down.
                             step_id = f"tool:{thinking_iteration}:{tool_index}"
                             tool_call_id = str(tool_call.get("id") or "").strip() or f"toolcall_{uuid.uuid4().hex}"
                             if isinstance(tool_call, dict) and not str(tool_call.get("id") or "").strip():
                                 tool_call["id"] = tool_call_id
-                            tool_name = str(tool_call.get("name") or f"{connector_id}__{action_id}").strip()
                             tool_item_id = uuid.uuid4().hex
+                            raw_tool_name = str(tool_call.get("name") or "").strip()
+                            argument_payload = services.tool_arguments_payload(tool_call.get("arguments"))
+                            # query_tool_registry is a meta-tool (search the lazy-load
+                            # catalog), not a "connector__action" pair — parse_tool_name
+                            # only recognizes a fixed bare-name whitelist plus that shape
+                            # and raises on anything else. Specialists with a narrow
+                            # explicit toolset lean on this discovery tool far more than
+                            # Sage's full toolset does, so skip straight to its handling
+                            # below instead of parsing it as a connector action.
+                            if raw_tool_name == "query_tool_registry" and tool_registry:
+                                connector_id, action_id = "", ""
+                            else:
+                                connector_id, action_id = services.parse_tool_name(raw_tool_name)
+                                if connector_id in {"file", "shell", "screenshot", "computer"} and isinstance(argument_payload.get("input"), str):
+                                    nested_input = services.parse_page_state(str(argument_payload.get("input") or ""))
+                                    if isinstance(nested_input, dict):
+                                        argument_payload = nested_input
+                            tool_name = str(tool_call.get("name") or f"{connector_id}__{action_id}").strip()
                             # ── query_tool_registry: lazy-load tools from registry ──
                             if tool_name == "query_tool_registry" and tool_registry:
                                 query_text = str(argument_payload.get("task_description") or "").strip()

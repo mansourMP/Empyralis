@@ -340,16 +340,6 @@ async def build_whatsapp_personal_reply_async(
             except Exception:
                 pass
         return _build_error_reply_dict(_exc, workspace_id)
-    return _build_personal_reply(
-        surface_channel="whatsapp_personal",
-        workspace_id=workspace_id,
-        gateway_id=gateway_id,
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        fallback_label="WhatsApp",
-        source_event_id=source_event_id,
-    )
 
 
 async def build_telegram_personal_reply_async(

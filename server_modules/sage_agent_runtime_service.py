@@ -1248,9 +1248,6 @@ def sanitize_agent_reply(text: str) -> str:
     return result
 
 def _guard_sage_visible_reply(value: Any) -> tuple[str, dict[str, Any]]:
-    import sys as _sys
-    _sys.stderr.write(f"DEBUG RAW PRE-SANITIZE: {str(value)[:300]!r}\n")
-    _sys.stderr.flush()
     raw = _coerce_text(value)
     guarded = response_leak_guard_service.guard_model_response(raw)
     text = guarded.text
@@ -2264,29 +2261,22 @@ async def _run_sage_action_loop_v3(
     final_payload = collected["final_payload"]
     # Accumulate streaming reply text from all result events (same pattern as web chat path)
     accumulated_reply = ""
-    import sys as _s2
     for event in stream_events:
         if isinstance(event, dict):
             et = event.get("type")
             r = str(event.get("reply") or "").strip()
             pl = event.get("payload") if isinstance(event.get("payload"), dict) else None
             r2 = str(pl.get("reply") or "").strip() if pl else ""
-            _s2.stderr.write(f"DEBUG EVENT type={et} reply={r[:80]!r} payload.reply={r2[:80]!r}\n")
             if et == "result" or et == "final":
                 candidate = r or r2
                 if candidate and (not accumulated_reply or len(candidate) > len(accumulated_reply)):
                     accumulated_reply = candidate
-    _s2.stderr.write(f"DEBUG ACCUMULATED accumulated_reply={accumulated_reply[:120]!r}\n")
-    _s2.stderr.flush()
     reply = _coerce_text(final_payload.get("reply"))
     # Fallback: if final reply is empty but we accumulated text, use accumulated
     if not reply and accumulated_reply:
         reply = accumulated_reply
     # If the action loop ran tools but produced no text reply at all,
     # return None so handle_sage_chat falls back to text-only generation.
-    import sys as _s3
-    _s3.stderr.write(f"DEBUG ACTION LOOP: reply empty after all fallbacks, tools_executed={bool(collected['tool_calls'])}\n")
-    _s3.stderr.flush()
     has_any_tool_activity = bool(
         collected.get("tool_calls") or collected.get("blocked_tools") or collected.get("approvals_required")
     )
