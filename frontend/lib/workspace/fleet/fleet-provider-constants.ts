@@ -45,13 +45,15 @@ export const MODE_LABELS: Record<ProviderMode, string> = {
   local: "Run locally",
 };
 
-/** BYO-brain: cli_subscription still needs the on-box CLI runner (Phase 3),
- *  so it stays "coming soon" — persisting it resolves to a guaranteed "not yet
- *  available" turn error. `local` (Ollama on the paired box) shipped in Phase 2
- *  and is now savable, so it is NO LONGER in this set. */
-export const COMING_SOON_MODES: ReadonlySet<ProviderMode> = new Set<ProviderMode>([
-  "cli_subscription",
-]);
+/** BYO-brain: cli_subscription shipped in Phase 3 (the on-box CLI runner —
+ *  claude_code/codex spawned on the owner's own paired Gateway under their
+ *  own subscription login) and `local` (Ollama on the paired box) shipped in
+ *  Phase 2, so neither is in this set anymore. Both are savable; an agent
+ *  configured into either mode dispatches for real at the turn seam instead
+ *  of resolving to a guaranteed error. Empty for now — kept as a set (not
+ *  deleted) since it's still the mechanism for gating any future mode that
+ *  isn't ready yet. */
+export const COMING_SOON_MODES: ReadonlySet<ProviderMode> = new Set<ProviderMode>([]);
 
 export const COMING_SOON_NOTE = "Coming soon — requires a paired box";
 

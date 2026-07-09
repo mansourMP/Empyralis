@@ -12,6 +12,8 @@ import {
   capabilityPermissionReady,
   capabilityPermissionStatus,
   desktopPermissionForCapability,
+  setLlmRuntimeClaudeCodeReady,
+  setLlmRuntimeCodexReady,
   setLlmRuntimeOllamaReady,
   setShellSandboxDockerReady,
   type CapabilityPermissionStatus,
@@ -701,6 +703,17 @@ export async function collectPassiveInventorySnapshot(
   // local Ollama endpoint is actually reachable (BYO-brain Phase 2).
   const ollamaItem = serviceInventory.find((item) => item.id === "ollama");
   setLlmRuntimeOllamaReady(ollamaItem?.status === "ready");
+  // cli_subscription (Phase 3): the SAME llm_runtime permission also opens up
+  // for a box where only Claude Code or only Codex is ready (no Ollama at
+  // all) — otherwise llm.generate would never even be advertised on a
+  // subscription-only box, and the control plane would see a misleading
+  // "capability missing" instead of "claude_code isn't ready" it can act on.
+  // "ready" here already means installed AND authenticated (see
+  // probeClaudeCli/probeCodexCli above) — "degraded"/"missing" don't count.
+  const claudeCliItem = serviceInventory.find((item) => item.id === "claude_cli");
+  setLlmRuntimeClaudeCodeReady(claudeCliItem?.status === "ready");
+  const codexCliItem = serviceInventory.find((item) => item.id === "codex_cli");
+  setLlmRuntimeCodexReady(codexCliItem?.status === "ready");
   if (typeof options.localRunnerReady === "boolean") {
     serviceInventory.unshift(buildLocalRunnerInventoryItem(options.localRunnerReady, checkedAt));
   }

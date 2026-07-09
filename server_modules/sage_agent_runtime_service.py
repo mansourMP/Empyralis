@@ -379,6 +379,14 @@ async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
 
 # ── Phase L: Per-agent AI provider binding ──────────────────────────────────
 
+# cli_subscription (BYO-brain Phase 3): the two CLIs the Gateway can spawn
+# under the owner's own subscription login. Kept in sync with
+# empyralis-gateway/src/llm/cli-runner.ts's CliSubscriptionRuntime union and
+# fleet_tools.py's _VALID_MODEL_RUNTIMES (which also allows "ollama" for
+# local mode — this set is the cli_subscription-only subset of that one).
+_VALID_CLI_SUBSCRIPTION_RUNTIMES = {"claude_code", "codex"}
+
+
 async def _resolve_agent_cloud_provider(
     workspace_id: str,
     agent_model_config: Optional[Dict[str, Any]] = None,
@@ -446,19 +454,37 @@ async def _resolve_agent_cloud_provider(
 
         return provider, credentials, "byok_api"
 
-    # ── cli_subscription: not yet available on this deployment ─────
+    # ── cli_subscription: the owner's own Claude Code / Codex subscription,
+    # executing on their own paired Gateway (BYO-brain Phase 3) ─────────────
+    # The actual completion is dispatched to the bound Gateway at the turn seam
+    # (handle_sage_chat → _dispatch_cli_subscription_gateway_brain → the same
+    # gateway WSS rail "local" mode uses), NOT resolved to a cloud endpoint
+    # here. This branch only validates the binding and returns the
+    # "cli_subscription" billing mode so nothing is ever charged to platform
+    # credits. No subscription credential is ever read or transmitted by the
+    # platform — the CLI reads its own auth on the box it runs on.
     if mode == "cli_subscription":
-        await _ledger_provider_unavailable(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            mode=mode,
-            provider=provider,
-            reason="cli_subscription mode is not yet available on this deployment.",
-        )
-        raise RuntimeError(
-            "CLI subscription mode is not yet available on this deployment. "
-            "Switch this agent to platform_credits or byok_api."
-        )
+        gateway_binding = str(mc.get("gateway_binding") or "").strip()
+        if not gateway_binding:
+            await _ledger_provider_unavailable(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                mode=mode,
+                provider=provider,
+                reason="cli_subscription mode requires a bound gateway (gateway_binding).",
+            )
+            raise RuntimeError(_friendly_cli_subscription_error("no_gateway_bound", runtime=str(mc.get("runtime") or "claude_code")))
+        runtime = str(mc.get("runtime") or "claude_code").strip().lower() or "claude_code"
+        if runtime not in _VALID_CLI_SUBSCRIPTION_RUNTIMES:
+            await _ledger_provider_unavailable(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                mode=mode,
+                provider=provider,
+                reason=f"unsupported cli_subscription runtime: {runtime}",
+            )
+            raise RuntimeError(_friendly_cli_subscription_error("unsupported_runtime", runtime=runtime))
+        return runtime, {"gateway_binding": gateway_binding, "runtime": runtime}, "cli_subscription"
 
     # ── local: on-box model via the paired gateway (BYO-brain Phase 2) ─────
     # The actual completion is dispatched to the bound box at the turn seam
@@ -731,6 +757,359 @@ async def _dispatch_local_gateway_brain(
         )
 
     await _ledger_gateway_brain_turn(
+        workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id,
+        gateway_id=gateway_id, runtime=_runtime, model=resolved_model,
+        usage=usage, trace_id=trace_id,
+    )
+    return reply, usage, resolved_model
+
+
+# ── cli_subscription: the owner's own Claude Code / Codex CLI, executing on
+# their own paired Gateway (BYO-brain Phase 3) ──────────────────────────────
+
+def _friendly_cli_subscription_error(reason: str, *, runtime: str) -> str:
+    """Map a raw dispatch/readiness reason to a platform-voice message, one
+    per distinct failure mode (G5) — never one blanket string. The turn is
+    DENIED — there is no fallback to platform credits or a different runtime.
+
+    The message bodies live in platform_event.py as PlatformEvent constants
+    (CLI_SUBSCRIPTION_*), matching how AUTH_FAILED_PLATFORM /
+    PROVIDER_PAYMENT_REQUIRED_PLATFORM etc. are structured there; this
+    function only classifies the raw reason and composes the final
+    "Heads up: ..." line callers actually raise."""
+    from server_modules import platform_event as _pe
+
+    r = str(reason or "").strip().lower()
+    is_codex = str(runtime or "").strip().lower() == "codex"
+
+    def _say(event: _pe.PlatformEvent) -> str:
+        return f"Heads up: {event.channel_text}"
+
+    if "no_gateway_bound" in r:
+        return _say(_pe.CLI_SUBSCRIPTION_NO_GATEWAY)
+    if "unsupported_runtime" in r or "unsupported cli_subscription runtime" in r:
+        return f"Heads up: {runtime or 'this runtime'} is not a supported cli_subscription runtime. Use claude_code or codex."
+    if (
+        "registration_missing" in r or "registration_inactive" in r
+        or "device_revoked" in r or "workspace_mismatch" in r
+    ):
+        return _say(_pe.CLI_SUBSCRIPTION_GATEWAY_NOT_PAIRED)
+    if "not_installed" in r or "not installed" in r:
+        return _say(_pe.CLI_SUBSCRIPTION_CODEX_NOT_INSTALLED if is_codex else _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_INSTALLED)
+    if "not_authenticated" in r or "not signed in" in r or "not authenticated" in r:
+        return _say(_pe.CLI_SUBSCRIPTION_CODEX_NOT_AUTHENTICATED if is_codex else _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_AUTHENTICATED)
+    if "capability_not_ready" in r or "capability_missing" in r:
+        return _say(_pe.CLI_SUBSCRIPTION_CODEX_NOT_INSTALLED if is_codex else _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_INSTALLED)
+    if "offline" in r or "heartbeat_stale" in r or "unhealthy" in r:
+        return _say(_pe.CLI_SUBSCRIPTION_GATEWAY_OFFLINE)
+    if "timed out" in r or "timeout" in r:
+        return _say(_pe.CLI_SUBSCRIPTION_TIMEOUT)
+    if "exited unexpectedly" in r or "crash" in r or "empty_completion" in r or "empty completion" in r:
+        return _say(_pe.CLI_SUBSCRIPTION_CRASH)
+    # Fallback — still honest (includes the raw reason), never a silently
+    # generic string per this repo's fail-loud convention.
+    label = "Codex" if is_codex else "Claude Code"
+    return f"Heads up: {label} generation failed on the bound Gateway ({reason})."
+
+
+def _cli_subscription_readiness_reason(
+    registration: Optional[Dict[str, Any]],
+    *,
+    workspace_id: str,
+    runtime: str,
+) -> str:
+    """Returns "" when the requested runtime (claude_code | codex) is
+    installed AND authenticated on this Gateway registration, else a short
+    machine-readable reason consumed by _friendly_cli_subscription_error.
+
+    This is deliberately narrower than
+    gateway_execution_service.gateway_registration_execution_readiness: that
+    function proves the Gateway is online and SOME llm.generate backend is
+    ready (used generically for "local"/ollama too); it has no way to know
+    WHICH runtime is ready. This reads the same per-runtime llm_runtimes
+    summary the agent-creation box-picker already reads (via
+    gateway_registry_service.gateway_registration_public_payload — BYO-brain
+    Phase 1), so "installed but not logged in" is never confused with "not
+    installed at all"."""
+    if not isinstance(registration, dict) or not registration:
+        return "gateway_registration_missing"
+    if str(registration.get("status") or "").strip().lower() != "active":
+        return "gateway_registration_inactive"
+    if str(registration.get("device_trust_state") or "").strip().lower() == "revoked":
+        return "gateway_device_revoked"
+    registration_workspace_id = str(registration.get("workspace_id") or "").strip()
+    if registration_workspace_id and registration_workspace_id != (str(workspace_id or "").strip() or "default"):
+        return "gateway_workspace_mismatch"
+
+    from server_modules import gateway_registry_service
+    public_payload = gateway_registry_service.gateway_registration_public_payload(registration)
+    llm_runtimes = public_payload.get("llm_runtimes") if isinstance(public_payload.get("llm_runtimes"), dict) else {}
+    key = "codex" if str(runtime or "").strip().lower() == "codex" else "claude_code"
+    entry = llm_runtimes.get(key) if isinstance(llm_runtimes.get(key), dict) else {}
+    if not entry.get("installed"):
+        return f"{key}_not_installed"
+    if not entry.get("authenticated"):
+        return f"{key}_not_authenticated"
+    return ""
+
+
+async def _ledger_cli_subscription_failure(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    agent_id: str,
+    gateway_id: str,
+    runtime: str,
+    reason: str,
+    trace_id: str = "",
+) -> None:
+    """Ledger every cli_subscription dispatch failure — not just successes —
+    so Activity/attribution shows an honest gap instead of silence (G5:
+    "Ledger every failure"). event_class="gateway_hardware",
+    action="llm_generate_failed" per spec. Best effort: a ledger failure must
+    never mask the original error raised to the caller."""
+    try:
+        await activity_ledger_service.append_activity_event(
+            tenant_id=str(tenant_id or "system").strip() or "system",
+            workspace_id=workspace_id,
+            actor_type="agent",
+            actor_id=str(agent_id or "").strip() or "unknown",
+            install_id=str(agent_id or "").strip() or None,
+            event_class="gateway_hardware",
+            detail_level="audit_reference",
+            action="llm_generate_failed",
+            title=f"cli_subscription generation failed: {runtime}",
+            summary=(
+                f"cli_subscription turn on gateway {gateway_id or 'unbound'} via {runtime} "
+                f"failed: {reason}. No fallback — turn denied."
+            ),
+            status="blocked",
+            metadata={
+                "agent_id": agent_id,
+                "execution_tier": "gateway_brain",
+                "runtime": runtime,
+                "gateway_id": gateway_id or None,
+                "reason": reason,
+                "trace_id": trace_id,
+            },
+        )
+    except Exception:
+        pass
+
+
+async def _ledger_cli_subscription_turn(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    agent_id: str,
+    gateway_id: str,
+    runtime: str,
+    model: str,
+    usage: Optional[Dict[str, Any]] = None,
+    trace_id: str = "",
+) -> None:
+    """Ledger + meter a successful cli_subscription turn — a completion
+    produced on the user's OWN paired Gateway under the user's OWN
+    subscription login (never platform credits, never a cloud provider call
+    the platform pays for). Tagged execution_tier=gateway_brain so attribution
+    can prove these turns are distinct and never cross-billed, exactly like
+    the "local"/ollama gateway_brain turns.
+
+    Truth in numbers: if the CLI reported real token counts, those are
+    recorded as-is. If it didn't (both zero), the row still records the
+    call — with metadata.tokens_known=False marking that these are NOT real
+    zero-usage numbers, just unknown ones — rather than silently skipping
+    metering. usd_cost is always left for pricing_registry_service to resolve
+    (usd_cost=None here): "claude_code"/"codex" are not priced providers, so
+    this naturally resolves to pricing_known=False, never a fabricated
+    $0.00 "known" cost (see usage_events_repository.record_usage_event —
+    this is the same column the recent truth-in-numbers fixes rely on).
+    Best effort: a metering failure must never mask a successful reply."""
+    _usage = usage if isinstance(usage, dict) else {}
+    input_tokens = int(_usage.get("input_tokens") or 0)
+    output_tokens = int(_usage.get("output_tokens") or 0)
+    tokens_known = input_tokens > 0 or output_tokens > 0
+    try:
+        await activity_ledger_service.append_activity_event(
+            tenant_id=str(tenant_id or "system").strip() or "system",
+            workspace_id=workspace_id,
+            actor_type="agent",
+            actor_id=str(agent_id or "").strip() or "unknown",
+            install_id=str(agent_id or "").strip() or None,
+            event_class="system_activity",
+            detail_level="audit_reference",
+            action="gateway_brain_turn",
+            title=f"cli_subscription turn: {runtime}",
+            summary=(
+                f"Turn generated on the user's paired Gateway {gateway_id} via {runtime} "
+                f"subscription ({model or 'default model'}). "
+                f"execution_tier=gateway_brain — not billed to platform credits."
+            ),
+            status="completed",
+            metadata={
+                "agent_id": agent_id,
+                "execution_tier": "gateway_brain",
+                "runtime": runtime,
+                "gateway_id": gateway_id,
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "tokens_known": tokens_known,
+                "trace_id": trace_id,
+            },
+        )
+    except Exception:
+        pass
+    try:
+        from server_modules import usage_events_repository as _usage_repo
+
+        await _usage_repo.record_usage_event(
+            tenant_id=str(tenant_id or "default").strip() or "default",
+            workspace_id=workspace_id,
+            provider=runtime,
+            model=model or None,
+            tokens_in=input_tokens,
+            tokens_out=output_tokens,
+            agent_install_id=str(agent_id or "").strip() or None,
+            mode="cli_subscription",
+            run_id=trace_id or None,
+            surface="sage_chat",
+            usd_cost=None,
+            metadata={"tokens_known": tokens_known, "gateway_id": gateway_id},
+        )
+    except Exception:
+        logging.getLogger(__name__).warning("cli_subscription usage_events record failed (non-fatal)")
+
+
+async def _dispatch_cli_subscription_gateway_brain(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    agent_id: str,
+    gateway_binding: str,
+    runtime: str,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    prior_messages: Optional[list] = None,
+    trace_id: str = "",
+) -> tuple[str, dict, str]:
+    """Dispatch ONE completion to the agent's paired Gateway via the gateway
+    WSS rail (llm.generate → the box's OWN Claude Code / Codex CLI, running
+    under the OWNER's own subscription login). Returns (reply, usage,
+    resolved_model) — the exact same shape _dispatch_local_gateway_brain
+    returns for "local"/ollama, so handle_sage_chat's turn-completion code
+    doesn't need to branch on which lane produced the reply.
+
+    HARD RULE — no fallback: if no Gateway is bound, the Gateway is offline,
+    or the specific CLI isn't installed+authenticated on that Gateway, the
+    turn FAILS with a platform-voice error (G5) + a provider_unavailable AND
+    gateway_hardware/llm_generate_failed ledger row (G5: every failure is
+    ledgered, not just successes). It NEVER falls back to platform credits or
+    a different runtime. No subscription credential is ever read or
+    transmitted by the platform — the CLI reads its own auth on the box it's
+    spawned on."""
+    gateway_id = str(gateway_binding or "").strip()
+    _runtime = str(runtime or "").strip().lower() or "claude_code"
+    _model = str(model or "").strip()
+
+    if _runtime not in _VALID_CLI_SUBSCRIPTION_RUNTIMES:
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription", provider=_runtime,
+            reason=f"unsupported cli_subscription runtime: {_runtime}",
+        )
+        raise RuntimeError(_friendly_cli_subscription_error("unsupported_runtime", runtime=_runtime))
+
+    if not gateway_id:
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription", provider=_runtime,
+            reason="cli_subscription mode requires a bound gateway (gateway_binding is empty).",
+        )
+        await _ledger_cli_subscription_failure(
+            workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id="",
+            runtime=_runtime, reason="no_gateway_bound", trace_id=trace_id,
+        )
+        raise RuntimeError(_friendly_cli_subscription_error("no_gateway_bound", runtime=_runtime))
+
+    # Runtime-specific readiness — see _cli_subscription_readiness_reason's
+    # docstring for why this can't be folded into the generic capability
+    # check execute_tool_via_gateway performs below.
+    from server_modules import gateway_state_repository
+
+    registration = gateway_state_repository.get_gateway_registration(gateway_id)
+    readiness_reason = _cli_subscription_readiness_reason(registration, workspace_id=workspace_id, runtime=_runtime)
+    if readiness_reason:
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription",
+            provider=f"{_runtime}@{gateway_id}", reason=readiness_reason,
+        )
+        await _ledger_cli_subscription_failure(
+            workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id=gateway_id,
+            runtime=_runtime, reason=readiness_reason, trace_id=trace_id,
+        )
+        raise RuntimeError(_friendly_cli_subscription_error(readiness_reason, runtime=_runtime))
+
+    messages: list = []
+    for _m in (prior_messages or []):
+        if not isinstance(_m, dict):
+            continue
+        _role = str(_m.get("role") or "").strip().lower()
+        _content = str(_m.get("content") or "").strip()
+        if _content and _role in {"user", "assistant", "system"}:
+            messages.append({"role": _role, "content": _content})
+
+    run_id = f"cli-subscription-{trace_id or uuid.uuid4()}"
+    from server_modules import gateway_execution_service
+    try:
+        response = await gateway_execution_service.execute_tool_via_gateway(
+            gateway_id=gateway_id,
+            capability_id="llm.generate",
+            arguments={
+                "runtime": _runtime,
+                "model": _model,
+                "system": system_prompt,
+                "messages": messages,
+                "prompt": user_message,
+                "timeout_seconds": 120,
+            },
+            run_id=run_id,
+            trace_id=trace_id or run_id,
+            workspace_id=workspace_id,
+            timeout_seconds=125,
+            request_id=run_id,
+            runtime_access_mode="default_guarded",
+            empyralis_approved=True,
+            agent_scope="specialist",
+            emit_hardware_activity=False,
+        )
+    except Exception as exc:
+        _reason = str(exc)
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription",
+            provider=f"{_runtime}@{gateway_id}", reason=_reason,
+        )
+        await _ledger_cli_subscription_failure(
+            workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id=gateway_id,
+            runtime=_runtime, reason=_reason, trace_id=trace_id,
+        )
+        raise RuntimeError(_friendly_cli_subscription_error(_reason, runtime=_runtime)) from exc
+
+    result = response.get("result") if isinstance(response.get("result"), dict) else {}
+    reply = str(result.get("text") or "").strip()
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    resolved_model = str(result.get("model") or _model or "default").strip()
+    if not reply:
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription",
+            provider=f"{_runtime}@{gateway_id}", reason="empty_completion",
+        )
+        await _ledger_cli_subscription_failure(
+            workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id=gateway_id,
+            runtime=_runtime, reason="empty_completion", trace_id=trace_id,
+        )
+        raise RuntimeError(_friendly_cli_subscription_error("empty_completion", runtime=_runtime))
+
+    await _ledger_cli_subscription_turn(
         workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id,
         gateway_id=gateway_id, runtime=_runtime, model=resolved_model,
         usage=usage, trace_id=trace_id,
@@ -3422,6 +3801,86 @@ async def handle_sage_chat(
             "execution_tier": "gateway_brain",
             "runtime": _local_runtime,
             "gateway_id": _local_gateway_id or None,
+            "proof_log": None,
+            "proof_log_id": "",
+            "transparency_events": [],
+            "acting_agent_install_id": _spec_install_id or None,
+            "acting_agent_label": (str(getattr(_spec, "agent_label", "") or "").strip() or None),
+            "runtime_specialization": "specialist",
+            "memory_scope": _spec_install_id or f"workspace:{normalized_workspace_id}",
+            "ai_setup_url": f"/w/{normalized_workspace_id}{_SAGE_AI_SETUP_PATH}",
+        }
+
+    # ── cli_subscription: the owner's own Claude Code / Codex CLI turn ──────
+    # A specialist bound to model_config.mode == "cli_subscription" runs its
+    # turn on ITS OWN paired Gateway via the SAME gateway WSS rail "local"
+    # mode uses above — just spawning claude/codex instead of calling Ollama's
+    # HTTP endpoint. Never the cloud provider, never platform credits, no
+    # fallback. Same single-completion constraint as "local": the cloud
+    # tool/action-loop below is deliberately skipped (CLI tool-use inside this
+    # capability is a later phase — this is one bounded text completion).
+    if _spec is not None and str(getattr(_spec, "mode", "") or "").strip().lower() == "cli_subscription":
+        _cli_runtime = str(getattr(_spec, "runtime", "") or "").strip().lower() or "claude_code"
+        _cli_gateway_id = str(getattr(_spec, "gateway_binding", "") or "").strip()
+        _cli_reply, _cli_usage, _cli_model = await _dispatch_cli_subscription_gateway_brain(
+            workspace_id=normalized_workspace_id,
+            tenant_id=effective_tenant_id,
+            agent_id=_spec_install_id,
+            gateway_binding=_cli_gateway_id,
+            runtime=_cli_runtime,
+            model=str(getattr(_spec, "model", "") or ""),
+            system_prompt=envelope["system_prompt"],
+            user_message=envelope.get("user_message") or normalized_message,
+            prior_messages=prior_messages,
+            trace_id=trace_id,
+        )
+        if "gateway_brain_cli_subscription" not in used_context:
+            used_context.append("gateway_brain_cli_subscription")
+        # Persist the turn to the shared thread, same as the cloud path.
+        try:
+            await thread_service.record_user_turn(
+                thread_id=thread_id,
+                tenant_id=effective_tenant_id,
+                workspace_id=normalized_workspace_id,
+                session_id=None,
+                actor={"user_id": actor_user_id or "sage", "name": actor_email or "sage"},
+                content=normalized_message,
+                metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
+            )
+            await thread_service.record_assistant_turn(
+                thread_id=thread_id,
+                tenant_id=effective_tenant_id,
+                workspace_id=normalized_workspace_id,
+                session_id=None,
+                actor={"user_id": _spec_install_id or "specialist", "name": str(getattr(_spec, "agent_label", "") or "Specialist")},
+                reply=_cli_reply,
+                status="completed",
+                run_id=trace_id,
+                metadata={"channel": channel_origin or "sage", "request_id": (request_id or None), "execution_tier": "gateway_brain"},
+            )
+        except Exception as _persist_exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("cli_subscription gateway_brain turn persist failed: %s", _persist_exc)
+        return {
+            "message": _cli_reply,
+            "error": None,
+            "used_context": used_context,
+            "tool_calls": [],
+            "available_tools": [],
+            "blocked_tools": [],
+            "approvals_required": [],
+            "memory_updates": [],
+            "tool_progress_messages": [],
+            "action_execution_mode": "gateway_brain",
+            "route_decision": _build_sage_route_decision(message=normalized_message),
+            "trace_id": trace_id,
+            "provider": _cli_runtime,
+            "model": _cli_model or None,
+            # Metering tags: these turns are provably distinct and never
+            # cross-billed with platform-credit or BYOK turns.
+            "execution_tier": "gateway_brain",
+            "runtime": _cli_runtime,
+            "gateway_id": _cli_gateway_id or None,
             "proof_log": None,
             "proof_log_id": "",
             "transparency_events": [],

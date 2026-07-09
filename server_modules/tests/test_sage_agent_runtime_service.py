@@ -1516,5 +1516,397 @@ class SageActionLoopKillSwitchTests(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "reached_specialist_toolset_resolution")
 
 
+class CliSubscriptionGatewayBrainTests(unittest.TestCase):
+    """BYO-brain Phase 3: cli_subscription dispatch — the happy path plus
+    every G5 error path (no gateway bound, gateway offline, CLI not
+    installed, CLI not authenticated, timeout, crash). Mirrors
+    _dispatch_local_gateway_brain's shape but adds the runtime-specific
+    (claude_code vs codex) readiness pre-check "local"/ollama never needed."""
+
+    @staticmethod
+    def _registration(**overrides):
+        base = {
+            "gateway_id": "gateway-1",
+            "workspace_id": "ws-1",
+            "status": "active",
+            "device_trust_state": "trusted",
+        }
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def _llm_runtimes_payload(*, claude_code=True, codex=True):
+        return {
+            "llm_runtimes": {
+                "claude_code": {"installed": claude_code, "authenticated": claude_code},
+                "codex": {"installed": codex, "authenticated": codex},
+            }
+        }
+
+    def test_happy_path_returns_reply_usage_and_model(self):
+        response = {
+            "result": {"text": "hello from claude", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 12, "output_tokens": 4}},
+        }
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=AsyncMock(return_value=response)),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger,
+            patch("server_modules.usage_events_repository.record_usage_event", new=AsyncMock()) as mock_usage,
+        ):
+            reply, usage, model = _run(
+                sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                    workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                    gateway_binding="gateway-1", runtime="claude_code", model="claude-sonnet-4-6",
+                    system_prompt="Be terse.", user_message="hi",
+                )
+            )
+        self.assertEqual(reply, "hello from claude")
+        self.assertEqual(usage, {"input_tokens": 12, "output_tokens": 4})
+        self.assertEqual(model, "claude-sonnet-4-6")
+        # Ledgered as a completed turn, tagged gateway_brain, never blocked.
+        completed_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "gateway_brain_turn"]
+        self.assertEqual(len(completed_calls), 1)
+        self.assertEqual(completed_calls[0].kwargs["status"], "completed")
+        self.assertEqual(completed_calls[0].kwargs["metadata"]["execution_tier"], "gateway_brain")
+        self.assertEqual(completed_calls[0].kwargs["metadata"]["runtime"], "claude_code")
+        # Metered with REAL tokens; usd_cost is left unresolved (None) since a
+        # subscription turn has no platform-billed per-token price — never a
+        # fabricated $0.00 "known" cost.
+        mock_usage.assert_awaited_once()
+        usage_kwargs = mock_usage.await_args.kwargs
+        self.assertEqual(usage_kwargs["tokens_in"], 12)
+        self.assertEqual(usage_kwargs["tokens_out"], 4)
+        self.assertIsNone(usage_kwargs["usd_cost"])
+        self.assertEqual(usage_kwargs["mode"], "cli_subscription")
+        self.assertTrue(usage_kwargs["metadata"]["tokens_known"])
+
+    def test_happy_path_with_unreported_usage_marks_tokens_unknown(self):
+        """Truth in numbers: when the CLI doesn't report usage, the row is
+        still recorded (never skipped) with an explicit tokens_known=False
+        marker instead of inventing plausible-looking numbers."""
+        response = {"result": {"text": "hi", "usage": {}}}
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=AsyncMock(return_value=response)),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.usage_events_repository.record_usage_event", new=AsyncMock()) as mock_usage,
+        ):
+            _reply, _usage, model = _run(
+                sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                    workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                    gateway_binding="gateway-1", runtime="codex", model="",
+                    system_prompt="", user_message="hi",
+                )
+            )
+        self.assertEqual(model, "default")
+        usage_kwargs = mock_usage.await_args.kwargs
+        self.assertEqual(usage_kwargs["tokens_in"], 0)
+        self.assertEqual(usage_kwargs["tokens_out"], 0)
+        self.assertIsNone(usage_kwargs["usd_cost"])
+        self.assertFalse(usage_kwargs["metadata"]["tokens_known"])
+
+    def test_no_gateway_bound_raises_and_is_ledgered(self):
+        with patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger:
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="", runtime="claude_code", model="",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+        message = str(ctx.exception)
+        self.assertIn("Heads up:", message)
+        self.assertIn("requires a Gateway", message)
+        failure_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "llm_generate_failed"]
+        self.assertEqual(len(failure_calls), 1)
+        self.assertEqual(failure_calls[0].kwargs["event_class"], "gateway_hardware")
+
+    def test_gateway_offline_raises_and_is_ledgered(self):
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+            patch(
+                "server_modules.gateway_execution_service.execute_tool_via_gateway",
+                new=AsyncMock(side_effect=ValueError("gateway_offline")),
+            ),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="claude_code", model="",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+        message = str(ctx.exception)
+        self.assertIn("Heads up:", message)
+        self.assertIn("offline", message.lower())
+        failure_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "llm_generate_failed"]
+        self.assertEqual(len(failure_calls), 1)
+
+    def test_cli_not_installed_raises_before_ever_dispatching(self):
+        """Not-installed is caught by the readiness pre-check — the Gateway
+        WSS rail is never even invoked for a CLI we already know isn't
+        there."""
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(claude_code=False),
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=AsyncMock()) as mock_dispatch,
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="claude_code", model="",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+        message = str(ctx.exception)
+        self.assertIn("Heads up:", message)
+        self.assertIn("not installed", message.lower())
+        self.assertIn("npm install -g @anthropic-ai/claude-code", message)
+        mock_dispatch.assert_not_awaited()
+        failure_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "llm_generate_failed"]
+        self.assertEqual(len(failure_calls), 1)
+
+    def test_codex_not_authenticated_raises_with_codex_specific_login_command(self):
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {"codex": {"installed": True, "authenticated": False}}},
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=AsyncMock()) as mock_dispatch,
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="codex", model="",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+        message = str(ctx.exception)
+        self.assertIn("Heads up:", message)
+        self.assertIn("not logged in", message.lower())
+        self.assertIn("codex login", message)
+        mock_dispatch.assert_not_awaited()
+
+    def test_timeout_raises_and_is_ledgered(self):
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+            patch(
+                "server_modules.gateway_execution_service.execute_tool_via_gateway",
+                new=AsyncMock(side_effect=Exception(
+                    "Claude Code generation timed out on this Gateway (no response within 120000ms)."
+                )),
+            ),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="claude_code", model="",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+        message = str(ctx.exception)
+        self.assertIn("Heads up:", message)
+        self.assertIn("timed out", message.lower())
+        failure_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "llm_generate_failed"]
+        self.assertEqual(len(failure_calls), 1)
+
+    def test_crash_raises_and_is_ledgered(self):
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+            patch(
+                "server_modules.gateway_execution_service.execute_tool_via_gateway",
+                new=AsyncMock(side_effect=Exception(
+                    "Codex exited unexpectedly on this Gateway (codex exited with code 139)."
+                )),
+            ),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="codex", model="",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+        message = str(ctx.exception)
+        self.assertIn("Heads up:", message)
+        self.assertIn("exited unexpectedly", message.lower())
+        failure_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "llm_generate_failed"]
+        self.assertEqual(len(failure_calls), 1)
+
+    def test_unsupported_runtime_rejected_before_any_lookup(self):
+        with patch("server_modules.gateway_state_repository.get_gateway_registration") as mock_get_reg:
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="gpt-5-direct", model="",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+        self.assertIn("not a supported cli_subscription runtime", str(ctx.exception))
+        mock_get_reg.assert_not_called()
+
+    def test_empty_completion_treated_as_crash(self):
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+            patch(
+                "server_modules.gateway_execution_service.execute_tool_via_gateway",
+                new=AsyncMock(return_value={"result": {"text": "", "usage": {}}}),
+            ),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="claude_code", model="",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+        self.assertIn("exited unexpectedly", str(ctx.exception).lower())
+        failure_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "llm_generate_failed"]
+        self.assertEqual(len(failure_calls), 1)
+
+
+class CliSubscriptionReadinessReasonTests(unittest.TestCase):
+    """Direct unit coverage for the runtime-specific readiness check. Generic
+    Gateway-online checks are gateway_execution_service's job (already
+    covered by its own tests); this is the NEW per-runtime (claude_code vs
+    codex) piece cli_subscription needed on top of that."""
+
+    def test_missing_registration(self):
+        reason = sage_agent_runtime_service._cli_subscription_readiness_reason(
+            None, workspace_id="ws-1", runtime="claude_code",
+        )
+        self.assertEqual(reason, "gateway_registration_missing")
+
+    def test_inactive_registration(self):
+        reg = {"status": "inactive", "workspace_id": "ws-1"}
+        reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="claude_code")
+        self.assertEqual(reason, "gateway_registration_inactive")
+
+    def test_revoked_registration(self):
+        reg = {"status": "active", "device_trust_state": "revoked", "workspace_id": "ws-1"}
+        reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="claude_code")
+        self.assertEqual(reason, "gateway_device_revoked")
+
+    def test_workspace_mismatch(self):
+        reg = {"status": "active", "workspace_id": "ws-other"}
+        reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="claude_code")
+        self.assertEqual(reason, "gateway_workspace_mismatch")
+
+    def test_not_installed(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"codex": {"installed": False, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="codex")
+        self.assertEqual(reason, "codex_not_installed")
+
+    def test_not_authenticated(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"claude_code": {"installed": True, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="claude_code")
+        self.assertEqual(reason, "claude_code_not_authenticated")
+
+    def test_ready(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"codex": {"installed": True, "authenticated": True}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="codex")
+        self.assertEqual(reason, "")
+
+
+class FriendlyCliSubscriptionErrorTests(unittest.TestCase):
+    """Every G5 condition gets its own distinct, platform-voiced
+    ("Heads up: ...") message — never one blanket string."""
+
+    def test_each_condition_gets_a_distinct_message(self):
+        cases = [
+            ("no_gateway_bound", "claude_code", "requires a gateway"),
+            ("gateway_registration_missing", "claude_code", "no longer paired"),
+            ("gateway_offline", "claude_code", "offline"),
+            ("claude_code_not_installed", "claude_code", "not installed"),
+            ("codex_not_installed", "codex", "not installed"),
+            ("claude_code_not_authenticated", "claude_code", "not logged in"),
+            ("codex_not_authenticated", "codex", "not logged in"),
+            ("Claude Code generation timed out on this Gateway (...)", "claude_code", "timed out"),
+            ("Codex exited unexpectedly on this Gateway (...)", "codex", "exited unexpectedly"),
+        ]
+        messages = set()
+        for reason, runtime, expect_substring in cases:
+            message = sage_agent_runtime_service._friendly_cli_subscription_error(reason, runtime=runtime)
+            self.assertIn("Heads up:", message)
+            self.assertIn(expect_substring, message.lower())
+            messages.add(message)
+        # Every condition produced a genuinely distinct message — never one
+        # blanket string standing in for all of them.
+        self.assertEqual(len(messages), len(cases))
+
+    def test_claude_vs_codex_not_installed_reference_the_right_cli_and_install_command(self):
+        claude_msg = sage_agent_runtime_service._friendly_cli_subscription_error("claude_code_not_installed", runtime="claude_code")
+        codex_msg = sage_agent_runtime_service._friendly_cli_subscription_error("codex_not_installed", runtime="codex")
+        self.assertIn("Claude Code", claude_msg)
+        self.assertIn("@anthropic-ai/claude-code", claude_msg)
+        self.assertIn("Codex", codex_msg)
+        self.assertIn("@openai/codex", codex_msg)
+
+    def test_claude_vs_codex_login_commands(self):
+        claude_msg = sage_agent_runtime_service._friendly_cli_subscription_error("claude_code_not_authenticated", runtime="claude_code")
+        codex_msg = sage_agent_runtime_service._friendly_cli_subscription_error("codex_not_authenticated", runtime="codex")
+        self.assertIn("claude login", claude_msg)
+        self.assertIn("codex login", codex_msg)
+
+    def test_unknown_reason_falls_back_to_an_honest_message_not_a_silent_generic_one(self):
+        message = sage_agent_runtime_service._friendly_cli_subscription_error("some_never_seen_reason", runtime="claude_code")
+        self.assertIn("Heads up:", message)
+        self.assertIn("some_never_seen_reason", message)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
+import { runCliSubscription, CliRunError, type CliRunResult, type CliSubscriptionRuntime } from "./cli-runner";
 
 // BYO-brain Phase 2: the on-box LLM capability. This runs on the USER's paired
 // box and forwards a turn to the box's OWN local Ollama endpoint
@@ -7,6 +8,12 @@ import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protoc
 // executors on the capability-router. It NEVER touches any subscription
 // credential — Ollama is local, open-weights, and needs no login. This proves
 // the box-dispatch rail on a zero-compliance-risk payload.
+//
+// cli_subscription Phase 3: the SAME llm.generate capability also carries the
+// owner's own Claude Code / Codex subscription. Those two runtimes spawn the
+// box's own CLI (cli-runner.ts) instead of calling a local HTTP endpoint —
+// still zero credential transmission, since the CLI reads its own auth from
+// the environment it's spawned in, never handed to the Gateway.
 
 export const LLM_GENERATE_CAPABILITY = "llm.generate";
 
@@ -16,6 +23,7 @@ const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const DEFAULT_MODEL = "llama3.2";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
+const CLI_SUBSCRIPTION_RUNTIMES = new Set(["claude_code", "codex"]);
 
 export interface OllamaChatMessage {
   role: string;
@@ -29,6 +37,17 @@ type FetchImpl = (url: string, init: Record<string, unknown>) => Promise<{
   text: () => Promise<string>;
 }>;
 
+/** Same shape as runCliSubscription from cli-runner.ts — kept as a separate
+ *  type alias so this file doesn't need to import CliRunParams/CliRunnerConfig
+ *  just to describe the injection point. */
+type CliRunnerImpl = (params: {
+  runtime: CliSubscriptionRuntime;
+  prompt: string;
+  systemPrompt?: string;
+  model?: string;
+  timeoutMs: number;
+}) => Promise<CliRunResult>;
+
 export interface GatewayLLMRuntimeConfig {
   /** Base URL for the local Ollama endpoint. Defaults to the env override
    *  (ORION_LOCAL_WORKER_OLLAMA_URL) or 127.0.0.1:11434. */
@@ -37,6 +56,9 @@ export interface GatewayLLMRuntimeConfig {
   fetchImpl?: FetchImpl;
   /** Injectable for tests. Defaults to Date.now-based timeouts. */
   defaultTimeoutMs?: number;
+  /** Injectable for tests. Defaults to cli-runner.ts's runCliSubscription
+   *  (spawns the real claude/codex binary). */
+  cliRunner?: CliRunnerImpl;
 }
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
@@ -101,10 +123,59 @@ function buildMessages(args: Record<string, unknown>): OllamaChatMessage[] {
   return messages;
 }
 
+/** Flattens the chat messages into what a single non-interactive CLI turn
+ *  needs: a system prompt (kept separate for runtimes with their own
+ *  --system-prompt flag) and one prompt body. A lone non-system message is
+ *  passed through as-is (the common single-turn case); more than one is
+ *  rendered with role labels so the CLI still sees the full exchange in its
+ *  one shot — cli_subscription turns are a single bounded request, never a
+ *  multi-turn tool loop (same constraint the "local" Ollama brain runs
+ *  under). `includeSystemInline` folds the system content into the prompt
+ *  body itself for runtimes with no separate system-prompt flag (codex). */
+function buildCliPrompt(
+  messages: OllamaChatMessage[],
+  { includeSystemInline }: { includeSystemInline: boolean },
+): { systemPrompt: string; promptText: string } {
+  const systemPrompt = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+  const conversational = messages.filter((m) => m.role !== "system");
+  const promptBody = conversational.length === 1
+    ? conversational[0].content
+    : conversational.map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`).join("\n\n");
+  if (!includeSystemInline) {
+    return { systemPrompt, promptText: promptBody };
+  }
+  return { systemPrompt: "", promptText: systemPrompt ? `${systemPrompt}\n\n${promptBody}` : promptBody };
+}
+
+/** Maps a CLI failure into a precise, honest message. This text is what the
+ *  control plane's platform-voice error mapper pattern-matches on (mirroring
+ *  how the Ollama path's "unreachable"/"HTTP 4xx" wording already gets
+ *  matched by sage_agent_runtime_service._friendly_gateway_brain_error) — so
+ *  the distinct phrases below ("not installed", "not signed in", "timed
+ *  out", "exited unexpectedly") matter, not just the human readability. */
+function cliErrorMessage(runtime: CliSubscriptionRuntime, error: unknown): string {
+  const label = runtime === "claude_code" ? "Claude Code" : "Codex";
+  if (error instanceof CliRunError) {
+    if (error.kind === "not_installed") {
+      return `${label} is not installed on this Gateway (${error.message}).`;
+    }
+    if (error.kind === "not_authenticated") {
+      return `${label} on this Gateway is not signed in (${error.message}).`;
+    }
+    if (error.kind === "timeout") {
+      return `${label} generation timed out on this Gateway (${error.message}).`;
+    }
+    return `${label} exited unexpectedly on this Gateway (${error.message}).`;
+  }
+  const reason = error instanceof Error ? error.message : String(error);
+  return `${label} generation failed on this Gateway (${reason}).`;
+}
+
 export class GatewayLLMRuntime {
   private readonly ollamaBaseUrl: string;
   private readonly fetchImpl: FetchImpl;
   private readonly defaultTimeoutMs: number;
+  private readonly cliRunner: CliRunnerImpl;
 
   constructor(config: GatewayLLMRuntimeConfig = {}) {
     this.ollamaBaseUrl = (
@@ -114,6 +185,7 @@ export class GatewayLLMRuntime {
     ).replace(/\/+$/, "");
     this.fetchImpl = config.fetchImpl ?? ((globalThis.fetch as unknown) as FetchImpl);
     this.defaultTimeoutMs = config.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.cliRunner = config.cliRunner ?? runCliSubscription;
   }
 
   requestedCapabilities(): string[] {
@@ -134,13 +206,6 @@ export class GatewayLLMRuntime {
     }
     const args = requireObject(payload.arguments ?? {}, "arguments must be an object.");
     const runtime = token(args.runtime) || "ollama";
-    if (runtime !== "ollama") {
-      // Phase 2 only wires the local Ollama runtime. CLI-subscription runtimes
-      // (claude_code/codex) ride the same rail but are a later phase — fail
-      // honestly rather than silently doing the wrong thing.
-      throw new Error(`llm.generate runtime "${runtime}" is not supported on this Gateway yet (only "ollama").`);
-    }
-    const model = token(args.model) || DEFAULT_MODEL;
     const messages = buildMessages(args);
     if (messages.length === 0) {
       throw new Error("llm.generate requires a non-empty prompt (messages, or system + prompt).");
@@ -150,11 +215,24 @@ export class GatewayLLMRuntime {
       this.defaultTimeoutMs,
       MAX_TIMEOUT_MS,
     );
-    const options = (args.options && typeof args.options === "object" && !Array.isArray(args.options))
-      ? (args.options as Record<string, unknown>)
-      : undefined;
 
-    return this.generateViaOllama({ model, messages, timeoutMs, options, runtime });
+    if (runtime === "ollama") {
+      const model = token(args.model) || DEFAULT_MODEL;
+      const options = (args.options && typeof args.options === "object" && !Array.isArray(args.options))
+        ? (args.options as Record<string, unknown>)
+        : undefined;
+      return this.generateViaOllama({ model, messages, timeoutMs, options, runtime });
+    }
+    if (CLI_SUBSCRIPTION_RUNTIMES.has(runtime)) {
+      // No DEFAULT_MODEL fallback here on purpose — that constant is an Ollama
+      // model name. An unset model means "let the CLI use its own configured
+      // default", never a fabricated model id the CLI wouldn't recognize.
+      const model = token(args.model);
+      return this.generateViaCli({ runtime: runtime as CliSubscriptionRuntime, model, messages, timeoutMs });
+    }
+    throw new Error(
+      `llm.generate runtime "${runtime}" is not supported on this Gateway (expected "ollama", "claude_code", or "codex").`,
+    );
   }
 
   private async generateViaOllama(params: {
@@ -222,6 +300,46 @@ export class GatewayLLMRuntime {
         output_tokens: Number(parsed?.eval_count) || 0,
       },
       source: "gateway_ollama",
+    };
+  }
+
+  /** cli_subscription (Phase 3): spawns the owner's own Claude Code / Codex
+   *  CLI for one completion. Same return shape as generateViaOllama so
+   *  nothing downstream (the control plane's dispatch, the turn ledger) needs
+   *  to branch on which runtime actually produced the text. */
+  private async generateViaCli(params: {
+    runtime: CliSubscriptionRuntime;
+    model: string;
+    messages: OllamaChatMessage[];
+    timeoutMs: number;
+  }): Promise<Record<string, unknown>> {
+    const { systemPrompt, promptText } = buildCliPrompt(params.messages, {
+      includeSystemInline: params.runtime === "codex",
+    });
+    if (!promptText) {
+      throw new Error("llm.generate requires a non-empty prompt (messages, or system + prompt).");
+    }
+    let result: CliRunResult;
+    try {
+      result = await this.cliRunner({
+        runtime: params.runtime,
+        prompt: promptText,
+        systemPrompt,
+        model: params.model,
+        timeoutMs: params.timeoutMs,
+      });
+    } catch (error) {
+      throw new Error(cliErrorMessage(params.runtime, error));
+    }
+    return {
+      text: result.text,
+      runtime: params.runtime,
+      // Echo back what was actually requested; an unset model means the CLI
+      // used its own configured default, which the CLI doesn't report back
+      // to us — "default" here describes OUR request, not a real model id.
+      model: params.model || "default",
+      usage: result.usage,
+      source: params.runtime === "claude_code" ? "gateway_claude_code" : "gateway_codex",
     };
   }
 }
