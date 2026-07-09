@@ -32,10 +32,18 @@ VALID_CAPABILITY_PRESETS = {PRESET_KNOWLEDGE, PRESET_STANDARD, PRESET_OPERATOR}
 # Presets a normal (non-Sage) create flow may request.
 CREATABLE_CAPABILITY_PRESETS = {PRESET_KNOWLEDGE, PRESET_STANDARD}
 
-# Read-only / knowledge toolset: memory + docs/web read + task completion. No
-# shell, hardware, fleet, or write tools. MCP connectors are added on top per
-# the agent's connector bindings.
-_KNOWLEDGE_TOOLS: List[str] = [
+# Read-only / safe-basics toolset: memory + docs/web read + task completion.
+# No shell, hardware, fleet, or write tools. MCP connectors are added on top
+# per the agent's connector bindings. These are LLM-dispatch tool names (the
+# format _resolve_specialist_toolset enforces at runtime, e.g. sage_agent_
+# runtime_service.py's _specialist_tool_allowed) — NOT skill_registry.py's
+# hyphenated display ids (web-search, memory-manager, ...). The two id spaces
+# are presently disconnected (fleet_get_agent_tools' Tools-tab toggle display
+# is keyed by the hyphenated id, enforcement is keyed by this underscore
+# name), so seeding this list makes the tools actually callable but will not
+# show as "on" in the Tools tab — a pre-existing, separate display bug this
+# preset does not attempt to fix.
+_SAFE_DEFAULT_TOOLS: List[str] = [
     "memory_search",
     "memory_get",
     "memory_read",
@@ -44,6 +52,7 @@ _KNOWLEDGE_TOOLS: List[str] = [
     "web__fetch",
     "task_complete",
 ]
+_KNOWLEDGE_TOOLS: List[str] = _SAFE_DEFAULT_TOOLS
 
 CAPABILITY_PRESETS: Dict[str, Dict[str, Any]] = {
     PRESET_KNOWLEDGE: {
@@ -65,7 +74,12 @@ CAPABILITY_PRESETS: Dict[str, Dict[str, Any]] = {
         "hardware_access": "none",
         "hardware_locked": False,
         "subagents_enabled": False,
-        "enabled_tools": None,  # None = inherit the definition's default toolset
+        # Safe basics ON at creation (web search, memory read, task
+        # completion) so a fresh agent can do something useful on its first
+        # turn instead of failing every tool call silently. Hardware, shell,
+        # write, and fleet-management tools stay OFF — the owner opts in via
+        # the Tools tab. Still fully overridable post-creation.
+        "enabled_tools": list(_SAFE_DEFAULT_TOOLS),
         "model_tier": "standard",
         "context_budget_preset": "standard",
         "context_policy": {"max_context_tokens": 0, "on_context_full": "compact"},  # 0 = use model default
