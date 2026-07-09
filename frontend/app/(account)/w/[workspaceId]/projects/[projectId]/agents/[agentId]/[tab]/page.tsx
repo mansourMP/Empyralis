@@ -21,7 +21,7 @@ export default function AgentDetailPage() {
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   const agentBase = `${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`;
 
-  const { agents } = useFleetAgents(workspaceId);
+  const { agents, refresh: refreshAgents } = useFleetAgents(workspaceId);
   const { projects, loading: projectsLoading } = useFleetProjects(workspaceId);
   const agent = agents.find((a) => a.agent_id === agentId) || null;
   const project = projects.find((p) => p.id === projectId);
@@ -39,10 +39,10 @@ export default function AgentDetailPage() {
       agentId={agentId}
       agent={agent}
       projectName={projectName}
-      variant="page"
       initialTab={tab}
       onTabChange={(t) => router.replace(`${agentBase}/${t}`)}
       onChat={() => router.replace(`${agentBase}/chat`)}
+      onRenamed={refreshAgents}
     />
   );
 }

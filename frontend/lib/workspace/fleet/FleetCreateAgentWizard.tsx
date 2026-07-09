@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Check, Loader2, Lock, X } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -14,41 +15,88 @@ import {
   modelsForProvider,
   defaultModelForProvider,
 } from "./fleet-provider-constants";
-import { useFleetProjects } from "./fleet-data";
+import { useFleetAgentChannels, type FleetAgent } from "./fleet-data";
 import { GatewayBoxPicker } from "./gateway-box-picker";
+import { ChannelsTab } from "./FleetAgentDetail";
+import { ConnectorPicker } from "./ConnectorPicker";
+import { GatewayPairPanel, type GatewayRegistrationRecord } from "@/lib/gateway/GatewayPairPanel";
+import { CloudVpsSetupPanel } from "@/lib/workspace/cloud-vps-setup-panel";
+import { SshServerConnectPanel } from "@/lib/workspace/ssh-server-connect-panel";
 
-type CapabilityPreset = "standard" | "knowledge";
 type WizardProviderMode = "platform" | "byok" | "subscription" | "local";
-type HardwareChoice = "none" | "gateway";
-type ChannelChoice = "none" | "byo";
+type Placement = "cloud" | "vps" | "gateway";
 
-// Fixed order per the UI contract: name → project → capability preset →
-// hardware → AI brain → model → channel. Hardware comes before the brain
-// because the chosen box determines which brains are actually available
-// (a box with no local Ollama can't run "Run locally").
-const STEP_LABELS = ["Name", "Project", "Capability preset", "Hardware", "AI brain", "Model", "Channel"];
+const STEP_LABELS = ["Placement", "Brain", "Channels", "Connections"];
 
-const PRESET_OPTIONS: { id: CapabilityPreset; label: string; body: string; note?: string }[] = [
-  {
-    id: "standard",
-    label: "Standard agent",
-    body: "A full agent. Can use tools, connect apps, and (if you grant it) a computer.",
-  },
-  {
-    id: "knowledge",
-    label: "Knowledge agent",
-    body: "Answers from documents and connected apps only. Cheaper, and simpler to trust.",
-    note: "No hardware access — locked off for safety.",
-  },
-];
+// ── Hardware nodes (VPS + paired Gateways) — same /api/gateway/registrations
+// endpoint the Hardware page reads, partitioned by hardware_kind. A local,
+// self-contained fetch (not gateway-box-picker's useWorkspaceGateways) because
+// this needs the hardware_kind field that hook's type doesn't model. ─────────
+
+type HardwareNode = {
+  gateway_id?: string | null;
+  id?: string | null;
+  display_name?: string | null;
+  platform?: string | null;
+  status?: string | null;
+  connection_status?: string | null;
+  hardware_kind?: string | null;
+  hardware_label?: string | null;
+};
+
+function nodeId(n: HardwareNode): string {
+  return String(n.gateway_id || n.id || "").trim();
+}
+function nodeLabel(n: HardwareNode): string {
+  return (
+    String(n.hardware_label || "").trim() ||
+    String(n.display_name || "").trim() ||
+    String(n.platform || "").trim() ||
+    nodeId(n) ||
+    "Computer"
+  );
+}
+function nodeOnline(n: HardwareNode): boolean {
+  return `${n.connection_status || ""} ${n.status || ""}`.toLowerCase().includes("online");
+}
+
+function useWorkspaceHardwareNodes(workspaceId: string) {
+  const [nodes, setNodes] = useState<HardwareNode[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  async function refresh(): Promise<HardwareNode[]> {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" });
+      const data = res.ok ? await res.json() : {};
+      const list = data?.items || data?.registrations || (Array.isArray(data) ? data : []);
+      const arr = Array.isArray(list) ? list : [];
+      setNodes(arr);
+      return arr;
+    } catch {
+      setNodes([]);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
+  return { nodes, loading, refresh };
+}
 
 /**
- * Create-agent wizard — fixed order per the UI contract:
- * Name → Project → Capability preset → Hardware → AI brain → Model → Channel.
- * The agent row is created behind the scenes at the Preset step (so later
- * steps have an agent_id to patch), but the button there reads "Next" — the
- * user only sees "Create" on the final (Channel) step, once everything is
- * actually configured. Plain-language throughout — no jargon.
+ * Create-agent wizard v2 — Placement → Brain → Channels → Connections.
+ * The agent is created the moment Placement is committed (auto pool name,
+ * project "General" unless opened from a specific project, capability_preset
+ * standard) — everything after that is a PATCH, so closing early still
+ * leaves a real, usable agent behind. Name/Project/Capability preset are no
+ * longer steps: they're sane defaults, editable later from the Overview and
+ * Model tabs.
  */
 export function FleetCreateAgentWizard({
   workspaceId,
@@ -61,15 +109,23 @@ export function FleetCreateAgentWizard({
   onCreated: (agentId: string) => void;
   initialProjectId?: string;
 }) {
-  const { projects } = useFleetProjects(workspaceId);
+  const router = useRouter();
   const [step, setStep] = useState(1);
   const [agentId, setAgentId] = useState<string | null>(null);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [projectId, setProjectId] = useState<string>(initialProjectId || "");
-  const [preset, setPreset] = useState<CapabilityPreset>("standard");
-  const [hardwareChoice, setHardwareChoice] = useState<HardwareChoice>("none");
-  const [hardwareGatewayId, setHardwareGatewayId] = useState("");
+  const [resolvedProjectId, setResolvedProjectId] = useState("");
+  const [createdAgent, setCreatedAgent] = useState<FleetAgent | null>(null);
+
+  // Step 1 — Placement
+  const [placement, setPlacement] = useState<Placement>("cloud");
+  const [selectedNodeId, setSelectedNodeId] = useState("");
+  const { nodes, loading: nodesLoading, refresh: refreshNodes } = useWorkspaceHardwareNodes(workspaceId);
+  const [vpsPanelOpen, setVpsPanelOpen] = useState(false);
+  const [sshPanelOpen, setSshPanelOpen] = useState(false);
+  const [showGatewayPair, setShowGatewayPair] = useState(false);
+  const vpsNodes = nodes.filter((n) => n.hardware_kind === "cloud_vps");
+  const gatewayNodes = nodes.filter((n) => n.hardware_kind !== "cloud_vps");
+
+  // Step 2 — Brain
   const [providerMode, setProviderMode] = useState<WizardProviderMode>("platform");
   const [byokProvider, setByokProvider] = useState("anthropic");
   const [byokKey, setByokKey] = useState("");
@@ -77,20 +133,13 @@ export function FleetCreateAgentWizard({
   const [localProvider, setLocalProvider] = useState("ollama");
   const [gatewayBinding, setGatewayBinding] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
-  const [channel, setChannel] = useState<ChannelChoice>("none");
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Default the project selection to the pre-selected one or the first project.
-  useEffect(() => {
-    if (!projectId && projects.length > 0) {
-      setProjectId(initialProjectId || projects[0].id);
-    }
-  }, [projects, projectId, initialProjectId]);
-
-  // The provider whose model catalog the Model step should show — keep the
-  // selected model in sync with it (freeform providers get "" so their text
-  // field starts empty rather than carrying over a stale id from another mode).
+  // The provider whose model catalog the Brain step's model picker should
+  // show — keep the selected model in sync with it (freeform providers get
+  // "" so their text field starts empty rather than carrying a stale id).
   const activeModelProvider = providerMode === "byok" ? byokProvider : providerMode === "local" ? (localProvider || "ollama") : "";
   useEffect(() => {
     if (!activeModelProvider) return;
@@ -98,9 +147,13 @@ export function FleetCreateAgentWizard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeModelProvider]);
 
-  async function patchAgent(patch: Record<string, any>) {
-    if (!agentId) return;
-    const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+  // How many channels are already live — decides whether step 3's forward
+  // button reads "Next" (something real happened) or "Skip for now".
+  const { channels } = useFleetAgentChannels(workspaceId, step === 3 ? agentId : null);
+  const channelsConnected = channels.filter((c: any) => c?.connected).length;
+
+  async function patchAgent(id: string, patch: Record<string, any>) {
+    const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(id)}`, {
       method: "PATCH",
       credentials: "include",
       headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -110,86 +163,100 @@ export function FleetCreateAgentWizard({
     if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
   }
 
-  // Step 3 (Capability preset) → create the agent with its preset + project.
-  // The button here reads "Next", not "Create" — more steps follow. If the
-  // agent was already created (the user went Back and returned), don't
-  // create a second one; just advance.
-  async function createAgent() {
-    if (agentId) {
-      setStep(4);
+  async function hydrateCreatedAgent(id: string) {
+    try {
+      const res = await fetch(`/api/w/${workspaceId}/fleet/agents`, { credentials: "include" });
+      const data = res.ok ? await res.json() : {};
+      const found = (data?.agents || []).find((a: FleetAgent) => a.agent_id === id) || null;
+      setCreatedAgent(found);
+    } catch {
+      // Best-effort — ChannelsTab tolerates a null agent.
+    }
+  }
+
+  // Step 1 (Placement) → creates the agent on first commit (auto name, the
+  // caller's project or "General", capability_preset standard), then always
+  // (re)patches hardware_access/preferred_gateway_id to match the current
+  // choice — placement is changeable anytime, including by coming back here
+  // after already advancing.
+  async function submitPlacement() {
+    if (placement !== "cloud" && !selectedNodeId.trim()) {
+      setError(placement === "vps" ? "Pick a cloud server, or start provisioning one." : "Pick a computer, or pair one.");
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
-        method: "POST",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          name: name.trim(),
-          instructions: description.trim(),
-          capability_preset: preset,
-          project_id: projectId,
-        }),
+      let id = agentId;
+      let projId = resolvedProjectId;
+      if (!id) {
+        const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify({ capability_preset: "standard", project_id: initialProjectId || "" }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+        id = String(data.agent_id || "");
+        projId = String(data.project_id || initialProjectId || "");
+        setAgentId(id);
+        setResolvedProjectId(projId);
+      }
+      await patchAgent(id, {
+        hardware_access: placement === "cloud" ? "none" : placement,
+        preferred_gateway_id: placement === "cloud" ? "" : selectedNodeId.trim(),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
-      setAgentId(String(data.agent_id || ""));
-      setStep(4);
+      await hydrateCreatedAgent(id);
+      setStep(2);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not create the agent.");
+      setError(e instanceof Error ? e.message : "Could not save placement.");
     } finally {
       setBusy(false);
     }
   }
 
-  // Step 4 (Hardware) → no server call — this step's box choice seeds the AI
-  // brain step's default box (hardware before brain: the box determines which
-  // brains are available). Knowledge agents are hardware-locked to none.
-  function submitHardware() {
-    if (preset !== "knowledge" && hardwareChoice === "gateway" && !hardwareGatewayId.trim()) {
-      setError("Pick a computer, or choose “No dedicated hardware” to continue.");
-      return;
-    }
-    setError(null);
-    if (hardwareChoice === "gateway" && hardwareGatewayId && !gatewayBinding) {
-      setGatewayBinding(hardwareGatewayId);
-    }
-    setStep(5);
+  async function handleVpsConnected() {
+    setVpsPanelOpen(false);
+    const before = new Set(nodes.map(nodeId));
+    const after = await refreshNodes();
+    const added = after.find((n) => n.hardware_kind === "cloud_vps" && !before.has(nodeId(n)));
+    if (added) setSelectedNodeId(nodeId(added));
   }
 
-  // Step 5 (AI brain) → who pays / which brain. Saves a BYOK vault key if one
-  // was entered; the actual model_config patch is deferred to the Model step
-  // (step 6), once the concrete model is also known, so it's written once.
+  async function handleSshConnected() {
+    setSshPanelOpen(false);
+    const before = new Set(nodes.map(nodeId));
+    const after = await refreshNodes();
+    const added = after.find((n) => !before.has(nodeId(n)));
+    if (added) setSelectedNodeId(nodeId(added));
+  }
+
+  function handleGatewayPaired(g: GatewayRegistrationRecord) {
+    setShowGatewayPair(false);
+    setSelectedNodeId(String(g.gateway_id || ""));
+    void refreshNodes();
+  }
+
+  // Step 2 (Brain) → who pays / which brain / which model, in one commit.
+  // Same logic as the old wizard's steps 5-6, unchanged: BYOK saves a vault
+  // key + provider profile before the model_config patch (which replaces
+  // model_config wholesale, so both fields are written together here).
   async function submitBrain() {
-    // cli_subscription isn't dispatchable yet (Phase 3) — persisting it resolves
-    // to a guaranteed "not yet available" turn error. The Next button is disabled
-    // for it; this guard is defence in depth.
     if (providerMode === "subscription") {
       setError(`${COMING_SOON_NOTE}. Pick Empyralis credits or your own API key to continue.`);
       return;
     }
-    // BYO-brain Phase 2: "local" is live but a local agent MUST name its box.
     if (providerMode === "local" && !gatewayBinding.trim()) {
       setError("Pick a computer (with Ollama) to run this agent’s local model.");
       return;
     }
+    if (!agentId) return;
     setBusy(true);
     setError(null);
     try {
       if (providerMode === "byok" && byokKey.trim()) {
-        // Two calls, not one: /credentials/vault stores the secret itself
-        // (provider-aware — actually validates the key against that
-        // provider's adapter) and returns a credential_id; /providers/profiles
-        // is the separate routing layer that says "this workspace's calls to
-        // this provider use that credential." Both are required — a bare
-        // vault credential with no profile pointing at it is invisible to
-        // direct_chat_credentials() at turn time. (Previously this posted to
-        // /api/connectors/vault — the generic THIRD-PARTY APP connector
-        // vault, e.g. Slack/Notion/Jira — which has no LLM-provider cases at
-        // all and 400s "Unsupported connector" for every one of them.)
-        const label = `${providerLabel(byokProvider)} — ${name.trim() || "agent"}`;
+        const label = `${providerLabel(byokProvider)} — ${createdAgent?.label || "agent"}`;
         const credRes = await fetch("/api/credentials/vault", {
           method: "POST",
           credentials: "include",
@@ -225,28 +292,10 @@ export function FleetCreateAgentWizard({
           throw new Error(pd?.detail || pd?.error || `HTTP ${profileRes.status}`);
         }
       }
-      setStep(6);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save the provider.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // Step 6 (Model) → the real model picker for the chosen brain. Writes the
-  // FULL model_config in one shot (mode/provider/gateway_binding/runtime were
-  // already known; model is the new field) — the PATCH endpoint replaces
-  // model_config wholesale, so a partial write here would erase the brain
-  // step's choices. Platform mode has nothing to pick (fixed platform model)
-  // and nothing to patch — same as before.
-  async function submitModel() {
-    setBusy(true);
-    setError(null);
-    try {
       if (providerMode === "byok") {
-        await patchAgent({ model_config: { mode: "byok_api", provider: byokProvider, model: selectedModel.trim() || undefined } });
+        await patchAgent(agentId, { model_config: { mode: "byok_api", provider: byokProvider, model: selectedModel.trim() || undefined } });
       } else if (providerMode === "local") {
-        await patchAgent({
+        await patchAgent(agentId, {
           model_config: {
             mode: "local",
             provider: localProvider || "ollama",
@@ -256,26 +305,20 @@ export function FleetCreateAgentWizard({
           },
         });
       }
-      setStep(7);
+      setStep(3);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save the model.");
+      setError(e instanceof Error ? e.message : "Could not save the provider.");
     } finally {
       setBusy(false);
     }
   }
 
-  // Step 7 (Channel) → Create. Neither remaining choice makes a server call
-  // here — "byo" is just a signpost ("you'll paste the token in the Channels
-  // tab next"); the actual bot assignment happens there.
-  function submitChannelAndCreate() {
-    finish();
-  }
-
   function finish() {
-    if (agentId) onCreated(agentId);
+    if (!agentId) return;
+    onCreated(agentId);
+    const projSeg = resolvedProjectId || initialProjectId || "";
+    router.push(`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projSeg)}/agents/${encodeURIComponent(agentId)}/overview`);
   }
-
-  const activeProject = projects.find((p) => p.id === projectId);
 
   return (
     <div className="fleet-detail-backdrop" onClick={onClose}>
@@ -300,76 +343,97 @@ export function FleetCreateAgentWizard({
         <div className="fleet-wizard-body">
           {step === 1 && (
             <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">Name your agent</div>
-              <label className="fleet-wizard-label">Name</label>
-              <input className="fleet-wizard-input" value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder="e.g. Support Bot" autoFocus disabled={Boolean(agentId)} />
-              <label className="fleet-wizard-label">What should it do? (one line)</label>
-              <input className="fleet-wizard-input" value={description} onChange={(e) => setDescription(e.currentTarget.value)} placeholder="e.g. Answer customer questions about orders" disabled={Boolean(agentId)} />
-              {agentId && <p className="fleet-wizard-hint">Already created — these fields are locked in. Rename it from the agent’s Overview tab after finishing.</p>}
+              <div className="fleet-detail-section-title">Where does it work?</div>
+              <div className="fleet-wizard-options">
+                <button type="button" className={`fleet-wizard-option${placement === "cloud" ? " is-selected" : ""}`} onClick={() => setPlacement("cloud")}>
+                  <span className="fleet-wizard-option-label">Cloud <span className="fleet-wizard-option-tag">Recommended</span></span>
+                  <span className="fleet-wizard-option-body">No hardware. Runs entirely on Empyralis’ infrastructure.</span>
+                </button>
+                <button type="button" className={`fleet-wizard-option${placement === "vps" ? " is-selected" : ""}`} onClick={() => setPlacement("vps")}>
+                  <span className="fleet-wizard-option-label">Self-hosted VPS</span>
+                  <span className="fleet-wizard-option-body">A cloud server you control, connected over SSH.</span>
+                </button>
+                <button type="button" className={`fleet-wizard-option${placement === "gateway" ? " is-selected" : ""}`} onClick={() => setPlacement("gateway")}>
+                  <span className="fleet-wizard-option-label">This computer</span>
+                  <span className="fleet-wizard-option-body">A computer you’ve paired as a Gateway.</span>
+                </button>
+              </div>
+
+              {placement === "vps" && (
+                <div className="fleet-channel-expand">
+                  {nodesLoading ? (
+                    <p className="fleet-channel-expand-hint">Loading your cloud servers…</p>
+                  ) : vpsNodes.length > 0 ? (
+                    <>
+                      <label className="fleet-wizard-label">Which server?</label>
+                      <div className="fleet-wizard-options">
+                        {vpsNodes.map((n) => (
+                          <button
+                            key={nodeId(n)}
+                            type="button"
+                            className={`fleet-wizard-option${selectedNodeId === nodeId(n) ? " is-selected" : ""}`}
+                            onClick={() => setSelectedNodeId(nodeId(n))}
+                          >
+                            <span className="fleet-wizard-option-label">{nodeLabel(n)}</span>
+                            <span className="fleet-wizard-option-body">{nodeOnline(n) ? "Online" : "Offline"}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="fleet-channel-expand-hint">No cloud servers connected yet.</p>
+                  )}
+                  <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                    <button type="button" className="fleet-btn" onClick={() => setVpsPanelOpen(true)}>Start provisioning</button>
+                    <button type="button" className="fleet-btn" onClick={() => setSshPanelOpen(true)}>Connect your own server</button>
+                  </div>
+                </div>
+              )}
+
+              {placement === "gateway" && (
+                <div className="fleet-channel-expand">
+                  {nodesLoading ? (
+                    <p className="fleet-channel-expand-hint">Loading your paired computers…</p>
+                  ) : gatewayNodes.length > 0 ? (
+                    <>
+                      <label className="fleet-wizard-label">Which computer?</label>
+                      <div className="fleet-wizard-options">
+                        {gatewayNodes.map((n) => (
+                          <button
+                            key={nodeId(n)}
+                            type="button"
+                            className={`fleet-wizard-option${selectedNodeId === nodeId(n) ? " is-selected" : ""}`}
+                            onClick={() => setSelectedNodeId(nodeId(n))}
+                          >
+                            <span className="fleet-wizard-option-label">{nodeLabel(n)}</span>
+                            <span className="fleet-wizard-option-body">{nodeOnline(n) ? "Online" : "Offline"}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="fleet-channel-expand-hint">No computers paired yet.</p>
+                  )}
+                  {showGatewayPair ? (
+                    <div style={{ marginTop: 10 }}>
+                      <GatewayPairPanel workspaceId={workspaceId} compact onPaired={handleGatewayPaired} />
+                    </div>
+                  ) : (
+                    <button type="button" className="fleet-btn" style={{ marginTop: 10 }} onClick={() => setShowGatewayPair(true)}>
+                      Pair this computer
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <p className="fleet-wizard-hint" style={{ marginTop: 16 }}>
+                Placement is where the agent works. What it may do there is set by you, the owner —
+                people who message it can request, not command.
+              </p>
             </div>
           )}
 
           {step === 2 && (
-            <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">Which project?</div>
-              <div className="fleet-wizard-options">
-                {projects.map((p) => (
-                  <button key={p.id} type="button" className={`fleet-wizard-option${projectId === p.id ? " is-selected" : ""}`} onClick={() => setProjectId(p.id)} disabled={Boolean(agentId)}>
-                    <span className="fleet-wizard-option-label">{p.name || p.id}</span>
-                    <span className="fleet-wizard-option-body">{p.description || `${p.agent_count ?? 0} agents`}</span>
-                  </button>
-                ))}
-                {projects.length === 0 && <p className="fleet-wizard-hint">Loading projects…</p>}
-              </div>
-            </div>
-          )}
-
-          {step === 3 && (
-            <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">Capability preset</div>
-              <div className="fleet-wizard-options">
-                {PRESET_OPTIONS.map((opt) => (
-                  <button key={opt.id} type="button" className={`fleet-wizard-option${preset === opt.id ? " is-selected" : ""}`} onClick={() => setPreset(opt.id)} disabled={Boolean(agentId)}>
-                    <span className="fleet-wizard-option-label">{opt.label}</span>
-                    <span className="fleet-wizard-option-body">{opt.body}</span>
-                    {opt.note && (
-                      <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> {opt.note}</span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {step === 4 && (
-            <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">Which computer runs it?</div>
-              {preset === "knowledge" ? (
-                <p className="fleet-wizard-hint">
-                  Knowledge agents run cloud-only — hardware access is off and locked for safety.
-                  Change the capability preset above to grant hardware.
-                </p>
-              ) : (
-                <>
-                  <div className="fleet-wizard-options">
-                    <button type="button" className={`fleet-wizard-option${hardwareChoice === "none" ? " is-selected" : ""}`} onClick={() => setHardwareChoice("none")}>
-                      <span className="fleet-wizard-option-label">No dedicated hardware <span className="fleet-wizard-option-tag">Recommended</span></span>
-                      <span className="fleet-wizard-option-body">Runs in the cloud. Pair a computer for it anytime from the Hardware tab.</span>
-                    </button>
-                    <button type="button" className={`fleet-wizard-option${hardwareChoice === "gateway" ? " is-selected" : ""}`} onClick={() => setHardwareChoice("gateway")}>
-                      <span className="fleet-wizard-option-label">A paired computer</span>
-                      <span className="fleet-wizard-option-body">Give it a computer — for browser/shell access, or to run its AI brain locally next.</span>
-                    </button>
-                  </div>
-                  {hardwareChoice === "gateway" && (
-                    <GatewayBoxPicker workspaceId={workspaceId} value={hardwareGatewayId} onChange={setHardwareGatewayId} />
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-          {step === 5 && (
             <div className="fleet-wizard-panel">
               <div className="fleet-detail-section-title">Who pays for the model?</div>
               <div className="fleet-wizard-options">
@@ -420,12 +484,8 @@ export function FleetCreateAgentWizard({
                   <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={setGatewayBinding} requireLocalModel />
                 </div>
               )}
-            </div>
-          )}
 
-          {step === 6 && (
-            <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">Which model?</div>
+              <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Which model?</div>
               {providerMode === "platform" && (
                 <p className="fleet-wizard-hint">
                   This agent uses Empyralis’ managed model (DeepSeek). Nothing to configure — Empyralis
@@ -473,22 +533,22 @@ export function FleetCreateAgentWizard({
             </div>
           )}
 
-          {step === 7 && (
+          {step === 3 && (
             <div className="fleet-wizard-panel">
               <div className="fleet-detail-section-title">How do people reach it?</div>
-              <div className="fleet-wizard-options">
-                <button type="button" className={`fleet-wizard-option${channel === "none" ? " is-selected" : ""}`} onClick={() => setChannel("none")}>
-                  <span className="fleet-wizard-option-label">Not yet <span className="fleet-wizard-option-tag">Recommended</span></span>
-                  <span className="fleet-wizard-option-body">Create it now, connect a channel later from the Channels tab.</span>
-                </button>
-                <button type="button" className={`fleet-wizard-option${channel === "byo" ? " is-selected" : ""}`} onClick={() => setChannel("byo")}>
-                  <span className="fleet-wizard-option-label">Bring your own bot</span>
-                  <span className="fleet-wizard-option-body">Use your own Telegram or Discord bot token. You’ll add it in the Channels tab.</span>
-                </button>
-              </div>
-              <p className="fleet-wizard-hint">
-                Creating <strong>{name || "this agent"}</strong> in <strong>{activeProject?.name || "General"}</strong> as a{" "}
-                <strong>{preset === "knowledge" ? "Knowledge" : "Standard"}</strong> agent.
+              {agentId && <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={createdAgent} />}
+              <p className="fleet-wizard-hint" style={{ marginTop: 12 }}>
+                Optional — connect a channel now, or skip and add one later from the Channels tab.
+              </p>
+            </div>
+          )}
+
+          {step === 4 && (
+            <div className="fleet-wizard-panel">
+              <div className="fleet-detail-section-title">Connect its apps</div>
+              {agentId && resolvedProjectId && <ConnectorPicker workspaceId={workspaceId} projectId={resolvedProjectId} agentId={agentId} />}
+              <p className="fleet-wizard-hint" style={{ marginTop: 12 }}>
+                Optional — connect the apps this agent needs, or skip and add them later from the Connectors tab.
               </p>
             </div>
           )}
@@ -500,34 +560,45 @@ export function FleetCreateAgentWizard({
           <button type="button" className="fleet-btn" onClick={() => (step === 1 ? onClose() : setStep((s) => s - 1))} disabled={busy}>
             {step === 1 ? "Cancel" : "Back"}
           </button>
-          {step === 1 && <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setStep(2)} disabled={!name.trim()}>Next</button>}
-          {step === 2 && <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setStep(3)} disabled={!projectId}>Next</button>}
-          {step === 3 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={createAgent} disabled={busy}>
+          {step === 1 && (
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitPlacement} disabled={busy}>
               {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Next"}
             </button>
           )}
-          {step === 4 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitHardware} disabled={busy || (preset !== "knowledge" && hardwareChoice === "gateway" && !hardwareGatewayId.trim())}>
-              Next
-            </button>
-          )}
-          {step === 5 && (
+          {step === 2 && (
             <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitBrain} disabled={busy || providerMode === "subscription" || (providerMode === "local" && !gatewayBinding.trim())}>
               {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Next"}
             </button>
           )}
-          {step === 6 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitModel} disabled={busy}>
-              {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Next"}
+          {step === 3 && (
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setStep(4)} disabled={busy}>
+              {channelsConnected > 0 ? "Next" : "Skip for now"}
             </button>
           )}
-          {step === 7 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitChannelAndCreate} disabled={busy}>
-              {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Create"}
+          {step === 4 && (
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={finish} disabled={busy}>
+              Finish
             </button>
           )}
         </div>
+
+        {/* Nested INSIDE .fleet-wizard (not as backdrop siblings) so a click
+            anywhere in these — including their own close buttons — stops at
+            .fleet-wizard's own stopPropagation and never bubbles to the
+            outer backdrop's onClose, which would otherwise kill the whole
+            wizard instead of just this sub-panel. */}
+        <CloudVpsSetupPanel
+          open={vpsPanelOpen}
+          workspaceId={workspaceId}
+          onClose={() => setVpsPanelOpen(false)}
+          onConnected={handleVpsConnected}
+        />
+        <SshServerConnectPanel
+          open={sshPanelOpen}
+          workspaceId={workspaceId}
+          onClose={() => setSshPanelOpen(false)}
+          onConnected={handleSshConnected}
+        />
       </div>
     </div>
   );

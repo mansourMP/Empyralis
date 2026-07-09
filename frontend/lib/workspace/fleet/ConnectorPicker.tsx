@@ -148,19 +148,26 @@ export function ConnectorPicker({
         const projectCreds = projectConnectors.filter((pc) => pc.provider === c.id);
         const icon = CONNECTOR_ICONS[c.id];
         const connectBusy = busyKey === `${c.id}:new`;
+        const notConfigured = c.configured === false;
         return (
-          <div key={c.id} className="fleet-connector-picker-item">
+          <div
+            key={c.id}
+            className={`fleet-connector-picker-item${notConfigured ? " is-inert" : ""}`}
+            title={notConfigured ? "Not configured on this deployment" : undefined}
+          >
             <div className="fleet-connector-picker-head">
               <span className="fleet-connector-picker-icon" aria-hidden="true">
                 {icon ? <img src={icon} alt="" /> : c.label.charAt(0)}
               </span>
               <div>
                 <div className="fleet-connector-picker-label">{c.label}</div>
-                <div className="fleet-connector-picker-summary">{c.summary}</div>
+                <div className="fleet-connector-picker-summary">
+                  {notConfigured ? "Not configured on this deployment" : c.summary}
+                </div>
               </div>
             </div>
 
-            {projectCreds.length > 0 ? (
+            {notConfigured ? null : projectCreds.length > 0 ? (
               <div className="fleet-connector-picker-rows">
                 {projectCreds.map((cred) => {
                   const selected = cred.subscribed_agent_ids.includes(agentId);
