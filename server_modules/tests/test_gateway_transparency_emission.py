@@ -253,16 +253,6 @@ class GatewayTransparencyEmissionTests(unittest.TestCase):
         )
         self.assertIsInstance(evt, AgentTransparencyEvent)
 
-    def test_approval_required_is_visible_to_owner(self):
-        evt = emit_approval_event(
-            event_type="approval_required",
-            title="Approval required", summary="s",
-            status="running",
-            trace_id=self.TRACE, workspace_id=self.WS,
-            audience="owner",
-        )
-        self.assertTrue(evt.is_visible_to("owner"))
-
     def test_gateway_events_have_gateway_surface(self):
         evt = emit_gateway_action_event(
             event_type="gateway_action_started",

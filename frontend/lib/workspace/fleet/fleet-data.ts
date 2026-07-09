@@ -2,6 +2,20 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+
+/** The owner stop control's live state — set by POST .../stop, cleared by
+ *  .../resume (agent-scoped) or .../stop-all, .../resume-all (workspace-
+ *  scoped). {active:false} (no other fields) once resumed — reason/who/at
+ *  only carry meaning while active. */
+export type StoppedState = {
+  active: boolean;
+  reason?: string;
+  stopped_by_user_id?: string;
+  stopped_by_label?: string;
+  at?: string;
+};
+
 export type FleetAgent = {
   agent_id: string;
   label: string;
@@ -12,6 +26,10 @@ export type FleetAgent = {
   runtime_target: string;
   hardware_status: "online" | "offline" | "unknown";
   last_heartbeat: string | null;
+  /** Run in progress on this agent's paired gateway/VPS worker, if any.
+   * Only ever set for gateway/self-hosted agents with an active worker —
+   * cloud text-agent turns run synchronously and have no queued-run concept. */
+  current_run_id?: string | null;
   last_activity?: string | null;
   activity_preview?: string;
   channel?: string;
@@ -25,6 +43,7 @@ export type FleetAgent = {
   instructions?: string;
   preferred_gateway_id?: string;
   telegram_first_contact_reply?: boolean;
+  stopped?: StoppedState;
 };
 
 export type FleetProject = {
@@ -42,6 +61,10 @@ export type FleetAgentActivity = {
   event_class: string;
   title: string;
   status: string;
+  /** Who this ran for — present when the event came from a channel turn,
+   * null for owner/Sage-only activity. No customer_label exists on this
+   * data source (that's a separate, unrelated conversation subsystem). */
+  channel?: string | null;
   created_at: string;
 };
 
@@ -74,33 +97,83 @@ export function useFleetAgents(workspaceId: string) {
   return { agents, loading, error, refresh };
 }
 
-export type FleetWorkspace = { id: string; name: string };
+type StopMutationResult = { ok: boolean; error?: string; stopped?: StoppedState };
+
+async function postFleetStopControl(path: string, reason?: string): Promise<StopMutationResult> {
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+      body: JSON.stringify(reason !== undefined ? { reason } : {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) {
+      return { ok: false, error: String(data?.error || data?.detail || `HTTP ${res.status}`) };
+    }
+    return { ok: true, stopped: data?.stopped };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
+  }
+}
+
+/** Owner-only emergency stop for a single agent — kill_switch_gate's
+ *  agent:{id} key, checked before any turn work. See routes_fleet.py's
+ *  .../agents/{agent_id}/stop. */
+export function stopFleetAgent(workspaceId: string, agentId: string, reason?: string) {
+  return postFleetStopControl(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/stop`,
+    reason || "",
+  );
+}
+
+export function resumeFleetAgent(workspaceId: string, agentId: string) {
+  return postFleetStopControl(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/resume`,
+  );
+}
+
+/** Owner-only emergency stop for every agent in the workspace —
+ *  kill_switch_gate's workspace:{id} key. See routes_fleet.py's
+ *  .../fleet/stop-all. */
+export function stopFleetWorkspace(workspaceId: string, reason?: string) {
+  return postFleetStopControl(`/api/w/${encodeURIComponent(workspaceId)}/fleet/stop-all`, reason || "");
+}
+
+export function resumeFleetWorkspace(workspaceId: string) {
+  return postFleetStopControl(`/api/w/${encodeURIComponent(workspaceId)}/fleet/resume-all`);
+}
+
+export type FleetWorkspace = { id: string; name: string; stopped?: StoppedState };
 
 /** The workspace's own display name — used for the breadcrumb root (not the
- *  platform brand, not "Home"). Fetched once per workspaceId. */
+ *  platform brand, not "Home") — plus the workspace-wide stop state
+ *  (Settings' "Stop all agents"). Fetched once per workspaceId; call
+ *  refresh() after a stop/resume mutation. */
 export function useFleetWorkspace(workspaceId: string) {
   const [workspace, setWorkspace] = useState<FleetWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
+  const refresh = useCallback(async () => {
     if (!workspaceId) { setLoading(false); return; }
-    (async () => {
-      try {
-        const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/workspace`, { credentials: "include" });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled && data?.workspace) setWorkspace(data.workspace);
-      } catch {
-        if (!cancelled) setWorkspace(null);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/workspace`, { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data?.workspace) setWorkspace(data.workspace);
+    } catch {
+      setWorkspace(null);
+    } finally {
+      setLoading(false);
+    }
   }, [workspaceId]);
 
-  return { workspace, loading };
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  return { workspace, loading, refresh };
 }
 
 export function useFleetProjects(workspaceId: string) {
@@ -136,29 +209,31 @@ export function useFleetAgentActivity(workspaceId: string, agentId: string | nul
   const [events, setEvents] = useState<FleetAgentActivity[]>([]);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
+  const refresh = useCallback(async () => {
     if (!agentId) {
       setEvents([]);
       return;
     }
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const res = await fetch(
-          `/api/w/${workspaceId}/fleet/agent-activity?agent_id=${encodeURIComponent(agentId)}`
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) setEvents(data.events || []);
-      } catch {
-        if (!cancelled) setEvents([]);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/w/${workspaceId}/fleet/agent-activity?agent_id=${encodeURIComponent(agentId)}`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setEvents(data.events || []);
+    } catch {
+      setEvents([]);
+    } finally {
+      setLoading(false);
+    }
   }, [workspaceId, agentId]);
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 30_000);
+    return () => clearInterval(interval);
+  }, [refresh]);
 
   return { events, loading };
 }
@@ -185,6 +260,9 @@ export type FleetConnector = {
   nextAction: string;
   healthStatus: string;
   authRequiredFields: string[];
+  // False when this OAuth app's client id/secret aren't set on this
+  // deployment — the backend already knows this before any click.
+  configured: boolean;
 };
 
 export type FleetTool = {

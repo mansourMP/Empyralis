@@ -57,6 +57,7 @@ class ApiAgentTurnResponse(BaseModel):
     approvals: List[Dict[str, Any]] = Field(default_factory=list)
     interventions: List[Dict[str, Any]] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    transparency_events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ApiRunListItem(BaseModel):
@@ -385,6 +386,27 @@ def build_turn_chat_body(turn_request: AgentTurnRequest) -> Dict[str, Any]:
     }
 
 
+def _serialize_transparency_events(raw: Any) -> List[Dict[str, Any]]:
+    """result["transparency_events"] (see sage_agent_runtime_service's
+    handle_sage_chat) holds raw AgentTransparencyEvent dataclass instances,
+    not plain dicts — convert each to its public payload shape. Duck-typed
+    (hasattr check) rather than importing AgentTransparencyEvent, and
+    tolerant of already-dict items, so this doesn't care which caller's
+    result dict it's reading."""
+    if not isinstance(raw, list):
+        return []
+    payloads: List[Dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            payloads.append(item)
+        elif hasattr(item, "to_user_payload"):
+            try:
+                payloads.append(item.to_user_payload())
+            except Exception:
+                continue
+    return payloads
+
+
 def normalize_agent_turn_result(
     result: Dict[str, Any],
     *,
@@ -449,7 +471,10 @@ def normalize_agent_turn_result(
             **({"trace_id": trace_id} if trace_id else {}),
         },
     )
-    return ApiAgentTurnResponse(**model_to_dict(normalized))
+    return ApiAgentTurnResponse(
+        **model_to_dict(normalized),
+        transparency_events=_serialize_transparency_events(result.get("transparency_events")),
+    )
 
 
 def normalize_session_record(record: Dict[str, Any]) -> ApiSessionResponse:

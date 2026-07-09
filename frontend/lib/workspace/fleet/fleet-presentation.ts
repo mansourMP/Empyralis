@@ -1,6 +1,6 @@
-import type { FleetAgent } from "./fleet-data";
+import type { FleetAgent, StoppedState } from "./fleet-data";
 
-export type AgentStatusTone = "online" | "offline" | "unknown" | "error";
+export type AgentStatusTone = "online" | "ready" | "offline" | "unknown" | "error" | "stopped";
 
 export type AgentSummary = {
   id: string;
@@ -11,6 +11,7 @@ export type AgentSummary = {
   hardwareStatus: string;
   lastActivity: string | null;
   tint: TintKey;
+  stopped?: StoppedState;
 };
 
 export type TintKey = "blue" | "purple" | "amber" | "teal" | "coral";
@@ -60,6 +61,7 @@ export function toAgentSummary(agent: FleetAgent, index: number): AgentSummary {
     hardwareStatus: agent.hardware_status || "unknown",
     lastActivity: agent.last_activity || null,
     tint: tintForAgent(agent, index),
+    stopped: agent.stopped,
   };
 }
 
@@ -80,18 +82,35 @@ export function findSageAgent(agents: FleetAgent[]): FleetAgent | null {
   );
 }
 
-/** Status tone + label — the ONE status vocabulary (contract):
- *  online (green) · offline (red) · not deployed (neutral) · error (red).
- *  Unknown is calm ("Not deployed"), never alarming. */
-export function deriveStatus(hardwareStatus: string): { tone: AgentStatusTone; label: string } {
-  if (hardwareStatus === "online") return { tone: "online", label: "Online" };
+/** Status tone + label — the ONE status vocabulary (contract), used by the
+ *  agents list, the Overview tab, and the Now strip alike so an agent never
+ *  reads differently in two places:
+ *  active (green, has real activity) · ready (calm, hardware-reachable but
+ *  never run — a fresh agent's honest first state) · offline (red) ·
+ *  not deployed (neutral) · error (red) · stopped (owner-initiated, distinct
+ *  from offline — the agent isn't down, it's deliberately paused).
+ *  `stopped` wins over every other signal: an agent that's hardware-online
+ *  but owner-stopped must still read Stopped everywhere. `hasActivity`
+ *  (pass `Boolean(agent.last_activity)`) is what separates Active from
+ *  Ready — hardware/deployment reachability alone (e.g. a Cloud agent is
+ *  trivially always "online") is not evidence the agent has ever done
+ *  anything, and must not read as if it has. */
+export function deriveStatus(
+  hardwareStatus: string,
+  stopped?: boolean,
+  hasActivity?: boolean,
+): { tone: AgentStatusTone; label: string } {
+  if (stopped) return { tone: "stopped", label: "Stopped" };
+  if (hardwareStatus === "online") {
+    return hasActivity ? { tone: "online", label: "Active" } : { tone: "ready", label: "Ready" };
+  }
   if (hardwareStatus === "offline") return { tone: "offline", label: "Offline" };
   if (hardwareStatus === "error") return { tone: "error", label: "Error" };
   return { tone: "unknown", label: "Not deployed" };
 }
 
 export function statusClass(tone: AgentStatusTone): string {
-  return tone === "online" ? "is-online" : tone === "offline" ? "is-offline" : "";
+  return tone === "online" ? "is-online" : tone === "ready" ? "is-ready" : tone === "offline" ? "is-offline" : tone === "stopped" ? "is-stopped" : "";
 }
 
 /** Placement/meta line. Never prints raw "unknown". */

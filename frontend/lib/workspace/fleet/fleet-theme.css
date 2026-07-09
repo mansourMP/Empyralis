@@ -105,7 +105,10 @@
   align-items: center;
   height: 40px;
   min-height: 40px;
-  padding: 0 var(--space-5);
+  /* No right inset: the primary action (New project / New agent) right-aligns
+     flush to the panel/content edge, exactly under the panel-toggle below it
+     and the right panel itself — one shared right edge (Linear). */
+  padding: 0 0 0 var(--space-5);
   border-bottom: 1px solid var(--border);
   background: transparent;
 }
@@ -113,6 +116,34 @@
   margin-left: auto;
   display: flex;
   align-items: center;
+  gap: 8px;
+}
+
+/* Owner stop control — the header-level "Stop agent" button / "Stopped by
+   X" chip, portaled into .fleet-topbar-action alongside "Chat with this
+   agent". */
+.fleet-stop-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fleet-stop-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--h-control-md);
+  padding: 0 12px;
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+.fleet-stop-error {
+  font-size: 12px;
+  color: var(--offline-text);
+  max-width: 220px;
 }
 .fleet-shell-scroll {
   flex: 1;
@@ -889,6 +920,31 @@ a.fleet-breadcrumb:hover {
   margin: 0 0 20px;
 }
 
+/* Sits directly under the topbar's divider line. No extra top padding here —
+   .fleet-toolbar-row's own vertical centering (~7px) already balances the
+   ~6px the New Project button sits above the line on the other side
+   (owner: symmetric spacing around the divider, matching Linear). No right
+   inset: the action cluster (incl. the panel toggle) right-aligns flush to
+   the panel/content edge, sharing one right edge with New project above it
+   and the right panel itself. */
+.fleet-content-toolbar {
+  padding: 0 0 0 32px;
+}
+
+/* On pages with a properties drawer, .fleet-toolbar-row's usual 20px
+   margin-bottom is dead space the drawer's scrim doesn't reach — the scrim
+   only covers .fleet-content-with-panel's box, a sibling that starts AFTER
+   this margin, so that 20px renders as plain undimmed background between
+   "end of the Filter/Sort/Properties buttons" and "start of the dimmed
+   area" whenever the drawer is open. Zero it out here — .fleet-content-main
+   supplies the toolbar→table gap on this page instead (entirely inside the
+   scrim's box, so it dims correctly). Scoped to --with-panel specifically:
+   the flat /agents page (no drawer, no double gap source) still needs this
+   margin as its only spacing before the list. */
+.fleet-content--with-panel .fleet-toolbar-row {
+  margin-bottom: 0;
+}
+
 .fleet-toolbar-tabs {
   display: flex;
   align-items: center;
@@ -936,7 +992,7 @@ a.fleet-breadcrumb:hover {
   height: 28px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--radius-control);
+  border-radius: 50%;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -1044,42 +1100,113 @@ a.fleet-breadcrumb:hover {
   flex-direction: column;
 }
 
-.fleet-content-toolbar {
-  padding: 20px 32px 0;
-}
-
+/* The relative anchor the properties drawer overlays against — NOT a flex
+   row splitting width with a permanent sibling. The main content sheet is
+   this container's only normal-flow child and always renders at full width,
+   whether the drawer (an absolutely-positioned child, out of flow entirely)
+   is open or closed. */
 .fleet-content-with-panel {
-  display: flex;
-  min-height: 0;
   flex: 1;
+  min-height: 0;
+  position: relative;
   overflow: hidden;
 }
 
 .fleet-content-main {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
+  height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
+  /* All 28px of the toolbar→table gap lives here, not split with
+     .fleet-toolbar-row's margin-bottom — that margin is now contained
+     inside .fleet-content-toolbar itself (see its display:flow-root), so it
+     no longer contributes any externally-visible spacing. Keeping the whole
+     gap on this side matters specifically because the properties drawer's
+     scrim dims .fleet-content-with-panel's box, which this padding is
+     inside of and .fleet-content-toolbar is not — a gap split across that
+     boundary was 20px of undimmed background between the toolbar buttons
+     and where the scrim visibly starts. */
   padding: 28px 32px;
 }
 
-.fleet-right-panel {
-  flex-shrink: 0;
-  width: 0;
+/* ── Properties drawer (overlay, not a permanent flex sibling) ───────────── */
+/* Floating card inset from the content frame's edges — Linear's own
+   properties/analytics side panels read this way: rounded on all four
+   corners, a soft shadow for depth, a small gap from the frame's edges
+   rather than flush full-bleed. Positioned relative to the nearest
+   `position: relative` ancestor (.fleet-content-with-panel /
+   .fleet-detail-columns), so it overlays just the content frame, not the
+   whole viewport. */
+/* Invisible click-catcher, not a dimmer — an 8% tint read as a half-finished
+   dim (neither clearly "background paused" nor clean full-brightness), and
+   the drawer's own box-shadow already reads as "floating on top" without
+   touching the content behind it, matching how Linear treats this same kind
+   of side panel (no background dim there either). Kept as a real element
+   (not just an onClick on the drawer's wrapper) purely so clicking anywhere
+   outside the card closes it. */
+.fleet-properties-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 29;
+  background: transparent;
+}
+
+.fleet-properties-drawer {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 30;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
   overflow: hidden;
-  border-left: 1px solid transparent;
-  transition: width var(--motion-base) ease-out, border-color var(--motion-base) ease-out;
+  animation: fleet-drawer-in 150ms ease-out;
 }
 
-.fleet-right-panel.is-open {
-  width: 280px;
-  border-left: 1px solid var(--border);
+@keyframes fleet-drawer-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
 }
 
-.fleet-right-panel-inner {
-  width: 280px;
-  height: 100%;
+/* Always the small inset card, at every viewport width — never full-bleed.
+   On narrower viewports this card can end up over the table's trailing
+   columns (the table caps at 1400px and doesn't yield room for it); that's
+   an accepted trade-off, not something to "fix" by changing what this panel
+   is. It stays a right-side drawer, full stop. */
+
+.fleet-properties-drawer-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+}
+.fleet-properties-drawer-close:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+.fleet-properties-drawer-inner {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 20px 16px;
+  padding: 16px 16px 20px;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -1087,7 +1214,7 @@ a.fleet-breadcrumb:hover {
 
 /* Section separation without a shadow — a hairline rule + breathing room
    above every section after the first gives the panel real hierarchy. */
-.fleet-right-panel-inner > div + div {
+.fleet-properties-drawer-inner > div + div {
   padding-top: 18px;
   border-top: 1px solid var(--border);
 }
@@ -1161,6 +1288,9 @@ a.fleet-breadcrumb:hover {
 .fleet-sdot--offline { background: var(--offline-dot); }
 .fleet-sdot--unknown { background: var(--unknown-dot); }
 .fleet-sdot--error { background: var(--offline-dot); }
+/* Stopped is deliberate (owner-initiated), not broken — the accent color
+   distinguishes it from offline/error's alarm red. */
+.fleet-sdot--stopped { background: var(--accent); }
 
 .fleet-schip {
   display: inline-flex;
@@ -1180,12 +1310,16 @@ a.fleet-breadcrumb:hover {
 }
 .fleet-schip--online { color: var(--online-text); }
 .fleet-schip--online .fleet-schip-dot { background: var(--online-dot); }
+.fleet-schip--ready { color: var(--text-muted); }
+.fleet-schip--ready .fleet-schip-dot { background: var(--unknown-dot); }
 .fleet-schip--offline { color: var(--offline-text); }
 .fleet-schip--offline .fleet-schip-dot { background: var(--offline-dot); }
 .fleet-schip--unknown { color: var(--text-muted); }
 .fleet-schip--unknown .fleet-schip-dot { background: var(--unknown-dot); }
 .fleet-schip--error { color: var(--offline-text); }
 .fleet-schip--error .fleet-schip-dot { background: var(--offline-dot); }
+.fleet-schip--stopped { color: var(--accent); }
+.fleet-schip--stopped .fleet-schip-dot { background: var(--accent); }
 
 .fleet-tile {
   display: inline-flex;
@@ -1638,6 +1772,15 @@ a.fleet-breadcrumb:hover {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--bg-card);
+}
+
+.fleet-connector-picker-item.is-inert {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fleet-connector-picker-item.is-inert .fleet-connector-picker-icon {
+  filter: grayscale(1);
 }
 
 .fleet-connector-picker-head {
@@ -2157,30 +2300,13 @@ a.fleet-breadcrumb:hover {
   flex-shrink: 0;
 }
 
-.fleet-detail-props-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--text-muted);
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
-}
-.fleet-detail-props-toggle:hover { background: var(--bg-card-hover); border-color: var(--border); color: var(--text-primary); }
-.fleet-detail-props-toggle.is-active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-ring); }
-
+/* The relative anchor the properties drawer overlays against (see
+   .fleet-content-with-panel's identical comment) — .fleet-detail-body is the
+   only normal-flow child and is always full width. */
 .fleet-detail-columns {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: row;
+  position: relative;
   overflow: hidden;
 }
 
@@ -2429,10 +2555,19 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-detail-body {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
+  height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 28px;
+}
+
+/* Reading-measure cap: constrain the tab's own content, not this container's
+   box, so the vertical scrollbar (when a tab overflows) tracks the sheet's
+   true right edge rather than sitting mid-page at 960px. Each tab renders
+   exactly one root element here, so this reaches it without per-tab changes. */
+.fleet-detail-body > * {
+  max-width: 960px;
 }
 
 .fleet-detail-section-title {
@@ -2440,6 +2575,72 @@ a.fleet-breadcrumb:hover {
   font-weight: 500;
   color: var(--text-muted);
   margin: 24px 0 8px;
+}
+
+/* ── Overview title — inline rename (click-to-edit) ─────────────────────── */
+
+.fleet-overview-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 8px;
+  margin-left: -8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 600;
+  text-align: left;
+  cursor: text;
+}
+
+.fleet-overview-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-overview-title:hover,
+.fleet-overview-title:focus-visible {
+  background: var(--bg-inset);
+  border-color: var(--border);
+}
+
+.fleet-overview-title:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.fleet-overview-title-pencil {
+  flex: none;
+  color: var(--text-muted);
+  opacity: 0;
+}
+
+.fleet-overview-title:hover .fleet-overview-title-pencil,
+.fleet-overview-title:focus-visible .fleet-overview-title-pencil {
+  opacity: 1;
+}
+
+.fleet-overview-title-input {
+  width: 100%;
+  max-width: 480px;
+  height: 40px;
+  padding: 4px 11px;
+  margin-left: -8px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--accent-ring);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.fleet-overview-title-input:focus-visible {
+  outline: none;
 }
 
 /* ── Activity ledger ─────────────────────────────────────────────────────── */
@@ -2478,6 +2679,19 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-activity-time { font-variant-numeric: tabular-nums; }
+
+.fleet-activity-day-group + .fleet-activity-day-group {
+  margin-top: 4px;
+}
+
+.fleet-activity-day-heading {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: 12px 20px 4px;
+}
 
 .fleet-activity-skeleton {
   padding: 16px 20px;
@@ -2543,6 +2757,22 @@ a.fleet-breadcrumb:hover {
   font-size: 13px;
   color: var(--text-muted);
   line-height: 1.5;
+}
+
+/* ── Now strip ────────────────────────────────────────────────────────────── */
+
+.fleet-now-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 0 20px;
+  margin: 4px 0 12px;
+}
+
+.fleet-now-meta {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 /* ── Model / config tab ──────────────────────────────────────────────────── */
@@ -3288,133 +3518,239 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   gap: var(--space-2);
 }
 
-/* ── UI Phase 2: dense agent list — Linear ~32px single-line rows ─────────── */
+/* ── Dense agent list — column grid, flush on the sheet, no card ─────────── */
+/* One shared 6-column grid used by both the header row and every agent row,
+   so every column ("Agent · Brain · Channels · Last active · Cost · Status")
+   aligns down the page. The Agent col is 1fr with a 260px floor — that's what
+   absorbs the width and kills the space-between "hollow gulf" the old row
+   design had. Ultrawide guardrail: max-width 1400px on the whole list.
+   No border/radius/background here — the list sits flush on the content
+   sheet (Linear list style), not in a floating rounded card. Rows are
+   hairline-divided only. The properties panel is an overlay now (never a
+   permanent flex sibling stealing width), so the sheet is always wide enough
+   for all 6 columns — no horizontal scroll on this list, ever. */
 .fleet-agents-list {
-  display: flex;
-  flex-direction: column;
-  margin-top: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  overflow: hidden;
+  --fleet-list-grid: minmax(260px, 1fr) 120px 120px 96px 84px 132px;
+  --fleet-list-gap: 16px;
+  --fleet-list-padding-x: 16px;
+  max-width: 1400px;
+  /* No margin-top here — the toolbar row above already carries a 20px
+     margin-bottom, and this list's own container already has top padding.
+     Adding a third spacing rule on top of both stacked to 64px of dead air
+     between the toolbar and the table header (measured). One gap source is
+     enough. */
 }
-.fleet-agent-row {
-  display: flex;
+
+.fleet-agents-list-header {
+  display: grid;
+  grid-template-columns: var(--fleet-list-grid);
+  gap: var(--fleet-list-gap);
   align-items: center;
-  gap: var(--space-3);
+  padding: 8px var(--fleet-list-padding-x);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.fleet-agents-list-header .is-right { text-align: right; }
+
+.fleet-agent-row {
+  display: grid;
+  grid-template-columns: var(--fleet-list-grid);
+  gap: var(--fleet-list-gap);
+  align-items: center;
   width: 100%;
-  padding: 11px 14px;
-  border: none;
-  border-bottom: 1px solid var(--border-strong, var(--border));
-  background: var(--bg-card);
+  padding: 10px var(--fleet-list-padding-x);
+  min-height: 52px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
   color: var(--text-primary);
   text-align: left;
-  cursor: pointer;
   font: inherit;
-  transition: background var(--motion-base) ease-out;
+  cursor: pointer;
+  transition: background var(--motion-base, 150ms) ease-out;
 }
 .fleet-agents-list .fleet-agent-row:last-child { border-bottom: none; }
-.fleet-agent-row:hover { background: var(--bg-card-hover); } /* quiet — no accent border on hover */
-.fleet-agent-row.is-selected { background: var(--accent-soft); }
-.fleet-agent-row-avatar {
-  position: relative;
+.fleet-agent-row:hover { background: var(--bg-card-hover); }
+.fleet-agent-row:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+/* Agent column: [health dot] [avatar] [name+badge / preview]. The dot on the
+   left is the at-a-glance state; the Status column on the right names it,
+   the visual redundancy is the point in dense list rows. */
+.fleet-agent-cell-agent {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  flex-shrink: 0;
-  border-radius: var(--radius-control);
-  /* Per-agent identity tint (set inline from TINTS); neutral fill as fallback. */
-  background: var(--tile-bg, var(--rail-active));
-  color: var(--tile-fg, var(--text-secondary));
-  font-size: 11px;
-  font-weight: var(--weight-semibold);
+  gap: 10px;
+  min-width: 0;
 }
-.fleet-agent-row-dot {
-  position: absolute;
-  bottom: -2px;
-  right: -2px;
+.fleet-agent-health-dot {
   width: 8px;
   height: 8px;
   border-radius: 999px;
+  flex-shrink: 0;
   background: var(--unknown-dot);
-  border: 2px solid var(--bg-card);
 }
-.fleet-agent-row-dot.is-online { background: var(--online-dot); }
-.fleet-agent-row-dot.is-offline { background: var(--offline-dot); }
-.fleet-agent-row-main {
+.fleet-agent-health-dot.is-online { background: var(--online-dot); }
+.fleet-agent-health-dot.is-ready { background: var(--unknown-dot); }
+.fleet-agent-health-dot.is-offline { background: var(--offline-dot); }
+.fleet-agent-health-dot.is-error { background: var(--offline-dot); }
+.fleet-agent-health-dot.is-stopped { background: var(--accent); }
+
+/* Per-row Stop/Resume affordance — sits in the Status cell, revealed on row
+   hover/focus so the resting row stays clean (same reveal pattern as
+   .fleet-card-actions). Row is role="button" (not a native <button>), so
+   this nested real <button> + toggleStop's stopPropagation is valid. */
+.fleet-agent-stop-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.fleet-agent-row:hover .fleet-agent-stop-btn,
+.fleet-agent-row:focus-within .fleet-agent-stop-btn {
+  display: inline-flex;
+}
+.fleet-agent-stop-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.fleet-agent-stop-btn:disabled { opacity: 0.5; }
+.fleet-agent-avatar {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  flex: 1;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: var(--radius-control);
+  background: var(--tile-bg, var(--rail-active));
+  color: var(--tile-fg, var(--text-secondary));
+  font-size: 12px;
+  font-weight: var(--weight-semibold);
+}
+.fleet-agent-cell-agent-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
-.fleet-agent-row-title {
-  flex: 0 1 auto;
-  min-width: 40px;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
+.fleet-agent-cell-agent-line1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.fleet-agent-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Preset badge stays intrinsic — the name ellipsizes first so the top line
+   stays one clean line. */
+.fleet-agent-cell-agent-line1 .fleet-badge {
+  flex-shrink: 0;
+  white-space: nowrap;
+  margin-left: 0;
+}
+.fleet-agent-preview {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Brain column: short model brand-family label ("Sonnet 5", "DeepSeek"). */
+.fleet-agent-cell-brain {
+  font-size: 13px;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Preset badge + channel chip never wrap or collapse — the title ellipsizes
-   first, so a row stays one clean line. */
-.fleet-agent-row-main .fleet-badge { flex-shrink: 0; white-space: nowrap; margin-left: 0; }
-.fleet-agent-row-chan {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.fleet-agent-row-chan svg { color: var(--text-muted); }
-/* Status chip column — the colored at-a-glance state, was previously only a
-   tiny corner dot on the avatar. */
-.fleet-agent-row-status {
-  flex-shrink: 0;
-  width: 104px;
-  display: inline-flex;
-  align-items: center;
-}
-.fleet-agent-row-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-.fleet-agent-row-tag svg { flex-shrink: 0; color: var(--text-muted); }
-.fleet-agent-row-tag--time { width: 92px; justify-content: flex-end; text-align: right; }
-.fleet-agent-row-cost {
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
-  flex-shrink: 0;
-  width: 64px;
-  text-align: right;
-}
-.fleet-agent-row-cost.is-zero { color: var(--text-muted); font-weight: var(--weight-regular); }
-.fleet-agent-group {
+
+/* Channels column: compact colored chip per connected channel, "None" muted
+   otherwise — never a naked dash. */
+.fleet-agent-cell-channels {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
-.fleet-agent-group + .fleet-agent-group { border-top: 1px solid var(--border); }
-.fleet-agent-group-title {
-  padding: 6px 12px;
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-medium);
-  letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
+.fleet-channel-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+}
+
+/* Right-aligned cells (Last active + Cost). Tabular so digits line up. */
+.fleet-agent-cell-right {
+  text-align: right;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status column: right-aligned dot + label ("Active", "Not deployed"). */
+.fleet-agent-cell-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+/* Muted in-cell placeholder — same size as the value it replaces, so the
+   column keeps its shape when empty. */
+.fleet-cell-muted { color: var(--text-muted); }
+
+/* Group headers (flat /agents list only, when sort = "Group by project"). The
+   wrapper is display:contents so its children flow as direct siblings of the
+   list container's rows — that keeps `.fleet-agent-row:last-child` picking the
+   truly last row (dropping its border), rather than the last row of the last
+   group. The header itself is a full-width flex bar between the column
+   header row and its group's rows. */
+.fleet-agent-group { display: contents; }
+.fleet-agent-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px var(--fleet-list-padding-x) 6px;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-muted);
-  background: var(--bg-inset);
+  border-bottom: 1px solid var(--border);
 }
+.fleet-agent-group-header svg { flex-shrink: 0; color: var(--text-muted); }
+.fleet-agent-group-name { color: var(--text-secondary); }
+.fleet-agent-group-count { color: var(--text-muted); font-weight: var(--weight-regular); }
 
 .fleet-segmented {
   display: inline-flex;
@@ -3563,6 +3899,10 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-secondary); margin-right: 4px;
 }
 .fleet-work-conv-channel::after { content: "·"; margin-left: 4px; color: var(--text-muted); font-weight: normal; }
+.fleet-work-conv-who {
+  display: inline-block; color: var(--text-secondary); margin-right: 4px;
+}
+.fleet-work-conv-who::after { content: "·"; margin-left: 4px; color: var(--text-muted); font-weight: normal; }
 /* Live/unread affordances: a small accent dot on conversations with activity
    the operator hasn't opened, and a running count at the top of the list. */
 .fleet-work-conv-dot {

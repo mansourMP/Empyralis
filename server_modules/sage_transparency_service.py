@@ -18,7 +18,6 @@ Callers should:
         sage_result=result,
         surface="chat",
         audience="owner",
-        visibility_level="standard",
     )
 
 The returned list[AgentTransparencyEvent] can be serialised and sent to
@@ -35,7 +34,6 @@ from server_modules.agent_transparency_events import (
     AgentTransparencyEvent,
     Audience,
     TransparencyEventType,
-    VisibilityLevel,
 )
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -64,7 +62,6 @@ def emit_sage_turn_transparency_events(
     sage_result: Dict[str, Any],
     surface: str = "chat",
     audience: Audience = "owner",
-    visibility_level: VisibilityLevel = "standard",
     agent_id: Optional[str] = None,
 ) -> List[AgentTransparencyEvent]:
     """
@@ -87,7 +84,6 @@ def emit_sage_turn_transparency_events(
                 actor_type="sage",
                 surface=surface if surface in ("chat", "channel") else "chat",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="user_message_received",
                 title="Message received",
                 summary=f"User message: {msg_text[:200]}",
@@ -114,7 +110,6 @@ def emit_sage_turn_transparency_events(
                     actor_type="sage",
                     surface="chat",
                     audience=audience,
-                    visibility_level=visibility_level,
                     event_type="memory_loaded",
                     title="Memory loaded",
                     summary=f"Loaded: {', '.join(context_labels[:5])}",
@@ -137,7 +132,6 @@ def emit_sage_turn_transparency_events(
                 actor_type="sage",
                 surface="chat",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="policy_blocked",
                 title="Tools blocked by policy",
                 summary=f"{len(blocked_tools)} tool(s) blocked",
@@ -167,7 +161,6 @@ def emit_sage_turn_transparency_events(
                 actor_type="sage",
                 surface="chat",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="tool_started",
                 title=f"Tool started: {tc_name}",
                 summary=f"Tool {tc_name} started.",
@@ -191,7 +184,6 @@ def emit_sage_turn_transparency_events(
                     actor_type="sage",
                     surface="chat",
                     audience=audience,
-                    visibility_level=visibility_level,
                     event_type="tool_completed",
                     title=f"Tool completed: {tc_name}",
                     summary=f"Tool {tc_name} completed successfully.",
@@ -210,7 +202,6 @@ def emit_sage_turn_transparency_events(
                     actor_type="sage",
                     surface="chat",
                     audience=audience,
-                    visibility_level=visibility_level,
                     event_type="tool_failed",
                     title=f"Tool failed: {tc_name}",
                     summary=f"Tool {tc_name} failed: {tc_error[:200]}" if tc_error else f"Tool {tc_name} failed.",
@@ -252,7 +243,6 @@ def emit_sage_turn_transparency_events(
                 actor_type="sage",
                 surface="chat",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="browser_action",
                 title=f"Browser: {tc_name.replace('browser__', '')}",
                 summary=" | ".join(summary_parts),
@@ -301,7 +291,6 @@ def emit_sage_turn_transparency_events(
                 actor_type="sage",
                 surface="chat",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="skill_executed",
                 title=f"MCP tool executed: {tc_name}",
                 summary=tc_output[:200] if tc_output else f"MCP tool {tc_name} executed.",
@@ -324,7 +313,6 @@ def emit_sage_turn_transparency_events(
                 actor_type="sage",
                 surface="chat",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="tool_failed",
                 title="Sage encountered an error",
                 summary="Sage was unable to complete this request.",
@@ -346,7 +334,6 @@ def emit_sage_turn_transparency_events(
                 actor_type="sage",
                 surface="chat",
                 audience=audience,
-                visibility_level=visibility_level,
                 event_type="final_response_sent",
                 title="Response sent",
                 summary=f"Sage replied ({len(reply_text)} chars)",

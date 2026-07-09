@@ -18,7 +18,6 @@ from uuid import uuid4
 from server_modules.agent_transparency_events import (
     AgentTransparencyEvent,
     Audience,
-    VisibilityLevel,
 )
 
 
@@ -44,7 +43,6 @@ def emit_gateway_action_event(
     capability_id: str = "",
     run_id: str = "",
     audience: Audience = "owner",
-    visibility_level: VisibilityLevel = "standard",
     metadata: Optional[Dict[str, Any]] = None,
 ) -> AgentTransparencyEvent:
     return AgentTransparencyEvent(
@@ -55,7 +53,6 @@ def emit_gateway_action_event(
         actor_type="gateway",
         surface="gateway",
         audience=audience,
-        visibility_level=visibility_level,
         event_type=event_type,  # type: ignore[arg-type]
         title=title,
         summary=summary,
@@ -89,7 +86,6 @@ def emit_approval_event(
         actor_type="gateway",
         surface="gateway",
         audience=audience,
-        visibility_level="standard" if event_type != "approval_required" else "off",
         event_type=event_type,  # type: ignore[arg-type]
         title=title,
         summary=summary,
@@ -120,7 +116,6 @@ def emit_safety_block_event(
         actor_type="gateway",
         surface="gateway",
         audience=audience,
-        visibility_level="standard",
         event_type=event_type,  # type: ignore[arg-type]
         title=title,
         summary=summary,
@@ -152,7 +147,6 @@ def emit_channel_event(
         actor_type="gateway",
         surface="channel" if channel else "gateway",
         audience=audience,
-        visibility_level="minimal",
         event_type=event_type,  # type: ignore[arg-type]
         title=title,
         summary=summary,

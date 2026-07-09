@@ -23,10 +23,20 @@ import type { FleetAgent } from "../fleet-data";
 
 const POLL_MS = 7000;
 
+type TurnActor = {
+  type?: string;
+  id?: string;
+  display_name?: string;
+};
+
 type Turn = {
   role?: string;
   content?: string;
   created_at?: string;
+  // Present on every turn the backend returns (agent_turn.py's TurnActor,
+  // serialized) but never read here before now — the customer/sender
+  // identity behind a conversation was already on the wire, just unused.
+  actor?: TurnActor;
 };
 
 type Thread = {
@@ -45,6 +55,25 @@ function threadStamp(t: Thread): string {
 function lastTurn(t: Thread): Turn | undefined {
   const turns = t.turns || [];
   return turns.length > 0 ? turns[turns.length - 1] : undefined;
+}
+
+function isCustomerRole(role: string): boolean {
+  const r = role.toLowerCase();
+  return r !== "assistant" && r !== "agent" && r !== "bot";
+}
+
+// Who this conversation was with. There is no thread-level "customer" field
+// in this API (agent_threads has no such column) — the identity lives per
+// turn, in the human side's actor.display_name. Cost has no equivalent
+// anywhere in this pipeline (only a page-level aggregate exists, on a
+// different endpoint) so it is deliberately not surfaced here.
+function conversationWho(t: Thread): string {
+  for (const turn of t.turns || []) {
+    if (!isCustomerRole(turn.role || "")) continue;
+    const name = (turn.actor?.display_name || "").trim();
+    if (name) return name;
+  }
+  return "";
 }
 
 export function WorkTab({
@@ -178,6 +207,7 @@ export function WorkTab({
           const when = t.last_turn_at || t.updated_at || "";
           const unread = isUnread(t);
           const preview = lastTurn(t)?.content || "—";
+          const who = conversationWho(t);
           return (
             <button
               key={t.id}
@@ -193,7 +223,9 @@ export function WorkTab({
                 {when && <span className="fleet-work-conv-time">{new Date(when).toLocaleDateString()}</span>}
               </div>
               <div className="fleet-work-conv-preview">
-                {t.channel && <span className="fleet-work-conv-channel">{t.channel}</span>} {preview}
+                {t.channel && <span className="fleet-work-conv-channel">{t.channel}</span>}
+                {who && <span className="fleet-work-conv-who">{who}</span>}
+                {preview}
               </div>
             </button>
           );

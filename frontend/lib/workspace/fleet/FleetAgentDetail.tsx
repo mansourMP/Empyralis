@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Brain,
   Check,
@@ -11,10 +12,14 @@ import {
   Loader2,
   Lock,
   MessageSquare,
-  PanelRight,
+  PanelRightClose,
+  PanelRightOpen,
+  Pencil,
+  Play,
   Plug,
   Radio,
   Sparkles,
+  Square,
   Wrench,
   X,
   type LucideIcon,
@@ -26,16 +31,19 @@ import { MemoryTab } from "./tabs/MemoryTab";
 import { AgentChat } from "./AgentChat";
 
 import {
+  resumeFleetAgent,
+  stopFleetAgent,
   useFleetAgentActivity,
   useFleetAgentChannels,
   useFleetAgentConnectors,
   useFleetAgentTools,
   type FleetAgent,
+  type FleetAgentActivity,
   type FleetChannel,
 } from "./fleet-data";
-import { deriveStatus, derivePlacement, type AgentStatusTone } from "./fleet-presentation";
+import { deriveStatus, derivePlacement, timeAgo, type AgentStatusTone } from "./fleet-presentation";
 import { StatusChip } from "./fleet-indicators";
-import { FleetRightPanel, PanelSection, PanelRow, usePanelOpenState } from "./FleetRightPanel";
+import { FleetRightPanel, PanelSection, PanelRow } from "./FleetRightPanel";
 import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
@@ -55,10 +63,9 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
 ];
 
 /**
- * Agent detail — centered modal (~80vw) with an internal right nav (tabs),
- * collapsible via the toggle button in the content column. Every tab has
- * real data or an intentional empty state with a working next action. No
- * stubs.
+ * Agent detail — a routed page (top tabs + a permanent properties panel that
+ * never reflows the content column). Every tab has real data or an
+ * intentional empty state with a working next action. No stubs.
  */
 export function FleetAgentDetail({
   workspaceId,
@@ -66,10 +73,9 @@ export function FleetAgentDetail({
   agent,
   projectName,
   onChat,
-  onClose,
-  variant = "modal",
   initialTab,
   onTabChange,
+  onRenamed,
 }: {
   workspaceId: string;
   agentId: string;
@@ -82,20 +88,22 @@ export function FleetAgentDetail({
    *  paint" bug. */
   projectName?: string;
   onChat: (agentId: string) => void;
-  onClose?: () => void;
-  variant?: "modal" | "page";
   initialTab?: TabId;
   onTabChange?: (tab: TabId) => void;
+  /** Called after a successful inline rename (Overview title) so the caller
+   *  can refresh whatever list/breadcrumb sources agent.label. */
+  onRenamed?: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<TabId>(initialTab || "overview");
-  // Properties panel — closed by default, remembered per agent (Linear pattern).
-  const [panelOpen, togglePanel] = usePanelOpenState(`agent:${agentId}`);
+  // Properties drawer — closed by default (it's an overlay now, not a
+  // permanent flex sibling); the toolbar toggle button owns opening it.
+  const [panelOpen, setPanelOpen] = useState(false);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
   const { channels } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
   const [costToday, setCostToday] = useState<number | null>(null);
 
-  const status = deriveStatus(agent?.hardware_status || "unknown");
+  const status = deriveStatus(agent?.hardware_status || "unknown", agent?.stopped?.active, Boolean(agent?.last_activity));
 
   useEffect(() => {
     let cancelled = false;
@@ -129,29 +137,37 @@ export function FleetAgentDetail({
     [onTabChange],
   );
 
-  // Modal mode closes on Escape; the routed page has no overlay to close.
-  useEffect(() => {
-    if (variant !== "modal" || !onClose) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [variant, onClose]);
+  // Esc returns to wherever the user came from (browser back) — not a
+  // hardcoded destination, so the flat /agents list, a project's list, or
+  // any other referrer all restore correctly. Skipped while typing (so it
+  // never discards an in-progress edit) and while a nested dialog is
+  // capturing the key itself (see ChannelsTab's banner, which stops
+  // propagation before this ever sees it).
+  const router = useRouter();
+  const onPageKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const el = document.activeElement as HTMLElement | null;
+      const isTyping = Boolean(el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable));
+      if (isTyping) return;
+      router.back();
+    },
+    [router],
+  );
 
-  // Bridge for the command palette (mounted separately at the shell level) —
-  // it dispatches a named event instead of a prop-threaded callback.
+  // Land keyboard/SR focus somewhere deliberate on mount rather than leaving
+  // it on <body> — the active tab pill, since it's already the natural next
+  // stop for arrow/tab navigation. Only on first mount, not on every tab
+  // switch (selectTab already moves visible state; native click/router
+  // navigation already handles focus for those).
+  const activeTabRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
-    const onSwitchTab = (e: Event) => {
-      const tab = (e as CustomEvent<TabId>).detail;
-      if (tab) selectTab(tab);
-    };
-    window.addEventListener("fleet:switch-tab", onSwitchTab);
-    return () => window.removeEventListener("fleet:switch-tab", onSwitchTab);
-  }, [selectTab]);
+    activeTabRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const propertiesPanel = (
-    <FleetRightPanel open={panelOpen}>
+    <FleetRightPanel open={panelOpen} onClose={() => setPanelOpen(false)}>
       <PanelSection title="Properties">
         <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
         <PanelRow label="Preset" value={<span style={{ textTransform: "capitalize" }}>{preset}</span>} />
@@ -175,13 +191,15 @@ export function FleetAgentDetail({
         <nav className="fleet-detail-toptabs" aria-label="Agent sections">
           {TABS.map((tab) => {
             const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
             return (
               <button
                 key={tab.id}
+                ref={isActive ? activeTabRef : undefined}
                 type="button"
-                className={`fleet-detail-toptab${activeTab === tab.id ? " is-active" : ""}`}
+                className={`fleet-detail-toptab${isActive ? " is-active" : ""}`}
                 onClick={() => selectTab(tab.id)}
-                aria-current={activeTab === tab.id ? "page" : undefined}
+                aria-current={isActive ? "page" : undefined}
               >
                 <Icon size={15} strokeWidth={1.75} />
                 <span>{tab.label}</span>
@@ -192,23 +210,20 @@ export function FleetAgentDetail({
         <div className="fleet-detail-tabbar-actions">
           <button
             type="button"
-            className={`fleet-detail-props-toggle${panelOpen ? " is-active" : ""}`}
-            onClick={togglePanel}
+            className={`fleet-icon-btn${panelOpen ? " is-active" : ""}`}
+            onClick={() => setPanelOpen((v) => !v)}
+            aria-label="Properties"
             aria-pressed={panelOpen}
-            title={panelOpen ? "Hide properties" : "Show properties"}
+            title="Properties"
           >
-            <PanelRight size={15} strokeWidth={1.75} />
-            <span>Properties</span>
+            {panelOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
           </button>
-          {variant === "modal" && onClose && (
-            <button type="button" className="fleet-detail-close fleet-detail-close--inline" onClick={onClose} aria-label="Close">
-              <X size={16} strokeWidth={1.75} />
-            </button>
-          )}
         </div>
       </div>
 
-      {/* Columns: main content + properties panel (closed by default) */}
+      {/* Columns: main content sheet (full width, never reflows) + the
+          properties drawer, an overlay layer positioned relative to this
+          wrapper — never a flex sibling that steals width. */}
       <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
           {activeTab === "overview" && (
@@ -220,6 +235,7 @@ export function FleetAgentDetail({
               events={events}
               loading={activityLoading}
               onChat={() => onChat(agentId)}
+              onRenamed={onRenamed}
             />
           )}
           {activeTab === "work" && <WorkTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
@@ -244,40 +260,127 @@ export function FleetAgentDetail({
     </>
   );
 
-  if (variant === "page") {
-    return (
-      <>
-        {activeTab === "overview" && (
-          <HeaderAction>
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => onChat(agentId)}>
-              <MessageSquare size={14} strokeWidth={1.75} />
-              Chat with this agent
-            </button>
-          </HeaderAction>
-        )}
-        <div className="fleet-detail fleet-detail--page" aria-label={`${agent?.label || "Agent"} details`}>
-          {inner}
-        </div>
-      </>
-    );
-  }
-
   return (
-    <div className="fleet-detail-backdrop" onClick={onClose}>
+    <>
+      {activeTab === "overview" && (
+        <HeaderAction>
+          <StopAgentControl workspaceId={workspaceId} agentId={agentId} agent={agent} onChanged={onRenamed} />
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => onChat(agentId)}>
+            <MessageSquare size={14} strokeWidth={1.75} />
+            Chat with this agent
+          </button>
+        </HeaderAction>
+      )}
       <div
-        className="fleet-detail"
-        role="dialog"
-        aria-modal="true"
+        className="fleet-detail fleet-detail--page"
         aria-label={`${agent?.label || "Agent"} details`}
-        onClick={(e) => e.stopPropagation()}
+        onKeyDown={onPageKeyDown}
       >
         {inner}
       </div>
-    </div>
+    </>
   );
 }
 
 // ── Overview ────────────────────────────────────────────────────────────────
+
+/** One compact status line: presence/hardware + last heartbeat + whatever
+ *  this agent is doing right now. Every clause is honest-when-empty — no
+ *  clause claims a state the data doesn't support (e.g. a cloud text-agent
+ *  has no queued-run concept at all, so it can only ever read Idle/Active,
+ *  never a stale "Working on…"). A never-run agent reads Ready, same as
+ *  everywhere else — "Idle" implies it has done something before and is
+ *  merely between tasks, which isn't true yet. */
+function NowStrip({ agent, status }: { agent: FleetAgent | null; status: { tone: AgentStatusTone; label: string } }) {
+  if (!agent) return null;
+  // Stopped wins over everything, including a stale current_run_id from
+  // before the stop — a killed agent never reads "Working on a task".
+  const working = status.tone !== "stopped" && Boolean(agent.current_run_id);
+  const nowLabel = working ? "Working on a task" : status.tone === "stopped" ? status.label : status.label === "Active" ? "Idle" : status.label;
+  const heartbeatText = agent.last_heartbeat ? `heartbeat ${timeAgo(agent.last_heartbeat)}` : "never heartbeat";
+  return (
+    <div className="fleet-now-strip" aria-label="Current status">
+      <StatusChip tone={status.tone} label={nowLabel} />
+      <span className="fleet-now-meta">{heartbeatText}</span>
+    </div>
+  );
+}
+
+// Owner-only stop control — the header-level "Stop agent" button, and once
+// stopped, an honest chip naming who stopped it (never a bare "Stopped").
+// kill_switch_gate.py enforces this on the backend before any turn runs;
+// this is purely the control surface.
+function StopAgentControl({
+  workspaceId, agentId, agent, onChanged,
+}: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChanged?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const stopped = agent?.stopped;
+
+  async function handleStop() {
+    setBusy(true);
+    setError(null);
+    const result = await stopFleetAgent(workspaceId, agentId);
+    setBusy(false);
+    if (result.ok) onChanged?.();
+    else setError(result.error || "Could not stop this agent.");
+  }
+
+  async function handleResume() {
+    setBusy(true);
+    setError(null);
+    const result = await resumeFleetAgent(workspaceId, agentId);
+    setBusy(false);
+    if (result.ok) onChanged?.();
+    else setError(result.error || "Could not resume this agent.");
+  }
+
+  if (stopped?.active) {
+    return (
+      <div className="fleet-stop-control">
+        <span className="fleet-stop-chip" title={stopped.reason || undefined}>
+          <Square size={12} strokeWidth={2} />
+          Stopped by {stopped.stopped_by_label || "an owner"}
+        </span>
+        <button type="button" className="fleet-btn" disabled={busy} onClick={handleResume}>
+          {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={14} strokeWidth={1.75} />}
+          Resume
+        </button>
+        {error && <span className="fleet-stop-error">{error}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="fleet-stop-control">
+      <button type="button" className="fleet-btn" disabled={busy} onClick={handleStop}>
+        {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Square size={14} strokeWidth={1.75} />}
+        Stop agent
+      </button>
+      {error && <span className="fleet-stop-error">{error}</span>}
+    </div>
+  );
+}
+
+/** activity_ledger_events rows are already ORDER BY created_at DESC from the
+ *  backend — grouping by day in iteration order preserves that ordering
+ *  without a separate sort. */
+function groupActivityByDay(events: FleetAgentActivity[]): { day: string; items: FleetAgentActivity[] }[] {
+  const groups: { day: string; items: FleetAgentActivity[] }[] = [];
+  const byDay = new Map<string, FleetAgentActivity[]>();
+  for (const event of events) {
+    const parsed = new Date(event.created_at);
+    const day = Number.isNaN(parsed.getTime())
+      ? "Unknown date"
+      : parsed.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+    if (!byDay.has(day)) {
+      byDay.set(day, []);
+      groups.push({ day, items: byDay.get(day)! });
+    }
+    byDay.get(day)!.push(event);
+  }
+  return groups;
+}
 
 function OverviewTab({
   workspaceId,
@@ -286,22 +389,30 @@ function OverviewTab({
   status,
   events,
   loading,
+  onRenamed,
 }: {
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
   status: { tone: AgentStatusTone; label: string };
-  events: any[];
+  events: FleetAgentActivity[];
   loading: boolean;
   onChat: () => void;
+  onRenamed?: () => void;
 }) {
   const deployed = status.label !== "Not deployed";
   const placement = derivePlacement(agent?.runtime_target || "unknown", deployed);
   const role = agent?.role || "agent";
   const isMaster = role === "operator";
+  const dayGroups = groupActivityByDay(events);
 
   return (
     <div className="fleet-detail-overview">
+      {agent && (
+        <AgentTitle workspaceId={workspaceId} agentId={agentId} label={agent.label || ""} onRenamed={onRenamed} />
+      )}
+      <NowStrip agent={agent} status={status} />
+
       {/* The THING (status/placement/role + activity), not numbers. Counts and
           cost live in the properties panel; the "Chat" action lives top-right. */}
       <div className="fleet-config" style={{ marginTop: 0 }}>
@@ -344,26 +455,135 @@ function OverviewTab({
         />
       ) : (
         <div className="fleet-activity">
-          {events.map((event) => (
-            <div key={event.event_id} className="fleet-activity-item">
-              <div className={`fleet-activity-dot${event.status === "logged" ? "" : " is-warn"}`} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="fleet-activity-title">{event.title}</div>
-                <div className="fleet-activity-meta">
-                  <span>{event.event_class}</span>
-                  <span>·</span>
-                  <span>{event.action}</span>
-                  <span>·</span>
-                  <span className="fleet-activity-time">
-                    {new Date(event.created_at).toLocaleString()}
-                  </span>
+          {dayGroups.map((group) => (
+            <div key={group.day} className="fleet-activity-day-group">
+              <div className="fleet-activity-day-heading">{group.day}</div>
+              {group.items.map((event) => (
+                <div key={event.event_id} className="fleet-activity-item">
+                  <div className={`fleet-activity-dot${event.status === "logged" ? "" : " is-warn"}`} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="fleet-activity-title">{event.title}</div>
+                    <div className="fleet-activity-meta">
+                      <span>{event.event_class}</span>
+                      <span>·</span>
+                      <span>{event.action}</span>
+                      {event.channel && (
+                        <>
+                          <span>·</span>
+                          <span>via {event.channel}</span>
+                        </>
+                      )}
+                      <span>·</span>
+                      <span className="fleet-activity-time">
+                        {new Date(event.created_at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              ))}
             </div>
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+// The agent's name — click-to-edit, save on blur/Enter, cancel on Escape.
+// NAME IS NOT A CREATE-AGENT STEP: this is the only place an agent is
+// renamed after creation, PATCHing display_name (fleet_configure_agent
+// writes it to the same `label` column the create route and the name pool
+// seed).
+function AgentTitle({
+  workspaceId, agentId, label, onRenamed,
+}: { workspaceId: string; agentId: string; label: string; onRenamed?: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(label);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const skipBlurCommit = useRef(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(label);
+  }, [label, editing]);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  async function commit() {
+    if (saving) return;
+    const next = draft.trim();
+    if (!next || next === label) {
+      setDraft(label);
+      setEditing(false);
+      setError(null);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { display_name: next } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      setEditing(false);
+      onRenamed?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not rename.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div style={{ marginBottom: 12 }}>
+        <input
+          ref={inputRef}
+          className="fleet-overview-title-input"
+          value={draft}
+          disabled={saving}
+          maxLength={200}
+          onChange={(e) => setDraft(e.currentTarget.value)}
+          onBlur={() => {
+            if (skipBlurCommit.current) {
+              skipBlurCommit.current = false;
+              return;
+            }
+            void commit();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              skipBlurCommit.current = true;
+              setDraft(label);
+              setEditing(false);
+              setError(null);
+            }
+          }}
+        />
+        {error && <p className="fleet-channel-expand-error" style={{ margin: "4px 0 0" }}>{error}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <button type="button" className="fleet-overview-title" onClick={() => setEditing(true)} style={{ marginBottom: 12 }} aria-label={`Rename ${label || "this agent"}`}>
+      <span>{label || "Untitled agent"}</span>
+      <Pencil size={14} strokeWidth={1.75} className="fleet-overview-title-pencil" />
+    </button>
   );
 }
 
@@ -439,149 +659,6 @@ function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId
         placeholder={`Message ${label}…`}
         sourceTag="fleet_agent_chat"
       />
-    </div>
-  );
-}
-
-// ── Memory ──────────────────────────────────────────────────────────────────
-
-// Real per-agent SOUL.md/MEMORY.md/GOALS.md/etc. — the same context-file
-// store the agent's own system prompt is built from (server_modules/
-// workspace_context.py), scoped by agent_id via /api/sage-context-files.
-// This is a fleet-native rewrite of the old workstation-activity-pane.tsx
-// file-tree browser rather than a mount of that component directly: it
-// hard-depends on useWorkspaceBoundary(), a context fleet routes never
-// mount (see FleetShellDecider.tsx — fleet renders without the workstation
-// shell), so importing it here would throw. Same files, same API, same
-// "real, editable content" — a smaller editor, not the full pane's
-// preview/pin/export feature set.
-// Superseded by ./tabs/MemoryTab (Phase 6 tree). Kept until the 7B cleanup.
-function LegacyMemoryTab({
-  workspaceId, agentId, agent, onChat,
-}: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
-  const [files, setFiles] = useState<{ filename: string; content: string }[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(
-          `/api/sage-context-files?workspace_id=${encodeURIComponent(workspaceId)}&agent_id=${encodeURIComponent(agentId)}`,
-          { credentials: "include" },
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (cancelled) return;
-        const list: { filename: string; content: string }[] = Array.isArray(data.files) ? data.files : [];
-        setFiles(list);
-        if (list.length > 0) {
-          setSelected(list[0].filename);
-          setDraft(list[0].content);
-        }
-      } catch {
-        if (!cancelled) setError("Could not load memory files.");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [workspaceId, agentId]);
-
-  function selectFile(filename: string) {
-    const f = files.find((x) => x.filename === filename);
-    setSelected(filename);
-    setDraft(f?.content || "");
-    setSaved(false);
-  }
-
-  async function save() {
-    if (!selected) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/sage-context-files/${encodeURIComponent(selected)}`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ workspace_id: workspaceId, agent_id: agentId, content: draft }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
-      setFiles((cur) => cur.map((f) => (f.filename === selected ? { ...f, content: draft } : f)));
-      setSaved(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (loading) {
-    return (
-      <div className="fleet-activity-skeleton" aria-label="Loading memory">
-        {[60, 48, 72].map((w, i) => (
-          <div key={i} className="fleet-skeleton-row">
-            <div className="fleet-skeleton-bar" style={{ width: 8 }} />
-            <div className="fleet-skeleton-bar" style={{ width: `${w}%` }} />
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  if (files.length === 0) {
-    return (
-      <EmptyState
-        icon={Brain}
-        title={error || "Nothing here yet"}
-        body="Sage will write memories here as it learns about this agent's preferences, facts, and context."
-        action="Chat with this agent"
-        onAction={onChat}
-      />
-    );
-  }
-
-  return (
-    <div className="fleet-memory-browser">
-      <div className="fleet-memory-file-list">
-        {files.map((f) => (
-          <button
-            key={f.filename}
-            type="button"
-            className={`fleet-memory-file-item${selected === f.filename ? " is-active" : ""}`}
-            onClick={() => selectFile(f.filename)}
-          >
-            {f.filename}
-          </button>
-        ))}
-      </div>
-      <div className="fleet-memory-editor">
-        {selected && (
-          <>
-            <div className="fleet-memory-editor-header">
-              <span>{selected}</span>
-              <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
-                {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
-              </button>
-            </div>
-            <textarea
-              className="fleet-memory-editor-textarea"
-              value={draft}
-              onChange={(e) => { setDraft(e.currentTarget.value); setSaved(false); }}
-              spellCheck={false}
-            />
-          </>
-        )}
-        {error && <p className="fleet-channel-expand-error">{error}</p>}
-      </div>
     </div>
   );
 }
@@ -789,7 +866,19 @@ export function ChannelsTab({
       </div>
 
       {activePlatform && (
-        <div className="fleet-detail-backdrop" onClick={closeBanner}>
+        <div
+          className="fleet-detail-backdrop"
+          onClick={closeBanner}
+          onKeyDown={(e) => {
+            // Own the Escape key here — otherwise it bubbles up to the page
+            // wrapper's "Esc returns to the previous view" handler and
+            // navigates the user away instead of just closing this banner.
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              closeBanner();
+            }
+          }}
+        >
           <div className="fleet-channel-banner" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="fleet-channel-banner-header">
               <span className="fleet-channel-banner-icon">

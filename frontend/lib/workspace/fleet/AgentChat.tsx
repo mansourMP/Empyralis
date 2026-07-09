@@ -25,6 +25,48 @@ function turnToMessage(turn: RawTurn): WorkstationChatMessageRecord {
   };
 }
 
+// Icons for "activity_step" rows are looked up by step_kind in chat-message.tsx's
+// stepIcon() — only 'thinking' | 'file' | 'search' are distinct, everything
+// else (including this) falls through to a generic tool wrench, which is a
+// fine default for the transparency event types that don't have a closer match.
+function stepKindForTransparencyEventType(eventType: string): string {
+  if (eventType.includes("memory")) return "file";
+  if (eventType.includes("search")) return "search";
+  return "tool";
+}
+
+const TRANSPARENCY_ERROR_STATUSES = new Set(["failed", "denied", "blocked"]);
+
+// Reuses chat-message.tsx's existing "activity_step" display_kind (already
+// rendered by ChatMessage for other producers) instead of building a new
+// component — see docs/PLACEMENT-EXECUTION-AUTHORITY-REPORT.md §6 on why a
+// second parallel renderer would be redundant here.
+function transparencyEventsToStepMessages(raw: unknown, baseId: string): WorkstationChatMessageRecord[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((event, index) => {
+    const e = (event && typeof event === "object" ? event : {}) as Record<string, unknown>;
+    const eventType = String(e.event_type ?? "");
+    const status = String(e.status ?? "");
+    const label = String(e.title ?? e.summary ?? "").trim() || eventType.replace(/_/g, " ") || "Step";
+    return {
+      id: String(e.event_id ?? `${baseId}-step-${index}`),
+      role: "system",
+      content: label,
+      status: null,
+      createdAt: typeof e.timestamp === "string" ? e.timestamp : null,
+      runId: null,
+      approvals: [],
+      interventions: [],
+      artifacts: [],
+      metadata: {
+        display_kind: "activity_step",
+        step_kind: stepKindForTransparencyEventType(eventType),
+        step_status: TRANSPARENCY_ERROR_STATUSES.has(status) ? "error" : "active",
+      },
+    };
+  });
+}
+
 // Mirrors workstation-client.ts's SSE block parser — kept local so this
 // fleet-native surface never has to reach for the legacy, context-bound
 // workstation client (createWorkstationClient needs a bootstrap provider
@@ -271,7 +313,11 @@ export function AgentChat({
       }
 
       const replyText = String(finalPayload?.reply ?? streamed ?? "").trim();
-      setMessages((cur) => [...cur, {
+      const stepMessages = transparencyEventsToStepMessages(
+        finalPayload?.transparency_events,
+        String(finalPayload?.run_id ?? Date.now()),
+      );
+      setMessages((cur) => [...cur, ...stepMessages, {
         id: String(finalPayload?.run_id ?? `reply-${Date.now()}`),
         role: "assistant",
         content: replyText || "…",

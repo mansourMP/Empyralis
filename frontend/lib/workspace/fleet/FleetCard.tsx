@@ -24,7 +24,7 @@ export function FleetCard({
   onSelect: (id: string) => void;
   onChat: (id: string) => void;
 }) {
-  const status = deriveStatus(agent.hardwareStatus);
+  const status = deriveStatus(agent.hardwareStatus, agent.stopped?.active);
   const deployed = status.tone !== "unknown";
   const placement = derivePlacement(agent.runtimeTarget, deployed);
   const tint = TINTS[agent.tint];
