@@ -1572,12 +1572,13 @@ function ContextPolicySection({
   );
 }
 
-/** channelStatePill-style dynamic hint for the still-locked "Your subscription"
- *  option — real hardware state instead of a static "Coming soon", without
- *  implying it's actually saveable yet (COMING_SOON_MODES stays locked; the
- *  Gateway-side CLI runner isn't built). We don't know which CLI (Claude
- *  Code vs Codex) they'll pick until the option is expanded, so this checks
- *  for either. */
+/** channelStatePill-style dynamic hint for the "Your subscription" option —
+ *  real hardware state instead of a static note. cli_subscription is real
+ *  and savable (BYO-brain Phase 3), but still needs a paired Gateway with
+ *  the CLI installed and signed in — this names what's actually missing
+ *  rather than a generic lock message. We don't know which CLI (Claude Code
+ *  vs Codex) they'll pick until the option is expanded, so this checks for
+ *  either. */
 function cliSubscriptionHint(gateways: FleetGateway[]): string {
   if (gateways.length === 0) return "Needs a paired computer — none paired yet";
   const anyReady = gateways.some(
@@ -1609,13 +1610,16 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
-  // cli_subscription is still not dispatchable (Phase 3) — saving it would
-  // resolve to a guaranteed "not yet available" turn error. Block save.
+  // COMING_SOON_MODES is empty today (cli_subscription and local both
+  // shipped) — kept as a live check, not deleted, so gating a future mode
+  // that isn't ready yet needs no new plumbing here.
   const isComingSoon = COMING_SOON_MODES.has(mode);
-  // BYO-brain Phase 2: "local" (Ollama on the paired box) is live, but a local
-  // agent MUST name which box runs it, or every turn fails with "no computer
-  // is bound". Require a gateway before saving.
+  // BYO-brain Phase 2/3: "local" (Ollama) and "cli_subscription" (Claude
+  // Code/Codex) both dispatch on a paired Gateway box — either one MUST name
+  // which box runs it, or every turn fails at turn time instead of save
+  // time ("no computer is bound" / "cli_subscription requires a Gateway").
   const localNeedsBox = mode === "local" && !gatewayBinding.trim();
+  const cliSubscriptionNeedsBox = mode === "cli_subscription" && !gatewayBinding.trim();
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1633,6 +1637,10 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
     }
     if (mode === "local" && !gatewayBinding.trim()) {
       setError("Pick a computer (with Ollama) to run this agent’s local model.");
+      return;
+    }
+    if (mode === "cli_subscription" && !gatewayBinding.trim()) {
+      setError("Pick a computer to run this agent’s subscription CLI.");
       return;
     }
     setSaving(true);
@@ -1729,17 +1737,20 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
           space-between header the rest of Overview already uses. */}
       <div className="fleet-detail-section-title" style={{ marginTop: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <span>Model</span>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving || isComingSoon || localNeedsBox}>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving || isComingSoon || localNeedsBox || cliSubscriptionNeedsBox}>
           {saving ? "Saving…" : saved ? "Saved ✓" : "Save"}
         </button>
       </div>
-      {(isComingSoon || (localNeedsBox && !isComingSoon) || error) && (
+      {(isComingSoon || (localNeedsBox && !isComingSoon) || (cliSubscriptionNeedsBox && !isComingSoon) || error) && (
         <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 12 }}>
           {isComingSoon && (
             <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>{COMING_SOON_NOTE} — you can’t save this yet.</span>
           )}
           {localNeedsBox && !isComingSoon && (
             <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Pick a computer to run this agent’s local model.</span>
+          )}
+          {cliSubscriptionNeedsBox && !isComingSoon && (
+            <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Pick a computer to run this agent’s subscription CLI.</span>
           )}
           {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
         </div>
@@ -1785,13 +1796,13 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
         </button>
         <button
           type="button"
-          className={`fleet-wizard-option fleet-wizard-option--soon${mode === "cli_subscription" ? " is-selected" : ""}`}
+          className={`fleet-wizard-option${mode === "cli_subscription" ? " is-selected" : ""}`}
           onClick={() => { setMode("cli_subscription"); setProvider(provider || "claude_code_cli"); setSaved(false); }}
         >
           <span className="fleet-wizard-option-label">Your subscription</span>
           <span className="fleet-wizard-option-body">Claude Code or Codex via Gateway.</span>
           <span className="fleet-wizard-option-note fleet-wizard-option-note--gateway">
-            <Lock size={11} strokeWidth={2} /> {cliSubscriptionHint(cliGateways)}
+            {cliSubscriptionHint(cliGateways)}
           </span>
         </button>
         <button
@@ -1859,10 +1870,6 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
             onChange={(id) => { setGatewayBinding(id); setSaved(false); }}
             requireRuntime={cliRuntime}
           />
-          <p className="fleet-channel-expand-hint">
-            Not saveable yet on this deployment — the Gateway-side CLI runner isn't wired up. This just
-            previews what it'll need once it ships.
-          </p>
         </div>
       )}
 
