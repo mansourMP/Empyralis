@@ -728,6 +728,7 @@ async def execute_skill(
     agent_id: str = "",
     agent_install_id: str = "",
 ) -> Dict[str, Any]:
+    global _MISSING_AGENT_ID_COUNT, _LEGACY_TOKEN_AGENT_ID_COUNT
     # ── Stage 4B: missing-agent-id instrumentation ────────────────────
     resolved_agent_id = str(agent_id or agent_install_id or "").strip()
     if not resolved_agent_id:

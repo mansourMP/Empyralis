@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { Bot, Calendar, DollarSign, Hash, PanelRightClose, PanelRightOpen, Zap } from "lucide-react";
+import { Bot, Calendar, Zap } from "lucide-react";
 
 import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
-import { useBreadcrumbLabel, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
-import { timeAgo, tintKeyForIndex, TINTS } from "@/lib/workspace/fleet/fleet-presentation";
+import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
+import { breadcrumbCount, tintKeyForIndex, TINTS, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
+import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
+import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
@@ -41,14 +43,6 @@ function readFiltersFromLocation(): FilterState {
   };
 }
 
-type ActivityEvent = {
-  event_id: string;
-  action: string;
-  title: string;
-  status: string;
-  created_at: string;
-};
-
 export default function ProjectDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -60,6 +54,13 @@ export default function ProjectDetailPage() {
   const { projects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
+  useBreadcrumbIcon(
+    projectId,
+    useMemo(
+      () => (project ? <ProjectIcon icon={project.icon} tint={project.tint} size={16} /> : null),
+      [project],
+    ),
+  );
 
   const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
   const { status: statusFilter, channel: channelFilter, sort } = filterState;
@@ -82,15 +83,22 @@ export default function ProjectDetailPage() {
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
   const [rollup, setRollup] = useState<{ usd_cost: number; total_tokens: number; events: number } | null>(null);
+  const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
   const [cost, setCost] = useState<Map<string, number>>(new Map());
-  const [activity, setActivity] = useState<ActivityEvent[]>([]);
-  const [activityLoading, setActivityLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${base.replace("/w/", "/api/w/")}/fleet/usage?scope=project&id=${encodeURIComponent(projectId)}&period=month`, { credentials: "include" })
+    // period=day, not month: `totals` is an all-time scope aggregate either
+    // way (period only controls how `buckets` are grouped) — day gives the
+    // daily granularity the cost sparkline needs; month would collapse to
+    // one point.
+    fetch(`${base.replace("/w/", "/api/w/")}/fleet/usage?scope=project&id=${encodeURIComponent(projectId)}&period=day`, { credentials: "include" })
       .then((r) => r.json())
-      .then((d) => { if (!cancelled && d?.totals) setRollup(d.totals); })
+      .then((d) => {
+        if (cancelled) return;
+        if (d?.totals) setRollup(d.totals);
+        if (Array.isArray(d?.buckets)) setCostBuckets(d.buckets);
+      })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [base, projectId]);
@@ -109,21 +117,17 @@ export default function ProjectDetailPage() {
     return () => { cancelled = true; };
   }, [workspaceId]);
 
-  // The properties panel is always visible on a project's detail page (no
-  // toggle, no reflow — see fleet-content-with-panel), so its Activity
-  // section fetches on mount rather than lazily on open.
-  useEffect(() => {
-    let cancelled = false;
-    setActivityLoading(true);
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/project-activity?project_id=${encodeURIComponent(projectId)}`, { credentials: "include" })
-      .then((r) => r.json())
-      .then((d) => { if (!cancelled) setActivity(Array.isArray(d?.events) ? d.events : []); })
-      .catch(() => { if (!cancelled) setActivity([]); })
-      .finally(() => { if (!cancelled) setActivityLoading(false); });
-    return () => { cancelled = true; };
-  }, [workspaceId, projectId]);
-
   const inProject = agents.filter((a) => (a.project_id || "").trim() === projectId);
+  // U3-E: the count lives on the breadcrumb line itself ("General · 3
+  // agents"), not a second toolbar row — the project name appears exactly
+  // once, in the crumb this badge attaches to.
+  useBreadcrumbBadge(
+    projectId,
+    useMemo(
+      () => <span className="fleet-breadcrumb-count">· {breadcrumbCount(inProject.length, "agent", "agents", project?.name || "")}</span>,
+      [inProject.length, project?.name],
+    ),
+  );
   const filtered = useMemo(() => inProject.filter((a) => {
     if (statusFilter !== "all" && (a.hardware_status || "unknown") !== statusFilter) return false;
     if (channelFilter === "connected" && !a.channel) return false;
@@ -166,18 +170,22 @@ export default function ProjectDetailPage() {
 
   return (
     <main className="fleet-content fleet-content--with-panel">
+      {/* No page-title header here — the breadcrumb (with the project's own
+          icon, see useBreadcrumbIcon above, and its count badge, see
+          useBreadcrumbBadge above) is the page identity. This stage matches
+          the Agents page exactly, all the way down to the two-row header
+          (U3-H): top row is breadcrumb + primary action only; the
+          view-control cluster is its own row below, under the topbar's
+          existing divider. FleetToolbar always renders here (even with 0
+          agents) so the Properties toggle stays reachable; filters/sort
+          still hide themselves when there's nothing to filter/sort (each is
+          independently optional). */}
       <HeaderAction>
         <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
           <span className="fleet-btn-plus">+</span> New agent
         </button>
       </HeaderAction>
 
-      {/* trailingAction keeps the Properties toggle inside FleetToolbar's own
-          right-aligned action cluster — same row, same gap, same alignment
-          as Filter/Sort — rather than as a sibling that falls to its own
-          line. FleetToolbar always renders here (even with 0 agents) so the
-          toggle stays reachable; filters/sort still hide themselves when
-          there's nothing to filter/sort (each is independently optional). */}
       <div className="fleet-content-toolbar">
         <FleetToolbar
           filters={inProject.length > 0 ? filters : undefined}
@@ -185,18 +193,9 @@ export default function ProjectDetailPage() {
           sortValue={sort}
           sortDefault="last_active"
           onSortChange={(v) => updateFilters({ sort: v as SortMode })}
-          trailingAction={
-            <button
-              type="button"
-              className={`fleet-icon-btn${panelOpen ? " is-active" : ""}`}
-              onClick={() => setPanelOpen((v) => !v)}
-              aria-label="Properties"
-              aria-pressed={panelOpen}
-              title="Properties"
-            >
-              {panelOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
-            </button>
-          }
+          panelOpen={panelOpen}
+          onTogglePanel={() => setPanelOpen((v) => !v)}
+          usageHref={`${base}/billing`}
         />
       </div>
 
@@ -224,11 +223,21 @@ export default function ProjectDetailPage() {
         <FleetRightPanel open={panelOpen} onClose={() => setPanelOpen(false)}>
           <PanelSection title="Properties">
             {project?.description && <PanelRow label="Description" value={project.description} />}
-            <PanelRow label="Cost this month" value={money(rollup?.usd_cost)} icon={<DollarSign size={15} strokeWidth={1.75} />} tone="accent" />
-            <PanelRow label="Tokens" value={(rollup?.total_tokens ?? 0).toLocaleString()} icon={<Hash size={15} strokeWidth={1.75} />} />
-            <PanelRow label="LLM calls" value={(rollup?.events ?? 0).toLocaleString()} icon={<Zap size={15} strokeWidth={1.75} />} />
+            <UsageStat
+              label="Cost this month"
+              total={rollup?.usd_cost ?? 0}
+              formattedTotal={money(rollup?.usd_cost)}
+              values={bucketSeries(costBuckets, "usd_cost")}
+            />
+            <UsageStat
+              label="Tokens"
+              total={rollup?.total_tokens ?? 0}
+              formattedTotal={formatNumber(rollup?.total_tokens ?? 0)}
+              values={bucketSeries(costBuckets, "total_tokens")}
+            />
+            <PanelRow label="LLM calls" value={formatNumber(rollup?.events ?? 0)} icon={<Zap size={15} strokeWidth={1.75} />} />
             <PanelRow label="Agents" value={inProject.length} icon={<Bot size={15} strokeWidth={1.75} />} />
-            <PanelRow label="Created" value={project?.created_at ? new Date(project.created_at).toLocaleDateString() : "—"} icon={<Calendar size={15} strokeWidth={1.75} />} tone={project?.created_at ? "default" : "muted"} />
+            <PanelRow label="Created" value={project?.created_at ? formatDate(project.created_at) : "—"} icon={<Calendar size={15} strokeWidth={1.75} />} tone={project?.created_at ? "default" : "muted"} />
           </PanelSection>
 
           <PanelSection title="Cost by agent">
@@ -247,20 +256,6 @@ export default function ProjectDetailPage() {
             )}
           </PanelSection>
 
-          <PanelSection title="Activity">
-            {activityLoading ? (
-              <div className="fleet-panel-empty">Loading…</div>
-            ) : activity.length === 0 ? (
-              <div className="fleet-panel-empty">No recent activity.</div>
-            ) : (
-              activity.map((e) => (
-                <div key={e.event_id} className="fleet-panel-activity-item">
-                  <span className="fleet-panel-activity-title">{e.title || e.action}</span>
-                  <span className="fleet-panel-activity-meta">{timeAgo(e.created_at)}</span>
-                </div>
-              ))
-            )}
-          </PanelSection>
         </FleetRightPanel>
       </div>
 

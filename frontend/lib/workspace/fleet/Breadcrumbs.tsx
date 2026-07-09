@@ -14,8 +14,6 @@ import {
 import { createPortal } from "react-dom";
 import { ChevronRight } from "lucide-react";
 
-import { useFleetWorkspace } from "./fleet-data";
-
 /**
  * Breadcrumbs read the URL segment chain under /w/{ws} and render one crumb per
  * segment, each linking to its cumulative path. Static segments (Projects,
@@ -26,17 +24,21 @@ import { useFleetWorkspace } from "./fleet-data";
 
 type LabelMap = Record<string, string>;
 type BadgeMap = Record<string, ReactNode>;
+type IconMap = Record<string, ReactNode>;
 
 const BreadcrumbLabelContext = createContext<{
   labels: LabelMap;
   setLabel: (key: string, label: string) => void;
   badges: BadgeMap;
   setBadge: (key: string, badge: ReactNode) => void;
-}>({ labels: {}, setLabel: () => {}, badges: {}, setBadge: () => {} });
+  icons: IconMap;
+  setIcon: (key: string, icon: ReactNode) => void;
+}>({ labels: {}, setLabel: () => {}, badges: {}, setBadge: () => {}, icons: {}, setIcon: () => {} });
 
 export function BreadcrumbLabelProvider({ children }: { children: ReactNode }) {
   const [labels, setLabels] = useState<LabelMap>({});
   const [badges, setBadges] = useState<BadgeMap>({});
+  const [icons, setIcons] = useState<IconMap>({});
   const setLabel = useCallback((key: string, label: string) => {
     setLabels((prev) => (prev[key] === label ? prev : { ...prev, [key]: label }));
   }, []);
@@ -48,7 +50,13 @@ export function BreadcrumbLabelProvider({ children }: { children: ReactNode }) {
     // setBadge → context value changes → component re-renders → ...).
     setBadges((prev) => (prev[key] === badge ? prev : { ...prev, [key]: badge }));
   }, []);
-  const value = useMemo(() => ({ labels, setLabel, badges, setBadge }), [labels, setLabel, badges, setBadge]);
+  const setIcon = useCallback((key: string, icon: ReactNode) => {
+    setIcons((prev) => (prev[key] === icon ? prev : { ...prev, [key]: icon }));
+  }, []);
+  const value = useMemo(
+    () => ({ labels, setLabel, badges, setBadge, icons, setIcon }),
+    [labels, setLabel, badges, setBadge, icons, setIcon],
+  );
   return (
     <BreadcrumbLabelContext.Provider value={value}>
       {children}
@@ -84,6 +92,23 @@ export function useBreadcrumbBadge(
     setBadge(key, badge);
     return () => setBadge(key, null);
   }, [key, badge, setBadge]);
+}
+
+/** Attach a small LEADING icon before a breadcrumb segment's own label —
+ *  a project's icon+tint next to its crumb, so "Projects › {name}" carries
+ *  the same visual identity the project shows everywhere else. Mirrors
+ *  useBreadcrumbBadge exactly, just rendered before the text instead of
+ *  after — same memoization contract (pass a stable/memoized element). */
+export function useBreadcrumbIcon(
+  key: string | null | undefined,
+  icon: ReactNode | null,
+) {
+  const { setIcon } = useContext(BreadcrumbLabelContext);
+  useEffect(() => {
+    if (!key) return;
+    setIcon(key, icon);
+    return () => setIcon(key, null);
+  }, [key, icon, setIcon]);
 }
 
 /**
@@ -126,7 +151,7 @@ const STATIC_LABELS: Record<string, string> = {
   projects: "Projects",
   agents: "Agents",
   hardware: "Hardware",
-  billing: "Billing",
+  billing: "Usage",
   settings: "Settings",
   overview: "Overview",
   chat: "Chat",
@@ -154,12 +179,11 @@ function looksLikeOpaqueId(segment: string): boolean {
   return /_[0-9a-f]{6,}$/i.test(segment) || /^[0-9a-f]{8}-?[0-9a-f-]{4,}$/i.test(segment);
 }
 
-type Crumb = { key: string; label: string; href: string; current: boolean; pending: boolean; badge: ReactNode };
+type Crumb = { key: string; label: string; href: string; current: boolean; pending: boolean; badge: ReactNode; icon: ReactNode };
 
 export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
   const pathname = usePathname() || "";
-  const { labels, badges } = useContext(BreadcrumbLabelContext);
-  const { workspace } = useFleetWorkspace(workspaceId);
+  const { labels, badges, icons } = useContext(BreadcrumbLabelContext);
 
   const crumbs = useMemo<Crumb[]>(() => {
     const base = `/w/${encodeURIComponent(workspaceId)}`;
@@ -167,23 +191,12 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     const rest = pathname.startsWith(base) ? pathname.slice(base.length) : "";
     const segments = rest.split("/").filter(Boolean);
 
-    // Root crumb: the WORKSPACE itself (its real name, not "Home" — this isn't
-    // the inbox), linking to the default landing (the flat agents list). The
-    // "agents/{id}" pair inside a project is a routed agent detail — the bare
-    // "agents" segment there is structural, not a page, so we fold it into the
-    // agent crumb rather than rendering a dead "Agents" link mid-chain.
-    // The backend echoes the raw workspace id back as `name` for a workspace
-    // that was never given a real one (see fleet_workspace in routes_fleet.py)
-    // — treat that echo the same as "no name" rather than rendering the id.
-    const hasRealName = Boolean(workspace?.name) && workspace!.name !== workspaceId;
-    const items: Crumb[] = [{
-      key: "workspace-root",
-      label: hasRealName ? workspace!.name : "Workspace",
-      href: `${base}/agents`,
-      current: segments.length === 0,
-      pending: false,
-      badge: null,
-    }];
+    // No synthetic workspace-root crumb — crumbs start at the section
+    // (Projects, Agents, Inbox, …). The "agents/{id}" pair inside a project
+    // is a routed agent detail — the bare "agents" segment there is
+    // structural, not a page, so it folds into the agent crumb rather than
+    // rendering a dead "Agents" link mid-chain.
+    const items: Crumb[] = [];
     let acc = base;
     segments.forEach((seg, i) => {
       acc += `/${seg}`;
@@ -203,18 +216,16 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
         current: i === segments.length - 1,
         pending,
         badge: badges[seg] ?? null,
+        icon: icons[seg] ?? null,
       });
     });
     return items;
-  }, [pathname, workspaceId, labels, badges, workspace?.name]);
+  }, [pathname, workspaceId, labels, badges, icons]);
 
-  if (crumbs.length <= 1) {
-    return (
-      <nav className="fleet-breadcrumbs" aria-label="Breadcrumb">
-        <span className="fleet-breadcrumb fleet-breadcrumb--current">{crumbs[0]?.label ?? "Workspace"}</span>
-      </nav>
-    );
-  }
+  // The workspace landing page (bare /w/{id}, no section segment) has its own
+  // page heading (FleetHome's "Your fleet") — nothing to crumb there once the
+  // root crumb is gone.
+  if (crumbs.length === 0) return null;
 
   return (
     <nav className="fleet-breadcrumbs" aria-label="Breadcrumb">
@@ -226,9 +237,11 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
               <span className="fleet-breadcrumb-skeleton" aria-hidden />
             </span>
           ) : c.current ? (
-            <span className="fleet-breadcrumb fleet-breadcrumb--current" aria-current="page">{c.label}</span>
+            <span className="fleet-breadcrumb fleet-breadcrumb--current" aria-current="page">
+              {c.icon}{c.label}
+            </span>
           ) : (
-            <Link className="fleet-breadcrumb" href={c.href}>{c.label}</Link>
+            <Link className="fleet-breadcrumb" href={c.href}>{c.icon}{c.label}</Link>
           )}
           {c.badge}
         </span>

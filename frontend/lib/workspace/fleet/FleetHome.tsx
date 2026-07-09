@@ -9,7 +9,7 @@ import { useFleetAgents, useWorkspaceActivity, useWorkspaceStatusStrip } from ".
 import { FleetCard } from "./FleetCard";
 import { FleetCreateAgentWizard } from "./FleetCreateAgentWizard";
 import { TelegramPairPanel } from "./TelegramPairPanel";
-import { isSageAgent, toAgentSummary } from "./fleet-presentation";
+import { isSageAgent, toAgentSummary, formatDateTime } from "./fleet-presentation";
 
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
   const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
@@ -226,7 +226,7 @@ function ActivityFeed({ workspaceId }: { workspaceId: string }) {
                 {event.action && <><span>·</span><span>{event.action}</span></>}
                 <span>·</span>
                 <span className="fleet-activity-time">
-                  {event.created_at ? new Date(event.created_at).toLocaleString() : ""}
+                  {event.created_at ? formatDateTime(event.created_at) : ""}
                 </span>
               </div>
             </div>

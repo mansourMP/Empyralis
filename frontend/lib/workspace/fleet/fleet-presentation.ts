@@ -1,6 +1,37 @@
 import type { FleetAgent, StoppedState } from "./fleet-data";
 
-export type AgentStatusTone = "online" | "ready" | "offline" | "unknown" | "error" | "stopped";
+/** This product has one language, English, everywhere — visitor-OS-locale
+ *  date/number rendering was never a decision. Every toLocale*() call in the
+ *  fleet UI goes through these three so nothing ever silently renders in
+ *  whatever locale the visitor's machine happens to report. */
+const LOCALE = "en-US";
+
+export function formatDate(value: string | number | Date, opts?: Intl.DateTimeFormatOptions): string {
+  const d = value instanceof Date ? value : new Date(value);
+  return d.toLocaleDateString(LOCALE, opts);
+}
+
+export function formatDateTime(value: string | number | Date, opts?: Intl.DateTimeFormatOptions): string {
+  const d = value instanceof Date ? value : new Date(value);
+  return d.toLocaleString(LOCALE, opts);
+}
+
+export function formatTime(value: string | number | Date, opts?: Intl.DateTimeFormatOptions): string {
+  const d = value instanceof Date ? value : new Date(value);
+  return d.toLocaleTimeString(LOCALE, opts);
+}
+
+export function formatNumber(value: number): string {
+  return value.toLocaleString(LOCALE);
+}
+
+/** "working" is the agent-lifecycle tone (deriveStatus() below never
+ *  produces anything else for a running task). "online" is kept only for
+ *  the Hardware page's own device-reachability chip — a different domain
+ *  (is this paired computer reachable, not what is this agent doing) that
+ *  happens to share the StatusChip/StatusDot components; deriveStatus()
+ *  itself never returns it. */
+export type AgentStatusTone = "working" | "online" | "ready" | "offline" | "unknown" | "error" | "stopped";
 
 export type AgentSummary = {
   id: string;
@@ -14,16 +45,21 @@ export type AgentSummary = {
   stopped?: StoppedState;
 };
 
-export type TintKey = "blue" | "purple" | "amber" | "teal" | "coral";
+export type TintKey = "blue" | "purple" | "amber" | "teal" | "coral" | "rose" | "sky" | "lime";
 
-/* Muted per-agent identity tints (~13% opacity fill + colored glyph).
-   These are identity colors, NOT the brand accent. */
+/* Muted per-agent/per-project identity tints (~16% opacity fill + colored
+   glyph). These are identity colors, NOT the brand accent — 8 total so a
+   project's deterministic-hash assignment (projects_repository.py) has a
+   real spread to draw from. */
 export const TINTS: Record<TintKey, { bg: string; fg: string }> = {
   blue: { bg: "rgba(12, 68, 124, 0.16)", fg: "#85B7EB" },
   purple: { bg: "rgba(60, 52, 137, 0.16)", fg: "#AFA9EC" },
   amber: { bg: "rgba(133, 79, 11, 0.16)", fg: "#EF9F27" },
   teal: { bg: "rgba(15, 110, 86, 0.16)", fg: "#5DCAA5" },
   coral: { bg: "rgba(153, 60, 29, 0.16)", fg: "#F0997B" },
+  rose: { bg: "rgba(136, 19, 55, 0.16)", fg: "#FB7185" },
+  sky: { bg: "rgba(12, 74, 110, 0.16)", fg: "#7DD3FC" },
+  lime: { bg: "rgba(63, 98, 18, 0.16)", fg: "#BEF264" },
 };
 
 const TINT_ORDER: TintKey[] = ["blue", "teal", "amber", "coral", "purple"];
@@ -83,26 +119,30 @@ export function findSageAgent(agents: FleetAgent[]): FleetAgent | null {
 }
 
 /** Status tone + label — the ONE status vocabulary (contract), used by the
- *  agents list, the Overview tab, and the Now strip alike so an agent never
- *  reads differently in two places:
- *  active (green, has real activity) · ready (calm, hardware-reachable but
- *  never run — a fresh agent's honest first state) · offline (red) ·
- *  not deployed (neutral) · error (red) · stopped (owner-initiated, distinct
- *  from offline — the agent isn't down, it's deliberately paused).
+ *  Agents list, Project rows, the Overview config row, the Properties panel,
+ *  and the Now strip alike so an agent never reads differently in two
+ *  places. Exactly five labels exist — "Active" and "Idle" are not among
+ *  them:
+ *  Ready (calm, hardware-reachable, not currently executing — a fresh
+ *  agent's honest first state AND a healthy agent between tasks; there is
+ *  no separate "has run before" label) · Working (currently executing) ·
+ *  Stopped (owner-initiated, distinct from Offline — the agent isn't down,
+ *  it's deliberately paused) · Offline (hardware unreachable) ·
+ *  Error.
  *  `stopped` wins over every other signal: an agent that's hardware-online
- *  but owner-stopped must still read Stopped everywhere. `hasActivity`
- *  (pass `Boolean(agent.last_activity)`) is what separates Active from
- *  Ready — hardware/deployment reachability alone (e.g. a Cloud agent is
- *  trivially always "online") is not evidence the agent has ever done
- *  anything, and must not read as if it has. */
+ *  but owner-stopped must still read Stopped everywhere. `working`
+ *  (pass `Boolean(agent.current_run_id)`) is what separates Working from
+ *  Ready — it's "is it executing right now", not "has it ever done
+ *  anything" — so a fresh agent and a healthy idle veteran both honestly
+ *  read Ready. */
 export function deriveStatus(
   hardwareStatus: string,
   stopped?: boolean,
-  hasActivity?: boolean,
+  working?: boolean,
 ): { tone: AgentStatusTone; label: string } {
   if (stopped) return { tone: "stopped", label: "Stopped" };
   if (hardwareStatus === "online") {
-    return hasActivity ? { tone: "online", label: "Active" } : { tone: "ready", label: "Ready" };
+    return working ? { tone: "working", label: "Working" } : { tone: "ready", label: "Ready" };
   }
   if (hardwareStatus === "offline") return { tone: "offline", label: "Offline" };
   if (hardwareStatus === "error") return { tone: "error", label: "Error" };
@@ -110,7 +150,7 @@ export function deriveStatus(
 }
 
 export function statusClass(tone: AgentStatusTone): string {
-  return tone === "online" ? "is-online" : tone === "ready" ? "is-ready" : tone === "offline" ? "is-offline" : tone === "stopped" ? "is-stopped" : "";
+  return tone === "working" ? "is-working" : tone === "ready" ? "is-ready" : tone === "offline" ? "is-offline" : tone === "stopped" ? "is-stopped" : tone === "error" ? "is-error" : "";
 }
 
 /** Placement/meta line. Never prints raw "unknown". */
@@ -136,5 +176,17 @@ export function timeAgo(iso: string | null | undefined): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return formatDate(iso, { month: "short", day: "numeric" });
+}
+
+/** The breadcrumb path's trailing count ("Agents · 4", "Projects · 1
+ *  project", "General · 3 agents") — U3-E moved this off its own toolbar
+ *  row onto the breadcrumb line. The unit word is dropped only when it
+ *  would exactly repeat the crumb label sitting right next to it ("Agents ·
+ *  4", not the redundant "Agents · 4 agents"); everywhere else — including
+ *  the grammatically-needed singular at count === 1 — it's spelled out. */
+export function breadcrumbCount(count: number, singular: string, plural: string, lastCrumbLabel: string): string {
+  const unit = count === 1 ? singular : plural;
+  if (unit.toLowerCase() === lastCrumbLabel.trim().toLowerCase()) return String(count);
+  return `${count} ${unit}`;
 }

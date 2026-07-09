@@ -11994,6 +11994,7 @@ async def list_activity_ledger_events(
     tenant_id: str,
     workspace_id: str,
     event_classes: Optional[List[str]] = None,
+    exclude_event_classes: Optional[List[str]] = None,
     detail_levels: Optional[List[str]] = None,
     actor_type: Optional[str] = None,
     actor_id: Optional[str] = None,
@@ -12023,6 +12024,14 @@ async def list_activity_ledger_events(
     if normalized_event_classes:
         params.append(normalized_event_classes)
         conditions.append(f"event_class = ANY(${len(params)}::text[])")
+    normalized_exclude_event_classes = [
+        str(item or "").strip().lower()
+        for item in list(exclude_event_classes or [])
+        if str(item or "").strip()
+    ]
+    if normalized_exclude_event_classes:
+        params.append(normalized_exclude_event_classes)
+        conditions.append(f"NOT (event_class = ANY(${len(params)}::text[]))")
     normalized_detail_levels = [
         str(item or "").strip().lower()
         for item in list(detail_levels or [])

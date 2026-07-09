@@ -405,6 +405,7 @@ def register_inbox_routes(app) -> None:
         limit: int = 80,
         trace_id: Optional[str] = None,
         event_class: Optional[str] = None,
+        exclude_event_class: Optional[str] = None,
         detail_level: Optional[str] = None,
         actor_type: Optional[str] = None,
         actor_id: Optional[str] = None,
@@ -412,6 +413,7 @@ def register_inbox_routes(app) -> None:
         app_id: Optional[str] = None,
         run_id: Optional[str] = None,
         thread_id: Optional[str] = None,
+        since_created_at: Optional[str] = None,
         current_user=Depends(require_api_key),
     ):
         from server_modules.auth import enforce_workspace_access, workspace_tenant_id
@@ -429,6 +431,7 @@ def register_inbox_routes(app) -> None:
             limit=limit,
             trace_id=trace_id,
             event_class=event_class,
+            exclude_event_class=exclude_event_class,
             detail_level=detail_level,
             actor_type=actor_type,
             actor_id=actor_id,
@@ -436,6 +439,7 @@ def register_inbox_routes(app) -> None:
             app_id=app_id,
             run_id=run_id,
             thread_id=thread_id,
+            since_created_at=since_created_at,
         )
 
     @app.get("/events/inbox/sessions", dependencies=[Depends(require_api_key)])

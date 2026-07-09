@@ -7,7 +7,7 @@ import { CreditCard, Copy, Check, Trash2, Plus, Play, Square, TriangleAlert } fr
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { resumeFleetWorkspace, stopFleetWorkspace, useFleetWorkspace } from "@/lib/workspace/fleet/fleet-data";
-import { timeAgo } from "@/lib/workspace/fleet/fleet-presentation";
+import { timeAgo, formatDate } from "@/lib/workspace/fleet/fleet-presentation";
 
 type McpKey = {
   key_id: string;
@@ -262,7 +262,7 @@ export default function SettingsPage() {
                 <span className="fleet-list-row-title">{k.label || k.key_id}</span>
                 <span className="fleet-list-row-desc">
                   {k.writes_enabled ? "Read + write" : "Read only"}
-                  {k.created_at ? ` · created ${new Date(k.created_at).toLocaleDateString()}` : ""}
+                  {k.created_at ? ` · created ${formatDate(k.created_at)}` : ""}
                 </span>
               </span>
               <button type="button" className="fleet-btn" onClick={() => revokeKey(k.key_id)} title="Revoke key">

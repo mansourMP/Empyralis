@@ -13,6 +13,8 @@ introduced in the Postgres-first era).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import uuid
 from typing import Any, Dict, List, Optional
@@ -21,6 +23,46 @@ from server_modules import control_plane_repository
 
 DEFAULT_PROJECT_NAME = "General"
 DEFAULT_PROJECT_SLUG = "general"
+
+# ── Phase U3-B: project identity (icon + tint) ──────────────────────────────
+# A curated set, not "any lucide icon" — keeps every project visually
+# distinct without turning the icon into a second, uncontrolled naming
+# surface. Names are lucide-react component names in kebab-case; the
+# frontend maps these 1:1 to imports. Assigned once at creation from a
+# deterministic hash of the project id (stable forever), stored in
+# `metadata` so an owner can override it later without a migration.
+PROJECT_ICONS = [
+    "rocket", "target", "compass", "flag", "star", "zap", "package", "briefcase",
+    "layers", "box", "puzzle", "shield", "gem", "anchor", "globe", "flame",
+]
+PROJECT_TINTS = ["blue", "purple", "amber", "teal", "coral", "rose", "sky", "lime"]
+
+# "General" is every workspace's own default project — it should look the
+# same everywhere, not randomized by its (otherwise arbitrary) generated id.
+DEFAULT_PROJECT_ICON = "folder-kanban"
+DEFAULT_PROJECT_TINT = "blue"
+
+
+def _deterministic_project_identity(project_id: str) -> Dict[str, str]:
+    digest = hashlib.md5(str(project_id or "").encode("utf-8")).hexdigest()
+    icon = PROJECT_ICONS[int(digest[:8], 16) % len(PROJECT_ICONS)]
+    tint = PROJECT_TINTS[int(digest[8:16], 16) % len(PROJECT_TINTS)]
+    return {"icon": icon, "tint": tint}
+
+
+def _coerce_metadata(value: Any) -> Dict[str, Any]:
+    """Postgres JSONB sometimes arrives already-decoded (dict) and sometimes
+    as a raw JSON string, depending on the pool's codec setup — see the
+    2026-07-09 wake-request cancel fix for the same footgun. Handle both."""
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _slugify(value: Any, *, fallback: str = "project") -> str:
@@ -36,6 +78,8 @@ def _row_to_project(row: Any) -> Optional[Dict[str, Any]]:
     if row is None:
         return None
     r = dict(row)
+    metadata = _coerce_metadata(r.get("metadata"))
+    identity = _deterministic_project_identity(str(r.get("id") or ""))
     return {
         "id": str(r.get("id") or "").strip(),
         "tenant_id": str(r.get("tenant_id") or "").strip() or None,
@@ -45,6 +89,16 @@ def _row_to_project(row: Any) -> Optional[Dict[str, Any]]:
         "description": str(r.get("description") or "").strip(),
         "is_default": bool(r.get("is_default")),
         "archived": bool(r.get("archived")),
+        "metadata": metadata,
+        # Fall back to a live-computed identity for rows written before this
+        # field existed (or ever cleared) — never render a project with no
+        # icon/tint. "General" always gets the fixed default, not the hash.
+        "icon": str(metadata.get("icon") or "").strip() or (
+            DEFAULT_PROJECT_ICON if r.get("is_default") else identity["icon"]
+        ),
+        "tint": str(metadata.get("tint") or "").strip() or (
+            DEFAULT_PROJECT_TINT if r.get("is_default") else identity["tint"]
+        ),
         "created_at": str(r.get("created_at") or "") or None,
         "updated_at": str(r.get("updated_at") or "") or None,
     }
@@ -78,7 +132,7 @@ async def list_projects(
     rows = await pool.fetch(
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
-               is_default, archived, created_at, updated_at
+               is_default, archived, metadata, created_at, updated_at
         FROM projects
         WHERE tenant_id = $1
           AND workspace_id = $2
@@ -104,7 +158,7 @@ async def get_project(
     row = await pool.fetchrow(
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
-               is_default, archived, created_at, updated_at
+               is_default, archived, metadata, created_at, updated_at
         FROM projects
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         """,
@@ -140,12 +194,19 @@ async def create_project(
     base_slug = _slugify(slug or name, fallback="project")
     final_slug = await _unique_slug(pool, tenant_id, workspace_id, base_slug)
     pid = str(project_id or "").strip() or _new_project_id()
+    # Icon + tint assigned once, here, from the new id — never recomputed
+    # once stored (a rename must not visually reshuffle the project).
+    identity = (
+        {"icon": DEFAULT_PROJECT_ICON, "tint": DEFAULT_PROJECT_TINT}
+        if is_default
+        else _deterministic_project_identity(pid)
+    )
     row = await pool.fetchrow(
         """
-        INSERT INTO projects (id, tenant_id, workspace_id, name, slug, description, is_default)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO projects (id, tenant_id, workspace_id, name, slug, description, is_default, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
         RETURNING id, tenant_id, workspace_id, name, slug, description,
-                  is_default, archived, created_at, updated_at
+                  is_default, archived, metadata, created_at, updated_at
         """,
         pid,
         tenant_id,
@@ -154,6 +215,7 @@ async def create_project(
         final_slug,
         str(description or "").strip(),
         bool(is_default),
+        json.dumps(identity),
     )
     return _row_to_project(row)
 
@@ -174,7 +236,7 @@ async def ensure_default_project(
     row = await pool.fetchrow(
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
-               is_default, archived, created_at, updated_at
+               is_default, archived, metadata, created_at, updated_at
         FROM projects
         WHERE tenant_id = $1 AND workspace_id = $2 AND is_default = TRUE
         ORDER BY created_at ASC
@@ -213,7 +275,7 @@ async def rename_project(
             updated_at = NOW()
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         RETURNING id, tenant_id, workspace_id, name, slug, description,
-                  is_default, archived, created_at, updated_at
+                  is_default, archived, metadata, created_at, updated_at
         """,
         str(tenant_id or "").strip(),
         str(workspace_id or "").strip(),
@@ -267,7 +329,7 @@ async def set_project_archived(
         SET archived = $4, updated_at = NOW()
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         RETURNING id, tenant_id, workspace_id, name, slug, description,
-                  is_default, archived, created_at, updated_at
+                  is_default, archived, metadata, created_at, updated_at
         """,
         tenant_id,
         workspace_id,

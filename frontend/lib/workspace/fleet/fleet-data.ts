@@ -52,6 +52,13 @@ export type FleetProject = {
   description?: string;
   agent_count?: number;
   status?: string;
+  is_default?: boolean;
+  /** Icon name (lucide-react key, e.g. "rocket") and tint key (TintKey) —
+   *  always populated by the backend (projects_repository.py), computed
+   *  deterministically from the project id if never explicitly set. */
+  icon?: string;
+  tint?: string;
+  metadata?: Record<string, unknown>;
   created_at?: string;
 };
 
@@ -501,18 +508,39 @@ export type WorkspaceActivityEvent = {
   action: string | null;
   status: string | null;
   created_at: string | null;
+  trace_id: string | null;
+  install_id: string | null;
+  channel: string | null;
+  actor_type: string | null;
+  review_required: boolean;
 };
 
-export function useWorkspaceActivity(workspaceId: string, limit = 8) {
+// Turn-execution plumbing (memory_loaded, tool_started/completed,
+// user_message_received, final_response_sent all ledger as system_activity;
+// owner-fleet administrative actions ledger as fleet_control) — real
+// disease/cure precedent: fleet_control raw strings were already the U3-A
+// fix for the Agents-list row subtitle; the Inbox needs the same exclusion,
+// plus its sibling system_activity class, applied server-side so a single
+// chat turn's multi-row spray never eats into the feed's own row limit.
+const NOISE_EVENT_CLASSES = ["system_activity", "fleet_control"];
+
+/** sinceCreatedAt (optional): only events after this ISO timestamp — the
+ *  rail's Inbox count uses this so its number is a real, backend-computed
+ *  count of what's new, not the fetch page size dressed up as one. The
+ *  Inbox page itself omits it (wants the full recent feed regardless of
+ *  read state). */
+export function useWorkspaceActivity(workspaceId: string, limit = 8, sinceCreatedAt?: string | null) {
   const [events, setEvents] = useState<WorkspaceActivityEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(`/api/activity/timeline?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}`, {
-        credentials: "include",
-      });
+      const since = sinceCreatedAt ? `&since_created_at=${encodeURIComponent(sinceCreatedAt)}` : "";
+      const res = await fetch(
+        `/api/activity/timeline?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}&exclude_event_class=${NOISE_EVENT_CLASSES.join(",")}${since}`,
+        { credentials: "include" },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setEvents(Array.isArray(data.items) ? data.items : []);
@@ -523,7 +551,7 @@ export function useWorkspaceActivity(workspaceId: string, limit = 8) {
     } finally {
       setLoading(false);
     }
-  }, [workspaceId, limit]);
+  }, [workspaceId, limit, sinceCreatedAt]);
 
   useEffect(() => {
     refresh();
@@ -532,6 +560,54 @@ export function useWorkspaceActivity(workspaceId: string, limit = 8) {
   }, [refresh]);
 
   return { events, loading, error };
+}
+
+/** The full, unfiltered spray for one turn (memory_loaded → tool calls →
+ *  final_response_sent, oldest first) — the plumbing NOISE_EVENT_CLASSES
+ *  hides from the feed itself but that the Inbox's detail pane shows as a
+ *  trace once a reader actually opens that item. On-demand, not a hook: a
+ *  handful of turns get expanded per session, not every turn on every poll. */
+export async function fetchActivityTrace(workspaceId: string, traceId: string): Promise<WorkspaceActivityEvent[]> {
+  if (!traceId) return [];
+  try {
+    const res = await fetch(
+      `/api/activity/timeline?workspace_id=${encodeURIComponent(workspaceId)}&trace_id=${encodeURIComponent(traceId)}&limit=50`,
+      { credentials: "include" },
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    const items: WorkspaceActivityEvent[] = Array.isArray(data.items) ? data.items : [];
+    return [...items].sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+  } catch {
+    return [];
+  }
+}
+
+// The rail's Inbox count needs "how many meaningful events arrived since the
+// reader last opened the Inbox" — a durable signal (survives navigating away
+// and back, unlike the Inbox page's own per-row session-scoped viewed-state)
+// without inventing server-side read-tracking. localStorage, one key, per
+// workspace so switching workspaces doesn't cross-contaminate the count.
+const INBOX_LAST_SEEN_KEY_PREFIX = "fleet:inbox-last-seen:";
+
+export function getInboxLastSeenAt(workspaceId: string): string | null {
+  try {
+    return window.localStorage.getItem(INBOX_LAST_SEEN_KEY_PREFIX + workspaceId);
+  } catch {
+    return null;
+  }
+}
+
+/** Call whenever the Inbox page has real events on screen (mount + each
+ *  poll) — stamps "now", not the newest event's own timestamp, so events
+ *  that arrive while the reader is already looking at the list don't count
+ *  as unread the next time they check the rail. */
+export function markInboxSeenNow(workspaceId: string) {
+  try {
+    window.localStorage.setItem(INBOX_LAST_SEEN_KEY_PREFIX + workspaceId, new Date().toISOString());
+  } catch {
+    /* best-effort */
+  }
 }
 
 export type WorkspaceStatusStrip = {

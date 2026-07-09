@@ -95,6 +95,7 @@ class FakeActivityLedgerRepo:
         tenant_id: str,
         workspace_id: str,
         event_classes: Optional[List[str]] = None,
+        exclude_event_classes: Optional[List[str]] = None,
         detail_levels: Optional[List[str]] = None,
         actor_type: Optional[str] = None,
         actor_id: Optional[str] = None,
@@ -120,6 +121,8 @@ class FakeActivityLedgerRepo:
             if ev is None:
                 continue
             if event_classes and ev.get("event_class") not in event_classes:
+                continue
+            if exclude_event_classes and ev.get("event_class") in exclude_event_classes:
                 continue
             if actor_id and ev.get("actor_id") != actor_id:
                 continue

@@ -7,6 +7,7 @@ import { Cpu, Server, Terminal, X } from "lucide-react";
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
+import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
 import {
   CLOUD_VPS_PROVIDERS,
   CLOUD_VPS_PROVIDER_IDS,
@@ -114,7 +115,7 @@ export default function HardwarePage() {
           </span>
           <span className="fleet-list-row-desc">
             {isCloud ? r.display_name || "Agent Computer" : r.platform || "unknown platform"}
-            {r.last_seen_at ? ` · last seen ${new Date(r.last_seen_at).toLocaleString()}` : ""}
+            {r.last_seen_at ? ` · last seen ${formatDateTime(r.last_seen_at)}` : ""}
           </span>
         </span>
         <span className="fleet-list-row-meta" style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>

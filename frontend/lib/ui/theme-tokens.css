@@ -103,7 +103,11 @@ html[data-theme="dark"] {
   --online-dot: #22c55e;
   --offline-text: #f87171;
   --offline-dot: #ef4444;
+  --warning-text: #fbbf24;
   --unknown-dot: #71717a;
+  /* Ready = healthy but not executing — a calmer, desaturated green, not
+     the vivid "actively working" green and not plain unknown-gray either. */
+  --ready-dot: #5b8c73;
 }
 
 html[data-theme="light"] {
@@ -141,5 +145,7 @@ html[data-theme="light"] {
 
   --online-text: #15803d;
   --offline-text: #b91c1c;
+  --warning-text: #b45309;
   --unknown-dot: #a1a1aa;
+  --ready-dot: #4b7a5e;
 }

@@ -663,6 +663,7 @@ async def list_activity_timeline_payload(
     limit: int = 80,
     trace_id: Optional[str] = None,
     event_class: Optional[str] = None,
+    exclude_event_class: Optional[str] = None,
     detail_level: Optional[str] = None,
     actor_type: Optional[str] = None,
     actor_id: Optional[str] = None,
@@ -670,11 +671,18 @@ async def list_activity_timeline_payload(
     app_id: Optional[str] = None,
     run_id: Optional[str] = None,
     thread_id: Optional[str] = None,
+    since_created_at: Optional[str] = None,
 ) -> Dict[str, Any]:
+    exclude_classes = [
+        token.strip().lower()
+        for token in str(exclude_event_class or "").split(",")
+        if token.strip()
+    ]
     rows = await control_plane_repository.list_activity_ledger_events(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         event_classes=[str(event_class or "").strip().lower()] if str(event_class or "").strip() else None,
+        exclude_event_classes=exclude_classes or None,
         detail_levels=[_normalize_detail_level(detail_level)] if str(detail_level or "").strip() else None,
         actor_type=str(actor_type or "").strip().lower() or None,
         actor_id=str(actor_id or "").strip() or None,
@@ -683,6 +691,7 @@ async def list_activity_timeline_payload(
         run_id=str(run_id or "").strip() or None,
         thread_id=str(thread_id or "").strip() or None,
         trace_id=str(trace_id or "").strip() or None,
+        since_created_at=str(since_created_at or "").strip() or None,
         limit=max(1, min(int(limit or 80), 500)),
     )
     rows = [

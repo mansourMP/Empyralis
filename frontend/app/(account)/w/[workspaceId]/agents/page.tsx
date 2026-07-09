@@ -3,17 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { Bot, DollarSign, Hash, PanelRightClose, PanelRightOpen, Radio } from "lucide-react";
+import { Bot, Radio } from "lucide-react";
 
-import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
-import { findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
+import { useFleetAgents, useFleetProjects, type FleetAgent, type FleetProject } from "@/lib/workspace/fleet/fleet-data";
+import { breadcrumbCount, findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
 import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
+import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
-import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
+import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 
 type SortMode = "last_active" | "status" | "cost" | "name" | "group";
 
@@ -59,6 +60,16 @@ export default function AgentsPage() {
     () => (sageAgent ? allAgents.filter((a) => a.agent_id !== sageAgent.agent_id) : allAgents),
     [allAgents, sageAgent],
   );
+  // U3-E: the count lives on the breadcrumb line itself ("Agents · 4"), not
+  // a second toolbar row — "Agents" is both the section and the unit, so it
+  // collapses to a bare count (see breadcrumbCount's doc comment).
+  useBreadcrumbBadge(
+    "agents",
+    useMemo(
+      () => <span className="fleet-breadcrumb-count">· {breadcrumbCount(agents.length, "agent", "agents", "Agents")}</span>,
+      [agents.length],
+    ),
+  );
   const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
   const { project: projectFilter, status: statusFilter, channel: channelFilter, sort } = filterState;
 
@@ -81,6 +92,7 @@ export default function AgentsPage() {
   // `totals` block is the workspace roll-up (usd_cost, total_tokens, events),
   // fed into the properties drawer below so both live off one fetch.
   const [usageTotals, setUsageTotals] = useState<{ usd_cost?: number; total_tokens?: number; events?: number } | null>(null);
+  const [usageBuckets, setUsageBuckets] = useState<UsageBucket[]>([]);
   const [wizardOpen, setWizardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet. The
   // page itself shows only agents; everything else (spend, tokens, channel
@@ -110,12 +122,13 @@ export default function AgentsPage() {
         for (const a of d?.by_agent || []) m.set(a.agent_install_id, a.usd_cost);
         setCost(m);
         setUsageTotals(d?.totals || null);
+        if (Array.isArray(d?.buckets)) setUsageBuckets(d.buckets);
       })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [workspaceId]);
 
-  const projName = useMemo(() => new Map(projects.map((p) => [p.id, p.name || p.id])), [projects]);
+  const projById = useMemo(() => new Map<string, FleetProject>(projects.map((p) => [p.id, p])), [projects]);
 
   const filtered = useMemo(() => {
     return agents.filter((a) => {
@@ -164,6 +177,14 @@ export default function AgentsPage() {
 
   return (
     <main className="fleet-content fleet-content--with-panel">
+      {/* U3-H: two rows, not one — top row is breadcrumb (with its count,
+          see the useBreadcrumbBadge call above) + primary action only,
+          portaled into the shell topbar. The view-control cluster is its
+          OWN row below, under the topbar's existing divider (its
+          border-bottom) — U3-E's "merge everything into one line" reading
+          was wrong. FleetToolbar always renders here (even with 0 agents)
+          so the Properties toggle stays reachable; filters/sort still hide
+          themselves when there's nothing to filter/sort. */}
       <HeaderAction>
         <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
           <span className="fleet-btn-plus">+</span>
@@ -171,11 +192,6 @@ export default function AgentsPage() {
         </button>
       </HeaderAction>
 
-      {/* trailingAction keeps the Properties toggle inside FleetToolbar's own
-          right-aligned action cluster — same row, same gap, same alignment as
-          Filter/Sort. FleetToolbar always renders here (even with 0 agents)
-          so the toggle stays reachable; filters/sort still hide themselves
-          when there's nothing to filter/sort. */}
       <div className="fleet-content-toolbar">
         <FleetToolbar
           filters={agents.length > 0 ? filters : undefined}
@@ -183,18 +199,9 @@ export default function AgentsPage() {
           sortValue={sort}
           sortDefault="last_active"
           onSortChange={(v) => updateFilters({ sort: v as SortMode })}
-          trailingAction={
-            <button
-              type="button"
-              className={`fleet-icon-btn${panelOpen ? " is-active" : ""}`}
-              onClick={() => setPanelOpen((v) => !v)}
-              aria-label="Properties"
-              aria-pressed={panelOpen}
-              title="Properties"
-            >
-              {panelOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
-            </button>
-          }
+          panelOpen={panelOpen}
+          onTogglePanel={() => setPanelOpen((v) => !v)}
+          usageHref={`${base}/billing`}
         />
       </div>
 
@@ -220,7 +227,7 @@ export default function AgentsPage() {
               workspaceId={workspaceId}
               agents={shown}
               costByAgent={cost}
-              projectNameById={projName}
+              projectById={projById}
               groupByProject={sort === "group"}
               onSelect={goToAgent}
               onAgentStoppedChanged={refresh}
@@ -231,9 +238,19 @@ export default function AgentsPage() {
         <FleetRightPanel open={panelOpen} onClose={() => setPanelOpen(false)}>
           <PanelSection title="Properties">
             <PanelRow label="Total agents" value={agents.length} icon={<Bot size={15} strokeWidth={1.75} />} />
-            <PanelRow label="Active" value={`${activeCount}/${agents.length}`} tone={activeCount > 0 ? "online" : "muted"} />
-            <PanelRow label="Spend today" value={`$${spendToday.toFixed(2)}`} icon={<DollarSign size={15} strokeWidth={1.75} />} tone={spendToday > 0 ? "accent" : "muted"} />
-            <PanelRow label="Tokens today" value={fmtTokens(usageTotals?.total_tokens || 0)} icon={<Hash size={15} strokeWidth={1.75} />} />
+            <PanelRow label="Online" value={`${activeCount}/${agents.length}`} tone={activeCount > 0 ? "online" : "muted"} />
+            <UsageStat
+              label="Spend today"
+              total={spendToday}
+              formattedTotal={`$${spendToday.toFixed(2)}`}
+              values={bucketSeries(usageBuckets, "usd_cost")}
+            />
+            <UsageStat
+              label="Tokens today"
+              total={usageTotals?.total_tokens || 0}
+              formattedTotal={fmtTokens(usageTotals?.total_tokens || 0)}
+              values={bucketSeries(usageBuckets, "total_tokens")}
+            />
             <PanelRow label="Channels live" value={channelsLiveCount} icon={<Radio size={15} strokeWidth={1.75} />} tone={channelsLiveCount > 0 ? "default" : "muted"} />
           </PanelSection>
         </FleetRightPanel>

@@ -6,12 +6,12 @@ import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useAppTheme } from "@/lib/ui/app-theme";
 
 export type FleetTheme = "light" | "dark";
-export type FleetSectionKey = "workspace" | "infrastructure";
+export type FleetSectionKey = "projects" | "agents";
 type SectionMap = Record<FleetSectionKey, boolean>;
 
 const COLLAPSED_KEY = "fleet:rail-collapsed";
 const SECTIONS_KEY = "fleet:rail-sections";
-const DEFAULT_SECTIONS: SectionMap = { workspace: true, infrastructure: true };
+const DEFAULT_SECTIONS: SectionMap = { projects: true, agents: true };
 
 /**
  * Fleet-local UI preferences (rail collapse, section expansion), persisted

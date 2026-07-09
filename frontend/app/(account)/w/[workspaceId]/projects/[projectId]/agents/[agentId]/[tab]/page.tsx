@@ -1,10 +1,12 @@
 "use client";
 
+import { useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import { useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
 import { FleetAgentDetail } from "@/lib/workspace/fleet/FleetAgentDetail";
-import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
+import { useBreadcrumbLabel, useBreadcrumbIcon } from "@/lib/workspace/fleet/Breadcrumbs";
+import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 
 const VALID_TABS = ["overview", "work", "channels", "connectors", "tools", "hardware", "model", "memory", "chat"] as const;
 type Tab = (typeof VALID_TABS)[number];
@@ -32,6 +34,13 @@ export default function AgentDetailPage() {
   // Real names in the breadcrumb chain instead of raw ids.
   useBreadcrumbLabel(projectId, project?.name);
   useBreadcrumbLabel(agentId, agent?.label);
+  useBreadcrumbIcon(
+    projectId,
+    useMemo(
+      () => (project ? <ProjectIcon icon={project.icon} tint={project.tint} size={16} /> : null),
+      [project],
+    ),
+  );
 
   return (
     <FleetAgentDetail

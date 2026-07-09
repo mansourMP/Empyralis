@@ -34,8 +34,10 @@ export function FleetShell({
   const {
     theme,
     collapsed,
+    sections,
     toggleTheme,
     toggleCollapsed,
+    toggleSection,
   } = useFleetPreferences();
 
   const [sageOpen, setSageOpen] = useState(false);
@@ -61,6 +63,8 @@ export function FleetShell({
         onToggleCollapsed={toggleCollapsed}
         theme={theme}
         onToggleTheme={toggleTheme}
+        sections={sections}
+        onToggleSection={toggleSection}
       />
       <div className="fleet-shell-panel">
         <FleetShellDecider workspaceId={workspaceId} shellSlot={shellSlot}>{children}</FleetShellDecider>

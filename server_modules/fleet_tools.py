@@ -147,6 +147,28 @@ def seed_specialist_metadata() -> Dict[str, Any]:
 
 # ── Ledger helper ───────────────────────────────────────────────────────────
 
+# Human-readable titles for fleet_control events — never a raw "Fleet: {action}
+# → {id}" string. This is what a list row's activity_preview shows a real
+# person, so it reads like something happened, not like an internal log line.
+_FLEET_ACTION_TITLES: Dict[str, str] = {
+    "create_agent": "Created",
+    "create_agent_failed": "Setup failed",
+    "configure_agent": "Configured",
+    "configure_agent_failed": "Configuration failed",
+    "message_agent": "Received a message",
+    "message_agent_failed": "Message delivery failed",
+    "hardware_grant_denied": "Hardware access denied",
+    "operator_bootstrap": "Operator set up",
+    "operator_bootstrap_failed": "Operator setup failed",
+    "schedule_task": "Wake-up scheduled",
+    "schedule_cancelled": "Wake-up cancelled",
+}
+
+
+def _humanize_fleet_action(action: str) -> str:
+    key = str(action or "").strip().lower()
+    return _FLEET_ACTION_TITLES.get(key) or key.replace("_", " ").capitalize() or "Updated"
+
 
 async def _ledger_fleet_action(
     *,
@@ -171,7 +193,7 @@ async def _ledger_fleet_action(
             event_class="fleet_control",
             detail_level="audit_reference",
             action=str(action or "").strip().lower(),
-            title=f"Fleet: {action}" + (f" → {target_agent_id}" if target_agent_id else ""),
+            title=_humanize_fleet_action(action),
             summary=(
                 f"Fleet control action '{action}' by {actor_id}"
                 + (f" on agent {target_agent_id}" if target_agent_id else "")
@@ -330,6 +352,14 @@ async def _fetch_latest_activity(workspace_id: str) -> Dict[str, Dict[str, Optio
     fix. Since actor_id never matches an agent install id, fleet_list_agents()'s
     lookup by install id always missed, showing "never" and no activity
     preview on the list even when the agent's own detail page had real data.
+
+    Prefers the latest non-fleet_control event over the latest fleet_control
+    one (2026-07-09 U3-A fix): fleet_control is plumbing (create_agent,
+    configure_agent, ...) — a row's activity preview should show what the
+    agent DID, not the last time its config was touched. Only falls back to
+    a fleet_control event when that's literally the only activity an agent
+    has; _humanize_fleet_action() keeps that fallback readable rather than a
+    raw "action → id" string.
     """
     try:
         from server_modules import control_plane_repository as cpr
@@ -342,7 +372,7 @@ async def _fetch_latest_activity(workspace_id: str) -> Dict[str, Dict[str, Optio
             SELECT DISTINCT ON (install_id) install_id, created_at, title, action
             FROM activity_ledger_events
             WHERE workspace_id = $1 AND install_id IS NOT NULL
-            ORDER BY install_id, created_at DESC
+            ORDER BY install_id, (event_class = 'fleet_control') ASC, created_at DESC
             """,
             str(workspace_id or "").strip(),
         )
@@ -487,6 +517,16 @@ async def fleet_get_agent_activity(
     turn — this is why Overview read "No activity yet" even after real
     conversations. Redacts payloads — only returns event metadata, never
     raw content.
+
+    fleet_control rows are excluded (2026-07-10): owner-fleet administrative
+    actions ("Fleet: configure_agent → ainstall_...") are plumbing on an
+    agent's own timeline, the same disease the Inbox feed had — rows written
+    before the U3-A title-humanization fix still carry the raw un-humanized
+    string forever, and even humanized ones aren't "this agent's activity"
+    in the sense this section means. Dropped here rather than humanized:
+    unlike the Inbox (a workspace-wide feed where a completed config action
+    is still worth a line), this is the agent's OWN work log — routine
+    owner configuration isn't part of that story.
     """
     from server_modules import control_plane_repository as cpr
 
@@ -504,6 +544,7 @@ async def fleet_get_agent_activity(
             FROM activity_ledger_events
             WHERE workspace_id = $1
               AND install_id = $2
+              AND event_class != 'fleet_control'
               AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz)
             ORDER BY created_at DESC
             LIMIT 50
@@ -1038,7 +1079,7 @@ async def fleet_stop_agent(
         event_class="fleet_control",
         detail_level="audit_reference",
         action="agent_stopped",
-        title=f"Agent stopped: {agent_id}",
+        title="Stopped",
         summary=(
             f"{actor_label or actor_id} stopped this agent."
             + (f" Reason: {reason}" if str(reason or "").strip() else "")
@@ -1083,7 +1124,7 @@ async def fleet_resume_agent(
         event_class="fleet_control",
         detail_level="audit_reference",
         action="agent_resumed",
-        title=f"Agent resumed: {agent_id}",
+        title="Resumed",
         summary=f"{actor_label or actor_id} resumed this agent.",
         status="executed",
         metadata={"agent_id": agent_id, "resumed_by_user_id": actor_id},
@@ -1125,7 +1166,7 @@ async def fleet_stop_workspace(
         event_class="fleet_control",
         detail_level="audit_reference",
         action="workspace_stopped",
-        title=f"All agents stopped in workspace {workspace_id}",
+        title="All agents stopped",
         summary=(
             f"{actor_label or actor_id} stopped all agents in this workspace."
             + (f" Reason: {reason}" if str(reason or "").strip() else "")
@@ -1161,7 +1202,7 @@ async def fleet_resume_workspace(
         event_class="fleet_control",
         detail_level="audit_reference",
         action="workspace_resumed",
-        title=f"All agents resumed in workspace {workspace_id}",
+        title="All agents resumed",
         summary=f"{actor_label or actor_id} resumed all agents in this workspace.",
         status="executed",
         metadata={"workspace_id": workspace_id, "resumed_by_user_id": actor_id},

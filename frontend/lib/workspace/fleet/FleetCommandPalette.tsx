@@ -111,6 +111,14 @@ export function FleetCommandPalette({
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
+  // Same custom-event pattern as fleet:open-sage — the rail's search control
+  // (U3-G) opens this without prop-drilling a setter down through FleetShell.
+  useEffect(() => {
+    const handler = () => setOpen(true);
+    window.addEventListener("fleet:open-command-palette", handler);
+    return () => window.removeEventListener("fleet:open-command-palette", handler);
+  }, []);
+
   useEffect(() => {
     if (open) {
       setQuery("");

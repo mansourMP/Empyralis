@@ -2,12 +2,27 @@
 
 import type { CSSProperties, KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FolderKanban, Play, Square } from "lucide-react";
+import { Play, Square } from "lucide-react";
 
-import { type FleetAgent, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
-import { deriveStatus, statusClass, timeAgo, tintForAgent, TINTS } from "./fleet-presentation";
+import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
+import { deriveStatus, timeAgo, tintForAgent, TINTS } from "./fleet-presentation";
+import { StatusDot } from "./fleet-indicators";
+import { ProjectIcon } from "./fleet-project-identity";
 
 const LAST_VIEWED_KEY = "fleet:list-last-viewed-agent";
+
+/** Display-time guard against old rows in the shared DB written before the
+ *  2026-07-09 U3-A fleet_control-title humanization fix — those still carry
+ *  a raw "Fleet: {action} → {id}"-shaped string. New writes never match
+ *  this (see _humanize_fleet_action in fleet_tools.py); this just keeps a
+ *  stale row from ever surfacing plumbing instead of an honest empty. */
+const RAW_INTERNAL_TITLE = /^Fleet:\s|ainstall_[a-z0-9]|(?:^|[\s:])ws_[a-z0-9]/i;
+
+function activityPreviewText(agent: FleetAgent): string {
+  const preview = (agent.activity_preview || "").trim();
+  if (!preview || RAW_INTERNAL_TITLE.test(preview)) return "No activity yet";
+  return preview;
+}
 
 /** Call right before navigating from a list row into an agent's detail page —
  *  paired with the read inside AgentsList below, so Esc/back into this list
@@ -89,7 +104,7 @@ export function AgentsList({
   workspaceId,
   agents,
   costByAgent,
-  projectNameById,
+  projectById,
   groupByProject,
   onSelect,
   onAgentStoppedChanged,
@@ -97,7 +112,7 @@ export function AgentsList({
   workspaceId: string;
   agents: FleetAgent[];
   costByAgent: Map<string, number>;
-  projectNameById?: Map<string, string>;
+  projectById?: Map<string, FleetProject>;
   groupByProject?: boolean;
   onSelect: (agentId: string, projectId: string) => void;
   /** Called after a stop/resume mutation succeeds — the caller should
@@ -179,11 +194,12 @@ export function AgentsList({
         }
         let flatIdx = 0;
         return Array.from(groups.entries()).map(([projectId, group]) => {
-          const projectLabel = (projectId && projectNameById?.get(projectId)) || "Ungrouped";
+          const proj = projectId ? projectById?.get(projectId) : undefined;
+          const projectLabel = proj?.name || "Ungrouped";
           return (
             <div key={projectId || "ungrouped"} className="fleet-agent-group">
               <div className="fleet-agent-group-header">
-                <FolderKanban size={12} strokeWidth={1.75} aria-hidden />
+                <ProjectIcon icon={proj?.icon} tint={proj?.tint} size={16} glyphSize={10} />
                 <span className="fleet-agent-group-name">{projectLabel}</span>
                 <span className="fleet-agent-group-count">
                   · {group.length} {group.length === 1 ? "agent" : "agents"}
@@ -234,7 +250,7 @@ function AgentRow({
 }) {
   const [busy, setBusy] = useState(false);
   const stopped = Boolean(agent.stopped?.active);
-  const st = deriveStatus(agent.hardware_status || "unknown", stopped, Boolean(agent.last_activity));
+  const st = deriveStatus(agent.hardware_status || "unknown", stopped, Boolean(agent.current_run_id));
   const preset = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
   const initial = (agent.label || "A").charAt(0).toUpperCase();
   const tint = tintForAgent(agent, index);
@@ -274,14 +290,14 @@ function AgentRow({
       onKeyDown={handleKey}
     >
       <span className="fleet-agent-cell-agent">
-        <span className={`fleet-agent-health-dot ${statusClass(st.tone)}`} aria-hidden />
+        <StatusDot tone={st.tone} size={8} />
         <span className="fleet-agent-avatar" style={avatarStyle}>{initial}</span>
         <span className="fleet-agent-cell-agent-text">
           <span className="fleet-agent-cell-agent-line1">
             <span className="fleet-agent-name">{agent.label || "Unnamed agent"}</span>
             {preset && <span className="fleet-badge fleet-badge--preset">{preset}</span>}
           </span>
-          <span className="fleet-agent-preview">{agent.activity_preview || "No activity yet"}</span>
+          <span className="fleet-agent-preview">{activityPreviewText(agent)}</span>
         </span>
       </span>
 
@@ -304,7 +320,7 @@ function AgentRow({
       </span>
 
       <span className="fleet-agent-cell-status">
-        <span className={`fleet-agent-health-dot ${statusClass(st.tone)}`} aria-hidden />
+        <StatusDot tone={st.tone} size={8} />
         <span>{st.label}</span>
         <button
           type="button"

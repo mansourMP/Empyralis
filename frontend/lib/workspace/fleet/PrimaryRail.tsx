@@ -1,18 +1,21 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSelectedLayoutSegment } from "next/navigation";
+import { useRouter, usePathname, useSelectedLayoutSegment } from "next/navigation";
 import {
+  BarChart3,
   Bot,
+  ChevronRight,
   Cpu,
-  CreditCard,
   FolderKanban,
   Inbox,
   LogOut,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
+  Search,
   Settings,
   Sun,
   type LucideIcon,
@@ -20,8 +23,12 @@ import {
 
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
+import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
+import { deriveStatus, findSageAgent } from "./fleet-presentation";
+import { StatusDot } from "./fleet-indicators";
+import { ProjectIcon } from "./fleet-project-identity";
 
-import type { FleetTheme } from "./fleet-preferences";
+import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
 type RailNavItem = { key: string; label: string; segment: string; icon: LucideIcon; chord: string };
 
@@ -36,14 +43,25 @@ const RAIL_ITEMS: RailNavItem[] = [
 const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
 
+// U3-H: back to 2 decimals — 4 (matching AgentsList/billing/project detail's
+// cost TABLES, where precision is the point) never fit this whisper-quiet
+// glance line without truncating "today" mid-word even after tightening
+// padding/letter-spacing as far as either theme's readability allows. This
+// line is ambient status, not an accounting figure — the tradeoff favors
+// "always renders whole" over "never rounds a fractional cent".
+const money = (n: number) => `$${n.toFixed(2)}`;
+
 /**
- * Persistent primary rail — the app's spine. Flat nav buttons for the
- * screens visited daily (Projects included — it opens the project
- * list/create view, it doesn't expand a tree here). Billing lives in the
- * account menu instead — it's a look-up-occasionally screen, not a nav
- * destination. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then a
- * section key jumps directly (g i inbox, g p projects, g a agents, g h
- * hardware) — the Linear muscle-memory model.
+ * Persistent primary rail — the app's spine. A populated workspace header
+ * (U3-G) replaces the static product wordmark; Projects AND Agents are both
+ * real, collapsible sub-lists of the workspace's own data (Linear's "Teams"
+ * treatment, same pattern for both — see the shared showSubnav logic
+ * below); a quiet footer line reports the fleet's pulse above the account
+ * block. Billing lives in the account menu instead — it's a look-up-
+ * occasionally screen, not a nav destination. Keyboard: `j`/`k` move a
+ * highlight, Enter opens it; `g` then a section key jumps directly (g i
+ * inbox, g p projects, g a agents, g h hardware) — the Linear muscle-memory
+ * model.
  */
 export function PrimaryRail({
   workspaceId,
@@ -54,6 +72,8 @@ export function PrimaryRail({
   onToggleCollapsed,
   theme,
   onToggleTheme,
+  sections,
+  onToggleSection,
 }: {
   workspaceId: string;
   ownerName?: string;
@@ -63,11 +83,91 @@ export function PrimaryRail({
   onToggleCollapsed: () => void;
   theme: FleetTheme;
   onToggleTheme: () => void;
-  sections?: Record<string, boolean>;
-  onToggleSection?: (key: string) => void;
+  sections?: Record<FleetSectionKey, boolean>;
+  onToggleSection?: (key: FleetSectionKey) => void;
 }) {
   const router = useRouter();
+  const pathname = usePathname() || "";
+  const { projects } = useFleetProjects(workspaceId);
+  const { workspace } = useFleetWorkspace(workspaceId);
+  const { agents: allAgents } = useFleetAgents(workspaceId);
+
+  // Read after mount (not during render) — same localStorage-hydration
+  // timing useFleetPreferences already uses, avoiding an SSR/hydration
+  // mismatch. Re-read whenever the Inbox page itself stamps a fresh value
+  // (see the "storage" listener below) so the badge clears without a reload.
+  const [lastSeenAt, setLastSeenAt] = useState<string | null>(null);
+  useEffect(() => {
+    setLastSeenAt(getInboxLastSeenAt(workspaceId));
+    const onStorage = () => setLastSeenAt(getInboxLastSeenAt(workspaceId));
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", onStorage);
+    };
+  }, [workspaceId]);
+
+  const INBOX_BADGE_LIMIT = 100;
+  // Backend-computed, not client-filtered: a genuine count of what's new
+  // since the last visit, not the fetch page size dressed up as one (U3-H —
+  // this used to read a suspicious, round "50" for a never-visited reader
+  // with any real backlog, since the old version just returned however many
+  // of the newest N events happened to be unseen).
+  const { events: inboxNewEvents } = useWorkspaceActivity(workspaceId, INBOX_BADGE_LIMIT, lastSeenAt);
+  const inboxUnreadCount = inboxNewEvents.length;
+  const inboxUnreadLabel = inboxUnreadCount >= INBOX_BADGE_LIMIT ? `${INBOX_BADGE_LIMIT}+` : String(inboxUnreadCount);
+
+  // Sage is the Operator, not a listed worker — the same exclusion every
+  // other agent surface (AgentsList, command palette, Projects table) makes.
+  const sageAgent = useMemo(() => findSageAgent(allAgents), [allAgents]);
+  const agents = useMemo(
+    () => (sageAgent ? allAgents.filter((a) => a.agent_id !== sageAgent.agent_id) : allAgents),
+    [allAgents, sageAgent],
+  );
+
+  const projectsExpanded = sections?.projects ?? true;
+  const agentsExpanded = sections?.agents ?? true;
+
+  // "/w/{ws}/projects/{id}[/...]" → {id}, so the matching rail row highlights
+  // whether you're on the project's own page or one of its agents' pages.
+  const activeProjectId = useMemo(() => {
+    const m = pathname.match(/\/projects\/([^/]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }, [pathname]);
+  // Same idea for a single agent — "/agents/{agentId}" appears under a
+  // project's own path (…/projects/{p}/agents/{a}/{tab}), the one route an
+  // agent detail ever renders at.
+  const activeAgentId = useMemo(() => {
+    const m = pathname.match(/\/agents\/([^/]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }, [pathname]);
   const segment = useSelectedLayoutSegment();
+
+  // Footer pulse — the exact same status tones the Agents table itself
+  // derives from, and the same workspace-usage fetch every other "spend
+  // today" figure in this UI already reads (see agents/page.tsx) — no new
+  // endpoint, no new meaning for "today".
+  const statusTones = useMemo(
+    () => agents.map((a) => deriveStatus(a.hardware_status || "unknown", Boolean(a.stopped?.active), Boolean(a.current_run_id)).tone),
+    [agents],
+  );
+  const workingCount = statusTones.filter((t) => t === "working").length;
+  const stoppedCount = statusTones.filter((t) => t === "stopped").length;
+  const [spendToday, setSpendToday] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=workspace&period=day`, { credentials: "include" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        let sum = 0;
+        for (const a of d?.by_agent || []) sum += Number(a?.usd_cost) || 0;
+        setSpendToday(sum);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [workspaceId]);
 
   const [focusIdx, setFocusIdx] = useState(-1);
   const gPendingRef = useRef(false);
@@ -118,11 +218,44 @@ export function PrimaryRail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusIdx, router, workspaceId]);
 
+  // Same custom-event mechanism as fleet:open-sage (FleetShell.tsx) — no
+  // prop-drilling a setter from FleetCommandPalette back down into the rail.
+  const openCommandPalette = () => window.dispatchEvent(new Event("fleet:open-command-palette"));
+  // Reuses the existing ?new=1 hand-off agents/page.tsx already handles
+  // (command palette + onboarding use the same convention) rather than
+  // standing up a second, rail-local wizard instance.
+  const openNewAgent = () => router.push(`${hrefFor("agents")}?new=1`);
+
+  // The backend echoes the raw workspace id back as `name` for a workspace
+  // that was never given a real one — same guard Breadcrumbs used to apply.
+  const hasRealWorkspaceName = Boolean(workspace?.name) && workspace!.name !== workspaceId;
+  const workspaceName = hasRealWorkspaceName ? workspace!.name : "Empyralis";
+
   return (
     <aside className={`fleet-rail${collapsed ? " fleet-rail--collapsed" : ""}`}>
-      <div className="fleet-rail-brand">
-        <div className="fleet-rail-brand-mark">E</div>
-        {!collapsed && <span className="fleet-rail-brand-name">Empyralis</span>}
+      <div className="fleet-rail-header">
+        <div className="fleet-rail-workspace">
+          <div className="fleet-rail-brand-mark">{(workspaceName || "E").charAt(0).toUpperCase()}</div>
+          {!collapsed && <span className="fleet-rail-workspace-name">{workspaceName}</span>}
+        </div>
+        {!collapsed && (
+          <div className="fleet-rail-quick-actions">
+            <button type="button" className="fleet-rail-search-btn" onClick={openCommandPalette}>
+              <Search size={13} strokeWidth={1.75} />
+              <span>Search</span>
+              <kbd>⌘K</kbd>
+            </button>
+            <button
+              type="button"
+              className="fleet-rail-new-btn"
+              onClick={openNewAgent}
+              aria-label="New agent"
+              title="New agent"
+            >
+              <Plus size={14} strokeWidth={2} />
+            </button>
+          </div>
+        )}
       </div>
 
       <nav className="fleet-rail-nav">
@@ -130,22 +263,83 @@ export function PrimaryRail({
           const Icon = item.icon;
           const active = segment === item.segment;
           const focused = focusIdx === idx;
+          const isProjects = item.key === "projects";
+          const isAgents = item.key === "agents";
+          const isInbox = item.key === "inbox";
+          const showProjectsSubnav = isProjects && !collapsed && projects.length > 0;
+          const showAgentsSubnav = isAgents && !collapsed && agents.length > 0;
+          const expanded = isProjects ? projectsExpanded : agentsExpanded;
+          const showToggle = showProjectsSubnav || showAgentsSubnav;
           return (
             <div key={item.key} className="fleet-rail-nav-group">
-              <button
-                type="button"
-                title={collapsed ? item.label : undefined}
-                className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
-                onClick={() => router.push(hrefFor(item.segment))}
-              >
-                <span className="fleet-rail-item-icon">
-                  <Icon size={RAIL_ICON} strokeWidth={1.75} />
-                </span>
-                {!collapsed && <span className="fleet-rail-item-label">{item.label}</span>}
-                {!collapsed && (
-                  <kbd className="fleet-rail-item-chord">G {item.chord.toUpperCase()}</kbd>
+              <div className="fleet-rail-item-row">
+                <button
+                  type="button"
+                  title={collapsed ? item.label : undefined}
+                  className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
+                  onClick={() => router.push(hrefFor(item.segment))}
+                >
+                  <span className="fleet-rail-item-icon">
+                    <Icon size={RAIL_ICON} strokeWidth={1.75} />
+                  </span>
+                  {!collapsed && <span className="fleet-rail-item-label">{item.label}</span>}
+                  {!collapsed && isInbox && inboxUnreadCount > 0 ? (
+                    <span className="fleet-rail-item-count">{inboxUnreadLabel}</span>
+                  ) : !collapsed ? (
+                    <kbd className="fleet-rail-item-chord">G {item.chord.toUpperCase()}</kbd>
+                  ) : null}
+                </button>
+                {showToggle && (
+                  <button
+                    type="button"
+                    className={`fleet-rail-subnav-toggle${expanded ? " is-expanded" : ""}`}
+                    onClick={() => onToggleSection?.(isProjects ? "projects" : "agents")}
+                    aria-expanded={expanded}
+                    aria-label={expanded ? `Collapse ${item.label.toLowerCase()}` : `Expand ${item.label.toLowerCase()}`}
+                  >
+                    <ChevronRight size={13} strokeWidth={2} />
+                  </button>
                 )}
-              </button>
+              </div>
+              {showProjectsSubnav && projectsExpanded && (
+                <div className="fleet-rail-subnav">
+                  {projects.map((p) => {
+                    const projectActive = activeProjectId === p.id;
+                    return (
+                      <Link
+                        key={p.id}
+                        href={`${hrefFor("projects")}/${encodeURIComponent(p.id)}`}
+                        className={`fleet-rail-subitem${projectActive ? " fleet-rail-subitem--active" : ""}`}
+                      >
+                        <ProjectIcon icon={p.icon} tint={p.tint} size={18} glyphSize={11} />
+                        <span className="fleet-rail-subitem-label">{p.name}</span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+              {showAgentsSubnav && agentsExpanded && (
+                <div className="fleet-rail-subnav">
+                  {agents.map((a) => {
+                    const agentActive = activeAgentId === a.agent_id;
+                    const st = deriveStatus(a.hardware_status || "unknown", Boolean(a.stopped?.active), Boolean(a.current_run_id));
+                    return (
+                      <Link
+                        key={a.agent_id}
+                        href={`${hrefFor("projects")}/${encodeURIComponent(a.project_id || "")}/agents/${encodeURIComponent(a.agent_id)}/overview`}
+                        className={`fleet-rail-subitem${agentActive ? " fleet-rail-subitem--active" : ""}`}
+                      >
+                        <StatusDot tone={st.tone} size={7} />
+                        <span className="fleet-rail-subitem-label">{a.label || "Unnamed agent"}</span>
+                      </Link>
+                    );
+                  })}
+                  {/* Flat list is the right call at this scale. Once a fleet
+                      runs into dozens of agents the answer is favorites/
+                      pinning, not a taller list — deliberately not built
+                      here (U3-G scope: presence, not triage tooling). */}
+                </div>
+              )}
             </div>
           );
         })}
@@ -171,6 +365,12 @@ export function PrimaryRail({
           {collapsed ? <PanelLeftOpen size={CONTROL_ICON} strokeWidth={1.75} /> : <PanelLeftClose size={CONTROL_ICON} strokeWidth={1.75} />}
         </button>
       </div>
+
+      {!collapsed && (
+        <div className="fleet-rail-pulse">
+          {workingCount} working · {stoppedCount} stopped · {money(spendToday)} today
+        </div>
+      )}
 
       <AccountMenu
         workspaceId={workspaceId}
@@ -205,7 +405,7 @@ function AccountMenu({
   const ref = useRef<HTMLDivElement | null>(null);
 
   const settingsHref = `/w/${encodeURIComponent(workspaceId)}/settings`;
-  const creditsHref = `/w/${encodeURIComponent(workspaceId)}/billing`;
+  const usageHref = `/w/${encodeURIComponent(workspaceId)}/billing`;
 
   useEffect(() => {
     if (!open) return;
@@ -254,9 +454,9 @@ function AccountMenu({
             <Settings size={14} strokeWidth={1.75} />
             Settings
           </Link>
-          <Link className="fleet-rail-account-popover-row" href={creditsHref} role="menuitem" onClick={() => setOpen(false)}>
-            <CreditCard size={14} strokeWidth={1.75} />
-            Billing
+          <Link className="fleet-rail-account-popover-row" href={usageHref} role="menuitem" onClick={() => setOpen(false)}>
+            <BarChart3 size={14} strokeWidth={1.75} />
+            Usage
           </Link>
           <button
             type="button"

@@ -13,8 +13,6 @@ import {
   Loader2,
   Lock,
   MessageSquare,
-  PanelRightClose,
-  PanelRightOpen,
   Pencil,
   Play,
   Plug,
@@ -49,9 +47,10 @@ import {
   type FleetTool,
   type FleetScheduleItem,
 } from "./fleet-data";
-import { deriveStatus, derivePlacement, timeAgo, type AgentStatusTone } from "./fleet-presentation";
-import { StatusChip } from "./fleet-indicators";
-import { FleetRightPanel, PanelSection, PanelRow } from "./FleetRightPanel";
+import { deriveStatus, derivePlacement, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, type AgentStatusTone } from "./fleet-presentation";
+import { StatusChip, StatusDot } from "./fleet-indicators";
+import { PanelSection, PanelRow } from "./FleetRightPanel";
+import { UsageStat, bucketSeries, type UsageBucket } from "./fleet-sparkline";
 import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
@@ -103,34 +102,43 @@ export function FleetAgentDetail({
   onRenamed?: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<TabId>(initialTab || "overview");
-  // Properties drawer — closed by default (it's an overlay now, not a
-  // permanent flex sibling); the toolbar toggle button owns opening it.
-  const [panelOpen, setPanelOpen] = useState(false);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
   const { channels } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
   const [costToday, setCostToday] = useState<number | null>(null);
+  const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
 
-  const status = deriveStatus(agent?.hardware_status || "unknown", agent?.stopped?.active, Boolean(agent?.last_activity));
+  const status = deriveStatus(agent?.hardware_status || "unknown", agent?.stopped?.active, Boolean(agent?.current_run_id));
 
   useEffect(() => {
     let cancelled = false;
     fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (!cancelled && d?.totals) setCostToday(Number(d.totals.usd_cost || 0)); })
+      .then((d) => {
+        if (cancelled || !d) return;
+        if (d.totals) setCostToday(Number(d.totals.usd_cost || 0));
+        if (Array.isArray(d.buckets)) setCostBuckets(d.buckets);
+      })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [workspaceId, agentId]);
 
   const connectedChannels = channels.filter((c: any) => c?.connected).length;
   const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
-  const preset = agent?.capability_preset || agent?.purpose_preset || "standard";
   const resolvedModel = String(
     agent?.model_config?.model
     || agent?.model_config?.resolved_model
     || (agent?.model_config?.mode === "local" ? "Local · Ollama" : "")
     || "Platform default",
   );
+  // Lives in the permanent properties column now, so it's computed once
+  // here rather than per-tab — every tab shows the same placement/role,
+  // not just Overview.
+  const placement = derivePlacement(agent?.runtime_target || "unknown", status.label !== "Not deployed");
+  const role = agent?.role || "agent";
+  const isMaster = role === "operator";
+  const { tools: agentTools } = useFleetAgentTools(workspaceId, agentId);
+  const customerAccessCount = agentTools.filter((t) => t.enabled && (t.audience_safe || t.mandate_granted)).length;
 
   // Page mode: keep the active tab in sync with the URL {tab} segment.
   useEffect(() => {
@@ -174,27 +182,43 @@ export function FleetAgentDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Permanent — space is ALWAYS reserved, a real flex sibling of the tab
+  // body, never an overlay/toggle (that pattern stays on LIST pages only;
+  // see FleetToolbar's panelOpen/onTogglePanel props). Fills what used to be
+  // a blank right half at every viewport width instead of hiding behind a
+  // click.
   const propertiesPanel = (
-    <FleetRightPanel open={panelOpen} onClose={() => setPanelOpen(false)}>
+    <aside className="fleet-detail-properties" aria-label="Properties">
       <PanelSection title="Properties">
         <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
-        <PanelRow label="Preset" value={<span style={{ textTransform: "capitalize" }}>{preset}</span>} />
+        <PanelRow label="Placement" value={placement} />
+        <PanelRow label="Role" value={<span style={{ textTransform: "capitalize" }}>{role}</span>} />
+        {!isMaster && (
+          <PanelRow
+            label="Customer access"
+            value={`${customerAccessCount} ${customerAccessCount === 1 ? "tool" : "tools"}`}
+            tone={customerAccessCount > 0 ? "default" : "muted"}
+          />
+        )}
         <PanelRow label="Model" value={resolvedModel} />
-        <PanelRow
-          label="Project"
-          value={projectName || <span className="fleet-skeleton-bar" style={{ width: 56, display: "inline-block" }} aria-label="Loading project…" />}
-          tone={projectName ? "default" : "muted"}
+        <UsageStat
+          label="Cost today"
+          total={costToday ?? 0}
+          formattedTotal={costToday === null ? "…" : `$${costToday.toFixed(4)}`}
+          values={bucketSeries(costBuckets, "usd_cost")}
         />
-        <PanelRow label="Cost today" value={costToday === null ? "…" : `$${costToday.toFixed(4)}`} tone={costToday ? "accent" : "muted"} />
         <PanelRow label="Channels" value={connectedChannels} />
         <PanelRow label="Connectors" value={connectedConnectors} />
       </PanelSection>
-    </FleetRightPanel>
+    </aside>
   );
 
   const inner = (
     <>
-      {/* Tabs live at the TOP, under the breadcrumb — one navigation only. */}
+      {/* Tabs live at the TOP, under the breadcrumb — one navigation only.
+          No trailing action here: the properties column to the right is
+          permanent on detail pages, never a toggle (that pattern is LIST
+          pages only — see FleetToolbar). */}
       <div className="fleet-detail-tabbar">
         <nav className="fleet-detail-toptabs" aria-label="Agent sections">
           {TABS.map((tab) => {
@@ -215,23 +239,11 @@ export function FleetAgentDetail({
             );
           })}
         </nav>
-        <div className="fleet-detail-tabbar-actions">
-          <button
-            type="button"
-            className={`fleet-icon-btn${panelOpen ? " is-active" : ""}`}
-            onClick={() => setPanelOpen((v) => !v)}
-            aria-label="Properties"
-            aria-pressed={panelOpen}
-            title="Properties"
-          >
-            {panelOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
-          </button>
-        </div>
       </div>
 
-      {/* Columns: main content sheet (full width, never reflows) + the
-          properties drawer, an overlay layer positioned relative to this
-          wrapper — never a flex sibling that steals width. */}
+      {/* Columns: main content sheet + the permanent properties column, a
+          real flex sibling that always reserves its width — it never opens,
+          closes, or reflows the sheet next to it. */}
       <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
           {activeTab === "overview" && (
@@ -240,6 +252,7 @@ export function FleetAgentDetail({
               agentId={agentId}
               agent={agent}
               status={status}
+              isMaster={isMaster}
               events={events}
               loading={activityLoading}
               onChat={() => onChat(agentId)}
@@ -292,24 +305,30 @@ export function FleetAgentDetail({
 
 // ── Overview ────────────────────────────────────────────────────────────────
 
-/** One compact status line: presence/hardware + last heartbeat + whatever
- *  this agent is doing right now. Every clause is honest-when-empty — no
- *  clause claims a state the data doesn't support (e.g. a cloud text-agent
- *  has no queued-run concept at all, so it can only ever read Idle/Active,
- *  never a stale "Working on…"). A never-run agent reads Ready, same as
- *  everywhere else — "Idle" implies it has done something before and is
- *  merely between tasks, which isn't true yet. */
+/** One compact status LINE, one sentence, one status vocabulary
+ *  (Ready / Working / Stopped / Offline / Error) — the exact same `status`
+ *  the Agents list, Project rows, the inline config row, and the Properties
+ *  panel all derive from, so this never reads differently from any of them.
+ *  No second chip here: a dot (color) plus a sentence (words), never two
+ *  competing labels for the same field. Every clause is honest-when-empty —
+ *  a never-run agent reads "Ready · no activity yet", not a stale claim. */
 function NowStrip({ agent, status }: { agent: FleetAgent | null; status: { tone: AgentStatusTone; label: string } }) {
   if (!agent) return null;
-  // Stopped wins over everything, including a stale current_run_id from
-  // before the stop — a killed agent never reads "Working on a task".
-  const working = status.tone !== "stopped" && Boolean(agent.current_run_id);
-  const nowLabel = working ? "Working on a task" : status.tone === "stopped" ? status.label : status.label === "Active" ? "Idle" : status.label;
-  const heartbeatText = agent.last_heartbeat ? `heartbeat ${timeAgo(agent.last_heartbeat)}` : "never heartbeat";
+  const sentence = (() => {
+    if (status.tone === "working") return "Working on a task";
+    if (status.tone === "stopped") return `Stopped by ${agent.stopped?.stopped_by_label || "an owner"}`;
+    if (status.tone === "ready") {
+      return agent.last_activity ? `Ready · last active ${timeAgo(agent.last_activity)}` : "Ready · no activity yet";
+    }
+    if (status.tone === "offline") {
+      return agent.last_heartbeat ? `Offline · last heartbeat ${timeAgo(agent.last_heartbeat)}` : "Offline · never heartbeat";
+    }
+    return status.label; // Error, Not deployed
+  })();
   return (
     <div className="fleet-now-strip" aria-label="Current status">
-      <StatusChip tone={status.tone} label={nowLabel} />
-      <span className="fleet-now-meta">{heartbeatText}</span>
+      <StatusDot tone={status.tone} size={7} />
+      <span className="fleet-now-meta">{sentence}</span>
     </div>
   );
 }
@@ -370,6 +389,16 @@ function StopAgentControl({
   );
 }
 
+// U3-H: the warn dot used to fire on anything status !== "logged" — backwards
+// for a routine "completed" event (specialist/sage turns log "logged";
+// nothing else does, so every other successful status read as a warning).
+// An explicit bad-status allowlist instead: only genuinely bad outcomes turn
+// the dot red.
+const BAD_ACTIVITY_STATUSES = new Set(["error", "failed", "blocked"]);
+function isBadActivityStatus(status: string): boolean {
+  return BAD_ACTIVITY_STATUSES.has(status.toLowerCase());
+}
+
 /** activity_ledger_events rows are already ORDER BY created_at DESC from the
  *  backend — grouping by day in iteration order preserves that ordering
  *  without a separate sort. */
@@ -380,7 +409,7 @@ function groupActivityByDay(events: FleetAgentActivity[]): { day: string; items:
     const parsed = new Date(event.created_at);
     const day = Number.isNaN(parsed.getTime())
       ? "Unknown date"
-      : parsed.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+      : formatDate(parsed, { weekday: "long", month: "long", day: "numeric" });
     if (!byDay.has(day)) {
       byDay.set(day, []);
       groups.push({ day, items: byDay.get(day)! });
@@ -395,6 +424,7 @@ function OverviewTab({
   agentId,
   agent,
   status,
+  isMaster,
   events,
   loading,
   onRenamed,
@@ -403,18 +433,13 @@ function OverviewTab({
   agentId: string;
   agent: FleetAgent | null;
   status: { tone: AgentStatusTone; label: string };
+  isMaster: boolean;
   events: FleetAgentActivity[];
   loading: boolean;
   onChat: () => void;
   onRenamed?: () => void;
 }) {
-  const deployed = status.label !== "Not deployed";
-  const placement = derivePlacement(agent?.runtime_target || "unknown", deployed);
-  const role = agent?.role || "agent";
-  const isMaster = role === "operator";
   const dayGroups = groupActivityByDay(events);
-  const { tools: overviewTools } = useFleetAgentTools(workspaceId, agentId);
-  const customerAccessCount = overviewTools.filter((t) => t.enabled && (t.audience_safe || t.mandate_granted)).length;
 
   return (
     <div className="fleet-detail-overview">
@@ -423,29 +448,10 @@ function OverviewTab({
       )}
       <NowStrip agent={agent} status={status} />
 
-      {/* The THING (status/placement/role + activity), not numbers. Counts and
-          cost live in the properties panel; the "Chat" action lives top-right. */}
-      <div className="fleet-config" style={{ marginTop: 0 }}>
-        <div className="fleet-config-row">
-          <span className="fleet-config-label">Status</span>
-          <span className="fleet-config-value"><StatusChip tone={status.tone} label={status.label} /></span>
-        </div>
-        <div className="fleet-config-row">
-          <span className="fleet-config-label">Placement</span>
-          <span className="fleet-config-value">{placement}</span>
-        </div>
-        <div className="fleet-config-row">
-          <span className="fleet-config-label">Role</span>
-          <span className="fleet-config-value" style={{ textTransform: "capitalize" }}>{role}</span>
-        </div>
-        {!isMaster && (
-          <div className="fleet-config-row">
-            <span className="fleet-config-label">Customer access</span>
-            <span className="fleet-config-value">{customerAccessCount} {customerAccessCount === 1 ? "tool" : "tools"}</span>
-          </div>
-        )}
-      </div>
-
+      {/* Minimal main column — Status/Placement/Role/Customer access now
+          live in the permanent properties column (see FleetAgentDetail's
+          propertiesPanel); this column is just the THING itself: persona,
+          schedule, activity. */}
       {!isMaster && agent && (
         <PersonaEditor workspaceId={workspaceId} agentId={agentId} agent={agent} />
       )}
@@ -480,7 +486,7 @@ function OverviewTab({
               <div className="fleet-activity-day-heading">{group.day}</div>
               {group.items.map((event) => (
                 <div key={event.event_id} className="fleet-activity-item">
-                  <div className={`fleet-activity-dot${event.status === "logged" ? "" : " is-warn"}`} />
+                  <div className={`fleet-activity-dot${isBadActivityStatus(event.status) ? " is-warn" : ""}`} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="fleet-activity-title">{event.title}</div>
                     <div className="fleet-activity-meta">
@@ -495,7 +501,7 @@ function OverviewTab({
                       )}
                       <span>·</span>
                       <span className="fleet-activity-time">
-                        {new Date(event.created_at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                        {formatTime(event.created_at, { hour: "numeric", minute: "2-digit" })}
                       </span>
                     </div>
                   </div>
@@ -617,6 +623,9 @@ function PersonaEditor({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Compact by default (~3 rows) — persona text is usually read once, not
+  // sat in front of; expand for the rare full-rewrite edit.
+  const [expanded, setExpanded] = useState(false);
 
   async function save() {
     setSaving(true);
@@ -640,17 +649,24 @@ function PersonaEditor({
 
   return (
     <div style={{ marginTop: 4 }}>
-      <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Persona</div>
+      {/* Save top-right of the section header — same placement as
+          ScheduleSection's own primary action, just below. */}
+      <div className="fleet-detail-section-title" style={{ marginTop: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span>Persona</span>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
+          {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
+        </button>
+      </div>
       <textarea
-        className="fleet-persona-textarea"
+        className={`fleet-persona-textarea${expanded ? " fleet-persona-textarea--expanded" : ""}`}
         value={draft}
         onChange={(e) => { setDraft(e.currentTarget.value); setSaved(false); }}
         placeholder="What this agent is and how it should behave — e.g. “You handle customer refund requests. Be concise, and always confirm the order number before acting.”"
         spellCheck
       />
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 12 }}>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
-          {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
+        <button type="button" className="fleet-link" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? "Show less" : "Expand"}
         </button>
         {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
       </div>
@@ -663,7 +679,7 @@ function PersonaEditor({
 function formatDueAt(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return formatDateTime(d, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function ScheduleTierBadge({ tier }: { tier: FleetScheduleItem["authority_tier"] }) {
@@ -1466,7 +1482,7 @@ function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: strin
       <div className="fleet-config-row">
         <span className="fleet-config-label">Context policy</span>
         <span className="fleet-config-value">
-          {maxTok > 0 ? `${maxTok.toLocaleString()} tokens` : "model default"} → {action}
+          {maxTok > 0 ? `${formatNumber(maxTok)} tokens` : "model default"} → {action}
         </span>
       </div>
       <div className="fleet-config-row">
@@ -1767,6 +1783,27 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
 
   return (
     <div>
+      {/* Save at the top, consistent with Persona/Schedule's own primary
+          action placement — same fleet-detail-section-title
+          space-between header the rest of Overview already uses. */}
+      <div className="fleet-detail-section-title" style={{ marginTop: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span>Model</span>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving || isComingSoon || localNeedsBox}>
+          {saving ? "Saving…" : saved ? "Saved ✓" : "Save"}
+        </button>
+      </div>
+      {(isComingSoon || (localNeedsBox && !isComingSoon) || error) && (
+        <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 12 }}>
+          {isComingSoon && (
+            <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>{COMING_SOON_NOTE} — you can’t save this yet.</span>
+          )}
+          {localNeedsBox && !isComingSoon && (
+            <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Pick a computer to run this agent’s local model.</span>
+          )}
+          {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
+        </div>
+      )}
+
       <AgentModelSummary workspaceId={workspaceId} agentId={agentId} agent={agent} />
       {/* Current state — always visible */}
       <div className="fleet-config" style={{ marginBottom: 20 }}>
@@ -1896,19 +1933,6 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
           <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={(id) => { setGatewayBinding(id); setSaved(false); }} requireLocalModel />
         </div>
       )}
-
-      <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12 }}>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving || isComingSoon || localNeedsBox}>
-          {saving ? "Saving…" : saved ? "Saved ✓" : "Save"}
-        </button>
-        {isComingSoon && (
-          <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>{COMING_SOON_NOTE} — you can’t save this yet.</span>
-        )}
-        {localNeedsBox && !isComingSoon && (
-          <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Pick a computer to run this agent’s local model.</span>
-        )}
-        {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
-      </div>
 
       {agent && (
         <div style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
