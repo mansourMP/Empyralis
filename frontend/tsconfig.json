@@ -40,7 +40,9 @@
     ".next-preview-verify/types/**/*.ts",
     ".next-preview-verify/dev/types/**/*.ts",
     ".next-preview-b/types/**/*.ts",
-    ".next-preview-b/dev/types/**/*.ts"
+    ".next-preview-b/dev/types/**/*.ts",
+    ".next-preview-verify2/types/**/*.ts",
+    ".next-preview-verify2/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

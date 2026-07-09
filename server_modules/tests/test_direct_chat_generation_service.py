@@ -654,6 +654,106 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "final")
         self.assertEqual(events[-1]["payload"]["error"], "provider_rate_limited")
 
+    def test_stream_provider_backed_direct_chat_flags_payment_required_on_platform_credits(self) -> None:
+        """A real-world regression: DeepSeek returning HTTP 402 (insufficient
+        balance) on platform-managed credits must classify as a distinct
+        payment-required error, in platform voice — never as "verify your
+        API key", since the customer never configured one."""
+        events = list(
+            direct_chat_generation_service.stream_provider_backed_direct_chat(
+                services=self._services(
+                    stream_events=[
+                        {
+                            "type": "failure",
+                            "attempted_providers": "deepseek",
+                            "error": "deepseek generation failed: http_402: Payment Required",
+                        }
+                    ]
+                ),
+                context={"provider": "deepseek"},
+                metadata={"provider": "deepseek", "model": "deepseek-chat"},
+                system_prompt="System prompt",
+                normalized_workspace_id="default",
+                normalized_requested_provider="deepseek",
+                normalized_requested_model="deepseek-chat",
+                normalized_reasoning_effort="medium",
+                normalized_thread_id="thread-1",
+                normalized_message="hello",
+                compacted_prior_messages=[],
+                prior_messages_used=False,
+                history_mode="none",
+                connected_systems=[],
+                tool_capabilities=[],
+                availability_payload={"ai_ready": True, "credential_plane": "platform_runtime"},
+                tools=[],
+                direct_chat_credentials={},
+                proactive_suggestions=[],
+                tool_loop_session_key="session-1",
+                fallback_reason=None,
+                session_ctx=None,
+                trace_context=None,
+                resolved_chat_max_iterations=1,
+                direct_tool_result_summary_system_message="Summarize tool results.",
+            )
+        )
+
+        self.assertEqual(events[-1]["type"], "final")
+        self.assertEqual(events[-1]["payload"]["error"], "provider_payment_required")
+        reply = events[-1]["payload"]["reply"]
+        self.assertNotIn("api key", reply.lower())
+        self.assertNotIn("verify", reply.lower())
+        self.assertIn("platform-side issue", reply)
+
+    def test_stream_provider_backed_direct_chat_flags_payment_required_on_byok(self) -> None:
+        """The same provider-balance failure on a customer-owned (BYOK) key
+        may reference the provider account — the customer owns that key.
+        Uses a provider outside PLATFORM_RUNTIME_AUTH_PROVIDERS (openai, not
+        deepseek/qwen/mistral/ollama_cloud) since those hosted providers are
+        always platform-paid in this system regardless of credential_plane —
+        a real BYOK turn runs through a different provider selection."""
+        events = list(
+            direct_chat_generation_service.stream_provider_backed_direct_chat(
+                services=self._services(
+                    stream_events=[
+                        {
+                            "type": "failure",
+                            "attempted_providers": "openai",
+                            "error": "openai generation failed: http_402: Payment Required",
+                        }
+                    ]
+                ),
+                context={"provider": "openai"},
+                metadata={"provider": "openai", "model": "gpt-5.4"},
+                system_prompt="System prompt",
+                normalized_workspace_id="default",
+                normalized_requested_provider="openai",
+                normalized_requested_model="gpt-5.4",
+                normalized_reasoning_effort="medium",
+                normalized_thread_id="thread-1",
+                normalized_message="hello",
+                compacted_prior_messages=[],
+                prior_messages_used=False,
+                history_mode="none",
+                connected_systems=[],
+                tool_capabilities=[],
+                availability_payload={"ai_ready": True, "credential_plane": "byok"},
+                tools=[],
+                direct_chat_credentials={},
+                proactive_suggestions=[],
+                tool_loop_session_key="session-1",
+                fallback_reason=None,
+                session_ctx=None,
+                trace_context=None,
+                resolved_chat_max_iterations=1,
+                direct_tool_result_summary_system_message="Summarize tool results.",
+            )
+        )
+
+        self.assertEqual(events[-1]["type"], "final")
+        self.assertEqual(events[-1]["payload"]["error"], "provider_payment_required")
+        reply = events[-1]["payload"]["reply"]
+        self.assertIn("provider account", reply.lower())
+
     def test_stream_provider_backed_direct_chat_recovers_from_invalid_non_codex_tool_call(self) -> None:
         call_count = {"value": 0}
 

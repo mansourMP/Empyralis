@@ -82,6 +82,53 @@ class DirectChatHostedUsageServiceTests(unittest.TestCase):
         self.assertEqual(credit_kwargs["source_table"], "workspace_hosted_ai_monthly_cost_ledger")
         self.assertEqual(credit_kwargs["source_event_id"], "shost_1")
 
+    def test_persist_direct_chat_hosted_usage_best_effort_records_usage_event_for_platform_runtime(self) -> None:
+        with patch(
+            "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_workspace_hosted_ai_monthly_cost_ledger_entry",
+            new=AsyncMock(return_value={"id": "shost_2"}),
+        ), patch(
+            "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_credit_ledger_event",
+            new=AsyncMock(return_value={"id": "cled_2"}),
+        ), patch(
+            "server_modules.billing_service.debit_workspace_credit_balance_for_hosted_usage",
+            return_value={"ok": True, "debited_usd": 0.0},
+        ), patch(
+            "server_modules.usage_events_repository.record_usage_from_context",
+            new=AsyncMock(return_value={"id": "uev_1"}),
+        ) as record_usage_event:
+            direct_chat_hosted_usage_service.persist_direct_chat_hosted_usage_best_effort(
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                session_ctx={"tenant_id": "tenant-1", "request_id": "req-1"},
+                availability_payload={
+                    "credential_plane": "platform_runtime",
+                    "platform_runtime_allowed": True,
+                },
+                usage_masked={
+                    "usage_accounting": {
+                        "input_tokens": 10,
+                        "output_tokens": 6,
+                        "total_tokens": 16,
+                        "estimated_cost_usd": 0.0011,
+                        "effective_provider": "deepseek",
+                        "effective_model": "deepseek-chat",
+                    }
+                },
+                requested_provider="deepseek",
+                effective_provider="deepseek",
+                requested_model="deepseek-chat",
+                effective_model="deepseek-chat",
+            )
+
+        record_usage_event.assert_awaited_once()
+        kwargs = record_usage_event.await_args.kwargs
+        self.assertEqual(kwargs["provider"], "deepseek")
+        self.assertEqual(kwargs["model"], "deepseek-chat")
+        self.assertEqual(kwargs["tokens_in"], 10)
+        self.assertEqual(kwargs["tokens_out"], 6)
+        self.assertEqual(kwargs["run_id"], "req-1")
+        self.assertEqual(kwargs["mode"], "platform_credits")
+
     def test_persist_direct_chat_hosted_usage_best_effort_records_byok_transparency_row(self) -> None:
         with patch(
             "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_workspace_hosted_ai_monthly_cost_ledger_entry",

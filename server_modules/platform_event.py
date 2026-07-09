@@ -171,11 +171,55 @@ AUTH_FAILED = PlatformEvent(
     severity="error",
 )
 
+# Platform-credits variant: the customer never configured a key, so the
+# message must never send them to "verify" one. Same failure class as
+# AUTH_FAILED, different ownership — this is a platform-side issue.
+AUTH_FAILED_PLATFORM = PlatformEvent(
+    code="ai_auth_failed_platform",
+    title="AI connection needs attention",
+    detail="The AI connection for this workspace needs attention on the platform side. Try again shortly.",
+    channel_text="The AI connection for this workspace needs attention on the platform side. Try again shortly.",
+    severity="error",
+)
+
+# Provider-side balance/payment failure (HTTP 402 or equivalent) — distinct
+# from AUTH_FAILED (401/403): the key works, the account behind it is empty.
+# Split by who owns that account.
+PROVIDER_PAYMENT_REQUIRED_PLATFORM = PlatformEvent(
+    code="provider_payment_required_platform",
+    title="AI credits unavailable",
+    detail="The shared AI credits for this workspace are unavailable right now. This is a platform-side issue — try again shortly.",
+    channel_text="The shared AI credits for this workspace are unavailable right now. This is a platform-side issue — try again shortly.",
+    severity="error",
+)
+
+PROVIDER_PAYMENT_REQUIRED_BYOK = PlatformEvent(
+    code="provider_payment_required_byok",
+    title="Provider balance exhausted",
+    detail="The connected provider account is out of balance. Add credit with the provider to continue.",
+    channel_text="The connected provider account is out of balance. Add credit with the provider to continue.",
+    severity="error",
+)
+
 PROVIDER_UNREACHABLE = PlatformEvent(
     code="provider_unreachable",
     title="AI service unreachable",
     detail="The AI service is unreachable right now. Try again shortly.",
     channel_text="The AI service is unreachable right now. Try again shortly.",
+    severity="warning",
+)
+
+# A turn ended with nothing substantive to say and at least one tool got
+# blocked by policy (not enabled for this agent) along the way. Generic on
+# purpose — the blocked-tool records available here are internal codes, not
+# reliably human-readable tool names, so naming a specific tool risks
+# surfacing something confusing. Still strictly better than the silence or
+# unrelated error this replaces.
+TOOLS_LIMITED_NO_REPLY = PlatformEvent(
+    code="tools_limited_no_reply",
+    title="Limited by current tool settings",
+    detail="This agent doesn't have every tool turned on, which may be why nothing came back. An owner can enable more under Tools.",
+    channel_text="This agent doesn't have every tool turned on, which may be why nothing came back. An owner can enable more under Tools.",
     severity="warning",
 )
 

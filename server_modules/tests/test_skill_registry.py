@@ -338,6 +338,30 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertEqual(definition.id, "memory-manager")
         self.assertIsNotNone(definition.executor)
 
+    def test_enforcement_tool_name_maps_hyphenated_ids_to_llm_tool_names(self) -> None:
+        """Skills with a real LLM tool-call equivalent resolve to that exact
+        name, so Tools-tab toggles land on the id enforcement checks."""
+        self.assertEqual(skill_registry.enforcement_tool_name("web-search"), "web__search")
+        self.assertEqual(skill_registry.enforcement_tool_name("browser"), "browser__navigate")
+        self.assertEqual(skill_registry.enforcement_tool_name("memory-manager"), "memory_update")
+        self.assertEqual(skill_registry.enforcement_tool_name("code-runner"), "shell__exec")
+        self.assertEqual(skill_registry.enforcement_tool_name("file-manager"), "file__read")
+        self.assertEqual(skill_registry.enforcement_tool_name("telegram-bot"), "telegram_bot__send_message")
+        self.assertEqual(skill_registry.enforcement_tool_name("fleet-create-agent"), "fleet__create_agent")
+        self.assertEqual(skill_registry.enforcement_tool_name("fleet-list-agents"), "fleet__list_agents")
+        self.assertEqual(skill_registry.enforcement_tool_name("fleet-get-agent-activity"), "fleet__get_agent_activity")
+        self.assertEqual(skill_registry.enforcement_tool_name("fleet-configure-agent"), "fleet__configure_agent")
+        self.assertEqual(skill_registry.enforcement_tool_name("fleet-message-agent"), "fleet__message_agent")
+        self.assertEqual(skill_registry.enforcement_tool_name("memory-read"), "memory_read")
+        self.assertEqual(skill_registry.enforcement_tool_name("memory-write"), "memory_write")
+
+    def test_enforcement_tool_name_passes_through_unmapped_ids(self) -> None:
+        """Skills with no live tool-calling equivalent (connector-scoped
+        manual skills, keyword-dispatched skills) are returned unchanged —
+        nothing enforces their id either way."""
+        for skill_id in ("email-access", "calendar-access", "task-runner", "inventory-tool", "crm-notes", "vision-monitor", "memory-list"):
+            self.assertEqual(skill_registry.enforcement_tool_name(skill_id), skill_id)
+
     def test_workspace_skill_with_handler_executes(self) -> None:
         """A workspace skill with handler.py executes via subprocess."""
         _write_skill(

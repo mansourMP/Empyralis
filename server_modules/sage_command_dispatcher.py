@@ -16,9 +16,12 @@ from typing import Optional
 from server_modules.platform_event import (
     AI_LIMIT_REACHED,
     AUTH_FAILED,
+    AUTH_FAILED_PLATFORM,
     GENERIC_ERROR,
     NO_AI_PROVIDER,
     NO_AI_PROVIDER_WEB,
+    PROVIDER_PAYMENT_REQUIRED_BYOK,
+    PROVIDER_PAYMENT_REQUIRED_PLATFORM,
     PROVIDER_UNREACHABLE,
     SAGE_COMPACT_NOT_NEEDED as _SAGE_COMPACT_NOT_NEEDED,
     SAGE_COMPACTED as _SAGE_COMPACTED,
@@ -54,6 +57,9 @@ _SAGE_AI_SETUP_LABEL = "AI \\& Setup"
 SAGE_AI_LIMIT_REPLY = AI_LIMIT_REACHED.channel_text
 SAGE_RATE_LIMITED_REPLY = SERVICE_RATE_LIMITED.channel_text
 SAGE_AI_NEEDS_ATTENTION_REPLY = AUTH_FAILED.channel_text
+SAGE_AI_NEEDS_ATTENTION_PLATFORM_REPLY = AUTH_FAILED_PLATFORM.channel_text
+SAGE_PAYMENT_REQUIRED_PLATFORM_REPLY = PROVIDER_PAYMENT_REQUIRED_PLATFORM.channel_text
+SAGE_PAYMENT_REQUIRED_BYOK_REPLY = PROVIDER_PAYMENT_REQUIRED_BYOK.channel_text
 SAGE_PROVIDER_UNREACHABLE_REPLY = PROVIDER_UNREACHABLE.channel_text
 SAGE_NO_PROVIDER_REPLY = NO_AI_PROVIDER.channel_text
 SAGE_ERROR_REPLY = GENERIC_ERROR.channel_text
@@ -68,24 +74,38 @@ SAGE_HELP_TEXT = _SAGE_HELP.channel_text
 
 # ── Error classification ──────────────────────────────────────────────────
 
-def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
+def classify_error(
+    error_text: str | None,
+    *,
+    raw_error: str = "",
+    is_platform_credits: bool = True,
+) -> str:
     """Map an error string to the appropriate user-facing reply constant.
 
     SINGLE source of truth for error classification — all channels use
-    this ONE function.  Returns one of the five SAGE_*_REPLY constants.
+    this ONE function.  Returns one of the SAGE_*_REPLY constants.
 
     *raw_error* is accepted for backward compatibility but is NOT appended
     to the chat reply — raw error details belong in logs, not the chat
     surface.  The classified base message is always in platform voice.
 
-    Six specific buckets, checked in order:
+    *is_platform_credits* distinguishes who owns the AI credential this
+    turn ran on. Defaults to True (the safer, less-blaming assumption) so a
+    caller that hasn't been updated to pass it never accidentally tells a
+    customer to "verify" a key they never configured — a BYOK caller must
+    opt in explicitly by passing is_platform_credits=False. It only affects
+    buckets where the user-facing action genuinely differs by ownership
+    (payment required, auth failed); other buckets are ownership-neutral.
 
-    1. Credits exhausted   → SAGE_AI_LIMIT_REPLY
-    2. Rate limited        → SAGE_RATE_LIMITED_REPLY
-    3. No provider set     → SAGE_NO_PROVIDER_REPLY   (known-fixable state)
-    4. Auth / key failed   → SAGE_AI_NEEDS_ATTENTION_REPLY
-    5. Provider unreachable → SAGE_PROVIDER_UNREACHABLE_REPLY
-    6. Catch-all           → SAGE_ERROR_REPLY
+    Seven specific buckets, checked in order:
+
+    1. Credits exhausted (platform usage cap) → SAGE_AI_LIMIT_REPLY
+    2. Provider payment/balance required      → SAGE_PAYMENT_REQUIRED_{PLATFORM,BYOK}_REPLY
+    3. Rate limited                           → SAGE_RATE_LIMITED_REPLY
+    4. No provider set                        → SAGE_NO_PROVIDER_REPLY (known-fixable state)
+    5. Auth / key failed                      → SAGE_AI_NEEDS_ATTENTION_{REPLY,PLATFORM_REPLY}
+    6. Provider unreachable                   → SAGE_PROVIDER_UNREACHABLE_REPLY
+    7. Catch-all                              → SAGE_ERROR_REPLY
     """
     if raw_error:
         import logging
@@ -95,17 +115,32 @@ def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
     else:
         msg = str(error_text).lower().strip()
 
-        # 1) Credits exhausted
+        # 1) Credits exhausted (the platform's own workspace usage cap)
         if any(kw in msg for kw in (
             "reached your ai limit", "ai limit", "cap_reached",
         )):
             base = SAGE_AI_LIMIT_REPLY
-        # 2) Rate limited
+        # 2) Provider-side payment/balance required (e.g. HTTP 402) — the
+        #    key authenticates fine, the account behind it is empty. Must be
+        #    checked before the auth bucket: "provider_generation_failed"
+        #    (the generic fallback code) is itself one of that bucket's
+        #    keywords, and a stale balance must never masquerade as a
+        #    customer-facing auth problem.
+        elif any(kw in msg for kw in (
+            "provider_payment_required", "http_402", "payment required",
+            "insufficient balance", "insufficient_balance",
+        )):
+            base = (
+                SAGE_PAYMENT_REQUIRED_PLATFORM_REPLY
+                if is_platform_credits
+                else SAGE_PAYMENT_REQUIRED_BYOK_REPLY
+            )
+        # 3) Rate limited
         elif any(kw in msg for kw in (
             "provider_rate_limited", "429", "rate limit", "too many requests",
         )):
             base = SAGE_RATE_LIMITED_REPLY
-        # 3) No cloud provider configured — known, fixable state.
+        # 4) No cloud provider configured — known, fixable state.
         #    Must be checked before the auth bucket: "not configured" is not
         #    the same as "auth failed", and the user-facing action differs
         #    (connect a provider vs verify an existing key).
@@ -116,19 +151,23 @@ def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
             "provider_not_configured",
         )):
             base = SAGE_NO_PROVIDER_REPLY
-        # 4) Auth / key failed
+        # 5) Auth / key failed
         elif any(kw in msg for kw in (
             "provider_generation_failed", "401", "403", "auth", "api key",
             "invalid key", "unauthorized",
         )):
-            base = SAGE_AI_NEEDS_ATTENTION_REPLY
-        # 5) Provider unreachable
+            base = (
+                SAGE_AI_NEEDS_ATTENTION_PLATFORM_REPLY
+                if is_platform_credits
+                else SAGE_AI_NEEDS_ATTENTION_REPLY
+            )
+        # 6) Provider unreachable
         elif any(kw in msg for kw in (
             "provider_transport_unavailable", "transport", "connection",
             "timeout", "unreachable",
         )):
             base = SAGE_PROVIDER_UNREACHABLE_REPLY
-        # 6) Catch-all
+        # 7) Catch-all
         else:
             base = SAGE_ERROR_REPLY
 

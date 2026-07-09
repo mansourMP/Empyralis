@@ -2094,15 +2094,40 @@ def _create_workspace_agent_install_local(
     normalized_metadata = dict(metadata or {})
     normalized_metadata.setdefault("role", "specialist")
 
+    # This path previously never attached a runtime_profile_id at all (unlike
+    # the Postgres path), guaranteeing every SQLite-fallback agent landed on
+    # "Not deployed" with no repair route. Seed (idempotent) and resolve one
+    # here too, same slug preference ('empyralis-cloud' first) as Postgres.
+    _ensure_agent_registry_seeded_local(tenant_id=tenant_id, workspace_id=workspace_id)
+    try:
+        with _connect_local_control_plane_db() as _profile_conn:
+            _profile_rows = _profile_conn.execute(
+                """
+                SELECT id, slug FROM runtime_profiles
+                WHERE tenant_id = ? AND workspace_id = ?
+                ORDER BY CASE WHEN slug = 'empyralis-cloud' THEN 0 ELSE 1 END, label ASC
+                """,
+                (str(tenant_id or "").strip(), str(workspace_id or "").strip()),
+            ).fetchall()
+    except Exception:
+        _profile_rows = []
+    resolved_runtime_profile_id = str(_profile_rows[0][0]).strip() if _profile_rows else ""
+    if not resolved_runtime_profile_id:
+        raise RuntimeError(
+            f"Could not resolve a cloud runtime placement for workspace {workspace_id!r} "
+            "(SQLite fallback) — refusing to create an agent that would be stuck at "
+            "\"Not deployed\" with no repair path."
+        )
+
     try:
         with _connect_local_control_plane_db() as connection:
             connection.execute(
                 """INSERT INTO workspace_agent_installs (
                     id, tenant_id, workspace_id, agent_definition_id, agent_definition_version_id,
-                    install_scope, label, status, enabled, tool_toggles, folder_grants,
+                    install_scope, label, status, enabled, runtime_profile_id, tool_toggles, folder_grants,
                     connector_bindings, memory_scope_overrides, policy_context_overrides,
                     metadata, hardware_access, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'workspace', ?, 'active', 1, '{}', '[]', '{}', '{}', '{}', ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, 'workspace', ?, 'active', 1, ?, '{}', '[]', '{}', '{}', '{}', ?, ?, ?, ?)""",
                 (
                     install_id,
                     str(tenant_id or "").strip(),
@@ -2110,6 +2135,7 @@ def _create_workspace_agent_install_local(
                     str(agent_definition_id or "").strip(),
                     version_id,
                     resolved_label,
+                    resolved_runtime_profile_id,
                     _json.dumps(normalized_metadata),
                     str(hardware_access or "").strip() or "none",
                     datetime.now(timezone.utc).isoformat(),
@@ -2410,6 +2436,27 @@ async def create_workspace_agent_install(
     agent_kind = str(definition.get("agent_kind") or "").strip().lower() or SPECIALIST_AGENT_KIND
     runtime_profiles = await list_runtime_profiles(tenant_id=tenant_id, workspace_id=workspace_id)
     resolved_runtime_profile_id = _normalize_token(runtime_profile_id) or _default_runtime_profile_id(definition, runtime_profiles)
+    if not resolved_runtime_profile_id:
+        # ensure_workspace_agent_registry_seeded() (called inside
+        # list_runtime_profiles above) acquires its own scoped connection
+        # independently of the pool handle this function already checked —
+        # a transient hiccup there can make it silently seed the LOCAL
+        # SQLite store instead of Postgres while this call still believes
+        # Postgres is available, leaving Postgres with zero runtime_profiles
+        # rows. DEFAULT_RUNTIME_PROFILES is a static non-empty list, so a
+        # genuine seed against the right store never returns empty — retry
+        # once explicitly before concluding this isn't transient.
+        await ensure_workspace_agent_registry_seeded(tenant_id=tenant_id, workspace_id=workspace_id)
+        runtime_profiles = await list_runtime_profiles(
+            tenant_id=tenant_id, workspace_id=workspace_id, seed_if_missing=False,
+        )
+        resolved_runtime_profile_id = _default_runtime_profile_id(definition, runtime_profiles)
+    if not resolved_runtime_profile_id:
+        raise RuntimeError(
+            f"Could not resolve a cloud runtime placement for workspace {workspace_id!r} "
+            "after retrying registry seeding — refusing to create an agent that would be "
+            "stuck at \"Not deployed\" with no repair path."
+        )
     current_version = _dict_json(definition.get("current_version"))
     capability_manifest = _dict_json(current_version.get("capability_manifest"))
     default_toggles = _default_tool_toggles_from_capabilities(capability_manifest)

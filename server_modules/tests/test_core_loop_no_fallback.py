@@ -465,10 +465,10 @@ class ClassifyErrorTests(unittest.TestCase):
         from server_modules.sage_command_dispatcher import classify_error
         cls._classify = staticmethod(classify_error)
 
-    def _classify(self, error_text):
+    def _classify(self, error_text, *, is_platform_credits=True):
         """Call the classify_error function without instance binding."""
         # Use the underlying function via the descriptor protocol
-        return type(self)._classify.__func__(error_text)
+        return type(self)._classify.__func__(error_text, is_platform_credits=is_platform_credits)
 
     # ── Bucket 1 — Credits exhausted ──
 
@@ -496,27 +496,77 @@ class ClassifyErrorTests(unittest.TestCase):
         self.assertIn("rate limited", msg.lower())
 
     # ── Bucket 3 — Auth / key failed ──
+    #
+    # is_platform_credits defaults to True (the safer, less-blaming
+    # assumption — see classify_error's docstring), so these BYOK-flavored
+    # assertions ("api key", "verify") pass is_platform_credits=False
+    # explicitly: they're testing the case where the customer legitimately
+    # owns the failing key. The complementary platform-credits tests below
+    # cover the opposite, default case.
 
     def test_auth_failed_provider_code(self):
-        msg = self._classify("provider_generation_failed: http 401")
+        msg = self._classify("provider_generation_failed: http 401", is_platform_credits=False)
         self.assertIn("authentication", msg.lower())
         self.assertIn("api key", msg.lower())
 
     def test_auth_failed_401(self):
-        msg = self._classify("HTTP error 401 Unauthorized")
+        msg = self._classify("HTTP error 401 Unauthorized", is_platform_credits=False)
         self.assertIn("authentication", msg.lower())
 
     def test_auth_failed_403(self):
-        msg = self._classify("403 Forbidden - check your API key")
+        msg = self._classify("403 Forbidden - check your API key", is_platform_credits=False)
         self.assertIn("authentication", msg.lower())
 
     def test_auth_failed_invalid_key(self):
-        msg = self._classify("invalid key: authentication failed")
+        msg = self._classify("invalid key: authentication failed", is_platform_credits=False)
         self.assertIn("authentication", msg.lower())
 
     def test_auth_failed_unauthorized(self):
-        msg = self._classify("unauthorized access to model")
+        msg = self._classify("unauthorized access to model", is_platform_credits=False)
         self.assertIn("authentication", msg.lower())
+
+    # ── Bucket 3, platform-credits variant — never blame the customer's key ──
+
+    def test_auth_failed_platform_credits_never_mentions_api_key(self):
+        """The 2026-07-09 first-run integrity fix: a platform-credits agent's
+        auth failure must never send the customer to "verify" a key they
+        never configured. Called with no override — is_platform_credits
+        defaults to True, so this also proves the safe default applies to
+        callers that haven't been migrated to pass the flag explicitly."""
+        msg = self._classify("provider_generation_failed: http 401")
+        self.assertNotIn("api key", msg.lower())
+        self.assertNotIn("verify", msg.lower())
+        self.assertIn("platform side", msg.lower())
+
+    # ── Bucket — Provider payment/balance required (HTTP 402) ──
+    #
+    # Distinct from auth failed: the key works, the account is empty. Must
+    # be checked before bucket 3 — "provider_generation_failed" (bucket 3's
+    # own generic-fallback keyword) must never swallow a payment-required
+    # signal that reaches classify_error as a coded string.
+
+    def test_payment_required_platform_credits(self):
+        msg = self._classify("deepseek generation failed: http_402: Payment Required")
+        self.assertNotIn("api key", msg.lower())
+        self.assertIn("platform-side issue", msg.lower())
+
+    def test_payment_required_byok(self):
+        msg = self._classify(
+            "openai generation failed: http_402: Payment Required",
+            is_platform_credits=False,
+        )
+        self.assertIn("provider account", msg.lower())
+
+    def test_payment_required_insufficient_balance_phrase(self):
+        msg = self._classify("Insufficient Balance")
+        self.assertIn("credits", msg.lower())
+
+    def test_payment_required_checked_before_generic_auth_code(self):
+        """The generic fallback code alone (no 402/balance detail) still
+        correctly falls into the auth bucket, not payment-required — this
+        guards the bucket ordering, not just keyword presence."""
+        msg = self._classify("provider_generation_failed")
+        self.assertIn("platform side", msg.lower())
 
     # ── Bucket 4 — Provider unreachable ──
 

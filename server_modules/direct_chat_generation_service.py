@@ -676,13 +676,29 @@ def _public_generation_error_code(llm_error: str) -> str:
         return "provider_rate_limited"
     if "direct_chat_transport_unavailable" in lowered:
         return "provider_transport_unavailable"
+    # HTTP 402 / insufficient balance: the key authenticates fine, the
+    # account behind it is empty. Checked before the generic fallback below
+    # so this never collapses into "provider_generation_failed" — that
+    # string is itself one of classify_error's own auth-bucket keywords,
+    # which would misreport a billing issue as an authentication failure.
+    if "http_402" in lowered or "payment required" in lowered or "insufficient balance" in lowered or "insufficient_balance" in lowered:
+        return "provider_payment_required"
     return "provider_generation_failed" if detail else "unknown_error"
 
 
-def _public_generation_error_reply(services: DirectChatGenerationServices, llm_error: str) -> str:
+def _public_generation_error_reply(
+    services: DirectChatGenerationServices,
+    llm_error: str,
+    *,
+    is_platform_credits: bool = True,
+) -> str:
     from server_modules.sage_command_dispatcher import classify_error
     _ = services
-    return classify_error(str(llm_error or ""), raw_error=str(llm_error or ""))
+    return classify_error(
+        str(llm_error or ""),
+        raw_error=str(llm_error or ""),
+        is_platform_credits=is_platform_credits,
+    )
 
 
 def _turn_metadata_from_session(session_ctx: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1312,6 +1328,29 @@ def stream_provider_backed_direct_chat(
                                 ),
                             },
                         }
+                        try:
+                            _persist_direct_chat_hosted_usage_with_reservation_guard(
+                                services=services,
+                                hosted_usage_reservation=hosted_usage_reservation,
+                                usage_kwargs={
+                                    "workspace_id": normalized_workspace_id,
+                                    "thread_id": normalized_thread_id,
+                                    "session_ctx": session_ctx,
+                                    "availability_payload": availability_payload,
+                                    "usage_masked": usage_masked,
+                                    "requested_provider": normalized_requested_provider,
+                                    "effective_provider": actual_provider,
+                                    "requested_model": normalized_requested_model,
+                                    "effective_model": actual_model,
+                                },
+                                release_kwargs={
+                                    "workspace_id": normalized_workspace_id,
+                                    "thread_id": normalized_thread_id,
+                                    "session_ctx": session_ctx,
+                                },
+                            )
+                        except Exception:
+                            pass
                         services.clear_direct_tool_loop_state(tool_loop_session_key)
                         return
                     approval_payload = services.build_direct_tool_approval_response(
@@ -2072,7 +2111,18 @@ def stream_provider_backed_direct_chat(
                 attempted_providers = str(event.get("attempted_providers") or "").strip()
                 llm_error = str(event.get("error") or "").strip()
                 print(f"[DG_FAILURE] iteration={iteration} llm_error={llm_error!r} attempted_providers={attempted_providers!r}", flush=True)
-                public_error_reply = _public_generation_error_reply(services, llm_error)
+                is_platform_credits = _platform_paid_ai_identity(
+                    availability_payload=availability_payload,
+                    metadata=metadata,
+                    session_ctx=session_ctx,
+                    requested_provider=normalized_requested_provider,
+                    requested_model=normalized_requested_model,
+                    effective_provider=actual_provider,
+                    effective_model=actual_model,
+                ) is not None
+                public_error_reply = _public_generation_error_reply(
+                    services, llm_error, is_platform_credits=is_platform_credits
+                )
                 public_error_code = _public_generation_error_code(llm_error)
                 if hosted_usage_reservation:
                     services.release_direct_chat_hosted_usage_reservation_best_effort(
@@ -2095,7 +2145,10 @@ def stream_provider_backed_direct_chat(
                 if trace_plan_failure is not None:
                     yield trace_plan_failure
                 yield services.thinking_step_payload(thinking_iteration, "error", public_error_reply)
-                llm_error = public_error_code
+                # llm_error stays the detailed provider text (not public_error_code)
+                # so the final classification below (after the loop exits) can
+                # still detect specifics like "http_402" instead of only ever
+                # seeing the generic "provider_generation_failed" fallback code.
                 iteration_failed = True
                 break
 
@@ -2225,7 +2278,18 @@ def stream_provider_backed_direct_chat(
 
     actions = [] if executed_any_tools else services.suggest_actions(normalized_message, availability_payload)
     services.clear_direct_tool_loop_state(tool_loop_session_key)
-    public_error_reply = _public_generation_error_reply(services, llm_error)
+    is_platform_credits = _platform_paid_ai_identity(
+        availability_payload=availability_payload,
+        metadata=metadata,
+        session_ctx=session_ctx,
+        requested_provider=normalized_requested_provider,
+        requested_model=normalized_requested_model,
+        effective_provider=actual_provider,
+        effective_model=actual_model,
+    ) is not None
+    public_error_reply = _public_generation_error_reply(
+        services, llm_error, is_platform_credits=is_platform_credits
+    )
     public_error_code = _public_generation_error_code(llm_error)
     effective_provider = str(actual_provider or context.get("provider") or "").strip() or None
     effective_model = str(actual_model or "").strip() or None
@@ -2284,3 +2348,26 @@ def stream_provider_backed_direct_chat(
         "type": "final",
         "payload": _mask_platform_paid_final_payload(final_error_payload, platform_paid_identity),
     }
+    try:
+        _persist_direct_chat_hosted_usage_with_reservation_guard(
+            services=services,
+            hosted_usage_reservation=hosted_usage_reservation,
+            usage_kwargs={
+                "workspace_id": normalized_workspace_id,
+                "thread_id": normalized_thread_id,
+                "session_ctx": session_ctx,
+                "availability_payload": availability_payload,
+                "usage_masked": usage_masked,
+                "requested_provider": normalized_requested_provider,
+                "effective_provider": effective_provider,
+                "requested_model": normalized_requested_model,
+                "effective_model": effective_model,
+            },
+            release_kwargs={
+                "workspace_id": normalized_workspace_id,
+                "thread_id": normalized_thread_id,
+                "session_ctx": session_ctx,
+            },
+        )
+    except Exception:
+        pass

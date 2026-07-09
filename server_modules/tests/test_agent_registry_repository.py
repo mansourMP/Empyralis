@@ -371,6 +371,47 @@ class AgentRegistryRepositoryTests(unittest.TestCase):
                 )
         self.assertIn("workspace scope mismatch", str(exc.exception).lower())
 
+    def test_create_workspace_agent_install_fails_loudly_when_no_runtime_profile_resolves(self) -> None:
+        """A wizard-created agent must never silently land with a NULL
+        runtime_profile_id (the "stuck at Not deployed forever" bug) — if
+        registry seeding genuinely can't produce a profile even after the
+        retry, this must raise instead of proceeding with the INSERT."""
+        definition = {
+            "id": "agentdef-1",
+            "agent_kind": "specialist",
+            "current_version": {},
+        }
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_agent_definition",
+                new=AsyncMock(return_value=definition),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_runtime_profiles",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.ensure_workspace_agent_registry_seeded",
+                new=AsyncMock(return_value=None),
+            ) as seed_mock,
+            patch(
+                "server_modules.control_plane_repository.ensure_control_plane_schema",
+                new=AsyncMock(return_value=object()),
+            ) as schema_mock,
+        ):
+            with self.assertRaises(RuntimeError) as exc:
+                asyncio.run(
+                    agent_registry_repository.create_workspace_agent_install(
+                        tenant_id="tenant-1",
+                        workspace_id="workspace-1",
+                        agent_definition_id="agentdef-1",
+                    )
+                )
+        self.assertIn("runtime placement", str(exc.exception).lower())
+        seed_mock.assert_awaited_once()
+        # Must fail before ever reaching the INSERT — no schema/pool lookup.
+        schema_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -284,6 +284,34 @@ def _non_platform_direct_chat_payer(availability: Dict[str, Any], provider: Opti
     return "BYOK"
 
 
+def _record_usage_event_best_effort(
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    tokens_in: int,
+    tokens_out: int,
+    run_id: Optional[str],
+    mode: Optional[str],
+    usd_cost: Optional[float] = None,
+) -> None:
+    """Fire-and-forget a normalized usage_events row. Never raises, never blocks
+    the caller — metering must not be able to break a chat turn."""
+    try:
+        from server_modules import usage_events_repository as _uev
+        import asyncio as _aio_uev
+
+        _coro = _uev.record_usage_from_context(
+            provider=provider, model=model, tokens_in=tokens_in, tokens_out=tokens_out,
+            usd_cost=usd_cost, run_id=run_id, mode=mode,
+        )
+        try:
+            _aio_uev.get_running_loop().create_task(_coro)
+        except RuntimeError:
+            _aio_uev.run(_coro)
+    except Exception:
+        pass
+
+
 def _record_direct_chat_transparency_usage(
     *,
     workspace_id: str,
@@ -335,24 +363,14 @@ def _record_direct_chat_transparency_usage(
 
     # Phase 5A: normalized per-call usage_events row (all payers). Best-effort;
     # attribution (agent_install_id/project_id) comes from the turn contextvar.
-    try:
-        from server_modules import usage_events_repository as _uev
-        import asyncio as _aio_uev
-
-        _ti = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-        _to = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
-        _mode_map = {"platform": "platform_credits", "platform_credits": "platform_credits",
-                     "byok": "byok", "local": "local", "subscription_passthrough": "no_provider"}
-        _coro = _uev.record_usage_from_context(
-            provider=provider, model=model, tokens_in=_ti, tokens_out=_to,
-            run_id=request_id, mode=_mode_map.get(payer, payer),
-        )
-        try:
-            _aio_uev.get_running_loop().create_task(_coro)
-        except RuntimeError:
-            _aio_uev.run(_coro)
-    except Exception:
-        pass
+    _mode_map = {"platform": "platform_credits", "platform_credits": "platform_credits",
+                 "byok": "byok", "local": "local", "subscription_passthrough": "no_provider"}
+    _record_usage_event_best_effort(
+        provider=provider, model=model,
+        tokens_in=int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0),
+        tokens_out=int(usage.get("output_tokens") or usage.get("completion_tokens") or 0),
+        run_id=request_id, mode=_mode_map.get(payer, payer),
+    )
     unified_ledger_event = credit_ledger_contract.build_unified_credit_ledger_event(
         surface="sage",
         source_surface="sage_direct_chat",
@@ -550,6 +568,13 @@ def persist_direct_chat_hosted_usage_best_effort(
     row = usage_accounting_service.usage_row_from_snapshot(snapshot)
     if not isinstance(row, dict):
         raise RuntimeError("Hosted AI usage could not be normalized for credit accounting.")
+    # Record ground-truth usage before any pricing/ledger step that can raise below,
+    # so metering survives even if credit accounting itself fails.
+    _record_usage_event_best_effort(
+        provider=row.get("provider"), model=row.get("model"),
+        tokens_in=int(row.get("prompt_tokens") or 0), tokens_out=int(row.get("completion_tokens") or 0),
+        usd_cost=row.get("estimated_cost_usd"), run_id=request_id, mode="platform_credits",
+    )
     validation_error = usage_accounting_service.platform_paid_usage_validation_error(row)
     if validation_error:
         reason = "unknown pricing" if validation_error == "unknown_pricing" else validation_error

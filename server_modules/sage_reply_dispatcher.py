@@ -117,7 +117,12 @@ def split_long_message(text: str, max_len: int) -> list[str]:
     return chunks
 
 
-def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
+def classify_error(
+    error_text: str | None,
+    *,
+    raw_error: str = "",
+    is_platform_credits: bool = True,
+) -> str:
     """Map an error string to the appropriate user-facing reply constant.
 
     Delegates to the single source of truth in :mod:`sage_command_dispatcher`.
@@ -125,7 +130,7 @@ def classify_error(error_text: str | None, *, raw_error: str = "") -> str:
     change; new callers should import directly from sage_command_dispatcher.
     """
     from server_modules.sage_command_dispatcher import classify_error as _ce
-    return _ce(error_text, raw_error=raw_error)
+    return _ce(error_text, raw_error=raw_error, is_platform_credits=is_platform_credits)
 
 
 def _build_setup_hint(workspace_id: str) -> str:

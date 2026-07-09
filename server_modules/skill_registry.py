@@ -338,6 +338,38 @@ _BUNDLED_SKILL_DISPATCH: dict[str, str] = {
     "browser": "browser__navigate",
 }
 
+# ── Canonical enforcement id map ────────────────────────────────────────
+# skill_registry ids are hyphenated display ids; _specialist_tool_allowed()
+# (sage_agent_runtime_service.py) and tool seeding (capability_presets.py)
+# both key tool_toggles by the literal LLM tool-call name instead. The two
+# id spaces are otherwise disconnected — a toggle stored under the display
+# id never matches what enforcement checks. This maps every built-in skill
+# that has a real, callable LLM tool onto that tool's exact name, so the
+# Tools tab (fleet_tools.fleet_get_agent_tools) can read/write the id
+# enforcement actually consults. Starts from _BUNDLED_SKILL_DISPATCH since
+# those 6 mappings already encode the same skill -> tool identity.
+# Skills with no live LLM tool_call name (connector-scoped manual skills,
+# and skills dispatched by keyword/handler rather than tool-calling) are
+# intentionally absent — enforcement never checks their id today, so they
+# have nothing to be unified onto.
+_ENFORCEMENT_TOOL_NAME: dict[str, str] = {
+    **_BUNDLED_SKILL_DISPATCH,
+    "fleet-create-agent": "fleet__create_agent",
+    "fleet-list-agents": "fleet__list_agents",
+    "fleet-get-agent-activity": "fleet__get_agent_activity",
+    "fleet-configure-agent": "fleet__configure_agent",
+    "fleet-message-agent": "fleet__message_agent",
+    "memory-read": "memory_read",
+    "memory-write": "memory_write",
+}
+
+
+def enforcement_tool_name(skill_id: str) -> str:
+    """The literal LLM tool-call name enforcement checks for ``skill_id``,
+    or ``skill_id`` unchanged when the skill has no live tool-calling
+    equivalent (nothing enforces those ids either way)."""
+    return _ENFORCEMENT_TOOL_NAME.get(str(skill_id or "").strip(), skill_id)
+
 # Skills that only inject prompt context (no tool execution).
 _PROMPT_ONLY_SKILLS: frozenset[str] = frozenset({
     "business-skill-template",

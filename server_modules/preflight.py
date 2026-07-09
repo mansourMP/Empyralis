@@ -337,6 +337,80 @@ async def report_rls_state() -> Dict[str, Any]:
 
 # ── Redis ─────────────────────────────────────────────────────────────
 
+def _platform_credit_check_skipped() -> bool:
+    return str(os.getenv("EMPYRALIS_SKIP_PLATFORM_CREDIT_CHECK") or "").strip().lower() in {"1", "true", "yes"}
+
+
+async def _check_platform_credit_keys() -> None:
+    """Best-effort health check of platform-hosted provider keys (e.g. the
+    DeepSeek key behind "Empyralis credits") — never blocks startup, only
+    warns loudly. A dead or empty-balance key here silently breaks the
+    first turn of every agent running on platform credits (the failure
+    surfaces downstream as a generic error, not as "the platform's key is
+    out of money"), so a loud startup warning is the only chance to catch
+    it before a customer does. Logged, never appended to the errors list
+    run_preflight_checks() returns — this is advisory, not a boot blocker.
+    """
+    if _platform_credit_check_skipped():
+        LOGGER.info("preflight: platform-credit key check skipped (EMPYRALIS_SKIP_PLATFORM_CREDIT_CHECK set).")
+        return
+
+    try:
+        from server_modules import secrets_broker
+        from server_modules.runtime_common import http_json_request
+    except Exception as exc:
+        LOGGER.warning("preflight: could not import dependencies for platform-credit check: %s", exc)
+        return
+
+    try:
+        resolution = secrets_broker.resolve_hosted_provider_secret(
+            tenant_id=None,
+            workspace_id=None,
+            provider_id="deepseek",
+            field="api_key",
+            tool_name="preflight",
+            purpose="platform_credit_health_check",
+        )
+        api_key = str(resolution.value or "").strip()
+    except Exception as exc:
+        LOGGER.warning("preflight: could not resolve DeepSeek platform-credit key: %s", exc)
+        return
+
+    if not api_key:
+        LOGGER.info("preflight: no DeepSeek platform-credit key configured — skipping balance check.")
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            http_json_request,
+            "https://api.deepseek.com/user/balance",
+            method="GET",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+    except Exception as exc:
+        LOGGER.warning("preflight: DeepSeek balance check errored (network/transport): %s", exc)
+        return
+
+    status = int(result.get("status") or 0)
+    body = result.get("json") if isinstance(result.get("json"), dict) else {}
+    if status == 200 and bool(body.get("is_available")):
+        LOGGER.info("preflight: DeepSeek platform-credit key is healthy (balance available).")
+        return
+
+    LOGGER.critical(
+        "PLATFORM-CREDIT KEY DEAD — DeepSeek 'Empyralis credits' is broken. "
+        "Every agent running on platform-managed credits will fail its first "
+        "turn until this is fixed (status=%s, response=%s). This is an ops "
+        "action — top up or rotate the account behind DEEPSEEK_API_KEY "
+        "(or ORION_HOSTED_DEEPSEEK_API_KEY); no code change fixes an empty "
+        "upstream balance. Set EMPYRALIS_SKIP_PLATFORM_CREDIT_CHECK=true to "
+        "silence this check.",
+        status,
+        body,
+    )
+
+
 async def _check_redis() -> Optional[str]:
     """Return ``None`` if Redis is reachable, or an error string."""
     if _redis_check_skipped():
@@ -397,6 +471,11 @@ async def run_preflight_checks() -> List[str]:
     redis_err = await _check_redis()
     if redis_err:
         errors.append(redis_err)
+
+    # 5. Platform-credit provider keys (e.g. DeepSeek) — advisory only.
+    #    Never appended to errors: a dead upstream balance degrades one
+    #    feature (agents on platform credits), not the whole platform.
+    await _check_platform_credit_keys()
 
     if errors:
         LOGGER.error("PREFLIGHT FAILED — %d check(s) did not pass.", len(errors))
