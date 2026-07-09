@@ -364,10 +364,13 @@ async def refresh_session(body: AuthRefreshRequest, request: Request, response: 
 
 @router.post("/auth/logout")
 async def logout(request: Request, response: Response):
-    # Logout must be able to clear a broken/stale browser session; a dead
-    # session cookie without a matching CSRF cookie must not 403 the user into
-    # a stuck state. Treat an expired/garbage credential as absent here.
-    validate_csrf(request, allow_expired_session=True)
+    # Logout is the guaranteed escape hatch from a stuck session — it must
+    # never itself 403 on the CSRF check it exists to help a user recover
+    # from. No validate_csrf call here at all: even a live, valid session
+    # cookie must not block logout, since a forged cross-site logout only
+    # logs the victim out (not a meaningful attack), and a stale one with a
+    # missing/mismatched CSRF cookie is exactly the stuck state this route
+    # must always be able to clear.
     result: dict[str, Any] = {"ok": True, "session_revoked": False}
     try:
         current_user = get_current_user(

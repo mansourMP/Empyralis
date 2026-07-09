@@ -8,11 +8,18 @@ import {
   AUTH_CSRF_HEADER_NAME,
   AUTH_REFRESH_COOKIE_NAME,
   browserCsrfProtectedMethod,
+  isAccessTokenLive,
+  isRefreshTokenStructurallyValid,
 } from '@/lib/auth/csrf';
 import { controlPlaneBaseUrl } from '@/lib/server/control-plane-base-url';
 
 type ForwardControlPlaneRequestInit = RequestInit & {
   timeoutMs?: number;
+  /** Logout is the guaranteed escape hatch from a stuck session — it must
+   * always reach the backend and clear cookies, never itself be blocked by
+   * the CSRF check it exists to help a user recover from. Only the logout
+   * route should set this; every other route keeps full CSRF enforcement. */
+  bypassCsrf?: boolean;
 };
 
 const HOP_BY_HOP_REQUEST_HEADERS = new Set([
@@ -64,13 +71,24 @@ function hasBrowserSessionCookie(request: NextRequest): boolean {
   // as a live session would permanently 403 a returning browser out of
   // logging back in. Mirrors the backend's own definition of a live session
   // in validate_csrf() (access or refresh token, never the CSRF cookie).
-  return Boolean(
-    request.cookies.get(AUTH_ACCESS_COOKIE_NAME)
-    || request.cookies.get(AUTH_REFRESH_COOKIE_NAME),
-  );
+  //
+  // Presence alone isn't enough either: an access/refresh cookie that's
+  // actually dead (expired JWT, garbage refresh token — the kind a browser
+  // keeps echoing back for weeks after the session it belonged to is gone)
+  // grants no real authority, so treating it as "live" here only serves to
+  // permanently CSRF-lock the browser out of signup/login/logout with no
+  // recovery path. Check liveness, matching auth.py's allow_expired_session
+  // leniency — applied unconditionally here since this layer has no
+  // per-route reason to keep that leniency opt-in.
+  const access = request.cookies.get(AUTH_ACCESS_COOKIE_NAME)?.value;
+  const refresh = request.cookies.get(AUTH_REFRESH_COOKIE_NAME)?.value;
+  return isAccessTokenLive(access) || isRefreshTokenStructurallyValid(refresh);
 }
 
-function validateBrowserCsrf(request: NextRequest): NextResponse | null {
+function validateBrowserCsrf(request: NextRequest, bypassCsrf?: boolean): NextResponse | null {
+  if (bypassCsrf) {
+    return null;
+  }
   if (!browserCsrfProtectedMethod(request.method)) {
     return null;
   }
@@ -209,7 +227,7 @@ export async function forwardControlPlaneRequest(
   upstreamPath: string,
   init: ForwardControlPlaneRequestInit = {},
 ): Promise<NextResponse> {
-  const csrfFailure = validateBrowserCsrf(request);
+  const csrfFailure = validateBrowserCsrf(request, init.bypassCsrf);
   if (csrfFailure) {
     return csrfFailure;
   }

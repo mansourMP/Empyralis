@@ -43,6 +43,9 @@ function authErrorCopy(error: string): string {
   if (normalized.includes('status 401')) {
     return 'Email or password was not accepted.';
   }
+  if (normalized.includes('csrf')) {
+    return "Your browser has an out-of-date session cookie for this site. Clear this site's cookies, then try again.";
+  }
   if (normalized.includes('status 403')) {
     return 'This account cannot open the workspace yet. Sign in again or use an allowed account.';
   }
