@@ -1,49 +1,50 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
-
-/** Open/closed, remembered per browser session (sessionStorage) — shared by
- *  every page that renders a FleetRightPanel, keyed so each page remembers
- *  its own state independently. Default closed. */
-export function usePanelOpenState(storageKey: string): [boolean, () => void] {
-  const key = `fleet:panel:${storageKey}`;
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    try {
-      setOpen(window.sessionStorage.getItem(key) === "1");
-    } catch {
-      // sessionStorage unavailable (private mode, etc.) — stay closed.
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-
-  const toggle = () => {
-    setOpen((v) => {
-      const next = !v;
-      try {
-        window.sessionStorage.setItem(key, next ? "1" : "0");
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  };
-
-  return [open, toggle];
-}
+import type { ReactNode } from "react";
+import { X } from "lucide-react";
 
 /**
- * The reusable collapsible right panel — Linear's properties-panel pattern.
- * Bordered, quiet label-left/value-right rows, 150ms width slide (the
- * existing --motion-base token). Used by project detail now, agent detail
- * later. Content is entirely caller-supplied via PanelSection/PanelRow.
+ * Properties drawer — Linear's properties-panel pattern (bordered, quiet
+ * label-left/value-right rows), but as an OVERLAY layer above the content
+ * sheet, never a permanent flex sibling: the sheet underneath never resizes
+ * or reflows whether this is open or closed. Closed by default; the caller
+ * owns `open` state via a toolbar toggle button. Dismissed by the toggle,
+ * this panel's own close button, clicking the scrim, or Escape while focus
+ * is inside it. Content is entirely caller-supplied via PanelSection/PanelRow.
  */
-export function FleetRightPanel({ open, children }: { open: boolean; children: ReactNode }) {
+export function FleetRightPanel({
+  open,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  if (!open) return null;
   return (
-    <div className={`fleet-right-panel${open ? " is-open" : ""}`} aria-hidden={!open}>
-      <div className="fleet-right-panel-inner">{children}</div>
-    </div>
+    <>
+      <div className="fleet-properties-scrim" onClick={onClose} />
+      <div
+        className="fleet-properties-drawer"
+        role="complementary"
+        aria-label="Properties"
+        onKeyDown={(e) => {
+          // Own Escape here so it closes just this drawer — otherwise it
+          // bubbles to the page's own "Esc returns to the previous view"
+          // handler and navigates away instead.
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            onClose();
+          }
+        }}
+      >
+        <button type="button" className="fleet-properties-drawer-close" onClick={onClose} aria-label="Close properties">
+          <X size={15} strokeWidth={1.75} />
+        </button>
+        <div className="fleet-properties-drawer-inner">{children}</div>
+      </div>
+    </>
   );
 }
 

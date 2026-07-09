@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Check, Filter as FilterIcon, PanelRight, SlidersHorizontal } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, Filter as FilterIcon, SlidersHorizontal } from "lucide-react";
 
 export type ToolbarTab = { id: string; label: string };
 export type ToolbarOption = { value: string; label: string };
@@ -16,10 +16,10 @@ export type ToolbarFilter = {
 /**
  * The thin control row every list/detail page gets: optional view tabs on the
  * left, a quiet right-aligned icon-button cluster on the right (Filter, Sort/
- * Display, and an optional right-panel toggle). Linear's exact treatment —
- * small ghost buttons, quiet hover, accent reserved for an open menu or an
- * actually-applied filter/sort. Any prop group left out (no filters, no sort,
- * no onTogglePanel) simply doesn't render that button — no dead controls.
+ * Display). Linear's exact treatment — small ghost buttons, quiet hover,
+ * accent reserved for an open menu or an actually-applied filter/sort. Any
+ * prop group left out (no filters, no sort) simply doesn't render that
+ * button — no dead controls.
  */
 export function FleetToolbar({
   tabs,
@@ -30,8 +30,7 @@ export function FleetToolbar({
   sortValue,
   sortDefault = "",
   onSortChange,
-  panelOpen,
-  onTogglePanel,
+  trailingAction,
 }: {
   tabs?: ToolbarTab[];
   activeTab?: string;
@@ -41,8 +40,11 @@ export function FleetToolbar({
   sortValue?: string;
   sortDefault?: string;
   onSortChange?: (value: string) => void;
-  panelOpen?: boolean;
-  onTogglePanel?: () => void;
+  /** An extra icon-button (e.g. a properties-panel toggle) rendered in the
+   *  same right-aligned cluster as Filter/Sort, after them — same row, same
+   *  gap, same alignment. Caller supplies the whole button so this stays
+   *  free of any specific button's meaning. */
+  trailingAction?: ReactNode;
 }) {
   const [openMenu, setOpenMenu] = useState<"filter" | "sort" | null>(null);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -67,7 +69,7 @@ export function FleetToolbar({
   const filterActive = (filters || []).some((f) => f.value && f.value !== "all");
   const sortActive = Boolean(sortValue && sortValue !== sortDefault);
   const hasTabs = Boolean(tabs && tabs.length > 0);
-  const hasActions = Boolean((filters && filters.length > 0) || (sortOptions && sortOptions.length > 0) || onTogglePanel);
+  const hasActions = Boolean((filters && filters.length > 0) || (sortOptions && sortOptions.length > 0) || trailingAction);
 
   if (!hasTabs && !hasActions) return null;
 
@@ -162,17 +164,7 @@ export function FleetToolbar({
           </>
         )}
 
-        {onTogglePanel && (
-          <button
-            type="button"
-            className={`fleet-icon-btn${panelOpen ? " is-active" : ""}`}
-            aria-label="Toggle panel"
-            title="Toggle panel"
-            onClick={onTogglePanel}
-          >
-            <PanelRight size={16} strokeWidth={1.75} />
-          </button>
-        )}
+        {trailingAction}
       </div>
     </div>
   );

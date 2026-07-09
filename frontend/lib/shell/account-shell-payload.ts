@@ -58,8 +58,7 @@ export function parseAccountShellPayload(payload: unknown): AccountShellBootstra
           role: requireString(entry.role, `workspaceMemberships[${index}].role`) as
             | 'viewer'
             | 'member'
-            | 'owner'
-            | 'admin',
+            | 'owner',
           permissions: requireStringArray(
             entry.permissions,
             `workspaceMemberships[${index}].permissions`,

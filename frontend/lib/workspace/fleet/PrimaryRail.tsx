@@ -31,18 +31,19 @@ const RAIL_ITEMS: RailNavItem[] = [
   { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
   { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a" },
   { key: "hardware", label: "Hardware", segment: "hardware", icon: Cpu, chord: "h" },
-  { key: "billing", label: "Billing", segment: "billing", icon: CreditCard, chord: "b" },
 ];
 
 const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
 
 /**
- * Persistent primary rail — the app's spine. Five flat nav buttons (Projects
- * included — it opens the project list/create view, it doesn't expand a tree
- * here). Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then a
+ * Persistent primary rail — the app's spine. Flat nav buttons for the
+ * screens visited daily (Projects included — it opens the project
+ * list/create view, it doesn't expand a tree here). Billing lives in the
+ * account menu instead — it's a look-up-occasionally screen, not a nav
+ * destination. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then a
  * section key jumps directly (g i inbox, g p projects, g a agents, g h
- * hardware, g b billing) — the Linear muscle-memory model.
+ * hardware) — the Linear muscle-memory model.
  */
 export function PrimaryRail({
   workspaceId,

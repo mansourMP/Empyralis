@@ -1,4 +1,4 @@
-export type WorkspaceRole = 'viewer' | 'member' | 'owner' | 'admin';
+export type WorkspaceRole = 'viewer' | 'member' | 'owner';
 
 export type AccountRecord = {
   id: string;
@@ -88,12 +88,11 @@ export function resolvePrimaryReadyWorkspaceId(
     return null;
   }
 
-  const readyOwnerOrAdmin = memberships.find(
-    (membership) => isWorkspaceReadyForProduct(membership)
-      && (membership.role === 'owner' || membership.role === 'admin'),
+  const readyOwner = memberships.find(
+    (membership) => isWorkspaceReadyForProduct(membership) && membership.role === 'owner',
   );
-  if (readyOwnerOrAdmin) {
-    return readyOwnerOrAdmin.workspace.id;
+  if (readyOwner) {
+    return readyOwner.workspace.id;
   }
 
   const readyMembership = memberships.find((membership) => isWorkspaceReadyForProduct(membership));

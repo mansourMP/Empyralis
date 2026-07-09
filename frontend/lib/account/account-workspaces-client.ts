@@ -18,7 +18,7 @@ export type AccountWorkspaceSummary = {
     label: string;
     kind: string;
   };
-  role?: 'viewer' | 'member' | 'owner' | 'admin';
+  role?: 'viewer' | 'member' | 'owner';
   defaultRoute: string;
   preferredShellProfileId: string | null;
   setupCompleted: boolean;
@@ -70,7 +70,6 @@ function parseWorkspaceSummary(payload: unknown): AccountWorkspaceSummary {
       payload.role === 'viewer'
       || payload.role === 'member'
       || payload.role === 'owner'
-      || payload.role === 'admin'
         ? payload.role
         : undefined,
     defaultRoute: requireString(payload.defaultRoute, 'defaultRoute'),

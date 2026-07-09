@@ -7,25 +7,30 @@ import {
   useRef,
   useState,
 } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Bot,
   Brain,
   Command,
-  CreditCard,
   Cpu,
-  Home,
+  FolderKanban,
+  FolderPlus,
+  Inbox,
+  LayoutGrid,
   MessageSquare,
   Moon,
   Plug,
   Radio,
+  Sparkles,
   Sun,
+  UserPlus,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 
 import type { FleetTheme } from "./fleet-preferences";
-import { useFleetAgents } from "./fleet-data";
-import { isSageAgent, toAgentSummary } from "./fleet-presentation";
+import { useFleetAgents, useFleetProjects } from "./fleet-data";
+import { findSageAgent } from "./fleet-presentation";
 
 type Action = {
   id: string;
@@ -36,10 +41,30 @@ type Action = {
   run: () => void;
 };
 
+// Matches /w/{workspaceId}/projects/{projectId}/agents/{agentId}/{tab} — the
+// one route an agent's detail view renders at (FleetAgentDetail is always
+// variant="page", mounted only from [tab]/page.tsx — there is no modal to
+// probe for). Deriving "are we on an agent, and which tab" from the URL
+// itself means this stays correct through back/forward/deep-links for free.
+const AGENT_DETAIL_RE = /^\/w\/[^/]+\/projects\/([^/]+)\/agents\/([^/]+)\/([^/]+)$/;
+
+// The tabs an agent detail page renders (see FleetAgentDetail.tsx's TABS),
+// minus Hardware — these are the "switch tab" actions offered here.
+const AGENT_TABS: { id: string; label: string; icon: LucideIcon }[] = [
+  { id: "overview", label: "Overview", icon: LayoutGrid },
+  { id: "work", label: "Work", icon: Inbox },
+  { id: "channels", label: "Channels", icon: Radio },
+  { id: "connectors", label: "Connectors", icon: Plug },
+  { id: "tools", label: "Tools", icon: Wrench },
+  { id: "model", label: "Model", icon: Sparkles },
+  { id: "memory", label: "Memory", icon: Brain },
+];
+
 /**
- * Cmd/Ctrl+K command palette. Fast filter, keyboard-navigable, no library
- * dependency. Actions: navigate to any section, open an agent by name,
- * toggle theme, "Chat with Sage".
+ * Cmd/Ctrl+K command palette — the fastest path to any agent. Fast substring
+ * filter, keyboard-navigable (Arrow/Enter), no library dependency. Sections:
+ * This agent (tab switch + chat, only on an agent-detail route) → Agents →
+ * Projects → Go to → Actions → Commands.
  */
 export function FleetCommandPalette({
   workspaceId,
@@ -58,7 +83,18 @@ export function FleetCommandPalette({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+  const pathname = usePathname() || "";
   const { agents } = useFleetAgents(workspaceId);
+  const { projects } = useFleetProjects(workspaceId);
+
+  // Route-derived context — replaces the old "query the DOM for a mounted
+  // modal" hack. Whether we're on an agent's detail route (and which agent
+  // and tab) is fully determined by the URL, so read it from there.
+  const agentDetail = useMemo(() => {
+    const m = pathname.match(AGENT_DETAIL_RE);
+    if (!m) return null;
+    return { projectId: decodeURIComponent(m[1]), agentId: decodeURIComponent(m[2]), tab: m[3] };
+  }, [pathname]);
 
   // Global Cmd+K binding
   useEffect(() => {
@@ -75,26 +111,17 @@ export function FleetCommandPalette({
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
-  const [agentModalOpen, setAgentModalOpen] = useState(false);
-
   useEffect(() => {
     if (open) {
       setQuery("");
       setActiveIndex(0);
-      // The agent detail modal lives in a different component tree (mounted
-      // from FleetHome, not here) — there's no shared state to read, so
-      // check for its root element instead of prop-threading a callback
-      // through FleetShell just for the palette.
-      setAgentModalOpen(Boolean(document.querySelector(".fleet-detail-backdrop")));
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [open]);
 
-  const switchAgentTab = useCallback((tab: string) => {
-    window.dispatchEvent(new CustomEvent("fleet:switch-tab", { detail: tab }));
-  }, []);
-
   const close = useCallback(() => setOpen(false), []);
+  // Full navigation (adds a history entry — Esc-to-return on the destination
+  // page relies on this being push, not replace).
   const go = useCallback(
     (path: string) => {
       router.push(path);
@@ -102,17 +129,84 @@ export function FleetCommandPalette({
     },
     [router, close],
   );
+  // Switching tabs within the SAME agent — replace, matching onTabChange in
+  // [tab]/page.tsx, so flipping through tabs doesn't bury the list you
+  // arrived from under a stack of tab history entries.
+  const replaceTab = useCallback(
+    (path: string) => {
+      router.replace(path);
+      close();
+    },
+    [router, close],
+  );
+
+  const sageAgent = useMemo(() => findSageAgent(agents), [agents]);
 
   const actions: Action[] = useMemo(() => {
     const base = `/w/${encodeURIComponent(workspaceId)}`;
-    const navigation: Action[] = [
-      { id: "nav-home", label: "Home", group: "Navigate", icon: Home, run: () => go(`${base}/fleet`) },
-      { id: "nav-hardware", label: "Hardware", group: "Navigate", icon: Cpu, run: () => go(`${base}/hardware`) },
-      { id: "nav-billing", label: "Billing", group: "Navigate", icon: CreditCard, run: () => go(`${base}/settings`) },
+
+    let thisAgentActions: Action[] = [];
+    if (agentDetail) {
+      const agentBase = `${base}/projects/${encodeURIComponent(agentDetail.projectId)}/agents/${encodeURIComponent(agentDetail.agentId)}`;
+      const tabActions: Action[] = AGENT_TABS.filter((t) => t.id !== agentDetail.tab).map((t) => ({
+        id: `tab-${t.id}`,
+        label: t.label,
+        group: "This agent",
+        icon: t.icon,
+        run: () => replaceTab(`${agentBase}/${t.id}`),
+      }));
+      const chatAction: Action[] = agentDetail.tab === "chat" ? [] : [
+        {
+          id: "tab-chat",
+          label: "Chat with this agent",
+          group: "This agent",
+          icon: MessageSquare,
+          run: () => replaceTab(`${agentBase}/chat`),
+        },
+      ];
+      thisAgentActions = [...tabActions, ...chatAction];
+    }
+
+    // Sage is the operator, not a listed worker — never a jump target here
+    // (same contract as the flat /agents list).
+    const agentActions: Action[] = agents
+      .filter((a) => a.agent_id !== sageAgent?.agent_id)
+      .map((a) => ({
+        id: `agent-${a.agent_id}`,
+        label: a.label || "Unnamed agent",
+        hint: "open",
+        group: "Agents",
+        icon: Bot,
+        run: () => go(`${base}/projects/${encodeURIComponent(a.project_id || "")}/agents/${encodeURIComponent(a.agent_id)}/overview`),
+      }));
+
+    const projectActions: Action[] = projects.map((p) => ({
+      id: `project-${p.id}`,
+      label: p.name || p.id,
+      hint: "open",
+      group: "Projects",
+      icon: FolderKanban,
+      run: () => go(`${base}/projects/${encodeURIComponent(p.id)}`),
+    }));
+
+    // Mirrors the rail's own destinations (PrimaryRail's RAIL_ITEMS) — the
+    // same four, in the same order.
+    const goToActions: Action[] = [
+      { id: "go-inbox", label: "Inbox", group: "Go to", icon: Inbox, run: () => go(`${base}/inbox`) },
+      { id: "go-projects", label: "Projects", group: "Go to", icon: FolderKanban, run: () => go(`${base}/projects`) },
+      { id: "go-agents", label: "Agents", group: "Go to", icon: Bot, run: () => go(`${base}/agents`) },
+      { id: "go-hardware", label: "Hardware", group: "Go to", icon: Cpu, run: () => go(`${base}/hardware`) },
     ];
 
-    const summaries = agents.map((a, i) => toAgentSummary(a, i));
-    const commands: Action[] = [
+    // ?new=1 is the existing onboarding hand-off agents/page.tsx already
+    // consumes to open its wizard on arrival; projects/page.tsx gains the
+    // same convention alongside this change.
+    const newActions: Action[] = [
+      { id: "new-agent", label: "New agent", group: "Actions", icon: UserPlus, run: () => go(`${base}/agents?new=1`) },
+      { id: "new-project", label: "New project", group: "Actions", icon: FolderPlus, run: () => go(`${base}/projects?new=1`) },
+    ];
+
+    const commandActions: Action[] = [
       {
         id: "chat-sage",
         label: "Chat with Sage",
@@ -134,25 +228,8 @@ export function FleetCommandPalette({
       },
     ];
 
-    const agentActions: Action[] = summaries
-      .filter((a) => !isSageAgent(a))
-      .map((a) => ({
-        id: `agent-${a.id}`,
-        label: a.name,
-        hint: "open",
-        group: "Agents",
-        icon: Bot,
-        run: () => go(`${base}/fleet`),
-      }));
-
-    const agentModalActions: Action[] = agentModalOpen ? [
-      { id: "modal-channels", label: "Channels", hint: "in this agent", group: "Agent modal", icon: Radio, run: () => { switchAgentTab("channels"); close(); } },
-      { id: "modal-connectors", label: "Connectors", hint: "in this agent", group: "Agent modal", icon: Plug, run: () => { switchAgentTab("connectors"); close(); } },
-      { id: "modal-memory", label: "Memory", hint: "in this agent", group: "Agent modal", icon: Brain, run: () => { switchAgentTab("memory"); close(); } },
-    ] : [];
-
-    return [...agentModalActions, ...commands, ...navigation, ...agentActions];
-  }, [workspaceId, theme, agents, go, onToggleTheme, close, agentModalOpen, switchAgentTab]);
+    return [...thisAgentActions, ...agentActions, ...projectActions, ...goToActions, ...newActions, ...commandActions];
+  }, [workspaceId, theme, agents, projects, sageAgent, agentDetail, go, replaceTab, onToggleTheme, close, onOpenSage]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return actions;
