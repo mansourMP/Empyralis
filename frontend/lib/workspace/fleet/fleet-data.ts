@@ -283,6 +283,11 @@ export type FleetTool = {
   // mandate_granted reflects this owner's mandate.audience_tools list.
   audience_safe: boolean;
   mandate_granted: boolean;
+  // Truth Map B1 — connector id (e.g. "google_workspace") this tool's real
+  // executor is bound behind, or null if the toggle alone is sufficient.
+  // Toggling `enabled` above does nothing for a connector-required tool
+  // until that connector is connected.
+  requires_connector: string | null;
 };
 
 export function useFleetAgentChannels(workspaceId: string, agentId: string | null) {
@@ -516,13 +521,22 @@ export type WorkspaceActivityEvent = {
 };
 
 // Turn-execution plumbing (memory_loaded, tool_started/completed,
-// user_message_received, final_response_sent all ledger as system_activity;
-// owner-fleet administrative actions ledger as fleet_control) — real
-// disease/cure precedent: fleet_control raw strings were already the U3-A
-// fix for the Agents-list row subtitle; the Inbox needs the same exclusion,
-// plus its sibling system_activity class, applied server-side so a single
-// chat turn's multi-row spray never eats into the feed's own row limit.
-const NOISE_EVENT_CLASSES = ["system_activity", "fleet_control"];
+// user_message_received, final_response_sent) ledgers as system_activity —
+// 4-5 rows per single chat turn, applied server-side so one turn's spray
+// never eats into the feed's own row limit.
+//
+// fleet_control (owner-fleet administrative actions: create/configure/message
+// an agent, hardware grants, schedule changes, stop/resume) used to be
+// excluded here too, on the same "noise" theory — but unlike system_activity,
+// every fleet_control write is one row per one discrete, low-frequency,
+// owner-caused action (never a per-turn spray), and several of them (stop,
+// resume, configuration changes) are exactly the kind of thing an owner wants
+// a workspace-wide audit trail of. 2026-07-10: no longer excluded here — an
+// agent's own per-agent activity view (fleet_get_agent_activity) still
+// excludes fleet_control at the SQL level, which is correct and untouched:
+// "you were configured by the owner" isn't part of that agent's own work log,
+// but it is part of the workspace's.
+const NOISE_EVENT_CLASSES = ["system_activity"];
 
 /** sinceCreatedAt (optional): only events after this ISO timestamp — the
  *  rail's Inbox count uses this so its number is a real, backend-computed

@@ -16,6 +16,7 @@ from server_modules import empyralis_model_tier_routing_service
 from server_modules import healthguide_safety_service
 from server_modules import response_leak_guard_service
 from server_modules import secret_redaction_service
+from server_modules import tool_honesty_guard
 from server_modules import tool_registry_service
 from server_modules import workspace_context_memory_adapter
 from server_modules.direct_chat_context_service import is_public_generation_error_message
@@ -960,6 +961,12 @@ def stream_provider_backed_direct_chat(
 
     executed_any_tools = False
     final_reply = ""
+    # Per-tool-call record for this turn — {"name", "status", "output"|"error"} —
+    # the shape tool_honesty_guard.check_tool_reply_consistency expects.
+    # executed_any_tools alone (just a bool) can't tell the guard WHICH tool
+    # ran or WHAT it returned, both needed to detect (and correct) a reply
+    # that denies a tool call that just succeeded.
+    turn_tool_trace: List[Dict[str, Any]] = []
     conversation_messages: List[Dict[str, Any]] = []
     conversation_messages.extend(compacted_prior_messages)
     current_prompt = normalized_message
@@ -1708,6 +1715,21 @@ def stream_provider_backed_direct_chat(
                                 and completed_execution_environment == "local_gateway"
                             )
                             result_summary = str(completed_trace_metadata.get("result_summary") or tool_result_for_context or "").strip()
+                            # Record for the tool-honesty guard's end-of-turn check. Timeouts
+                            # (above) and other tool-level errors surface as a JSON error
+                            # payload in the raw result — matched here rather than trusted
+                            # as a real "completed" result, since a failed tool later denied
+                            # in the reply is correct honesty, not a guard mismatch.
+                            _looks_like_tool_error = result_summary[:80].lstrip().startswith('{"error"') or '"error":' in str(tool_result or "")[:120]
+                            _tool_trace_entry = {
+                                "name": tool_name,
+                                "status": "failed" if (_looks_like_tool_error or not result_summary) else "completed",
+                            }
+                            if _looks_like_tool_error:
+                                _tool_trace_entry["error"] = result_summary
+                            else:
+                                _tool_trace_entry["output"] = result_summary
+                            turn_tool_trace.append(_tool_trace_entry)
                             tool_result_data = {
                                 "status": "ok",
                                 "summary": result_summary,
@@ -1972,6 +1994,47 @@ def stream_provider_backed_direct_chat(
                         }
                 leak_guard = response_leak_guard_service.guard_model_response(final_reply)
                 final_reply = _strip_reasoning_thinking_blocks(leak_guard.text)
+
+                # --- Structural tool-honesty guard ---
+                # A prompt instruction alone (direct_chat_prompt_service.py's
+                # build_system_prompt "after a tool call" case) measurably
+                # helped but wasn't reliable (live-verified: DeepSeek still
+                # denied a just-succeeded web__search on some fresh-thread
+                # attempts, not others, same prompt) — this is the
+                # platform-level backstop, independent of model or prompt
+                # wording. Sync variant: this generator is a plain `def`, not
+                # `async def` (its own tool execution already bridges to sync
+                # via ThreadPoolExecutor for the same reason).
+                try:
+                    def _direct_chat_regenerate(correction_text: str) -> Optional[str]:
+                        from server_modules.direct_chat_runtime_exports import generate_chat_reply_with_provider_fallback
+
+                        _corrected_text, _corrected_usage, _corrected_model, _corrected_err = generate_chat_reply_with_provider_fallback(
+                            context,
+                            metadata,
+                            normalized_message,
+                            f"{system_prompt}\n\n{correction_text}",
+                            prior_messages=compacted_prior_messages or None,
+                        )
+                        return str(_corrected_text).strip() if _corrected_text and not _corrected_err else None
+
+                    _guard_outcome = tool_honesty_guard.apply_tool_honesty_guard_sync(
+                        reply_text=final_reply,
+                        tool_trace=turn_tool_trace,
+                        regenerate_fn=_direct_chat_regenerate,
+                    )
+                    final_reply = _guard_outcome["reply"]
+                    if _guard_outcome["guard"]["fired"]:
+                        print(
+                            f"[TOOL_HONESTY_GUARD] fired mismatch_type={_guard_outcome['guard']['mismatch_type']!r} "
+                            f"corrected={_guard_outcome['guard']['corrected']} fell_back={_guard_outcome['guard']['fell_back']} "
+                            f"workspace={normalized_workspace_id!r}",
+                            flush=True,
+                        )
+                except Exception:
+                    print("[TOOL_HONESTY_GUARD] raised — shipping ungated reply", flush=True)
+                # --- End tool-honesty guard ---
+
                 if (
                     conversation_messages
                     and isinstance(conversation_messages[-1], dict)

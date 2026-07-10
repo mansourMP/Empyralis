@@ -170,6 +170,27 @@ def _humanize_fleet_action(action: str) -> str:
     return _FLEET_ACTION_TITLES.get(key) or key.replace("_", " ").capitalize() or "Updated"
 
 
+async def _resolve_ledger_tenant_id(workspace_id: str) -> str:
+    """The activity ledger's read path (list_activity_ledger_events) filters
+    strictly on `tenant_id = $1` — no fallback, no wildcard. Every
+    fleet_control write in this file used to hardcode the literal string
+    "system" here, which is never a real workspace's resolved tenant_id, so
+    every one of these rows was written into a scope no normal per-workspace
+    read could ever match — invisible by construction, not by the de-noise
+    filter (2026-07-10 fix, found live-verifying B3: fleet_control was
+    correctly un-hidden from the Inbox query but stop/resume events still
+    didn't appear, because they'd never match on tenant_id in the first
+    place). Best-effort: on lookup failure, "system" is still a *reasonable*
+    fallback for a row where nothing else identifies it either."""
+    try:
+        from server_modules.control_plane_repository import get_workspace_by_id
+        ws = await get_workspace_by_id(workspace_id)
+        tenant_id = str((ws or {}).get("tenant_id") or "").strip()
+        return tenant_id or "system"
+    except Exception:
+        return "system"
+
+
 async def _ledger_fleet_action(
     *,
     action: str,
@@ -182,7 +203,7 @@ async def _ledger_fleet_action(
     """Best-effort fleet control ledger event."""
     try:
         await activity_ledger_service.append_activity_event(
-            tenant_id="system",
+            tenant_id=await _resolve_ledger_tenant_id(workspace_id),
             workspace_id=workspace_id,
             actor_type="agent",
             actor_id=str(actor_id or "").strip() or "unknown",
@@ -645,6 +666,24 @@ async def fleet_get_project_activity(
         return {"ok": False, "error": str(exc), "events": []}
 
 
+# Truth Map B1: these tools are real (skill_registry entries, real
+# permission/approval semantics) but execution_mode="manual" with no direct
+# executor in the registry-building path — the only real executor is behind
+# a bound connector, so the tool_toggles switch above does nothing on its
+# own. In this deployment that connector is Google Workspace for all four
+# (email/calendar/task/CRM scopes route through the same OAuth connection).
+# A generic connector_scopes -> connector_id resolver would be wrong here:
+# scopes like "email"/"calendar" could equally be satisfied by Microsoft 365,
+# so mapping by scope name isn't guaranteed correct — this maps the four
+# specific tools this deployment actually routes through Google Workspace.
+_CONNECTOR_REQUIRED_TOOLS: Dict[str, str] = {
+    "email-access": "google_workspace",
+    "calendar-access": "google_workspace",
+    "task-runner": "google_workspace",
+    "crm-notes": "google_workspace",
+}
+
+
 async def fleet_get_agent_tools(
     *,
     workspace_id: str,
@@ -728,6 +767,13 @@ async def fleet_get_agent_tools(
             "mandate_granted": authority_mandate_service.is_audience_tool_allowed(
                 mandate_audience_tools, enforcement_id
             ),
+            # Truth Map B1: email-access/calendar-access/task-runner/crm-notes
+            # are execution_mode="manual" with no direct executor — the real
+            # executor only exists behind a bound connector, independent of
+            # this toggle. Flipping it on does nothing by itself, so the
+            # Tools tab needs the real requirement, not a switch that looks
+            # functional. See _CONNECTOR_REQUIRED_TOOLS below.
+            "requires_connector": _CONNECTOR_REQUIRED_TOOLS.get(enforcement_id),
         })
 
     # A core tool with its own entry above (Web Search, Memory read/write/
@@ -1112,8 +1158,14 @@ async def fleet_stop_agent(
     kill_switch_gate.set_kill_switch(f"{kill_switch_gate.AGENT_KILL_PREFIX}{agent_id}")
     await repo.update_workspace_agent_install(agent_id, tenant_id=tenant_id, workspace_id=workspace_id, metadata=meta)
 
+    # Title carries the agent's own name (matching the "Maple chat completed"
+    # convention other ledger rows use) rather than a bare "Stopped" — the
+    # Inbox list row shows only `title`, not a resolved install_id, so an
+    # un-clicked row needs the name baked in to read clearly once fleet_control
+    # rows are no longer filtered out of the workspace-wide feed.
+    _agent_label = str(bundle_dict.get("label") or "").strip() or "This agent"
     await activity_ledger_service.append_activity_event(
-        tenant_id="system",
+        tenant_id=await _resolve_ledger_tenant_id(workspace_id),
         workspace_id=workspace_id,
         actor_type="user",
         actor_id=str(actor_id or "").strip() or "unknown",
@@ -1121,7 +1173,7 @@ async def fleet_stop_agent(
         event_class="fleet_control",
         detail_level="audit_reference",
         action="agent_stopped",
-        title="Stopped",
+        title=f"{_agent_label} stopped",
         summary=(
             f"{actor_label or actor_id} stopped this agent."
             + (f" Reason: {reason}" if str(reason or "").strip() else "")
@@ -1157,8 +1209,9 @@ async def fleet_resume_agent(
     kill_switch_gate.clear_kill_switch(f"{kill_switch_gate.AGENT_KILL_PREFIX}{agent_id}")
     await repo.update_workspace_agent_install(agent_id, tenant_id=tenant_id, workspace_id=workspace_id, metadata=meta)
 
+    _agent_label = str(bundle_dict.get("label") or "").strip() or "This agent"
     await activity_ledger_service.append_activity_event(
-        tenant_id="system",
+        tenant_id=await _resolve_ledger_tenant_id(workspace_id),
         workspace_id=workspace_id,
         actor_type="user",
         actor_id=str(actor_id or "").strip() or "unknown",
@@ -1166,7 +1219,7 @@ async def fleet_resume_agent(
         event_class="fleet_control",
         detail_level="audit_reference",
         action="agent_resumed",
-        title="Resumed",
+        title=f"{_agent_label} resumed",
         summary=f"{actor_label or actor_id} resumed this agent.",
         status="executed",
         metadata={"agent_id": agent_id, "resumed_by_user_id": actor_id},
@@ -1201,7 +1254,7 @@ async def fleet_stop_workspace(
         return {"ok": False, "error": f"Workspace {workspace_id} not found"}
 
     await activity_ledger_service.append_activity_event(
-        tenant_id="system",
+        tenant_id=await _resolve_ledger_tenant_id(workspace_id),
         workspace_id=workspace_id,
         actor_type="user",
         actor_id=str(actor_id or "").strip() or "unknown",
@@ -1237,7 +1290,7 @@ async def fleet_resume_workspace(
         return {"ok": False, "error": f"Workspace {workspace_id} not found"}
 
     await activity_ledger_service.append_activity_event(
-        tenant_id="system",
+        tenant_id=await _resolve_ledger_tenant_id(workspace_id),
         workspace_id=workspace_id,
         actor_type="user",
         actor_id=str(actor_id or "").strip() or "unknown",

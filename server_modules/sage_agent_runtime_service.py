@@ -12,6 +12,7 @@ from server_modules import skills_service as _sage_skills_service
 from server_modules import thread_service
 from server_modules import runtime_config
 from server_modules import authority_mandate_service
+from server_modules import tool_honesty_guard
 from server_modules import (
     activity_ledger_service,
     agent_trace_service,
@@ -3805,14 +3806,28 @@ async def handle_sage_chat(
         # up as "based on the search results" once the real tool call was
         # correctly blocked — live-verified during the Truth Map fix: blocking
         # the tool call alone made it silent about *why*, not honest about it.
+        #
+        # First version of this rule only stated the negative case ("only
+        # claim X if a tool ran") with no matching positive case for when a
+        # tool DID run and succeed — verified live to overcorrect into the
+        # model denying tools it had just used successfully (a real
+        # web__search call would return real results, and the reply would
+        # still say "I don't have a web search tool"). Three explicit,
+        # non-overlapping cases below close that gap: case 1 is the one that
+        # was missing.
         _spec_honesty_rule = (
             "\n\n## Tool honesty\n"
-            "Only claim to have searched, fetched, or looked something up if a "
-            "real tool call actually ran and returned a result this turn. If "
-            "you don't have a working tool for what's being asked — it may be "
-            "disabled, or simply not something you have access to — say so "
-            "plainly instead of inventing an answer that sounds like it came "
-            "from a real lookup."
+            "Exactly one of these is true each turn — report the one that "
+            "actually happened, never a different one:\n"
+            "1. A tool call ran and returned a result this turn → use it. "
+            "Base your answer on that real result and report it plainly. Do "
+            "not deny having the capability, hedge the result away, or claim "
+            "you lack a tool you just successfully used.\n"
+            "2. No tool call ran this turn — disabled, unavailable, or you "
+            "didn't attempt one — → say so plainly instead of inventing an "
+            "answer.\n"
+            "3. Never fabricate: don't claim a lookup happened when it "
+            "didn't, and don't invent facts dressed up as a real result."
         )
         _spec_memory_block = f"\n\n## Your memory\n{memory_context}" if memory_context else ""
         _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
@@ -4058,6 +4073,59 @@ async def handle_sage_chat(
                         reply = str(_fb_reply).strip()
                 except Exception:
                     pass
+
+        # --- Structural tool-honesty guard ---
+        # A prompt instruction alone measurably helped but wasn't reliable
+        # (live-verified: DeepSeek still denied a just-succeeded web__search
+        # on some fresh-thread attempts, not others, same prompt) — this is
+        # the platform-level backstop, independent of model or prompt
+        # wording. action_result's tool_calls entries already carry
+        # {"name", "status", "output"|"error"} — exactly the shape
+        # tool_honesty_guard expects, no adaptation needed.
+        try:
+            async def _sage_action_loop_regenerate(correction_text: str) -> Optional[str]:
+                _corrected = await _run_sage_action_loop_v3(
+                    workspace_id=normalized_workspace_id,
+                    tenant_id=normalized_tenant_id,
+                    message=action_loop_message,
+                    provider=provider,
+                    model=requested_model,
+                    credentials=credentials,
+                    trace_id=trace_id,
+                    actor_user_id=actor_user_id,
+                    sender_class=_sender_class,
+                    system_prompt=f"{envelope['system_prompt']}\n\n{correction_text}",
+                    channel_origin=channel_origin,
+                    attachments=attachments,
+                    prior_messages=prior_messages,
+                    sender_id=sender_id,
+                    agent_install_id=_spec_install_id,
+                    preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
+                )
+                if not isinstance(_corrected, dict):
+                    return None
+                _corrected_reply, _ = _guard_sage_visible_reply(_corrected.get("message"))
+                return _corrected_reply or None
+
+            _guard_outcome = await tool_honesty_guard.apply_tool_honesty_guard(
+                reply_text=reply,
+                tool_trace=list(action_result.get("tool_calls") or []),
+                regenerate_fn=_sage_action_loop_regenerate,
+            )
+            reply = _guard_outcome["reply"]
+            if _guard_outcome["guard"]["fired"]:
+                logging.getLogger(__name__).warning(
+                    "tool_honesty_guard fired: mismatch_type=%s corrected=%s fell_back=%s workspace=%s trace_id=%s",
+                    _guard_outcome["guard"]["mismatch_type"],
+                    _guard_outcome["guard"]["corrected"],
+                    _guard_outcome["guard"]["fell_back"],
+                    normalized_workspace_id,
+                    trace_id,
+                )
+        except Exception:
+            logging.getLogger(__name__).exception("tool_honesty_guard raised — shipping ungated reply")
+        # --- End tool-honesty guard ---
+
         # --- Persist user + assistant turns to shared thread ---
         try:
             import time as _time

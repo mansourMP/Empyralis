@@ -83,7 +83,11 @@ def build_system_prompt(
         sections.append(
             "## Tool Use Rules\n"
             "Use matching tools when available. Do not claim lack of access when a listed tool can do it. Request approval for risky actions.\n"
-            f"{follow_through_rule}"
+            f"{follow_through_rule}\n"
+            "After a tool call: if it ran and returned a result this turn, your answer MUST be based on that "
+            "real result — report it plainly. Never respond as if the tool didn't run, wasn't available, or "
+            "returned nothing when it actually succeeded. If a tool call genuinely failed or nothing ran, say "
+            "that plainly instead — never invent an answer that sounds like it came from a real result either way."
         )
     else:
         sections.append(f"## Follow-through Rule\n{follow_through_rule}")

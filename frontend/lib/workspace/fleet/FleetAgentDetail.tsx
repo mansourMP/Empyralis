@@ -1312,6 +1312,13 @@ function ToolsTab({
   workspaceId, agentId, agent, onChat,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
   const { tools, coreTools, isMaster, loading, refresh } = useFleetAgentTools(workspaceId, agentId);
+  // Truth Map B1: a handful of tools (Calendar/Task Runner/Email/CRM) are
+  // real but execution_mode="manual" with no direct executor — the toggle
+  // above does nothing until the connector named in requires_connector is
+  // actually connected. Cross-referencing the same connector list the
+  // Connectors tab already fetches, so this stays accurate if a deployment
+  // configures Google Workspace OAuth later.
+  const { connectors: toolConnectors, loading: connectorsLoading } = useFleetAgentConnectors(workspaceId, agentId);
   const [pending, setPending] = useState<string | null>(null);
   const [mandateBusy, setMandateBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1361,9 +1368,11 @@ function ToolsTab({
     }
   }
 
-  if (loading) {
+  if (loading || connectorsLoading) {
     return <div className="fleet-activity-skeleton" aria-label="Loading tools"><div className="fleet-skeleton-bar" style={{ width: "60%" }} /></div>;
   }
+
+  const connectorById = new Map(toolConnectors.map((c) => [c.id, c]));
 
   if (tools.length === 0 && coreTools.length === 0) {
     return (
@@ -1395,12 +1404,20 @@ function ToolsTab({
           </p>
         </>
       )}
-      {tools.map((t) => (
+      {tools.map((t) => {
+        const requiredConnector = t.requires_connector ? connectorById.get(t.requires_connector) : undefined;
+        const connectorMissing = Boolean(t.requires_connector) && !requiredConnector?.connected;
+        return (
         <div key={t.id} className="fleet-toggle-row">
           <div style={{ minWidth: 0 }}>
             <div className="fleet-toggle-row-label">{t.label}</div>
             {t.description && <div className="fleet-toggle-row-desc">{t.description}</div>}
-            {!t.enabled && (t.audience_safe || t.mandate_granted) && (
+            {connectorMissing && (
+              <div className="fleet-toggle-row-desc">
+                Needs {requiredConnector?.label || "a connector"} connected — this toggle has no effect until then.
+              </div>
+            )}
+            {!connectorMissing && !t.enabled && (t.audience_safe || t.mandate_granted) && (
               <div className="fleet-toggle-row-desc">Enabled required to run</div>
             )}
           </div>
@@ -1424,7 +1441,8 @@ function ToolsTab({
             />
           </div>
         </div>
-      ))}
+        );
+      })}
       {error && <p className="fleet-channel-expand-error">{error}</p>}
       {coreTools.length > 0 && (
         <Disclosure label={`${coreTools.length} core ${coreTools.length === 1 ? "tool" : "tools"} — always on`}>
