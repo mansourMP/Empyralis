@@ -184,6 +184,12 @@ body[data-theme='dark'] {
   --app-font-12: var(--font-size-sm);
   --app-font-13: var(--font-size-md);
   --app-font-14: var(--font-size-base);
+  /* Referenced in 23 places (chat bubbles among them) but never actually
+     defined until now — var() on an undefined custom property makes the
+     whole font-size declaration invalid, so every one of those 23 spots
+     was silently inheriting its ancestor's size instead of using 15px.
+     UI Contract §9 ("Chat ... 15px text") is what surfaced it. */
+  --app-font-15: 15px;
   --app-font-16: var(--font-size-lg);
   --app-font-18: 18px;
   --app-font-20: var(--font-size-xl);
@@ -2425,6 +2431,17 @@ body[data-theme='dark'] .app-auth-page {
   box-shadow: 0 24px 60px -42px rgba(32, 32, 32, 0.18);
 }
 
+/* --elevated hardcodes a light card background (unlike the base
+   .app-auth-card, which already reads the theme-aware --premium-glass-bg
+   token) — signup and auth/complete render near-invisible dark-on-light
+   text in dark mode without this override (Truth Map mobile pass,
+   2026-07-11). */
+:root[data-theme='dark'] .app-auth-card--elevated,
+body[data-theme='dark'] .app-auth-card--elevated {
+  border-color: var(--premium-glass-border);
+  background: var(--premium-glass-bg);
+}
+
 .app-auth-card--elevated::before {
   content: none;
 }
@@ -3045,7 +3062,29 @@ body[data-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
   to { opacity: 1; transform: translateX(0); }
 }
 
+/* Mobile (<=768px): collapse the two-column hero+form shell (signup,
+   auth/complete) to a single centered card — the hero's marketing copy has
+   no interactive purpose, so dropping it (rather than stacking it above the
+   form) keeps these screens as fast and centered as login already is at
+   this width. min(360px, 520px) alone plus the 64px gap exceeds any phone
+   viewport, which is what caused the pre-fix overlap. */
+@media (max-width: 768px) {
+  .app-auth-shell {
+    display: flex;
+    grid-template-columns: none;
+    justify-content: center;
+    gap: 0;
+  }
 
+  .app-auth-hero {
+    display: none;
+  }
+
+  .app-auth-card {
+    max-width: 100%;
+    padding: 32px 20px;
+  }
+}
 
 .app-setup-form {
   display: grid;

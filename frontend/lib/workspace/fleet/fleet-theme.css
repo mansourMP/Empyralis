@@ -731,7 +731,14 @@ a.fleet-breadcrumb:hover {
   position: fixed;
   right: 20px;
   bottom: 20px;
-  z-index: 40;
+  /* UI Contract §7: floating elements never overlap an open drawer/sheet.
+     Was tied with .fleet-toolbar-popover at z-index 40 — same tier as the
+     properties drawer's OWN popovers, but above the drawer itself (30),
+     so this button rendered on top of an open Properties panel instead of
+     underneath it. 20 sits below both the drawer (30) and its scrim (29)
+     while staying above ordinary content and the rail's local popovers
+     (9-10). */
+  z-index: 20;
 }
 
 .fleet-help-float-btn {
@@ -800,7 +807,16 @@ a.fleet-breadcrumb:hover {
   position: fixed;
   right: 62px; /* 20px edge + 30px help btn + 12px gap */
   bottom: 20px;
-  z-index: 40;
+  /* UI Contract §7 — see .fleet-help-float's identical fix, same bug, for
+     the idle button. But this wrapper also holds .fleet-sage-console when
+     open (a real chat surface, not a "floating bubble"), which needs to
+     stay above the properties drawer like any other active dialog — the
+     .is-open bump below restores that specifically while open. */
+  z-index: 20;
+}
+
+.fleet-sage-launcher.is-open {
+  z-index: 45;
 }
 
 .fleet-sage-launcher-btn {
@@ -1057,7 +1073,7 @@ a.fleet-breadcrumb:hover {
   height: 28px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 50%;
+  border-radius: 8px; /* UI Contract §2/§6: square, 6-8px — not var(--radius-control)'s fleet-wide 10px */
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -4758,4 +4774,503 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-muted);
   cursor: not-allowed;
 }
+
+/* ── Mobile shell (<=768px) — Truth Map mobile pass, 2026-07-11 ────────────
+   The rail's static 220px column (plus, on detail/list pages, further
+   fixed-width siblings) cannot fit next to real content below this width.
+   Placed at the end of the file so these flat single-class overrides beat
+   every base rule above regardless of source order (none of the rail rules
+   exceed two-class specificity, so cascade order alone decides ties).
+
+   The rail leaves the flex flow entirely (position:fixed) and slides in
+   above a scrim; .fleet-shell-panel then naturally claims the full width
+   since its flex sibling no longer occupies layout space. Toggled via the
+   fleet:toggle-mobile-nav window event — same event-bus pattern as
+   fleet:open-sage / fleet:open-command-palette elsewhere in this file — so
+   the hamburger button in FleetContentFrame's topbar doesn't need a prop
+   thread through FleetShellDecider down to PrimaryRail's sibling. */
+.fleet-topbar-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin-right: 4px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.fleet-topbar-menu-btn:hover {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.fleet-rail-scrim {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .fleet-shell-panel {
+    margin: 0;
+    border-width: 0;
+    border-radius: 0;
+  }
+
+  .fleet-shell-topbar {
+    height: 48px;
+    min-height: 48px;
+    padding-left: var(--space-2);
+  }
+
+  .fleet-topbar-menu-btn {
+    display: inline-flex;
+  }
+
+  /* UI Contract §4: title 15px/500, count 12px muted, same line. */
+  .fleet-breadcrumb--current {
+    font-size: 15px;
+    font-weight: var(--weight-medium);
+  }
+  .fleet-breadcrumb-count {
+    font-size: 12px;
+  }
+
+  .fleet-rail,
+  .fleet-rail--collapsed {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 70;
+    width: min(320px, 85vw);
+    height: 100vh;
+    height: 100dvh;
+    padding: 14px 12px;
+    background: var(--bg-canvas);
+    border-right: 1px solid var(--border);
+    box-shadow: 0 12px 32px -10px rgba(0, 0, 0, 0.35);
+    transform: translateX(-100%);
+    transition: transform var(--dur-base) ease-out;
+  }
+
+  .fleet-rail--mobile-open {
+    transform: translateX(0);
+  }
+
+  /* The desktop icon-only collapse is meaningless inside an overlay drawer
+     — PrimaryRail already forces its rendering to the expanded state while
+     the drawer is open (effectiveCollapsed = collapsed && !mobileOpen);
+     this just hides the now-inert toggle button itself. */
+  .fleet-rail-control-btn--collapse {
+    display: none;
+  }
+
+  /* Keyboard-chord hints ("G I", "⌘K") describe shortcuts a touch device
+     has no keyboard to press — clutter, not information, on mobile. */
+  .fleet-rail-item-chord,
+  .fleet-rail-search-btn kbd {
+    display: none;
+  }
+
+  /* UI Contract §3/§5: nav rows 40px, sub-rows 36px, drawer search 36px —
+     Linear-calibrated, not the generic 44px accessibility floor an
+     earlier pass here used. Spacing between rows carries tap accuracy at
+     this density, not raw target height. */
+  .fleet-rail-item {
+    height: 40px;
+  }
+  .fleet-rail-search-btn {
+    height: 36px;
+  }
+  .fleet-rail-subitem {
+    min-height: 36px;
+  }
+  /* Contract §2 icon button, mobile: 34px square. */
+  .fleet-rail-control-btn,
+  .fleet-rail-new-btn,
+  .fleet-rail-subnav-toggle {
+    width: 34px;
+    height: 34px;
+  }
+
+  /* .fleet-btn is the shared base for every primary/secondary action button
+     app-wide (New agent, Save, Create key, Stop all agents, …) — one rule
+     here instead of hunting down each call site. Contract §2: 32-34px
+     mobile. Same scale for the icon-only toolbar buttons and the two
+     floating corner buttons present on every page. */
+  .fleet-btn {
+    height: 32px;
+  }
+  .fleet-icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+  .fleet-sage-launcher-btn,
+  .fleet-help-float-btn {
+    height: 34px;
+  }
+  .fleet-help-float-btn {
+    width: 34px;
+  }
+
+  .fleet-rail-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: rgba(0, 0, 0, 0.4);
+    animation: fleet-scrim-fade-in var(--dur-base) ease-out both;
+  }
+}
+
+@keyframes fleet-scrim-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fleet-rail {
+    transition: none;
+  }
+  .fleet-rail-scrim {
+    animation: none;
+  }
+}
 .fleet-secondary-toggle:hover { color: var(--text-primary); }
+
+/* ── Mobile list collapse (<=768px) — Agents/Projects/project-detail tables
+   (project detail reuses AgentsList directly, so one fix covers both) —
+   Truth Map mobile pass, 2026-07-11. Both tables size their grid off a
+   --fleet-list-grid custom property, so collapsing to 3 tracks (name/
+   agent · cost · status) is a one-line override each; the hidden columns'
+   values move into .fleet-agent-meta-mobile, a muted second line under the
+   primary cell (added in AgentsList.tsx / projects/page.tsx). Base (hidden)
+   state lives outside the media query per the pattern above; shown inside
+   it, alongside the grid overrides that make room for it. */
+.fleet-agent-meta-mobile {
+  display: none;
+}
+
+.fleet-agent-row-mobile {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  /* .fleet-content/.fleet-content-main's 28px/32px page gutter (measured:
+     the gap from the shell topbar's divider to the table) is a desktop
+     amount — at 390px it alone ate 64px before the list even started,
+     which is what was forcing the Agent column below its own avatar+gap
+     width. Every page that uses either class gets the trim, not just the
+     two tables, since the same over-wide gutter shows up on Hardware/
+     Settings/Billing/FleetHome too. */
+  .fleet-content,
+  .fleet-content-main {
+    padding: 16px 12px;
+  }
+
+  /* UI Contract §8: an anchored popover is already one of the two allowed
+     shapes for filter/sort/panel controls on mobile — this one just
+     needed its internal rows brought to the §3 sub-row height (was 31px,
+     a bare desktop 6px padding never re-checked at this scale). */
+  .fleet-toolbar-popover-option {
+    padding: 8px 6px;
+  }
+
+  /* Sage console: fixed 400px, anchored right:0 relative to a launcher
+     button that itself sits 62px from the viewport edge — on a 390px
+     screen that runs the panel's left edge ~70px past the left edge of
+     the viewport. Detaches from the launcher's local anchor and floats
+     as its own fixed, viewport-margined panel instead (found while
+     verifying §7's z-index fix, not in the contract's own Part 2 list,
+     but "opens a working panel" is the floor under every item on it). */
+  .fleet-sage-console {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 76px;
+    width: auto;
+    max-height: min(70vh, calc(100vh - 100px));
+  }
+
+  /* Projects list keeps the grid-collapse treatment (3 tracks + a muted
+     .fleet-agent-meta-mobile second line) — only Agent rows got the full
+     UI Contract redesign below; Projects wasn't in scope for that pass. */
+  .fleet-projects-list {
+    --fleet-list-grid: minmax(0, 1fr) 64px 108px;
+    --fleet-list-gap: 8px;
+    --fleet-list-padding-x: 0px;
+  }
+  .fleet-col-agents-count,
+  .fleet-col-tokens,
+  .fleet-col-last-active {
+    display: none;
+  }
+  .fleet-agent-meta-mobile {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fleet-agents-list-header {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  /* Agent rows — UI Contract Part 2: a real two-line design, not the
+     desktop column grid squeezed sideways. All of the desktop grid's own
+     cells hide; .fleet-agent-row-mobile (added in AgentsList.tsx) is the
+     only visible content. Stop/resume drops out of the row entirely on
+     mobile — it lives on the agent detail page's topbar action instead
+     (already real, already reachable there), which is also why the
+     contract's own row spec never mentions a third inline control. */
+  .fleet-agents-list {
+    --fleet-list-padding-x: 0px;
+  }
+  .fleet-agent-row {
+    display: block;
+    height: auto;
+    min-height: 0;
+    padding: 4px 12px;
+  }
+  .fleet-agents-list-header {
+    display: none;
+  }
+  .fleet-agent-cell-agent,
+  .fleet-agent-cell-brain,
+  .fleet-agent-cell-channels,
+  .fleet-agent-cell-right,
+  .fleet-agent-cell-status {
+    display: none;
+  }
+  .fleet-agent-row-mobile {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .fleet-agent-row-mobile-line1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .fleet-agent-row-mobile-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 15px;
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fleet-agent-row-mobile-line2 {
+    font-size: 13px;
+    color: var(--text-muted);
+    padding-left: 16px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* ── Agent detail (<=768px) — Truth Map mobile pass, 2026-07-11 ────────────
+   .fleet-detail-properties is a permanent 320px flex sibling (U3-I: "never
+   an overlay/toggle") — correct on desktop, but at 390px it leaves the tab
+   body ~70px wide with its own content still trying to render at full
+   measure, wrapping character-by-character. .fleet-detail-toptabs already
+   has overflow-x:auto (container-scoped scroll, no page-level fallback
+   needed) — this just adds the fade affordance and widens the touch
+   targets to match. */
+@media (max-width: 768px) {
+  .fleet-detail-columns {
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  .fleet-detail-body {
+    flex: none;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    padding: 16px;
+  }
+  .fleet-detail-body > * {
+    max-width: 100%;
+  }
+  .fleet-detail-properties {
+    width: 100%;
+    height: auto;
+    flex: none;
+    overflow: visible;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  .fleet-detail-tabbar {
+    position: relative;
+    padding-right: 0;
+  }
+  /* Static fade cue rather than a scroll-position-tracked one — sufficient
+     at "nothing broken" fidelity and needs no JS. */
+  .fleet-detail-tabbar::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 28px;
+    background: linear-gradient(to right, transparent, var(--bg-card));
+    pointer-events: none;
+  }
+  .fleet-detail-toptab {
+    height: 44px;
+  }
+
+  /* Work tab: two read-only panes (conversation list + selected transcript),
+     no composer — stacking them is enough for "not broken". The elaborate
+     list-then-push-in-detail-with-back pattern is reserved for Inbox
+     (task spec item 7), the one surface actually called out for it. */
+  .fleet-work-split {
+    flex-direction: column;
+    height: auto;
+  }
+  .fleet-work-list {
+    width: 100%;
+    max-height: 240px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .fleet-work-transcript-pane {
+    width: 100%;
+    height: auto;
+  }
+
+  /* Chat tab: the one tab that needs ITS OWN fixed-height internal scroll +
+     a composer that stays pinned in view, unlike every other tab (which
+     now shares one page-level scroll via .fleet-detail-body above).
+     .fleet-agent-chat-panel/.fleet-sage-chat's height:100% chain (same one
+     desktop already relies on) needs a real height handed down, not
+     height:auto — restored here, scoped to just this tab via :has() so the
+     generic stacking rules above stay correct for every other tab. */
+  .fleet-detail-columns:has(.fleet-agent-chat-panel) {
+    overflow: hidden;
+  }
+  .fleet-detail-columns:has(.fleet-agent-chat-panel) .fleet-detail-body {
+    height: 100%;
+    flex: 1;
+    overflow: hidden;
+    padding: 0;
+  }
+  .fleet-detail-columns:has(.fleet-agent-chat-panel) .fleet-detail-properties {
+    display: none;
+  }
+}
+
+/* ── Wizard + dialogs (<=768px) — UI Contract §8, 2026-07-11.
+   Two shapes, picked per dialog, never mixed (contract rule: "pick one
+   shape per dialog; don't mix a sheet's silhouette with a dialog's
+   footer"):
+     - The wizard is substantial (4 steps, "steps navigable" in the spec)
+       → full-screen sheet, fixed height so a short step (Placement, 3
+       options) doesn't read as "mostly empty backdrop" — the CTA row
+       still pins to the sheet's own true bottom edge either way, but a
+       fixed (not content-hugging) sheet height keeps that edge in a
+       consistent place step to step.
+     - New-project and the channel-connect banner are one screen each (a
+       name field; a token field) → centered floating dialog, full width
+       within a comfortable margin, rounded on all four corners. Forcing
+       these into a sheet shell left a tall dead gap of backdrop above a
+       small card — the exact failure mode this section exists to name. */
+@media (max-width: 768px) {
+  .fleet-detail-backdrop {
+    align-items: center;
+    padding: 20px;
+  }
+  .fleet-detail-backdrop:has(.fleet-wizard) {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .fleet-wizard {
+    width: 100%;
+    max-width: 100%;
+    height: 88dvh;
+    border-radius: 16px 16px 0 0;
+  }
+  .fleet-small-dialog,
+  .fleet-channel-banner {
+    width: 100%;
+    max-width: 100%;
+    max-height: 90vh;
+    border-radius: 16px;
+  }
+
+  /* CTA row pinned flush to the sheet's bottom edge (no dead margin below
+     it), primary action expands to carry the row — "full width, not a
+     small button pair floating mid-card" — while Back/Cancel stays
+     compact next to it. The header's own × already covers "cancel" on
+     step 1, so the footer's job on mobile is really just Back + the
+     primary action. */
+  .fleet-wizard-footer {
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  .fleet-wizard-footer .fleet-btn--accent {
+    flex: 1;
+  }
+}
+
+/* ── Inbox: master-detail → list, then push-in detail (<=768px) — Truth Map
+   mobile pass, 2026-07-11. .fleet-content--split lays list+detail out as a
+   fixed-30%-plus-320px-floor row with no wrap — the worst offender the
+   architecture survey found (rail alone already exceeded 390px before this
+   row's own floor). Both panes stay in the DOM at every width (desktop
+   never reflows); .fleet-inbox--detail-open (inbox/page.tsx's
+   mobileDetailOpen state, set only by an explicit row tap — never by the
+   page's own auto-select-first-item effect) toggles which one is visible. */
+.fleet-inbox-back {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .fleet-inbox-list,
+  .fleet-inbox-detail {
+    width: 100%;
+    flex: none;
+    min-width: 0;
+  }
+  .fleet-inbox-detail {
+    display: none;
+    padding: 16px;
+  }
+  .fleet-inbox--detail-open .fleet-inbox-list {
+    display: none;
+  }
+  .fleet-inbox--detail-open .fleet-inbox-detail {
+    display: block;
+  }
+  .fleet-inbox-row {
+    min-height: 44px;
+  }
+  .fleet-inbox-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 44px;
+    margin: -8px 0 4px -8px;
+    padding: 0 10px 0 6px;
+    border: none;
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .fleet-inbox-back:hover {
+    background: var(--rail-active);
+    color: var(--text-primary);
+  }
+}
