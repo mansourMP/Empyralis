@@ -1,3 +1,4 @@
+import os
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -238,8 +239,23 @@ async def _validate_and_apply_pilot_invite(code: Optional[str]) -> Optional[str]
     return str(result.get("plan_id") or "pilot").strip()
 
 
+def _validate_platform_invite_code(code: Optional[str]) -> None:
+    """EMPYRALIS_INVITE_CODE gate: set -> signup requires this exact code; unset ->
+    open signup (no-op). A single static shared secret, deliberately simpler than
+    the DB-backed pilot_invite system above — this is a blunt "not open yet" gate,
+    not a per-use/per-plan invite mechanism. 403, not 404: auth-client.ts's
+    authFailureMessage() hardcodes a generic override for 404 that would swallow
+    the honest "invite-only" copy; 403 passes the detail text through."""
+    required_code = str(os.environ.get("EMPYRALIS_INVITE_CODE") or "").strip()
+    if not required_code:
+        return
+    if str(code or "").strip() != required_code:
+        raise HTTPException(status_code=403, detail="Empyralis is invite-only right now.")
+
+
 @router.post("/auth/register", dependencies=[Depends(limit_public_requests), Depends(ensure_public_registration_enabled)])
 async def register(body: AuthRegisterRequest, request: Request, response: Response):
+    _validate_platform_invite_code(body.invite_code)
     pilot_plan_id = await _validate_and_apply_pilot_invite(body.pilot_invite_code)
     payload = register_user(
         body.email,

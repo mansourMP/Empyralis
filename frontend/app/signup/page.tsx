@@ -40,6 +40,9 @@ function authErrorCopy(error: string): string {
   if (normalized.includes('already') || normalized.includes('exists')) {
     return 'That email is already registered. Log in or use another email.';
   }
+  if (normalized.includes('invite')) {
+    return 'Empyralis is invite-only right now. Enter your invite code, or ask whoever invited you for one.';
+  }
   if (normalized.includes('status 401')) {
     return 'Email or password was not accepted.';
   }
@@ -84,7 +87,9 @@ export default function SignupPage() {
   const [providers, setProviders] = useState<AuthProviderOptions>({
     email: { enabled: true },
     google: { enabled: true },
+    invite_required: false,
   });
+  const [inviteCode, setInviteCode] = useState('');
   const [channelAttribution, setChannelAttribution] = useState('');
   const [agent, setAgent] = useState('');
   const [source, setSource] = useState('');
@@ -133,12 +138,14 @@ export default function SignupPage() {
         setProviders({
           email: { enabled: payload?.email?.enabled !== false },
           google: { enabled: payload?.google?.enabled === true },
+          invite_required: payload?.invite_required === true,
         });
       })
       .catch(() => {
         setProviders({
           email: { enabled: true },
           google: { enabled: true },
+          invite_required: false,
         });
       });
   }, []);
@@ -180,7 +187,7 @@ export default function SignupPage() {
     setSubmitting(true);
     setError(null);
     try {
-      await signup(email, password, name || undefined, pilotCode || undefined);
+      await signup(email, password, name || undefined, pilotCode || undefined, inviteCode || undefined);
       await awaitBrowserAuthReady({ attempts: 12, delayMs: 250 });
       window.location.replace('/');
     } catch (nextError) {
@@ -298,6 +305,24 @@ export default function SignupPage() {
               />
             </span>
           </label>
+          {providers.invite_required ? (
+            <label className="app-auth-field">
+              <span className="app-auth-field__label">Invite code</span>
+              <span className="app-auth-input-shell">
+                <Lock className="app-auth-input-shell__icon" size={16} aria-hidden="true" />
+                <AppInput
+                  autoComplete="off"
+                  name="invite_code"
+                  required
+                  value={inviteCode}
+                  className="app-auth-input"
+                  placeholder="Enter your invite code"
+                  onChange={(event) => setInviteCode(event.target.value)}
+                />
+              </span>
+              <span className="app-auth-provider-note">Empyralis is invite-only right now.</span>
+            </label>
+          ) : null}
           {error ? <AuthErrorNotice title="Couldn’t create the account" message={error} /> : null}
           <AppButton type="submit" disabled={submitting} className="app-auth-submit">
             <span>{submitting ? 'Creating account…' : 'Create account'}</span>

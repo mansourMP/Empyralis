@@ -1,0 +1,51 @@
+# Empyralis backend (FastAPI/uvicorn).
+#
+# Reconciled against the actual running VPS 2026-07-10 (Truth Map deploy-prep
+# pass). This process is currently kept alive by `pm2` running as root — no
+# systemd unit for it exists on the box at all (the two that do,
+# empyralis-api.service / empyralis-bot.service, are leftover from an
+# abandoned "v2" rewrite: inactive, pointing at a different checkout layout
+# under /opt/empyralis with `python -m server.api`/`server.bot`, not what's
+# actually running). This unit replaces the ad-hoc pm2 invocation with a real,
+# version-controlled one — same command pm2 was already running
+# (`uvicorn server:app --host 0.0.0.0 --port 8001`), plus User=empyralis
+# instead of root.
+#
+# Recommended, not yet applied to the live box — see docs/DEPLOY-RUNBOOK.md.
+# Swapping pm2 -> systemd and root -> empyralis is a real behavior change to
+# a live process; do it deliberately (stop pm2's process first, confirm the
+# empyralis user can actually read the checkout + write .empyralis/state,
+# THEN start this unit), not as a blind file copy.
+#
+# --proxy-headers/--forwarded-allow-ips added on top of pm2's original
+# command: server_modules/auth.py's cookie Secure flag falls back to
+# checking the request's own scheme when the resolved environment isn't
+# recognized as production (_cookie_secure() -> _environment_is_production()
+# OR request scheme == https) — without this flag uvicorn never sees past
+# nginx's plain-HTTP-to-127.0.0.1 hop, so that fallback silently can't see
+# HTTPS either. EMPYRALIS_DEPLOY_ENV=production (see docs/DEPLOY-RUNBOOK.md)
+# is the primary fix — this is defense-in-depth for the same gap.
+#
+# Install: copy to /etc/systemd/system/empyralis-backend.service,
+# `systemctl daemon-reload`, `systemctl enable --now empyralis-backend`.
+
+[Unit]
+Description=Empyralis Backend (FastAPI/uvicorn)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=empyralis
+Group=empyralis
+WorkingDirectory=/opt/empyralis-app
+EnvironmentFile=/opt/empyralis-app/.env
+ExecStart=/opt/empyralis-app/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 8001 --timeout-keep-alive 30 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=empyralis-backend
+
+[Install]
+WantedBy=multi-user.target

@@ -28,6 +28,9 @@ LOCAL_OR_SUBSCRIPTION_PROVIDERS = {"ollama", "openai-codex", "claude_code_cli"}
 PLATFORM_CREDIT_MODEL_ALLOWLIST = {
     ("deepseek", "deepseek-chat"),
     ("deepseek", "deepseek-v4-pro"),
+    # Default platform-credits model for new fleet specialists as of this
+    # session (deny-a-successful-tool rate: deepseek-chat 5/5, reasoner 1/5).
+    ("deepseek", "deepseek-reasoner"),
 }
 
 
@@ -249,7 +252,8 @@ def assert_model_route_policy(
                 raise ValueError(f"{provider_id} is BYOK/workspace-key only and cannot use Empyralis credits.")
             if (provider_id, model_id) not in PLATFORM_CREDIT_MODEL_ALLOWLIST:
                 raise ValueError(
-                    "Empyralis credits only support Light (DeepSeek Chat) and Pro (DeepSeek V4 Pro)."
+                    "Empyralis credits only support Light (DeepSeek Chat), Pro (DeepSeek V4 Pro), "
+                    "and DeepSeek Reasoner."
                 )
             if not policy.get("platform_paid_allowed"):
                 raise ValueError(f"Model '{provider_id}:{model_id}' is not approved for Empyralis credits.")

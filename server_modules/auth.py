@@ -410,13 +410,16 @@ def validate_csrf(request: Request, *, allow_expired_session: bool = False) -> b
     return True
 
 
-def auth_provider_options() -> dict[str, dict[str, bool]]:
+def auth_provider_options() -> dict[str, Any]:
     google_enabled = bool(_configured_provider_audiences("google"))
     apple_enabled = bool(_configured_provider_audiences("apple"))
     return {
         "email": {"enabled": True},
         "google": {"enabled": google_enabled},
         "apple": {"enabled": apple_enabled},
+        # Lets the signup form show/require the invite-code field before the
+        # user even submits, instead of only learning via a 403 on submit.
+        "invite_required": bool(str(os.getenv("EMPYRALIS_INVITE_CODE") or "").strip()),
     }
 
 

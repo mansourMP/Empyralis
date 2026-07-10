@@ -137,11 +137,20 @@ def seed_operator_metadata() -> Dict[str, Any]:
 
 
 def seed_specialist_metadata() -> Dict[str, Any]:
-    """Return the install_metadata for a new specialist."""
+    """Return the install_metadata for a new specialist.
+
+    model is explicit here (not left for the runtime's own deepseek-chat
+    fallback in resolve_requested_model()) specifically so that changing the
+    default only affects NEW agents — an agent created before this default
+    changed keeps an empty model_config and keeps falling through to
+    whatever the runtime fallback was at the time, untouched. Deny-a-
+    successful-tool rate empirically measured this session: deepseek-chat
+    5/5, deepseek-reasoner 1/5 (guard stays on regardless either way).
+    """
     return {
         "role": SPECIALIST_ROLE,
         "subagents_enabled": False,
-        "model_config": {"mode": "platform_credits"},
+        "model_config": {"mode": "platform_credits", "model": "deepseek-reasoner"},
     }
 
 

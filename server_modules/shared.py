@@ -16,10 +16,21 @@ async def app_lifespan(_: Any):
             from server_modules import sage_telegram_hosted_service as _hosted
             import os as _os
             _base_url = _os.getenv("EMPYRALIS_BASE_URL", "http://127.0.0.1:8001")
-            _is_local = any(h in _base_url for h in ('127.0.0.1', 'localhost', '0.0.0.0', '::1'))
-            _deploy_env = _os.getenv("EMPYRALIS_DEPLOY_ENV", _os.getenv("NODE_ENV", "")).lower()
-            _is_prod = _deploy_env in ('production', 'prod', 'staging')
-            if (_is_local or not _is_prod) and _hosted.is_configured():
+            _is_local_url = any(h in _base_url for h in ('127.0.0.1', 'localhost', '0.0.0.0', '::1'))
+            # Same fallback chain as auth._resolved_environment(). An allowlist of
+            # known dev-like values (not a blocklist of known-prod ones) so any
+            # unrecognized deploy env — e.g. "self-hosted", used by the main VPS —
+            # defaults to "not dev". This path deletes the production webhook
+            # before polling starts, so misclassifying prod as dev is destructive.
+            _deploy_env = (
+                _os.getenv("EMPYRALIS_DEPLOY_ENV")
+                or _os.getenv("ORION_ENV")
+                or _os.getenv("ENV")
+                or _os.getenv("NODE_ENV")
+                or ""
+            ).strip().lower()
+            _is_dev_env = _deploy_env in ("", "dev", "development", "local", "test")
+            if (_is_local_url or _is_dev_env) and _hosted.is_configured():
                 import logging as _logging
                 _log = _logging.getLogger("server_modules.sage_telegram_hosted_service")
                 _log.info("Sage Telegram hosted: local dev detected, starting background polling")

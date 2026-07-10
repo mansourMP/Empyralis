@@ -1,0 +1,48 @@
+# Empyralis frontend (Next.js production server).
+#
+# Reconciled against the actual running VPS 2026-07-10 (Truth Map deploy-prep
+# pass), with two changes on top of what's live today:
+#
+# 1. User=empyralis instead of root. The live process currently runs as root
+#    despite a dedicated `empyralis` service user already existing on the box
+#    (it owns the backend's .env). Recommended hardening, not yet applied —
+#    see docs/DEPLOY-RUNBOOK.md before switching the live unit, since the
+#    checkout's file ownership needs to allow the empyralis user to read
+#    what npm start needs (.next/, node_modules/; no writes expected at
+#    runtime for `next start` against an already-built .next/).
+#
+# 2. EMPYRALIS_API_URL is now set explicitly here. The live box currently
+#    only proxies /api/* correctly because of an untracked frontend/.env.local
+#    (or .env.production) file sitting on disk — nothing in this repo's
+#    deploy/ provisioned or documented it. A fresh checkout without that file
+#    would boot with no configured backend URL and every /api/* call would
+#    fail (frontend/lib/server/control-plane-base-url.ts throws when none of
+#    EMPYRALIS_API_URL/ORION_API_URL/NEXT_PUBLIC_ORION_API_URL/
+#    NEXT_PUBLIC_API_URL are set and the request isn't already same-origin).
+#    Setting it here makes the unit self-contained instead of depending on a
+#    file surviving redeploys.
+#
+# Install: copy to /etc/systemd/system/empyralis-frontend.service,
+# `systemctl daemon-reload`, `systemctl enable --now empyralis-frontend`.
+
+[Unit]
+Description=Empyralis Frontend (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+User=empyralis
+Group=empyralis
+WorkingDirectory=/opt/empyralis-app/frontend
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=EMPYRALIS_API_URL=http://127.0.0.1:8001
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=empyralis-frontend
+
+[Install]
+WantedBy=multi-user.target

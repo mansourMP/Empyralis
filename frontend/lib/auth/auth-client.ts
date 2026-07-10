@@ -27,6 +27,7 @@ type ExternalAuthCompletionRecord = {
 export type AuthProviderOptions = {
   email?: { enabled?: boolean } | null;
   google?: { enabled?: boolean } | null;
+  invite_required?: boolean;
 };
 
 const EXTERNAL_AUTH_PENDING_STORAGE_KEY = 'empyralis.external-auth.pending';
@@ -272,8 +273,10 @@ export async function signup(
   password: string,
   name?: string,
   pilotInviteCode?: string,
+  inviteCode?: string,
 ): Promise<Record<string, unknown> | null> {
   const cleanPilotInviteCode = String(pilotInviteCode || '').trim();
+  const cleanInviteCode = String(inviteCode || '').trim();
   return requestAuth<Record<string, unknown> | null>('/api/auth/signup', {
     method: 'POST',
     body: {
@@ -283,6 +286,7 @@ export async function signup(
       channel: 'web',
       acquisition_token: channelAttributionToken(),
       ...(cleanPilotInviteCode ? { pilot_invite_code: cleanPilotInviteCode } : {}),
+      ...(cleanInviteCode ? { invite_code: cleanInviteCode } : {}),
     },
   });
 }
