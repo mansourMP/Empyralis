@@ -13,7 +13,8 @@ export type GatewayRequestType =
 export type GatewayEventType =
   | "gateway.hello"
   | "gateway.presence"
-  | "channel.inbound";
+  | "channel.inbound"
+  | "cli.login.output";
 
 export type GatewayFrameKind = "request" | "response" | "event";
 
@@ -132,6 +133,22 @@ export interface GatewayChannelInboundPayload {
     received_at: string;
     from_me?: boolean;
   };
+}
+
+/** cli.login.output (Build F): pushed by the Gateway, out of band from the
+ *  cli.login.start request/response, as a login session produces output or
+ *  finishes. Only ever carries a URL, a "paste code" prompt, or a final
+ *  done/ok/error — never raw CLI stdout. See llm/cli-login-session.ts's
+ *  module doc comment for why. */
+export interface GatewayCliLoginOutputPayload {
+  run_id: string;
+  runtime: "claude_code" | "codex";
+  event: "output" | "done";
+  kind?: "url" | "code_prompt";
+  text?: string;
+  ok?: boolean;
+  error?: string;
+  error_kind?: string;
 }
 
 export interface GatewayChannelOutboundPayload {

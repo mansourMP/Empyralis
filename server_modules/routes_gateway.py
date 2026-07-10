@@ -50,6 +50,7 @@ from server_modules.capability_risk_classifier_service import (
 from server_modules.runtime_common import require_api_key
 from server_modules import (
     agent_computer_profile_service,
+    cli_setup_service,
     dedicated_workstation_setup_service,
     execution_mode_policy,
     gateway_browser_service,
@@ -886,6 +887,36 @@ class GatewayToolInterruptRequest(BaseModel):
     reason: Optional[str] = None
     request_id: Optional[str] = None
     timeout_seconds: Optional[int] = Field(default=None, ge=1, le=120)
+
+
+class CliInstallRequest(BaseModel):
+    runtime: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    workspace_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    request_id: Optional[str] = None
+
+
+class CliLoginStartRequest(BaseModel):
+    runtime: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    workspace_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    request_id: Optional[str] = None
+
+
+class CliLoginInputRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    workspace_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    request_id: Optional[str] = None
+
+
+class CliLoginCancelRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    request_id: Optional[str] = None
+    reason: Optional[str] = Field(default=None, max_length=200)
 
 
 _REMOTE_HARDWARE_CAPABILITY_PROBE = r'''
@@ -2400,6 +2431,133 @@ async def list_gateway_registration_events(
     items = gateway_state_repository.list_gateway_events(gateway_id, limit=limit)
     return {
         "gateway_id": gateway_id,
+        "count": len(items),
+        "items": items,
+    }
+
+
+@router.post("/gateway/registrations/{gateway_id}/cli/install")
+async def install_gateway_cli_runtime(
+    gateway_id: str,
+    body: CliInstallRequest,
+    current_user=Depends(require_api_key),
+):
+    _registration, resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        workspace_id=body.workspace_id,
+        minimum_role="member",
+    )
+    try:
+        return await cli_setup_service.install_cli_runtime(
+            gateway_id=gateway_id,
+            workspace_id=resolved_workspace_id,
+            runtime=body.runtime,
+            run_id=body.run_id,
+            trace_id=str(body.trace_id or "").strip(),
+            request_id=str(body.request_id or "").strip() or None,
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+    except cli_setup_service.CliSetupError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post("/gateway/registrations/{gateway_id}/cli/login/start")
+async def start_gateway_cli_login(
+    gateway_id: str,
+    body: CliLoginStartRequest,
+    current_user=Depends(require_api_key),
+):
+    _registration, resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        workspace_id=body.workspace_id,
+        minimum_role="member",
+    )
+    try:
+        return await cli_setup_service.start_cli_login(
+            gateway_id=gateway_id,
+            workspace_id=resolved_workspace_id,
+            runtime=body.runtime,
+            run_id=body.run_id,
+            trace_id=str(body.trace_id or "").strip(),
+            request_id=str(body.request_id or "").strip() or None,
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+    except cli_setup_service.CliSetupError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post("/gateway/registrations/{gateway_id}/cli/login/{run_id}/input")
+async def submit_gateway_cli_login_input(
+    gateway_id: str,
+    run_id: str,
+    body: CliLoginInputRequest,
+    current_user=Depends(require_api_key),
+):
+    _registration, resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        workspace_id=body.workspace_id,
+        minimum_role="member",
+    )
+    try:
+        return await cli_setup_service.submit_cli_login_input(
+            gateway_id=gateway_id,
+            workspace_id=resolved_workspace_id,
+            run_id=run_id,
+            code=body.code,
+            trace_id=str(body.trace_id or "").strip(),
+            request_id=str(body.request_id or "").strip() or None,
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+    except cli_setup_service.CliSetupError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post("/gateway/registrations/{gateway_id}/cli/login/{run_id}/cancel")
+async def cancel_gateway_cli_login(
+    gateway_id: str,
+    run_id: str,
+    body: Optional[CliLoginCancelRequest] = None,
+    current_user=Depends(require_api_key),
+):
+    payload = body or CliLoginCancelRequest()
+    _registration, resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        workspace_id=payload.workspace_id,
+        minimum_role="member",
+    )
+    try:
+        return await cli_setup_service.cancel_cli_login(
+            gateway_id=gateway_id,
+            workspace_id=resolved_workspace_id,
+            run_id=run_id,
+            trace_id=str(payload.trace_id or "").strip(),
+            request_id=str(payload.request_id or "").strip() or None,
+            reason=payload.reason,
+        )
+    except cli_setup_service.CliSetupError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/gateway/registrations/{gateway_id}/cli/login/{run_id}/events")
+async def list_gateway_cli_login_events(
+    gateway_id: str,
+    run_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    current_user=Depends(require_api_key),
+):
+    _registration, _resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="viewer",
+    )
+    items = cli_setup_service.list_cli_login_events(gateway_id=gateway_id, run_id=run_id, limit=limit)
+    return {
+        "gateway_id": gateway_id,
+        "run_id": run_id,
         "count": len(items),
         "items": items,
     }

@@ -14,6 +14,7 @@ import { encodeFrame, decodeFrame, SUPPORTED_PROTOCOL_VERSIONS } from "../protoc
 import type {
   GatewayChannelInboundPayload,
   GatewayChannelOutboundPayload,
+  GatewayCliLoginOutputPayload,
   GatewayEventEnvelope,
   GatewayRegistrationPayload,
   GatewayRequestEnvelope,
@@ -446,8 +447,8 @@ export class GatewayWsClient {
   }
 
   async publishEvent(
-    type: "channel.inbound",
-    payload: GatewayChannelInboundPayload | Record<string, unknown>,
+    type: "channel.inbound" | "cli.login.output",
+    payload: GatewayChannelInboundPayload | GatewayCliLoginOutputPayload | Record<string, unknown>,
   ): Promise<void> {
     if (!this.activeScope) {
       await this.journal.append("outbound", type, {

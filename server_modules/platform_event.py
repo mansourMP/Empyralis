@@ -536,6 +536,129 @@ CLI_SUBSCRIPTION_CRASH = PlatformEvent(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# cli_setup (BYO-brain install + sign-in) — the one-click install and the
+# device-code sign-in handshake for a box operator's OWN Claude Code / Codex
+# subscription on their paired Gateway. Distinct from cli_subscription above:
+# these fire from the setup/onboarding flow (install, start login, submit a
+# pasted-back code), not from a generation turn. The Gateway never reads or
+# transmits the credential itself — see cli-login-session.ts.
+# ═══════════════════════════════════════════════════════════════════════════
+
+CLI_SETUP_GATEWAY_OFFLINE = PlatformEvent(
+    code="cli_setup_gateway_offline",
+    title="Gateway offline",
+    detail="This Gateway is offline, so install/sign-in cannot run. Start the Gateway on the paired machine and retry.",
+    channel_text="the Gateway is offline. Start it on the paired machine and retry.",
+    severity="warning",
+)
+
+CLI_SETUP_NOT_ENABLED_LOCALLY = PlatformEvent(
+    code="cli_setup_not_enabled_locally",
+    title="Install/sign-in not enabled on this Gateway",
+    detail="The box operator hasn't enabled CLI install/sign-in on this Gateway yet. Set EMPYRALIS_GATEWAY_CLI_SETUP_ENABLED=true on that machine and restart the Gateway.",
+    channel_text="CLI install/sign-in isn't enabled on this Gateway yet. The box operator needs to turn it on there first.",
+    severity="warning",
+)
+
+CLI_SETUP_INSTALL_NPM_MISSING = PlatformEvent(
+    code="cli_setup_install_npm_missing",
+    title="npm not found",
+    detail="npm was not found on the Gateway's PATH, so the CLI could not be installed. Install Node.js/npm on that machine and retry.",
+    channel_text="npm isn't on the Gateway's PATH, so nothing could be installed. Install Node.js on that machine and retry.",
+    severity="error",
+)
+
+CLI_SETUP_INSTALL_PERMISSION_DENIED = PlatformEvent(
+    code="cli_setup_install_permission_denied",
+    title="Install permission denied",
+    detail="npm did not have permission to install globally on the Gateway. Fix npm's global prefix permissions on that machine and retry.",
+    channel_text="the install failed with a permission error. Fix npm's global install permissions on the Gateway and retry.",
+    severity="error",
+)
+
+CLI_SETUP_INSTALL_NETWORK_ERROR = PlatformEvent(
+    code="cli_setup_install_network_error",
+    title="Install failed — network error",
+    detail="The Gateway could not reach the npm registry to install the CLI. Check that machine's network connection and retry.",
+    channel_text="the install failed — the Gateway couldn't reach the npm registry. Check its network connection and retry.",
+    severity="error",
+)
+
+CLI_SETUP_INSTALL_TIMEOUT = PlatformEvent(
+    code="cli_setup_install_timeout",
+    title="Install timed out",
+    detail="The install did not finish in time and was stopped. The Gateway's network or npm registry may be slow. Retry.",
+    channel_text="the install timed out and was stopped. Retry — the Gateway's connection or the npm registry may be slow right now.",
+    severity="warning",
+)
+
+CLI_SETUP_CLAUDE_INSTALL_FAILED = PlatformEvent(
+    code="cli_setup_claude_install_failed",
+    title="Claude Code install failed",
+    detail="Installing Claude Code on the Gateway failed. Check Gateway logs for the underlying npm error.",
+    channel_text="installing Claude Code on the Gateway failed. Check Gateway logs for details.",
+    severity="error",
+)
+
+CLI_SETUP_CODEX_INSTALL_FAILED = PlatformEvent(
+    code="cli_setup_codex_install_failed",
+    title="Codex install failed",
+    detail="Installing Codex on the Gateway failed. Check Gateway logs for the underlying npm error.",
+    channel_text="installing Codex on the Gateway failed. Check Gateway logs for details.",
+    severity="error",
+)
+
+CLI_SETUP_CLAUDE_LOGIN_NOT_INSTALLED = PlatformEvent(
+    code="cli_setup_claude_login_not_installed",
+    title="Claude Code not installed",
+    detail="Claude Code is not installed on this Gateway yet. Install it first, then sign in.",
+    channel_text="Claude Code isn't installed on the Gateway yet. Install it first, then sign in.",
+    severity="error",
+)
+
+CLI_SETUP_CODEX_LOGIN_NOT_INSTALLED = PlatformEvent(
+    code="cli_setup_codex_login_not_installed",
+    title="Codex not installed",
+    detail="Codex is not installed on this Gateway yet. Install it first, then sign in.",
+    channel_text="Codex isn't installed on the Gateway yet. Install it first, then sign in.",
+    severity="error",
+)
+
+CLI_SETUP_LOGIN_TIMEOUT = PlatformEvent(
+    code="cli_setup_login_timeout",
+    title="Sign-in timed out",
+    detail="Sign-in was not completed in time and the session was closed. Start sign-in again and approve it promptly in your browser.",
+    channel_text="sign-in timed out and was closed. Start sign-in again and approve it promptly in your browser.",
+    severity="warning",
+)
+
+CLI_SETUP_CLAUDE_LOGIN_FAILED = PlatformEvent(
+    code="cli_setup_claude_login_failed",
+    title="Claude Code sign-in failed",
+    detail="The Claude Code sign-in session on the Gateway exited unexpectedly. Check Gateway logs and retry.",
+    channel_text="Claude Code sign-in on the Gateway failed unexpectedly. Check Gateway logs and retry.",
+    severity="error",
+)
+
+CLI_SETUP_CODEX_LOGIN_FAILED = PlatformEvent(
+    code="cli_setup_codex_login_failed",
+    title="Codex sign-in failed",
+    detail="The Codex sign-in session on the Gateway exited unexpectedly. Check Gateway logs and retry.",
+    channel_text="Codex sign-in on the Gateway failed unexpectedly. Check Gateway logs and retry.",
+    severity="error",
+)
+
+CLI_SETUP_LOGIN_CANCELLED = PlatformEvent(
+    code="cli_setup_login_cancelled",
+    title="Sign-in cancelled",
+    detail="The sign-in session was cancelled before it completed.",
+    channel_text="sign-in was cancelled before it completed.",
+    severity="info",
+    status="cancelled",
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Guaranteed fallback
 # ═══════════════════════════════════════════════════════════════════════════
 
