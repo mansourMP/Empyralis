@@ -1,13 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import { Cpu, Server, Terminal, X } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
+import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
+import { connectionPresentation } from "@/lib/workspace/fleet/gateway-box-picker";
 import {
   CLOUD_VPS_PROVIDERS,
   CLOUD_VPS_PROVIDER_IDS,
@@ -28,94 +30,9 @@ type Registration = {
   hardware_label?: string;
 };
 
-/** Click-to-rename a paired box's nickname. gatewayLabel() (used everywhere
- *  this registration is displayed — the Hardware tab's "Running on" header,
- *  box pickers, etc.) already prefers display_name over the derived
- *  "Provider · Region" label, so setting it here is the whole fix. */
-function HardwareRenameField({
-  gatewayId,
-  displayName,
-  onRenamed,
-}: {
-  gatewayId: string;
-  displayName: string;
-  onRenamed: (next: string) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(displayName);
-  const [saving, setSaving] = useState(false);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    if (!editing) setDraft(displayName);
-  }, [displayName, editing]);
-
-  useEffect(() => {
-    if (editing) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [editing]);
-
-  async function commit() {
-    if (saving) return;
-    const next = draft.trim();
-    if (!next || next === displayName) {
-      setDraft(displayName);
-      setEditing(false);
-      return;
-    }
-    setSaving(true);
-    try {
-      const res = await fetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/rename`, {
-        method: "POST",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ display_name: next }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setEditing(false);
-      onRenamed(next);
-    } catch {
-      setDraft(displayName); // roll back — the row still shows the last-saved name
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (editing) {
-    return (
-      <input
-        ref={inputRef}
-        className="fleet-list-row-title-input"
-        value={draft}
-        disabled={saving}
-        maxLength={80}
-        onChange={(e) => setDraft(e.currentTarget.value)}
-        onClick={(e) => e.stopPropagation()}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") { e.preventDefault(); commit(); }
-          if (e.key === "Escape") { setDraft(displayName); setEditing(false); }
-        }}
-      />
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      className="fleet-list-row-title-edit"
-      title="Rename this computer"
-      onClick={(e) => { e.stopPropagation(); setEditing(true); }}
-    >
-      {displayName}
-    </button>
-  );
-}
-
 export default function HardwarePage() {
   const params = useParams();
+  const router = useRouter();
   const workspaceId = String(params?.workspaceId || "");
   const [regs, setRegs] = useState<Registration[]>([]);
   const [loading, setLoading] = useState(true);
@@ -153,11 +70,6 @@ export default function HardwarePage() {
       cancelled = true;
     };
   }, [loadRegistrations]);
-
-  const isOnline = (r: Registration) => {
-    const s = `${r.connection_status || ""} ${r.status || ""}`.toLowerCase();
-    return s.includes("online") || s.includes("active") || s.includes("connected");
-  };
 
   const openProviderPanel = (providerId: VpsProviderId) => {
     setVpsInitialProvider(providerId);
@@ -197,9 +109,23 @@ export default function HardwarePage() {
   const renderRow = (r: Registration) => {
     const gatewayId = String(r.gateway_id || r.id || "");
     const isCloud = r.hardware_kind === "cloud_vps";
-    const online = isOnline(r);
+    const presentation = connectionPresentation(r);
+    const detailHref = `/w/${encodeURIComponent(workspaceId)}/hardware/${encodeURIComponent(gatewayId)}`;
     return (
-      <div key={gatewayId} className="fleet-list-row" style={{ cursor: "default" }}>
+      <div
+        key={gatewayId}
+        className="fleet-list-row"
+        style={{ cursor: "pointer" }}
+        role="link"
+        tabIndex={0}
+        onClick={() => router.push(detailHref)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            router.push(detailHref);
+          }
+        }}
+      >
         <TintTile tint={isCloud ? "blue" : "teal"}>
           {isCloud ? <Server size={15} strokeWidth={1.75} /> : <Cpu size={15} strokeWidth={1.75} />}
         </TintTile>
@@ -219,12 +145,15 @@ export default function HardwarePage() {
           </span>
         </span>
         <span className="fleet-list-row-meta" style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
-          <StatusChip tone={online ? "online" : "offline"} label={online ? "Online" : "Offline"} />
+          <StatusChip tone={presentation.tone} label={presentation.label} />
           <button
             type="button"
             className="fleet-list-row-remove"
             disabled={removingId === gatewayId}
-            onClick={() => void handleRemove(gatewayId)}
+            onClick={(e) => {
+              e.stopPropagation();
+              void handleRemove(gatewayId);
+            }}
             aria-label={`Remove ${r.display_name || r.hardware_label || "computer"}`}
           >
             {removingId === gatewayId ? "…" : <X size={14} strokeWidth={1.75} />}
@@ -236,7 +165,12 @@ export default function HardwarePage() {
 
   return (
     <main className="fleet-content">
-      {/* A box row already says everything — no right panel on Hardware (contract). */}
+      {/* Each box row opens its own machine-detail ROUTE (hardware/[gatewayId]),
+          matching the Projects list -> project-detail pattern — a deliberate
+          departure from this list's earlier "a box row already says
+          everything, no right panel" note. That note ruled out a side PANEL
+          on this page; a dedicated detail page is a different shape, not a
+          reversal of it. */}
       <div className="fleet-detail-section-title">Connect a cloud server</div>
           <div className="fleet-provider-grid">
             {CLOUD_VPS_PROVIDER_IDS.map((providerId) => {

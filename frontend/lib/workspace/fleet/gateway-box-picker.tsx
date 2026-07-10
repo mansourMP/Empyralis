@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
+
+import type { AgentStatusTone } from "./fleet-presentation";
 
 /** Per-box AI-runtime detection (BYO-brain Phase 1), surfaced so users don't
  *  pick a box that can't run the brain. */
@@ -11,6 +14,20 @@ export type LlmRuntimeSummary = {
   local_model_ready?: boolean;
 };
 
+/** One entry from the Gateway's heartbeat capability inventory — Postgres,
+ *  Docker, Ollama, the two CLIs, GPU, etc. (empyralis-gateway/src/health/
+ *  service-inventory.ts). Same raw list the machine detail view renders as
+ *  a capabilities grid. */
+export type ServiceInventoryItem = {
+  id?: string;
+  label?: string;
+  kind?: string;
+  status?: string;
+  detected?: boolean;
+  summary?: string;
+  last_checked_at?: string;
+};
+
 /** A paired Gateway box (subset of /api/gateway/registrations items). */
 export type FleetGateway = {
   gateway_id?: string;
@@ -18,9 +35,19 @@ export type FleetGateway = {
   display_name?: string | null;
   platform?: string | null;
   hardware_label?: string | null;
+  hardware_kind?: string | null;
+  hardware_provider?: string | null;
+  hardware_region?: string | null;
   status?: string | null;
   connection_status?: string | null;
+  heartbeat_age_seconds?: number | null;
+  last_heartbeat_at?: string | null;
+  last_seen_at?: string | null;
+  created_at?: string | null;
+  runtime_access_mode?: string | null;
+  runtime_access_label?: string | null;
   llm_runtimes?: LlmRuntimeSummary | null;
+  metadata?: { service_inventory?: ServiceInventoryItem[] } & Record<string, unknown>;
 };
 
 /** Whether this box has a local model runtime (Ollama) ready to serve turns. */
@@ -46,11 +73,44 @@ export function gatewayIsOnline(g: FleetGateway): boolean {
   return `${g.connection_status || ""} ${g.status || ""}`.toLowerCase().includes("online");
 }
 
+/** The honest 3-way signal for a subscription CLI on a box. `.detected` alone
+ *  (the field every caller used to read) is true the moment the binary is
+ *  found on PATH, regardless of login state — it cannot tell "installed but
+ *  not signed in" apart from "ready". `.status` alone can't either: the
+ *  Gateway probe reports "degraded" for BOTH "not installed" and "installed,
+ *  not authenticated" (service-inventory.ts's probeClaudeCli/probeCodexCli).
+ *  `.installed` is the one field that disambiguates, so it goes first. */
+export type RuntimeState = "ready" | "unauthenticated" | "missing";
+
+export function gatewayRuntimeState(g: FleetGateway, runtime: "claude_code" | "codex"): RuntimeState {
+  const entry = g.llm_runtimes?.[runtime];
+  if (!entry || entry.installed === false) return "missing";
+  if (entry.authenticated || entry.status === "ready") return "ready";
+  return "unauthenticated";
+}
+
+const RUNTIME_STATE_LABEL: Record<RuntimeState, string> = {
+  ready: "Ready",
+  unauthenticated: "Installed, not signed in",
+  missing: "Not installed",
+};
+
+/** The one label string for this state — every surface (box picker, machine
+ *  detail view) renders the same three words for the same state, per the
+ *  UI contract's "concept renders identically" rule. */
+export function runtimeStateLabel(state: RuntimeState): string {
+  return RUNTIME_STATE_LABEL[state];
+}
+
+export function runtimeStateTone(state: RuntimeState): AgentStatusTone {
+  return state === "ready" ? "ready" : state === "unauthenticated" ? "degraded" : "unknown";
+}
+
 /** Whether this box has the given subscription CLI installed + authenticated
- *  (BYO-brain readiness, same shape as gatewayLocalModelReady's Ollama check
- *  but for claude_code/codex). */
+ *  — collapses gatewayRuntimeState to the fully-"ready" case, for the one
+ *  caller (cliSubscriptionHint) that only needs a yes/no. */
 export function gatewayRuntimeReady(g: FleetGateway, runtime: "claude_code" | "codex"): boolean {
-  return Boolean(g.llm_runtimes?.[runtime]?.detected);
+  return gatewayRuntimeState(g, runtime) === "ready";
 }
 
 export type HardwarePlacementTone = "cloud" | "online" | "offline" | "degraded" | "unpaired";
@@ -62,6 +122,24 @@ function connectionTone(g: FleetGateway): HardwarePlacementTone {
   if (raw === "online") return "online";
   if (raw === "degraded" || raw === "reconnecting") return "degraded";
   return "offline";
+}
+
+/** The one place a box's live reachability becomes a StatusChip tone+label —
+ *  the Hardware list and the machine detail page both call this instead of
+ *  each reading connection_status their own way, so the same box never
+ *  reads "Online" in one place and something else in the other. Reads
+ *  connection_status (the real, server-computed WSS/heartbeat state) with
+ *  exact-match comparisons only — never a substring match against a
+ *  registration's own lifecycle `status` field, which is what previously let
+ *  a freshly-registered, session-less box read "Online" off the word
+ *  "active". */
+export function connectionPresentation(g: FleetGateway): { tone: AgentStatusTone; label: string } {
+  const raw = `${g.connection_status || g.status || ""}`.toLowerCase();
+  if (raw === "online") return { tone: "online", label: "Online" };
+  if (raw === "degraded") return { tone: "degraded", label: "Degraded" };
+  if (raw === "reconnecting") return { tone: "degraded", label: "Reconnecting" };
+  if (raw === "revoked") return { tone: "error", label: "Revoked" };
+  return { tone: "offline", label: "Offline" };
 }
 
 /** Real placement + live health for "Running on: …" — built ONLY from
@@ -87,15 +165,24 @@ export function resolveHardwarePlacement(
 }
 
 /** Fetches the workspace's paired Gateway boxes — the same endpoint the
- *  Hardware page uses. Read-only; safe to call from any tab. */
+ *  Hardware page uses. Read-only; safe to call from any tab.
+ *  `refresh` is exposed (not just an internal effect) so callers that need
+ *  to re-check a specific box after an action — the machine detail page's
+ *  verify loop chief among them — reuse this one fetch instead of a second
+ *  implementation. `refresh({ silent: true })` skips the loading flag, for
+ *  a background poll that shouldn't flicker a skeleton every tick. A
+ *  request-id ref (not a plain `cancelled` bool) makes "latest call wins" —
+ *  correct whether a fast workspaceId change or an overlapping poll causes
+ *  the race, not just unmount. */
 export function useWorkspaceGateways(workspaceId: string) {
   const [gateways, setGateways] = useState<FleetGateway[]>([]);
   const [loading, setLoading] = useState(true);
+  const requestIdRef = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
+  const refresh = useCallback(
+    async (opts?: { silent?: boolean }): Promise<FleetGateway[]> => {
+      const requestId = ++requestIdRef.current;
+      if (!opts?.silent) setLoading(true);
       try {
         const res = await fetch(
           `/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`,
@@ -103,22 +190,27 @@ export function useWorkspaceGateways(workspaceId: string) {
         );
         const data = res.ok ? await res.json() : {};
         const list = data?.items || data?.registrations || (Array.isArray(data) ? data : []);
-        if (!cancelled) setGateways(Array.isArray(list) ? list : []);
+        const next: FleetGateway[] = Array.isArray(list) ? list : [];
+        if (requestIdRef.current === requestId) setGateways(next);
+        return next;
       } catch {
-        if (!cancelled) setGateways([]);
+        if (requestIdRef.current === requestId) setGateways([]);
+        return [];
       } finally {
-        if (!cancelled) setLoading(false);
+        if (requestIdRef.current === requestId && !opts?.silent) setLoading(false);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId]);
+    },
+    [workspaceId],
+  );
 
-  return { gateways, loading };
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { gateways, loading, refresh };
 }
 
-const RUNTIME_LABELS: Record<"claude_code" | "codex", string> = {
+export const RUNTIME_LABELS: Record<"claude_code" | "codex", string> = {
   claude_code: "Claude Code",
   codex: "Codex",
 };
@@ -151,9 +243,7 @@ export function GatewayBoxPicker({
   const selectedMissingLocalModel = Boolean(
     requireLocalModel && selected && !gatewayLocalModelReady(selected),
   );
-  const selectedMissingRuntime = Boolean(
-    requireRuntime && selected && !gatewayRuntimeReady(selected, requireRuntime),
-  );
+  const selectedRuntimeState = requireRuntime && selected ? gatewayRuntimeState(selected, requireRuntime) : null;
   const runtimeLabel = requireRuntime ? RUNTIME_LABELS[requireRuntime] : "";
 
   return (
@@ -180,7 +270,14 @@ export function GatewayBoxPicker({
               const suffix = requireLocalModel
                 ? (gatewayLocalModelReady(g) ? "· Ollama ready" : "· no local model")
                 : requireRuntime
-                ? (gatewayRuntimeReady(g, requireRuntime) ? `· ${runtimeLabel} ready` : "· not detected")
+                ? (() => {
+                    const state = gatewayRuntimeState(g, requireRuntime);
+                    return state === "ready"
+                      ? `· ${runtimeLabel} ready`
+                      : state === "unauthenticated"
+                      ? `· ${runtimeLabel} not signed in`
+                      : `· ${runtimeLabel} not installed`;
+                  })()
                 : (online ? "· online" : "· offline");
               return (
                 <option key={id} value={id}>
@@ -194,10 +291,25 @@ export function GatewayBoxPicker({
               This computer has no local model runtime detected. Install and start Ollama on it (then
               reconnect the gateway), or pick a box that shows “Ollama ready”.
             </p>
-          ) : selectedMissingRuntime ? (
+          ) : selectedRuntimeState === "missing" ? (
             <p className="fleet-channel-expand-error" style={{ margin: "6px 0 0" }}>
-              This computer doesn't have {runtimeLabel} installed and signed in. Install and authenticate{" "}
-              {runtimeLabel} there (then reconnect the gateway), or pick a box that shows “{runtimeLabel} ready”.
+              {runtimeLabel} isn't installed on this computer yet. Install it there, then come back and
+              verify — or pick a box that already shows “{runtimeLabel} ready”.{" "}
+              {selected && (
+                <Link href={`/w/${encodeURIComponent(workspaceId)}/hardware/${encodeURIComponent(gatewayId(selected))}`}>
+                  Get the install command →
+                </Link>
+              )}
+            </p>
+          ) : selectedRuntimeState === "unauthenticated" ? (
+            <p className="fleet-channel-expand-error" style={{ margin: "6px 0 0" }}>
+              {runtimeLabel} is installed on this computer but not signed in. Sign in there, then come
+              back and verify — or pick a box that already shows “{runtimeLabel} ready”.{" "}
+              {selected && (
+                <Link href={`/w/${encodeURIComponent(workspaceId)}/hardware/${encodeURIComponent(gatewayId(selected))}`}>
+                  Get the sign-in command →
+                </Link>
+              )}
             </p>
           ) : (
             <p className="fleet-channel-expand-hint">

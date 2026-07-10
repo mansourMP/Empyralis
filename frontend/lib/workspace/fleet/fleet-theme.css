@@ -1567,6 +1567,12 @@ a.fleet-breadcrumb:hover {
 .fleet-schip--error .fleet-schip-dot { background: var(--offline-dot); }
 .fleet-schip--stopped { color: var(--offline-text); }
 .fleet-schip--stopped .fleet-schip-dot { background: var(--offline-dot); }
+/* Installed-but-not-signed-in, and any other "needs your action, not broken"
+   state — reuses the same amber already wired for gateway connection health
+   (.fleet-detail-dot.is-degraded) so the two "degraded" concepts share one
+   color instead of inventing a second amber. */
+.fleet-schip--degraded { color: var(--warning-text); }
+.fleet-schip--degraded .fleet-schip-dot { background: var(--degraded-dot); }
 
 .fleet-tile {
   display: inline-flex;
