@@ -43,6 +43,21 @@ design law.
   original problem against the merged tree before considering the merge
   done.
 
+## Secrets
+
+- **Never create, edit, move, or delete `.env` files, credential files, or
+  any secret** — an OAuth client id/secret, an API key, a token, a
+  password, a signed-cookie secret, anything that authenticates rather than
+  just configures. Secrets live only in the host environment a human set
+  up — never in the repository, never written or copied by an agent, not
+  even to a gitignored path, not even as a "just for this throwaway
+  worktree" copy.
+- If running something needs a secret you don't have (a `DATABASE_URL` to
+  start a backend, a token to hit a real API), that's a signal to ask the
+  person running the session to provide it in their own shell or `.env` —
+  not to go find one in another checkout and place a copy where you're
+  working.
+
 ## Why this exists
 
 Every rule above maps to a real failure mode, not a hypothetical:
@@ -60,3 +75,9 @@ Every rule above maps to a real failure mode, not a hypothetical:
 - The "grep before merging" rule exists because a text-level clean merge
   is not the same claim as "the bug is still fixed." Verify the property
   the commit established, not just the diff's absence of `<<<<<<<` markers.
+- The "secrets" rule exists because a copied `.env` is a live credential
+  sitting in one more place than it needs to be — every additional
+  worktree, branch, or throwaway checkout holding a copy is one more place
+  a leak, an accidental commit, or a stale checkout can expose it. "It's
+  the same database anyway, no harm copying the file" is exactly the
+  reasoning that turns one well-guarded secret into five unguarded copies.
