@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
@@ -75,31 +75,120 @@ export type FleetAgentActivity = {
   created_at: string;
 };
 
-export function useFleetAgents(workspaceId: string) {
-  const [agents, setAgents] = useState<FleetAgent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+// ── Shared polling cache ─────────────────────────────────────────────────
+// useFleetAgents/useFleetProjects used to be "fetch on mount + own
+// setInterval", each hook instance independent. On a real page multiple
+// always-mounted components each hold their own instance — e.g. on the
+// Agents page, PrimaryRail + SageLauncher + FleetCommandPalette + the page
+// itself each called useFleetAgents(workspaceId) — so every 30s poll tick
+// fired 4 near-simultaneous /fleet/agents requests and 4 separate React
+// state updates/re-renders in the same JS tick. Measured live via
+// performance.getEntriesByType('resource') during the BUILD E mobile-jank
+// pass: 4x on /fleet/agents, 3x on /fleet/projects, every interval, for the
+// whole session (see docs/ui-proof/BUILD-E-MOBILE-INTERACTION-LAG-PROOF.md).
+// This registry makes every hook instance for the same cache key share one
+// underlying fetch + one interval + one cached value: the last unsubscribe
+// stops the interval, and a fetch already in flight is reused instead of
+// duplicated.
+type SharedEntry<T> = {
+  data: T;
+  loading: boolean;
+  error: string | null;
+  subscribers: Set<() => void>;
+  intervalId: ReturnType<typeof setInterval> | null;
+  inFlight: Promise<void> | null;
+};
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/w/${workspaceId}/fleet/agents`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setAgents(data.agents || []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load agents");
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceId]);
+const sharedResourceCache = new Map<string, SharedEntry<unknown>>();
+
+function sharedEntry<T>(key: string, initialValue: T): SharedEntry<T> {
+  let entry = sharedResourceCache.get(key) as SharedEntry<T> | undefined;
+  if (!entry) {
+    entry = { data: initialValue, loading: true, error: null, subscribers: new Set(), intervalId: null, inFlight: null };
+    sharedResourceCache.set(key, entry);
+  }
+  return entry;
+}
+
+function runSharedFetch<T>(entry: SharedEntry<T>, fetcher: () => Promise<T>, force: boolean): Promise<void> {
+  if (entry.inFlight && !force) return entry.inFlight;
+  entry.loading = true;
+  for (const listener of entry.subscribers) listener();
+  const promise = fetcher()
+    .then((data) => {
+      entry.data = data;
+      entry.error = null;
+    })
+    .catch((e) => {
+      entry.error = e instanceof Error ? e.message : "Failed to load";
+    })
+    .finally(() => {
+      entry.loading = false;
+      entry.inFlight = null;
+      for (const listener of entry.subscribers) listener();
+    });
+  entry.inFlight = promise;
+  return promise;
+}
+
+/** One fetch, one interval, one cache per key — shared across every
+ *  component asking for it, instead of each caller polling independently.
+ *  `key` scopes the cache (callers include the workspace id); `fetcher` may
+ *  close over fresh values each render — the latest one is always used (via
+ *  a ref) without tearing down and restarting the shared interval. */
+function useSharedPolledResource<T>(
+  key: string,
+  fetcher: () => Promise<T>,
+  intervalMs: number,
+  initialValue: T,
+): { data: T; loading: boolean; error: string | null; refresh: () => void } {
+  const entry = sharedEntry(key, initialValue);
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
+  const [, forceRender] = useState(0);
 
   useEffect(() => {
-    refresh();
-    const interval = setInterval(refresh, 30_000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+    const listener = () => forceRender((n) => n + 1);
+    entry.subscribers.add(listener);
+    if (entry.subscribers.size === 1) {
+      void runSharedFetch(entry, fetcherRef.current, false);
+      entry.intervalId = setInterval(() => void runSharedFetch(entry, fetcherRef.current, false), intervalMs);
+    }
+    return () => {
+      entry.subscribers.delete(listener);
+      if (entry.subscribers.size === 0 && entry.intervalId !== null) {
+        clearInterval(entry.intervalId);
+        entry.intervalId = null;
+      }
+    };
+    // fetcherRef always holds the latest closure, so a fetcher identity
+    // change never tears down and restarts the shared interval/subscription
+    // — that would defeat request sharing across simultaneously-mounted
+    // callers, which is the entire point of this hook.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, intervalMs]);
+
+  const refresh = useCallback(() => {
+    void runSharedFetch(entry, fetcherRef.current, true);
+  }, [entry]);
+
+  return { data: entry.data, loading: entry.loading, error: entry.error, refresh };
+}
+
+export function useFleetAgents(workspaceId: string) {
+  const fetcher = useCallback(async (): Promise<FleetAgent[]> => {
+    const res = await fetch(`/api/w/${workspaceId}/fleet/agents`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return data.agents || [];
+  }, [workspaceId]);
+
+  const { data: agents, loading, error, refresh } = useSharedPolledResource<FleetAgent[]>(
+    `fleet-agents:${workspaceId}`,
+    fetcher,
+    30_000,
+    [],
+  );
 
   return { agents, loading, error, refresh };
 }
@@ -184,30 +273,19 @@ export function useFleetWorkspace(workspaceId: string) {
 }
 
 export function useFleetProjects(workspaceId: string) {
-  const [projects, setProjects] = useState<FleetProject[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/w/${workspaceId}/fleet/projects`, { credentials: "include" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setProjects(Array.isArray(data.projects) ? data.projects : []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load projects");
-    } finally {
-      setLoading(false);
-    }
+  const fetcher = useCallback(async (): Promise<FleetProject[]> => {
+    const res = await fetch(`/api/w/${workspaceId}/fleet/projects`, { credentials: "include" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data.projects) ? data.projects : [];
   }, [workspaceId]);
 
-  useEffect(() => {
-    refresh();
-    const interval = setInterval(refresh, 60_000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+  const { data: projects, loading, error, refresh } = useSharedPolledResource<FleetProject[]>(
+    `fleet-projects:${workspaceId}`,
+    fetcher,
+    60_000,
+    [],
+  );
 
   return { projects, loading, error, refresh };
 }
