@@ -73,6 +73,8 @@ export function PrimaryRail({
   onToggleTheme,
   sections,
   onToggleSection,
+  mobileOpen = false,
+  onCloseMobile,
 }: {
   workspaceId: string;
   ownerName?: string;
@@ -84,12 +86,32 @@ export function PrimaryRail({
   onToggleTheme: () => void;
   sections?: Record<FleetSectionKey, boolean>;
   onToggleSection?: (key: FleetSectionKey) => void;
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
 }) {
   const router = useRouter();
   const pathname = usePathname() || "";
   const { projects } = useFleetProjects(workspaceId);
   const { workspace } = useFleetWorkspace(workspaceId);
   const { agents: allAgents } = useFleetAgents(workspaceId);
+
+  // The desktop icon-only rail collapse is a persisted preference that has
+  // nothing to do with the mobile drawer — forcing it off while the drawer
+  // is open means a phone visitor always sees full labels regardless of
+  // what a prior desktop session left in localStorage. Safe without a
+  // matchMedia check: mobileOpen can only ever become true via the
+  // hamburger button, which CSS hides entirely above the 768px drawer
+  // breakpoint (see fleet-theme.css), so effectiveCollapsed only differs
+  // from collapsed in exactly the narrow-viewport case that should ignore it.
+  const effectiveCollapsed = collapsed && !mobileOpen;
+
+  // Close the drawer on every navigation, regardless of which link/button
+  // triggered it (rail item, project/agent subitem, account-menu row) —
+  // cheaper and more robust than wiring onCloseMobile into each handler.
+  useEffect(() => {
+    onCloseMobile?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
 
   // Read after mount (not during render) — same localStorage-hydration
   // timing useFleetPreferences already uses, avoiding an SSR/hydration
@@ -231,13 +253,15 @@ export function PrimaryRail({
   const workspaceName = hasRealWorkspaceName ? workspace!.name : "Empyralis";
 
   return (
-    <aside className={`fleet-rail${collapsed ? " fleet-rail--collapsed" : ""}`}>
+    <aside
+      className={`fleet-rail${effectiveCollapsed ? " fleet-rail--collapsed" : ""}${mobileOpen ? " fleet-rail--mobile-open" : ""}`}
+    >
       <div className="fleet-rail-header">
         <div className="fleet-rail-workspace">
           <div className="fleet-rail-brand-mark">{(workspaceName || "E").charAt(0).toUpperCase()}</div>
-          {!collapsed && <span className="fleet-rail-workspace-name">{workspaceName}</span>}
+          {!effectiveCollapsed && <span className="fleet-rail-workspace-name">{workspaceName}</span>}
         </div>
-        {!collapsed && (
+        {!effectiveCollapsed && (
           <div className="fleet-rail-quick-actions">
             <button type="button" className="fleet-rail-search-btn" onClick={openCommandPalette}>
               <Search size={13} strokeWidth={1.75} />
@@ -265,8 +289,8 @@ export function PrimaryRail({
           const isProjects = item.key === "projects";
           const isAgents = item.key === "agents";
           const isInbox = item.key === "inbox";
-          const showProjectsSubnav = isProjects && !collapsed && projects.length > 0;
-          const showAgentsSubnav = isAgents && !collapsed && agents.length > 0;
+          const showProjectsSubnav = isProjects && !effectiveCollapsed && projects.length > 0;
+          const showAgentsSubnav = isAgents && !effectiveCollapsed && agents.length > 0;
           const expanded = isProjects ? projectsExpanded : agentsExpanded;
           const showToggle = showProjectsSubnav || showAgentsSubnav;
           return (
@@ -274,17 +298,17 @@ export function PrimaryRail({
               <div className="fleet-rail-item-row">
                 <button
                   type="button"
-                  title={collapsed ? item.label : undefined}
+                  title={effectiveCollapsed ? item.label : undefined}
                   className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
                   onClick={() => router.push(hrefFor(item.segment))}
                 >
                   <span className="fleet-rail-item-icon">
                     <Icon size={RAIL_ICON} strokeWidth={1.75} />
                   </span>
-                  {!collapsed && <span className="fleet-rail-item-label">{item.label}</span>}
-                  {!collapsed && isInbox && inboxUnreadCount > 0 ? (
+                  {!effectiveCollapsed && <span className="fleet-rail-item-label">{item.label}</span>}
+                  {!effectiveCollapsed && isInbox && inboxUnreadCount > 0 ? (
                     <span className="fleet-rail-item-count">{inboxUnreadLabel}</span>
-                  ) : !collapsed ? (
+                  ) : !effectiveCollapsed ? (
                     <kbd className="fleet-rail-item-chord">G {item.chord.toUpperCase()}</kbd>
                   ) : null}
                 </button>
@@ -356,7 +380,7 @@ export function PrimaryRail({
         </button>
         <button
           type="button"
-          className="fleet-rail-control-btn"
+          className="fleet-rail-control-btn fleet-rail-control-btn--collapse"
           onClick={onToggleCollapsed}
           title={collapsed ? "Expand" : "Collapse"}
           aria-label="Toggle rail"
@@ -365,7 +389,7 @@ export function PrimaryRail({
         </button>
       </div>
 
-      {!collapsed && (
+      {!effectiveCollapsed && (
         <div className="fleet-rail-pulse">
           {workingCount} working · {stoppedCount} stopped · {money(spendToday)} today
         </div>
@@ -376,7 +400,7 @@ export function PrimaryRail({
         ownerName={ownerName}
         ownerEmail={ownerEmail}
         ownerRole={ownerRole}
-        collapsed={collapsed}
+        collapsed={effectiveCollapsed}
       />
     </aside>
   );

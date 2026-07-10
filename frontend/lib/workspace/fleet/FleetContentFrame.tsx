@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { Menu } from "lucide-react";
 
 import { BreadcrumbLabelProvider, Breadcrumbs, HeaderActionSlotProvider } from "./Breadcrumbs";
 
@@ -26,6 +27,14 @@ export function FleetContentFrame({
       <HeaderActionSlotProvider slotEl={actionSlot}>
         <div className="fleet-shell-main">
           <header className="fleet-shell-topbar">
+            <button
+              type="button"
+              className="fleet-topbar-menu-btn"
+              onClick={() => window.dispatchEvent(new Event("fleet:toggle-mobile-nav"))}
+              aria-label="Open menu"
+            >
+              <Menu size={18} strokeWidth={1.75} />
+            </button>
             <Breadcrumbs workspaceId={workspaceId} />
             <div className="fleet-topbar-action" ref={setActionSlot} />
           </header>

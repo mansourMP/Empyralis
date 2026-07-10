@@ -52,6 +52,26 @@ export function FleetShell({
     return () => window.removeEventListener("fleet:open-sage", handler);
   }, [onOpenSage]);
 
+  // Mobile nav drawer — same event-bus pattern as fleet:open-sage above.
+  // The hamburger button lives in FleetContentFrame, several layers below
+  // FleetShellDecider; a custom event avoids threading a setter down through
+  // it just for this one narrow-viewport control.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), []);
+  useEffect(() => {
+    const toggle = () => setMobileNavOpen((v) => !v);
+    window.addEventListener("fleet:toggle-mobile-nav", toggle);
+    return () => window.removeEventListener("fleet:toggle-mobile-nav", toggle);
+  }, []);
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mobileNavOpen]);
+
   return (
     <div className="fleet-root" data-theme={theme}>
       <PrimaryRail
@@ -65,7 +85,10 @@ export function FleetShell({
         onToggleTheme={toggleTheme}
         sections={sections}
         onToggleSection={toggleSection}
+        mobileOpen={mobileNavOpen}
+        onCloseMobile={closeMobileNav}
       />
+      {mobileNavOpen && <div className="fleet-rail-scrim" onClick={closeMobileNav} />}
       <div className="fleet-shell-panel">
         <FleetShellDecider workspaceId={workspaceId} shellSlot={shellSlot}>{children}</FleetShellDecider>
       </div>
