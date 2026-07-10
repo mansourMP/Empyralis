@@ -442,7 +442,13 @@ a.fleet-breadcrumb:hover {
   margin-top: 4px;
   overflow: hidden;
   max-height: 400px;
-  transition: max-height 150ms ease-out, opacity 150ms ease-out;
+  /* opacity only — UI Contract §10 "transitions are opacity/transform only".
+     max-height WAS in this transition list; it's a layout-triggering
+     property (forces reflow every frame, not just composite), so it snaps
+     instantly instead of animating. The visible effect is unchanged in
+     spirit — content still fades — without animating layout on every tap of
+     a nav section header, which is inside the mobile drawer. */
+  transition: opacity 150ms ease-out;
 }
 
 .fleet-rail-section-items[data-collapsed="true"] {
