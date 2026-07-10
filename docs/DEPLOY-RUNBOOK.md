@@ -59,10 +59,19 @@ Confirmed by directly test-booting the app with the real production-style flags 
    cd /opt/empyralis-app
    git log -1 --oneline   # compare against your local HEAD before pulling
    ```
-2. **Pull code:**
+2. **Pull code.** `git pull` does **not** work directly on the box — confirmed 2026-07-10, there's no stored GitHub credential (`~/.git-credentials`, a credential helper, an SSH deploy key) and never has been. Push directly over the SSH access you already have instead, via a throwaway local bare mirror (no GitHub auth needed, since it's all filesystem/SSH):
    ```bash
-   git fetch origin && git checkout verify && git pull
+   # from your local machine, one time (skip if the mirror already exists):
+   ssh root@165.227.25.201 "mkdir -p /opt/empyralis-deploy-mirror.git && cd /opt/empyralis-deploy-mirror.git && git init --bare"
+   # from your local machine, each deploy:
+   git push ssh://root@165.227.25.201/opt/empyralis-deploy-mirror.git verify:verify
+   # on the box:
+   cd /opt/empyralis-app
+   git fetch /opt/empyralis-deploy-mirror.git verify:refs/deploy-incoming
+   git merge --ff-only refs/deploy-incoming   # fails loudly if it's not a clean fast-forward — don't force past that, investigate first
+   git update-ref -d refs/deploy-incoming     # tidy up the temp ref
    ```
+   If a real GitHub credential ever gets provisioned on the box, `git fetch origin && git checkout verify && git pull` becomes the simpler path — until then, use the mirror.
 3. **Backend deps:**
    ```bash
    .venv/bin/pip install -r requirements.txt -r requirements-worker.txt
