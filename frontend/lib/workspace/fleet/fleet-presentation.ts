@@ -31,7 +31,7 @@ export function formatNumber(value: number): string {
  *  (is this paired computer reachable, not what is this agent doing) that
  *  happens to share the StatusChip/StatusDot components; deriveStatus()
  *  itself never returns it. */
-export type AgentStatusTone = "working" | "online" | "ready" | "offline" | "unknown" | "error" | "stopped";
+export type AgentStatusTone = "working" | "online" | "ready" | "offline" | "unknown" | "error" | "stopped" | "degraded";
 
 export type AgentSummary = {
   id: string;
@@ -157,7 +157,7 @@ export function deriveStatus(
 }
 
 export function statusClass(tone: AgentStatusTone): string {
-  return tone === "working" ? "is-working" : tone === "ready" ? "is-ready" : tone === "offline" ? "is-offline" : tone === "stopped" ? "is-stopped" : tone === "error" ? "is-error" : "";
+  return tone === "working" ? "is-working" : tone === "ready" ? "is-ready" : tone === "offline" ? "is-offline" : tone === "stopped" ? "is-stopped" : tone === "error" ? "is-error" : tone === "degraded" ? "is-degraded" : "";
 }
 
 /** Placement/meta line. Never prints raw "unknown". */
