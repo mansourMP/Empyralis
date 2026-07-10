@@ -46,6 +46,42 @@ edge is the entire control's frame, not because it's mobile.
 Icon buttons are square with 6-8px corner radius, not circles — a circle
 around a single glyph reads as a toy affordance at this density.
 
+### Button surface — no exceptions
+
+A button is a single flat surface: hairline border, one subtle hover
+state, one barely-there pressed state (scale 0.98). NO nested frames, NO
+stacked layers, NO concentric accent rings, NO multi-stage animation.
+Accent color is used almost never — primary action and active nav only.
+A more decorated button is always the wrong button.
+
+**Compliant** — one border, one hover, one pressed state, done:
+```css
+.btn {
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: 8px;
+  transition: background 120ms ease-out, transform 120ms ease-out;
+}
+.btn:hover { background: var(--bg-card-hover); }
+.btn:active { transform: scale(0.98); }
+```
+
+**Violating** — five separate decorations for one button (gradient fill,
+ring shadow, an inner pseudo-element layer, hover-scale-up plus a glow,
+and an active-state rotation). Every one of these reads as "the important
+button" even when it's a Cancel action:
+```css
+.btn {
+  border: 2px solid var(--accent);
+  background: linear-gradient(180deg, var(--accent-soft), transparent);
+  box-shadow: 0 0 0 3px var(--accent-ring), inset 0 1px 0 rgba(255,255,255,.3);
+  border-radius: 10px;
+}
+.btn::before { /* inner glow layer */ }
+.btn:hover { transform: scale(1.03); box-shadow: 0 4px 16px var(--accent-ring); }
+.btn:active { transform: scale(0.95) rotate(-1deg); }
+```
+
 ## 3. Rows
 
 | Row type | Height | Notes |
