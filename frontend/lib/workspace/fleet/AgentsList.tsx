@@ -6,7 +6,7 @@ import { Play, Square } from "lucide-react";
 
 import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
 import { deriveStatus, timeAgo, tintForAgent, TINTS } from "./fleet-presentation";
-import { StatusDot } from "./fleet-indicators";
+import { StatusChip, StatusDot } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
 
 const LAST_VIEWED_KEY = "fleet:list-last-viewed-agent";
@@ -220,9 +220,9 @@ export function AgentsList({
     >
       <div className="fleet-agents-list-header" aria-hidden>
         <span>Agent</span>
-        <span>Brain</span>
-        <span>Channels</span>
-        <span className="is-right">Last active</span>
+        <span className="fleet-col-brain">Brain</span>
+        <span className="fleet-col-channels">Channels</span>
+        <span className="is-right fleet-col-last-active">Last active</span>
         <span className="is-right">Cost</span>
         <span className="is-right">Status</span>
       </div>
@@ -301,17 +301,17 @@ function AgentRow({
         </span>
       </span>
 
-      <span className={`fleet-agent-cell-brain${brain ? "" : " fleet-cell-muted"}`}>
+      <span className={`fleet-agent-cell-brain fleet-col-brain${brain ? "" : " fleet-cell-muted"}`}>
         {brain || "—"}
       </span>
 
-      <span className="fleet-agent-cell-channels">
+      <span className="fleet-agent-cell-channels fleet-col-channels">
         {channel
           ? <span className="fleet-channel-chip">{channelAbbr(channel)}</span>
           : <span className="fleet-cell-muted">None</span>}
       </span>
 
-      <span className={`fleet-agent-cell-right${relative ? "" : " fleet-cell-muted"}`}>
+      <span className={`fleet-agent-cell-right fleet-col-last-active${relative ? "" : " fleet-cell-muted"}`}>
         {relative || "never"}
       </span>
 
@@ -333,6 +333,24 @@ function AgentRow({
           {stopped ? <Play size={12} strokeWidth={2} /> : <Square size={12} strokeWidth={2} />}
         </button>
       </span>
+
+      {/* UI Contract Part 2 "Agent rows": a real two-line mobile design, not
+          the desktop grid cells above squeezed sideways — hidden on
+          desktop, shown in place of all the cells above under
+          fleet-theme.css's mobile media query. Stop/resume lives on the
+          agent detail page's own topbar action on mobile (already real,
+          already reachable) rather than a third inline control competing
+          for room in a 2-line row the contract didn't spec one into. */}
+      <div className="fleet-agent-row-mobile">
+        <div className="fleet-agent-row-mobile-line1">
+          <StatusDot tone={st.tone} size={8} />
+          <span className="fleet-agent-row-mobile-name">{agent.label || "Unnamed agent"}</span>
+          <StatusChip tone={st.tone} label={st.label} />
+        </div>
+        <div className="fleet-agent-row-mobile-line2">
+          {[brain || "—", money(cost), relative || "never"].join(" · ")}
+        </div>
+      </div>
     </div>
   );
 }

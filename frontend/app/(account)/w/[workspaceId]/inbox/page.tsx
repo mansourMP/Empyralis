@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-import { AlertTriangle, Inbox as InboxIcon } from "lucide-react";
+import { AlertTriangle, ChevronLeft, Inbox as InboxIcon } from "lucide-react";
 
 import { fetchActivityTrace, markInboxSeenNow, useFleetAgents, useWorkspaceActivity, type WorkspaceActivityEvent } from "@/lib/workspace/fleet/fleet-data";
 import { timeAgo } from "@/lib/workspace/fleet/fleet-presentation";
@@ -39,6 +39,12 @@ export default function InboxPage() {
   );
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Mobile only (see fleet-theme.css's fleet-inbox--detail-open): whether
+  // the pushed-in detail view is showing over the list. Deliberately
+  // separate from selectedId — the auto-landing effect below sets that on
+  // load same as desktop, but a reader arriving on a phone should still see
+  // the list first, not jump straight into a detail they didn't tap.
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   // Session-scoped "seen" set — there's no persistent read-state on activity
   // ledger rows (a write-path concern, out of scope here), so the unread dot
   // tracks what this reader has opened this session rather than fabricating
@@ -86,8 +92,10 @@ export default function InboxPage() {
 
   const isEmptyState = (loading && events.length === 0) || (error && events.length === 0) || (events.length === 0 && freshWorkspace);
 
+  const splitClassName = `fleet-content fleet-content--split${mobileDetailOpen ? " fleet-inbox--detail-open" : ""}`;
+
   return (
-    <main className={isEmptyState ? "fleet-content" : "fleet-content fleet-content--split"}>
+    <main className={isEmptyState ? "fleet-content" : splitClassName}>
       {loading && events.length === 0 ? (
         <FleetListSkeleton rows={6} />
       ) : error && events.length === 0 ? (
@@ -110,7 +118,7 @@ export default function InboxPage() {
                   key={event.id || event.created_at}
                   type="button"
                   className={`fleet-inbox-row${event.id === selectedId ? " is-selected" : ""}`}
-                  onClick={() => selectRow(event)}
+                  onClick={() => { selectRow(event); setMobileDetailOpen(true); }}
                 >
                   {esc ? (
                     <AlertTriangle size={14} strokeWidth={1.75} style={{ color: "var(--accent)", flexShrink: 0 }} />
@@ -135,6 +143,10 @@ export default function InboxPage() {
               </div>
             ) : (
               <>
+                <button type="button" className="fleet-inbox-back" onClick={() => setMobileDetailOpen(false)}>
+                  <ChevronLeft size={16} strokeWidth={2} />
+                  Inbox
+                </button>
                 <h1 className="fleet-inbox-detail-title">{selected.title || selected.action || "Event"}</h1>
                 <div className="fleet-inbox-detail-meta">
                   {[

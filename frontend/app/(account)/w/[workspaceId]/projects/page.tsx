@@ -251,10 +251,10 @@ export default function ProjectsPage() {
             <div className="fleet-projects-list">
               <div className="fleet-projects-list-header" aria-hidden>
                 <span>Project</span>
-                <span className="is-right">Agents</span>
+                <span className="is-right fleet-col-agents-count">Agents</span>
                 <span className="is-right">Cost this month</span>
-                <span className="is-right">Tokens</span>
-                <span className="is-right">Last active</span>
+                <span className="is-right fleet-col-tokens">Tokens</span>
+                <span className="is-right fleet-col-last-active">Last active</span>
                 <span className="is-right">Status</span>
               </div>
               {shown.map((p) => {
@@ -271,12 +271,15 @@ export default function ProjectsPage() {
                       <span className="fleet-project-cell-name-text">
                         <span className="fleet-project-cell-name-title">{p.name || p.id}</span>
                         {p.description && <span className="fleet-project-cell-name-desc">{p.description}</span>}
+                        <span className="fleet-agent-meta-mobile">
+                          {`${agentsCount} ${agentsCount === 1 ? "agent" : "agents"} · ${formatNumber(tokens)} tok · ${lastActive ? timeAgo(lastActive) : "never"}`}
+                        </span>
                       </span>
                     </span>
-                    <span className={`fleet-agent-cell-right${agentsCount > 0 ? "" : " fleet-cell-muted"}`}>{agentsCount}</span>
+                    <span className={`fleet-agent-cell-right fleet-col-agents-count${agentsCount > 0 ? "" : " fleet-cell-muted"}`}>{agentsCount}</span>
                     <span className={`fleet-agent-cell-right${cost > 0 ? "" : " fleet-cell-muted"}`}>{money(cost)}</span>
-                    <span className={`fleet-agent-cell-right${tokens > 0 ? "" : " fleet-cell-muted"}`}>{formatNumber(tokens)}</span>
-                    <span className={`fleet-agent-cell-right${lastActive ? "" : " fleet-cell-muted"}`}>
+                    <span className={`fleet-agent-cell-right fleet-col-tokens${tokens > 0 ? "" : " fleet-cell-muted"}`}>{formatNumber(tokens)}</span>
+                    <span className={`fleet-agent-cell-right fleet-col-last-active${lastActive ? "" : " fleet-cell-muted"}`}>
                       {lastActive ? timeAgo(lastActive) : "never"}
                     </span>
                     <span className={`fleet-agent-cell-right${statusSummary ? "" : " fleet-cell-muted"}`}>
