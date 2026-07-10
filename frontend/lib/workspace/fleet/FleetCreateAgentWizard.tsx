@@ -2,18 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, Lock, X } from "lucide-react";
+import { Check, Loader2, X } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import {
   BYOK_PROVIDERS,
   SUBSCRIPTION_PROVIDERS,
   LOCAL_PROVIDERS,
-  COMING_SOON_NOTE,
   FREEFORM_MODEL_PROVIDERS,
   providerLabel,
   modelsForProvider,
   defaultModelForProvider,
+  runtimeForProvider,
 } from "./fleet-provider-constants";
 import { useFleetAgentChannels, type FleetAgent } from "./fleet-data";
 import { GatewayBoxPicker } from "./gateway-box-picker";
@@ -243,8 +243,8 @@ export function FleetCreateAgentWizard({
   // key + provider profile before the model_config patch (which replaces
   // model_config wholesale, so both fields are written together here).
   async function submitBrain() {
-    if (providerMode === "subscription") {
-      setError(`${COMING_SOON_NOTE}. Pick Empyralis credits or your own API key to continue.`);
+    if (providerMode === "subscription" && !gatewayBinding.trim()) {
+      setError("Pick a computer to run this agent’s subscription CLI.");
       return;
     }
     if (providerMode === "local" && !gatewayBinding.trim()) {
@@ -445,10 +445,9 @@ export function FleetCreateAgentWizard({
                   <span className="fleet-wizard-option-label">Your own API key</span>
                   <span className="fleet-wizard-option-body">Use your key for any provider. You pay them directly.</span>
                 </button>
-                <button type="button" className={`fleet-wizard-option fleet-wizard-option--soon${providerMode === "subscription" ? " is-selected" : ""}`} onClick={() => setProviderMode("subscription")}>
+                <button type="button" className={`fleet-wizard-option${providerMode === "subscription" ? " is-selected" : ""}`} onClick={() => setProviderMode("subscription")}>
                   <span className="fleet-wizard-option-label">Your subscription</span>
                   <span className="fleet-wizard-option-body">Route through your Claude Code or Codex plan. Needs the Gateway.</span>
-                  <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> {COMING_SOON_NOTE}</span>
                 </button>
                 <button type="button" className={`fleet-wizard-option${providerMode === "local" ? " is-selected" : ""}`} onClick={() => setProviderMode("local")}>
                   <span className="fleet-wizard-option-label">Run locally</span>
@@ -471,8 +470,12 @@ export function FleetCreateAgentWizard({
                   <select className="fleet-wizard-input" value={subscriptionProvider} onChange={(e) => setSubscriptionProvider(e.currentTarget.value)}>
                     {SUBSCRIPTION_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
                   </select>
-                  <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={setGatewayBinding} />
-                  <p className="fleet-channel-expand-hint">{COMING_SOON_NOTE}. You’ll be able to save this once your box can run it.</p>
+                  <GatewayBoxPicker
+                    workspaceId={workspaceId}
+                    value={gatewayBinding}
+                    onChange={setGatewayBinding}
+                    requireRuntime={runtimeForProvider(subscriptionProvider) === "codex" ? "codex" : "claude_code"}
+                  />
                 </div>
               )}
               {providerMode === "local" && (
@@ -566,7 +569,7 @@ export function FleetCreateAgentWizard({
             </button>
           )}
           {step === 2 && (
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitBrain} disabled={busy || providerMode === "subscription" || (providerMode === "local" && !gatewayBinding.trim())}>
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitBrain} disabled={busy || (providerMode === "subscription" && !gatewayBinding.trim()) || (providerMode === "local" && !gatewayBinding.trim())}>
               {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Next"}
             </button>
           )}
