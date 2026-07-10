@@ -43,13 +43,12 @@ const RAIL_ITEMS: RailNavItem[] = [
 const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
 
-// U3-H: back to 2 decimals — 4 (matching AgentsList/billing/project detail's
-// cost TABLES, where precision is the point) never fit this whisper-quiet
-// glance line without truncating "today" mid-word even after tightening
-// padding/letter-spacing as far as either theme's readability allows. This
-// line is ambient status, not an accounting figure — the tradeoff favors
-// "always renders whole" over "never rounds a fractional cent".
-const money = (n: number) => `$${n.toFixed(2)}`;
+// 4 decimals, matching AgentsList/billing/project detail's cost formatters —
+// real per-turn costs are fractions of a cent, and this line sits directly
+// above the Agents list row that already shows the honest, unrounded figure.
+// Two decimals silently rounded any realistic per-turn spend to "$0.00",
+// contradicting the very row beneath it (Truth Map, 2026-07-10).
+const money = (n: number) => `$${n.toFixed(4)}`;
 
 /**
  * Persistent primary rail — the app's spine. A populated workspace header

@@ -439,14 +439,19 @@ def _kernel_prompt(
         "These rules ensure facts survive across conversations. Without memory_write calls,\n"
         "everything the user tells you is lost when the session ends."
     )
+    # Deliberately no blanket "computer capabilities" claim here — whether a
+    # personal computer is actually paired and online varies per workspace
+    # per turn, and is stated accurately (and only when true) by the
+    # unconditional hardware-status block _run_sage_action_loop_v3 appends
+    # to every turn's system_prompt, right below the callable-tools list.
     if _platform_paid_ai_source(billing_source=billing_source, ai_tier=ai_tier):
         return (
-            "You are operating inside Empyralis, an environment connecting the user with AI, tools, files, memory, apps, and computer capabilities. "
+            "You are operating inside Empyralis, an environment connecting the user with AI, tools, files, memory, and apps. "
             "The active AI source is Empyralis AI. "
             "Workspace identity and role files may be available through tools or workspace context when relevant."
         ) + memory_rule
     return (
-        "You are operating inside Empyralis, an environment connecting the user with this AI model, tools, files, memory, apps, and computer capabilities. "
+        "You are operating inside Empyralis, an environment connecting the user with this AI model, tools, files, memory, and apps. "
         "Workspace identity and role files may be available through tools or workspace context when relevant."
     ) + memory_rule
 

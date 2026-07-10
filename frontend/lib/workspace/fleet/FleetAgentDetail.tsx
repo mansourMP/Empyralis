@@ -861,7 +861,7 @@ function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId
         agentInstallId={agentId}
         emptyIcon={MessageSquare}
         emptyTitle={`Message ${label}`}
-        emptyBody={`Talk to ${label} the way a customer would — it replies as itself, using whatever's configured on the Model and Tools tabs.`}
+        emptyBody={`Your owner test chat with ${label} — full access, not what a real customer would see (this tab always runs at owner tier). It replies as itself, using whatever's configured on the Model and Tools tabs.`}
         placeholder={`Message ${label}…`}
         sourceTag="fleet_agent_chat"
       />
@@ -1429,7 +1429,7 @@ function ToolsTab({
       {coreTools.length > 0 && (
         <Disclosure label={`${coreTools.length} core ${coreTools.length === 1 ? "tool" : "tools"} — always on`}>
           <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-            Every agent has these regardless of the toggles above — memory, search, and task completion.
+            Plumbing every agent needs to function — there&apos;s no toggle for these because there&apos;s nothing to turn off. Anything with its own real toggle is listed above instead.
           </p>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {coreTools.map((name) => (

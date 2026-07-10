@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 
 import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
-import { findSageAgent, formatNumber, tintKeyForIndex, TINTS } from "@/lib/workspace/fleet/fleet-presentation";
+import { formatNumber, tintKeyForIndex, TINTS } from "@/lib/workspace/fleet/fleet-presentation";
 import { MultiSeriesChart, type ChartSeries } from "@/lib/workspace/fleet/fleet-sparkline";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
@@ -68,14 +68,11 @@ export default function UsagePage() {
   const [error, setError] = useState<string | null>(null);
   const [bucketsByAgent, setBucketsByAgent] = useState<Map<string, UsageBucket[]>>(new Map());
 
-  const { agents: allAgents } = useFleetAgents(workspaceId);
-  const sageAgent = useMemo(() => findSageAgent(allAgents), [allAgents]);
-  // Same exclusion as every other fleet surface — Sage is the operator, not
-  // a listed worker, so it never appears as its own series.
-  const agents = useMemo(
-    () => (sageAgent ? allAgents.filter((a) => a.agent_id !== sageAgent.agent_id) : allAgents),
-    [allAgents, sageAgent],
-  );
+  const { agents } = useFleetAgents(workspaceId);
+  // Unlike the Agents list (where Sage is rightly hidden — it's the operator,
+  // not a manageable worker), this page is specifically "where does the
+  // money go" — excluding Sage's own real spend here would silently hide it
+  // from the one surface built to show it (Truth Map, 2026-07-10).
 
   useEffect(() => {
     if (agents.length === 0) {

@@ -1854,6 +1854,7 @@ async def _resolve_specialist_toolset(
         return None
     connectors: set[str] = set()
     tools: set[str] = set()
+    raw_toggles: dict[str, bool] = {}
     mandate_audience_tools: list[str] = []
     try:
         from server_modules import agent_bindings_repository as _bind
@@ -1877,8 +1878,12 @@ async def _resolve_specialist_toolset(
         toggles = bundle.get("tool_toggles") if isinstance(bundle, dict) else None
         if isinstance(toggles, dict):
             for name, enabled in toggles.items():
-                if enabled and str(name or "").strip():
-                    tools.add(str(name).strip())
+                clean_name = str(name or "").strip()
+                if not clean_name:
+                    continue
+                raw_toggles[clean_name] = bool(enabled)
+                if enabled:
+                    tools.add(clean_name)
         # The owner-declared mandate (fleet_tools "mandate" patch key) — read
         # from the SAME bundle fetch so this costs no extra round-trip.
         # Threaded onto session_ctx below so the mandate gate can consult it
@@ -1896,33 +1901,74 @@ async def _resolve_specialist_toolset(
         "core": _core_direct_tool_names(),
         "connectors": connectors,
         "tools": tools,
+        "raw_tool_toggles": raw_toggles,
         "mandate_audience_tools": mandate_audience_tools,
     }
+
+
+# Pure plumbing, never shown as a toggle anywhere in the Tools tab — there is
+# nothing for an owner to turn off. Every other "core" tool (memory_write,
+# memory_read, memory_update, web__search) DOES have real, owner-facing
+# toggle state, so the toggle must be authoritative for those instead of a
+# blanket always-on bypass (a disabled Web Search toggle must actually stop
+# Web Search, not just look disabled).
+_ALWAYS_MANDATORY_TOOL_NAMES = frozenset({"task_complete", "query_tool_registry"})
+
+# web__fetch and hardware__action have no toggle of their own anywhere in the
+# UI — "Web Search" is the only web-lookup control an owner ever sees. Live
+# verification of this exact fix showed the gap directly: disabling Web
+# Search made the model call web__fetch instead and still return real web
+# content, unblocked. So web__fetch follows web__search's toggle instead of
+# being unconditionally core — the owner's one visible switch actually
+# covers the capability it claims to.
+_CORE_TOOL_FOLLOWS_TOGGLE = {"web__fetch": "web__search"}
+
+
+def _core_tool_allowed(name: str, toolset: dict[str, Any]) -> bool:
+    """Is this core tool actually allowed, honoring an explicit owner toggle?
+
+    An explicit False is authoritative (the fix). An absent entry — the tool
+    was never touched on the Tools tab — defaults to allowed, unchanged from
+    today's behavior, so agents nobody has configured don't regress."""
+    if name in _ALWAYS_MANDATORY_TOOL_NAMES:
+        return True
+    lookup_name = _CORE_TOOL_FOLLOWS_TOGGLE.get(name, name)
+    raw_toggles = toolset.get("raw_tool_toggles", {})
+    if isinstance(raw_toggles, dict) and lookup_name in raw_toggles:
+        return bool(raw_toggles[lookup_name])
+    return True
 
 
 def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
     """True when a specialist bound to ``toolset`` may call ``tool_name``.
 
-    Allowed = a core tool, an explicitly-toggled tool, or a connector tool
-    (``{connector}__{action}``) whose connector is bound.
+    Allowed = a core tool whose toggle (if any) isn't explicitly off, an
+    explicitly-toggled tool, or a connector tool (``{connector}__{action}``)
+    whose connector is bound.
     """
     name = str(tool_name or "").strip()
     if not name:
         return False
-    if name in toolset.get("core", set()) or name in toolset.get("tools", set()):
+    if name in toolset.get("core", set()):
+        return _core_tool_allowed(name, toolset)
+    if name in toolset.get("tools", set()):
         return True
     connector = name.split("__", 1)[0].strip().lower() if "__" in name else ""
     return bool(connector and connector in toolset.get("connectors", set()))
 
 
 def _filter_registry_for_specialist(registry: Any, toolset: dict[str, Any]) -> list[Any]:
-    """Keep only registry entries the specialist is bound to (core tools are not
-    in the registry, so they are unaffected)."""
+    """Keep only registry entries the specialist is bound to (core tools are
+    normally not in the registry — they're in the always-on list — but this
+    stays consistent with _specialist_tool_allowed for the rare case one is)."""
     kept: list[Any] = []
     for entry in registry or []:
         name = str(getattr(entry, "tool_name", "") or "").strip()
         connector = str(getattr(entry, "connector_id", "") or "").strip().lower()
-        if name in toolset.get("core", set()) or name in toolset.get("tools", set()):
+        if name in toolset.get("core", set()):
+            if _core_tool_allowed(name, toolset):
+                kept.append(entry)
+        elif name in toolset.get("tools", set()):
             kept.append(entry)
         elif connector and connector in toolset.get("connectors", set()):
             kept.append(entry)
@@ -1970,10 +2016,17 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
                 _tool_def["connector_id"] = _payload["connector_id"]
             tools.append(_tool_def)
             _seen_names.add(_descriptor.tool_name)
+    else:
+        # A disabled owner toggle for a core tool (Web Search, Memory, ...)
+        # must actually stop that tool, not just look disabled — the LLM
+        # can only call what's in this list, so filtering here (not just the
+        # lazy registry below) is what makes the toggle real. Mandatory
+        # plumbing (task_complete, query_tool_registry) is never filtered.
+        _before_core = len(tools)
+        tools = [t for t in tools if _specialist_tool_allowed(str(t.get("name") or ""), specialist_toolset)]
+        print(f"[TOOL_FILTER] specialist_core_tools before={_before_core} after={len(tools)}", flush=True)
     _registry = direct_chat_tool_catalog_service.build_registry_entries(tool_capabilities, availability)
     # Phase 4B: a specialist only discovers the connectors/tools it is bound to.
-    # Core tools (the `tools` list above) are untouched. None → master/Sage,
-    # no filtering (byte-for-byte unchanged).
     if specialist_toolset is not None:
         _before_reg = len(_registry)
         _registry = _filter_registry_for_specialist(_registry, specialist_toolset)
@@ -2427,6 +2480,33 @@ async def _run_sage_action_loop_v3(
         blocked = None  # agent machine mode: hardware tools always available
     else:
         blocked = _blocked_agent_computer_tool_for_message(message, availability)
+
+    # Self-description must match the same truth the tool filter above already
+    # used to decide whether agent-computer tools were stripped — otherwise
+    # Sage volunteers "I can control your computer" on a plain "what can you
+    # do?" (no computer-specific keywords, so `blocked` below stays None and
+    # the reactive correction never fires) while every real attempt is
+    # honestly refused. Unconditional (every turn), not tied to `blocked`,
+    # so the very first message on a fresh account already gets it right.
+    _hardware_connected = _rc.AGENT_MACHINE_MODE == "agent" or _sage_agent_computer_browser_status(availability) == "online"
+    if _hardware_connected:
+        system_prompt = (system_prompt or "") + (
+            "\n[SYSTEM CONTEXT] A personal computer is paired and online right now. "
+            "You have real computer-control tools available (shell commands, file "
+            "access, screenshots, browser control) when relevant to the request.\n"
+        )
+    else:
+        system_prompt = (system_prompt or "") + (
+            "\n[SYSTEM CONTEXT] No personal computer is paired right now — you are "
+            "running cloud-only. You do NOT have shell, filesystem, screenshot, or "
+            "browser-control access to any computer. Never claim you can control, "
+            "access, or take screenshots of \"your computer\" or \"my computer\" — "
+            "none is connected. If asked what you can do, describe only your real "
+            "cloud-based capabilities (chat, tools, memory, connected apps) and "
+            "mention that computer control becomes available once a computer is "
+            "paired from the Hardware page.\n"
+        )
+
     route_decision = _build_sage_route_decision(
         message=message,
         tools=tools,
@@ -3717,8 +3797,25 @@ async def handle_sage_chat(
             "conversation — briefly introduce yourself by name and what you help "
             "with before addressing the request."
         )
+        # Master Sage's own prompt (the else branch below) gets an explicit
+        # "## Callable Tools ... do not invent unavailable tools" instruction
+        # from _capability_manifest_text; this branch never did, so a
+        # specialist with a tool disabled (e.g. Web Search toggled off) had no
+        # instruction against fabricating a plausible-looking answer dressed
+        # up as "based on the search results" once the real tool call was
+        # correctly blocked — live-verified during the Truth Map fix: blocking
+        # the tool call alone made it silent about *why*, not honest about it.
+        _spec_honesty_rule = (
+            "\n\n## Tool honesty\n"
+            "Only claim to have searched, fetched, or looked something up if a "
+            "real tool call actually ran and returned a result this turn. If "
+            "you don't have a working tool for what's being asked — it may be "
+            "disabled, or simply not something you have access to — say so "
+            "plainly instead of inventing an answer that sounds like it came "
+            "from a real lookup."
+        )
         _spec_memory_block = f"\n\n## Your memory\n{memory_context}" if memory_context else ""
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
@@ -4408,6 +4505,47 @@ async def handle_sage_chat(
     attempted = [p.strip() for p in _coerce_text(attempted_providers).split(",") if p.strip()]
     effective_provider = attempted[-1] if attempted else provider
     effective_model = _coerce_text((usage or {}).get("model")) or requested_model
+
+    # Phase 5A metering — this cloud fallthrough (master Sage, or a specialist
+    # not on gateway_brain local/cli_subscription — those meter themselves
+    # above) never reached record_usage_from_context before, so Sage's own
+    # turns showed $0.00/0 tokens everywhere despite real LLM calls. The
+    # attribution contextvar was already set at the top of this function
+    # (set_usage_attribution) — awaited (not fire-and-forget) because the
+    # caller's event loop can close immediately after this function returns.
+    try:
+        _usage_dict = usage if isinstance(usage, dict) else {}
+        _sage_tokens_in = int(_usage_dict.get("prompt_tokens") or _usage_dict.get("input_tokens") or 0)
+        _sage_tokens_out = int(_usage_dict.get("completion_tokens") or _usage_dict.get("output_tokens") or 0)
+        # Reuse the cost this same generation call already computed (via
+        # usage_accounting_service's pricing lookup) instead of asking the
+        # repository to recompute it independently. Only trust it when
+        # pricing_known — otherwise leave usd_cost unset so the repository's
+        # own lookup (or an honest "unknown") decides, never a fabricated 0.
+        _sage_usd_cost = (
+            _usage_dict.get("estimated_cost_usd") if _usage_dict.get("pricing_known") else None
+        )
+        _sage_usage_mode = "platform_credits"
+        try:
+            from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata as _admin_defaults_for_mode
+            _ws_meta_for_mode = dict((_ws_record or {}).get("metadata") or {}) if isinstance(_ws_record, dict) else {}
+            if str(_admin_defaults_for_mode(_ws_meta_for_mode).sage_ai_provider or "").strip():
+                _sage_usage_mode = "byok"
+        except Exception:
+            pass
+        from server_modules import usage_events_repository as _usage_repo_meter
+        await _usage_repo_meter.record_usage_from_context(
+            provider=effective_provider or None,
+            model=effective_model or None,
+            tokens_in=_sage_tokens_in,
+            tokens_out=_sage_tokens_out,
+            usd_cost=_sage_usd_cost,
+            run_id=trace_id or None,
+            mode=_sage_usage_mode,
+        )
+    except Exception:
+        pass
+
     route_decision = _build_sage_route_decision(message=normalized_message)
     prompt_diagnostics = {
         **prompt_diagnostics,

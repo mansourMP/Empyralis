@@ -662,9 +662,14 @@ async def fleet_get_agent_tools(
     truth (fleet_create_agent still seeds it, kept only for back-compat
     display in older callers).
 
-    Core tools (always on for every agent, never gated by tool_toggles) are
-    returned separately under "core_tools" for read-only display — they
-    aren't real toggles because there's nothing to turn off.
+    Core (always-on) tools split two ways. Most of them — Web Search,
+    Memory read/write/update — have a real skill_registry-backed toggle and
+    already have their own entry in `tools` above (enforced by
+    _core_tool_allowed, not bypassed); listing them again below would claim
+    they ignore a toggle that, since the Truth Map fix, they don't. Only the
+    remainder — pure plumbing with no toggle anywhere (task_complete,
+    query_tool_registry) — is returned separately under "core_tools" for
+    read-only display, because there's genuinely nothing to turn off.
     """
     from server_modules import agent_registry_repository as repo
     from server_modules import authority_mandate_service
@@ -725,7 +730,15 @@ async def fleet_get_agent_tools(
             ),
         })
 
-    core_tools = sorted(_core_direct_tool_names())
+    # A core tool with its own entry above (Web Search, Memory read/write/
+    # update — anything skill_registry maps onto a real enforcement id) is
+    # now toggle-respecting at runtime (_core_tool_allowed), so listing it
+    # again here as "always on regardless of the toggles above" would be
+    # exactly the lying-toggle facade this was meant to fix. Only tools with
+    # no real toggle at all (task_complete, query_tool_registry, and any
+    # core tool skill_registry doesn't map) belong in this read-only bucket.
+    _toggleable_ids = {t["id"] for t in tools}
+    core_tools = sorted(name for name in _core_direct_tool_names() if name not in _toggleable_ids)
     return {"ok": True, "tools": tools, "core_tools": core_tools, "agent_id": agent_id, "is_master": is_master}
 
 
