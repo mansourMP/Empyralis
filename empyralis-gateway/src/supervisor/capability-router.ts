@@ -6,6 +6,7 @@ import type {
 import { GatewayBrowserRuntime } from "../browser/runtime";
 import { GatewayShellRuntime } from "../shell/runtime";
 import { GatewayLLMRuntime } from "../llm/runtime";
+import { GatewayCliSetupRuntime } from "../llm/cli-setup-runtime";
 import { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
 import { ExternalAgentProxyRuntime } from "../external-agent/proxy-runtime";
 import {
@@ -26,7 +27,7 @@ const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // execution — see src/shell/runtime.ts. Unlike the old supervisor, this has
 // no unsandboxed path: it only exists where Docker (or an explicitly
 // authorized full_access mode) is actually verified present.
-type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm";
+type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm" | "cli_setup";
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -52,6 +53,7 @@ export class GatewayCapabilityRouter {
     private readonly externalAgentProxyRuntime = new ExternalAgentProxyRuntime(),
     private readonly shellRuntime?: GatewayShellRuntime,
     private readonly llmRuntime?: GatewayLLMRuntime,
+    private readonly cliSetupRuntime?: GatewayCliSetupRuntime,
   ) {}
 
   supportedCapabilities(): string[] {
@@ -70,6 +72,9 @@ export class GatewayCapabilityRouter {
       // when a local Ollama endpoint reads ready — same pattern as shell/Docker
       // (BYO-brain Phase 2).
       ...filterCapabilitiesByDesktopPermission(this.llmRuntime?.requestedCapabilities() ?? []),
+      // cli.install/cli.login.* are gated on the "cli_setup" permission —
+      // granted only once the box operator has explicitly opted in (Build F).
+      ...filterCapabilitiesByDesktopPermission(this.cliSetupRuntime?.requestedCapabilities() ?? []),
     ];
   }
 
@@ -157,13 +162,25 @@ export class GatewayCapabilityRouter {
         result,
       };
     }
+    if (this.cliSetupRuntime?.supportsCapability(capabilityId)) {
+      this.trackExecutor(runId, "cli_setup");
+      const result = await this.cliSetupRuntime.handleCapabilityInvoke(
+        frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
+      );
+      return {
+        request_id: frame.id,
+        capability_id: capabilityId,
+        run_id: runId,
+        result,
+      };
+    }
     // ARCHIVED (Phase U1): supervisor executor removed.
     // Capabilities that don't match browser, external-agent-proxy, personal-channel,
     // or shell_sandbox are no longer supported. Desktop control (mouse/keyboard/
     // screen) is still OUT — only shell/filesystem came back, and only sandboxed.
     throw new Error(
       `No executor available for capability "${capabilityId}". ` +
-      `Supported executors: browser, external_agent_proxy, personal_channel, shell_sandbox. ` +
+      `Supported executors: browser, external_agent_proxy, personal_channel, shell_sandbox, llm, cli_setup. ` +
       `Desktop control capabilities are not part of the Empyralis product.`,
     );
   }
@@ -240,6 +257,14 @@ export class GatewayCapabilityRouter {
         error: `llm interrupt not applicable for run_id "${runId}" (single bounded request).`,
         run_id: runId,
       };
+    }
+
+    if (executor === "cli_setup" && this.cliSetupRuntime) {
+      // The one executor here that IS a genuine long-lived session — a
+      // cli.login.start held open across a multi-minute human round trip.
+      // tool.interrupt is how the control plane cancels it early (the user
+      // gave up, or a differentiated timeout upstream fired first).
+      return this.cliSetupRuntime.interruptRun(runId);
     }
 
     // ARCHIVED (Phase U1): supervisor executor removed.

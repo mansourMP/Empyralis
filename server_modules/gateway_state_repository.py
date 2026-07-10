@@ -1979,6 +1979,7 @@ def list_gateway_events(
     gateway_id: str,
     *,
     session_id: Optional[str] = None,
+    message_type: Optional[str] = None,
     limit: int = 100,
     db_path: Optional[Path | str] = None,
 ) -> List[Dict[str, Any]]:
@@ -1987,6 +1988,9 @@ def list_gateway_events(
     if session_id:
         where.append("session_id = ?")
         params.append(str(session_id or "").strip())
+    if message_type:
+        where.append("message_type = ?")
+        params.append(str(message_type or "").strip())
     params.append(max(int(limit or 0), 1))
     with _DB_LOCK:
         conn = _connect(db_path)

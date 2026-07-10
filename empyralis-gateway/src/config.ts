@@ -26,6 +26,15 @@ export interface GatewayConfig {
    */
   shellFullAccessLocallyEnabled: boolean;
   shellSandboxDockerImage?: string;
+  /**
+   * The box operator's opt-in for cli.install/cli.login.* (BYO-brain
+   * onboarding, Build F) — see runtime/desktop-permissions.ts's cli_setup
+   * permission. Defaults to false: a paired box does not let the control
+   * plane install software or drive a login flow on it until the operator
+   * deliberately turns this on — same "opt-in, not opt-out" posture as
+   * shellFullAccessLocallyEnabled above.
+   */
+  cliSetupLocallyEnabled: boolean;
 }
 
 function normalizeBaseUrl(value: string | undefined, fallback: string): string {
@@ -150,5 +159,6 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     browserProjectRoot,
     shellFullAccessLocallyEnabled: normalizeBoolean(env.EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED, false),
     shellSandboxDockerImage: String(env.EMPYRALIS_GATEWAY_SHELL_SANDBOX_IMAGE || "").trim() || undefined,
+    cliSetupLocallyEnabled: normalizeBoolean(env.EMPYRALIS_GATEWAY_CLI_SETUP_ENABLED, false),
   };
 }

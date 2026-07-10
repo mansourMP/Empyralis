@@ -10,7 +10,8 @@ export type DesktopPermissionId =
   | "automation"
   | "browser"
   | "shell_sandbox"
-  | "llm_runtime";
+  | "llm_runtime"
+  | "cli_setup";
 
 export type DesktopPermissionState =
   | "granted"
@@ -43,6 +44,7 @@ const PERMISSION_ENV_KEYS: Record<DesktopPermissionId, string> = {
   browser: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_BROWSER",
   shell_sandbox: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX",
   llm_runtime: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_LLM_RUNTIME",
+  cli_setup: "EMPYRALIS_AGENT_COMPUTER_PERMISSION_CLI_SETUP",
 };
 
 const DESKTOP_CAPABILITY_PERMISSIONS: Record<string, DesktopPermissionId> = {
@@ -72,6 +74,16 @@ const DESKTOP_CAPABILITY_PERMISSIONS: Record<string, DesktopPermissionId> = {
   // shell_sandbox is gated on Docker — only "granted" when a local model
   // runtime (Ollama) has actually been confirmed reachable.
   "llm.generate": "llm_runtime",
+  // BYO-brain onboarding (Build F): install/login are real side effects
+  // (a global npm install, a spawned OAuth flow) initiated remotely by the
+  // control plane, so — same defense-in-depth posture as shell_sandbox and
+  // llm_runtime — they need an explicit local opt-in, not a default grant.
+  // Unlike those two, there's no external service to probe readiness of;
+  // the "readiness" here is a one-time box-operator decision (see
+  // cliSetupLocallyEnabled below), not an environment fact.
+  "cli.install": "cli_setup",
+  "cli.login.start": "cli_setup",
+  "cli.login.input": "cli_setup",
 };
 
 // Docker readiness for the shell_sandbox permission. Unlike the other
@@ -119,6 +131,21 @@ export function setLlmRuntimeCodexReady(ready: boolean): void {
   llmRuntimeCodexReady = ready;
 }
 
+// cli_setup (Build F): the box operator's explicit, one-time opt-in for
+// letting this Gateway install Claude Code/Codex and run their login flows
+// when the control plane asks. Read once at startup from
+// EMPYRALIS_GATEWAY_CLI_SETUP_ENABLED (see config.ts) — a static local
+// policy choice, not a probed environment fact, so this is set once and
+// never flips during the process's lifetime (unlike shellSandboxDockerReady/
+// llmRuntimeOllamaReady, which track a real external dependency that could
+// come and go). No default-granted fallback, same as shell_sandbox/
+// llm_runtime — false until the box operator turns it on.
+let cliSetupLocallyEnabled = false;
+
+export function setCliSetupLocallyEnabled(enabled: boolean): void {
+  cliSetupLocallyEnabled = enabled;
+}
+
 function normalizePermissionState(value: unknown): DesktopPermissionState | null {
   const token = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (token === "1" || token === "true" || token === "yes" || token === "allow" || token === "allowed") {
@@ -163,6 +190,9 @@ function defaultDesktopPermissionState(
     // _cli_subscription_readiness_reason) is what enforces WHICH specific
     // runtime a given turn actually needs.
     return (llmRuntimeOllamaReady || llmRuntimeClaudeCodeReady || llmRuntimeCodexReady) ? "granted" : "restricted";
+  }
+  if (permission === "cli_setup") {
+    return cliSetupLocallyEnabled ? "granted" : "restricted";
   }
   if (agentComputerSystemServiceModeEnabled(env) && !agentComputerUserSessionBridgeEnabled(env)) {
     return "restricted";

@@ -25,7 +25,9 @@ import { GatewayBrowserWorker } from "./browser/worker";
 import { GatewayBrowserRuntime } from "./browser/runtime";
 import { GatewayShellRuntime } from "./shell/runtime";
 import { GatewayLLMRuntime } from "./llm/runtime";
+import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { collectPassiveInventorySnapshot } from "./health/service-inventory";
+import { setCliSetupLocallyEnabled } from "./runtime/desktop-permissions";
 
 const GATEWAY_VERSION = "0.1.0";
 
@@ -143,12 +145,19 @@ async function main(): Promise<void> {
   // Ollama probe in collectPassiveInventorySnapshot() above confirmed a local
   // endpoint is reachable (mirrors how shell_sandbox is gated on Docker).
   const llmRuntime = new GatewayLLMRuntime();
+  // BYO-brain onboarding (Build F): cli_setup is a static local policy
+  // choice, not a probed environment fact (contrast the Docker/Ollama probe
+  // just above) — set once, here, before the one-time
+  // supportedCapabilities() computation below.
+  setCliSetupLocallyEnabled(config.cliSetupLocallyEnabled);
+  const cliSetupRuntime = new GatewayCliSetupRuntime();
   const capabilityRouter = new GatewayCapabilityRouter(
     browserRuntime,
     personalChannelRuntimes,
     undefined,
     shellRuntime,
     llmRuntime,
+    cliSetupRuntime,
   );
   const identity = await resolveDeviceIdentity(db, {
     gatewayId: config.gatewayId,
@@ -169,6 +178,10 @@ async function main(): Promise<void> {
     personalChannelRuntimes,
   );
   personalChannelRuntimes.setPublisher(client);
+  // Same circular-dependency shape as the line above: cliSetupRuntime is
+  // constructed before client exists (the router needs it first), so the
+  // event-push side of it is wired here, after the fact.
+  cliSetupRuntime.setEventPublisher((payload) => client.publishEvent("cli.login.output", payload));
 
   const cleanup = async (reason: string) => {
     await journal.append("system", "gateway.process.stop", {
