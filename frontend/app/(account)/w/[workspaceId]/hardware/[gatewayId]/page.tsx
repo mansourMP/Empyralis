@@ -13,7 +13,7 @@ import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
 import {
   gatewayId as idOf,
   gatewayLabel,
-  gatewayIsOnline,
+  connectionPresentation,
   gatewayRuntimeState,
   runtimeStateLabel,
   runtimeStateTone,
@@ -46,15 +46,6 @@ function serviceItemPresentation(status: string | undefined): { tone: AgentStatu
   if (s === "degraded") return { tone: "degraded", label: "Degraded" };
   if (s === "missing" || s === "offline") return { tone: "unknown", label: "Not detected" };
   return { tone: "unknown", label: "Unknown" };
-}
-
-function connectionPresentation(status: string): { tone: AgentStatusTone; label: string } {
-  const s = status.toLowerCase();
-  if (s === "online") return { tone: "online", label: "Online" };
-  if (s === "degraded") return { tone: "degraded", label: "Degraded" };
-  if (s === "reconnecting") return { tone: "degraded", label: "Reconnecting" };
-  if (s === "revoked") return { tone: "error", label: "Revoked" };
-  return { tone: "offline", label: "Offline" };
 }
 
 /** The exact remediation commands this product already tells owners to run
@@ -261,8 +252,7 @@ export default function GatewayDetailPage() {
   }
 
   const isCloud = gateway.hardware_kind === "cloud_vps";
-  const connStatus = (gateway.connection_status || (gatewayIsOnline(gateway) ? "online" : "offline")).toLowerCase();
-  const connPresentation = connectionPresentation(connStatus);
+  const connPresentation = connectionPresentation(gateway);
   const heartbeatAge = gateway.heartbeat_age_seconds;
   const serviceInventory: ServiceInventoryItem[] = gateway.metadata?.service_inventory || [];
   const byId = new Map(serviceInventory.map((item) => [String(item.id || ""), item]));

@@ -9,6 +9,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
+import { connectionPresentation } from "@/lib/workspace/fleet/gateway-box-picker";
 import {
   CLOUD_VPS_PROVIDERS,
   CLOUD_VPS_PROVIDER_IDS,
@@ -70,11 +71,6 @@ export default function HardwarePage() {
     };
   }, [loadRegistrations]);
 
-  const isOnline = (r: Registration) => {
-    const s = `${r.connection_status || ""} ${r.status || ""}`.toLowerCase();
-    return s.includes("online") || s.includes("active") || s.includes("connected");
-  };
-
   const openProviderPanel = (providerId: VpsProviderId) => {
     setVpsInitialProvider(providerId);
     setVpsPanelOpen(true);
@@ -113,7 +109,7 @@ export default function HardwarePage() {
   const renderRow = (r: Registration) => {
     const gatewayId = String(r.gateway_id || r.id || "");
     const isCloud = r.hardware_kind === "cloud_vps";
-    const online = isOnline(r);
+    const presentation = connectionPresentation(r);
     const detailHref = `/w/${encodeURIComponent(workspaceId)}/hardware/${encodeURIComponent(gatewayId)}`;
     return (
       <div
@@ -149,7 +145,7 @@ export default function HardwarePage() {
           </span>
         </span>
         <span className="fleet-list-row-meta" style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
-          <StatusChip tone={online ? "online" : "offline"} label={online ? "Online" : "Offline"} />
+          <StatusChip tone={presentation.tone} label={presentation.label} />
           <button
             type="button"
             className="fleet-list-row-remove"

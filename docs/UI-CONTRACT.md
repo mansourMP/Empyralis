@@ -90,7 +90,15 @@ button" even when it's a Cancel action:
 | List row, desktop, one-line | 40-44px | column grid, see toolbar/list docs |
 | Nav row (rail, drawer) | 40px | icon + label |
 | Sub-nav row (rail subnav, drawer subitem) | 36px | indented, no icon or small icon |
-| Chip / pill | 22-24px | 12px text, never taller |
+| Status chip (non-interactive: Ready, Online, Degraded, …) | ~17-20px | 12px text minimum, dot + label, never clickable |
+| Pill / tag (interactive: filters, selectable tags) | 22-24px | 12px text, never taller |
+
+A status chip is a compact, non-interactive readout (Linear-lean) —
+deliberately smaller than an interactive pill, not an unmeasured accident.
+`.fleet-schip` (the shared StatusChip component) sits in the status-chip
+band. Nudge a status chip's height toward 20px only if it reads cramped on a
+real phone; never grow it to the interactive band's 22-24px — that would
+make a readout look clickable.
 
 ## 4. Topbar (mobile)
 

@@ -124,6 +124,24 @@ function connectionTone(g: FleetGateway): HardwarePlacementTone {
   return "offline";
 }
 
+/** The one place a box's live reachability becomes a StatusChip tone+label —
+ *  the Hardware list and the machine detail page both call this instead of
+ *  each reading connection_status their own way, so the same box never
+ *  reads "Online" in one place and something else in the other. Reads
+ *  connection_status (the real, server-computed WSS/heartbeat state) with
+ *  exact-match comparisons only — never a substring match against a
+ *  registration's own lifecycle `status` field, which is what previously let
+ *  a freshly-registered, session-less box read "Online" off the word
+ *  "active". */
+export function connectionPresentation(g: FleetGateway): { tone: AgentStatusTone; label: string } {
+  const raw = `${g.connection_status || g.status || ""}`.toLowerCase();
+  if (raw === "online") return { tone: "online", label: "Online" };
+  if (raw === "degraded") return { tone: "degraded", label: "Degraded" };
+  if (raw === "reconnecting") return { tone: "degraded", label: "Reconnecting" };
+  if (raw === "revoked") return { tone: "error", label: "Revoked" };
+  return { tone: "offline", label: "Offline" };
+}
+
 /** Real placement + live health for "Running on: …" — built ONLY from
  *  hardware_access + preferred_gateway_id + this same registrations join,
  *  never from runtime_target / derivePlacement() / agent.hardware_status.
