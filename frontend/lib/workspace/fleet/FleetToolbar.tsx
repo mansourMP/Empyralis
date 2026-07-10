@@ -16,12 +16,15 @@ export type ToolbarFilter = {
 /**
  * The quiet right-aligned icon-button cluster every list page portals into
  * the shell topbar's action slot — see HeaderAction in Breadcrumbs.tsx.
- * Three fixed slots, in order: [panel-toggle] [filter+sort] [usage]. Filter
- * and sort share ONE icon button and ONE popover (two icons for one concept
- * was redundant) — Linear's exact treatment otherwise: small ghost buttons,
- * quiet hover, accent reserved for an open menu or an actually-applied
- * filter/sort. Any slot the caller doesn't wire up simply doesn't render —
- * no dead controls.
+ * Three fixed slots, in order: [usage] [filter+sort] [panel-toggle] — UI
+ * Contract §6, a hard invariant, not a default. panel-toggle is ALWAYS
+ * rightmost, physically adjacent to the panel edge it opens (the
+ * properties drawer opens from the right — see FleetRightPanel). Filter
+ * and sort share ONE icon button and ONE popover (two icons for one
+ * concept was redundant) — Linear's exact treatment otherwise: small
+ * ghost buttons, quiet hover, accent reserved for an open menu or an
+ * actually-applied filter/sort. Any slot the caller doesn't wire up
+ * simply doesn't render — no dead controls.
  */
 export function FleetToolbar({
   filters,
@@ -78,17 +81,10 @@ export function FleetToolbar({
 
   return (
     <div className="fleet-toolbar-actions" ref={ref}>
-      {onTogglePanel && (
-        <button
-          type="button"
-          className={`fleet-icon-btn${panelOpen ? " is-active" : ""}`}
-          onClick={onTogglePanel}
-          aria-label="Properties"
-          aria-pressed={panelOpen}
-          title="Properties"
-        >
-          {panelOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
-        </button>
+      {usageHref && (
+        <Link href={usageHref} className="fleet-icon-btn" aria-label="Usage" title="Usage">
+          <BarChart3 size={16} strokeWidth={1.75} />
+        </Link>
       )}
 
       {hasControls && (
@@ -148,10 +144,17 @@ export function FleetToolbar({
         </>
       )}
 
-      {usageHref && (
-        <Link href={usageHref} className="fleet-icon-btn" aria-label="Usage" title="Usage">
-          <BarChart3 size={16} strokeWidth={1.75} />
-        </Link>
+      {onTogglePanel && (
+        <button
+          type="button"
+          className={`fleet-icon-btn${panelOpen ? " is-active" : ""}`}
+          onClick={onTogglePanel}
+          aria-label="Properties"
+          aria-pressed={panelOpen}
+          title="Properties"
+        >
+          {panelOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
+        </button>
       )}
     </div>
   );

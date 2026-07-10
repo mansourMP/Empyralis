@@ -84,7 +84,7 @@ export function SageLauncher({
   const selectedChannel = PERSONAL_CHANNELS.find((c) => c.id === connectChannel);
 
   return (
-    <div ref={ref} className="fleet-sage-launcher">
+    <div ref={ref} className={`fleet-sage-launcher${open ? " is-open" : ""}`}>
       {open && (
         <div className="fleet-sage-console" role="dialog" aria-label="Sage console">
           <div className="fleet-sage-console-header">
