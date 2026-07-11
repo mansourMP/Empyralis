@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from server_modules import (
@@ -2007,7 +2008,7 @@ def get_telegram_gateway_view(gateway_id: str) -> Dict[str, Any]:
     }
 
 
-def _platform_telegram_api_id() -> Optional[int]:
+def _platform_telegram_single_api_id() -> Optional[int]:
     for name in ("EMPYRALIS_TELEGRAM_API_ID", "TELEGRAM_API_ID"):
         raw = str(os.getenv(name) or "").strip()
         if not raw:
@@ -2021,12 +2022,58 @@ def _platform_telegram_api_id() -> Optional[int]:
     return None
 
 
-def _platform_telegram_api_hash() -> Optional[str]:
+def _platform_telegram_single_api_hash() -> Optional[str]:
     for name in ("EMPYRALIS_TELEGRAM_API_HASH", "TELEGRAM_API_HASH"):
         raw = str(os.getenv(name) or "").strip()
         if raw:
             return raw
     return None
+
+
+def _platform_telegram_credential_pool() -> List[Tuple[int, str]]:
+    """Small pool of platform-level Telegram api_id/api_hash pairs, indexed
+    EMPYRALIS_TELEGRAM_API_ID_1/EMPYRALIS_TELEGRAM_API_HASH_1, _2, _3, ...
+    A single shared credential means Telegram's anti-abuse systems flagging
+    or rate-limiting it breaks onboarding for every workspace at once; a
+    pool bounds that blast radius to whichever slice of workspaces hash to
+    the affected member. Falls back to the single un-indexed
+    EMPYRALIS_TELEGRAM_API_ID/_API_HASH as a pool of size 1 if no indexed
+    pool is configured, so existing single-credential deployments keep
+    working unchanged."""
+    pool: List[Tuple[int, str]] = []
+    index = 1
+    while True:
+        raw_id = str(os.getenv(f"EMPYRALIS_TELEGRAM_API_ID_{index}") or "").strip()
+        raw_hash = str(os.getenv(f"EMPYRALIS_TELEGRAM_API_HASH_{index}") or "").strip()
+        if not raw_id and not raw_hash:
+            break
+        try:
+            parsed_id = int(raw_id)
+        except ValueError:
+            parsed_id = 0
+        if parsed_id > 0 and raw_hash:
+            pool.append((parsed_id, raw_hash))
+        index += 1
+    if pool:
+        return pool
+    single_id = _platform_telegram_single_api_id()
+    single_hash = _platform_telegram_single_api_hash()
+    if single_id is not None and single_hash:
+        return [(single_id, single_hash)]
+    return []
+
+
+def _platform_telegram_credentials_for_workspace(workspace_id: str) -> Tuple[Optional[int], Optional[str]]:
+    pool = _platform_telegram_credential_pool()
+    if not pool:
+        return None, None
+    normalized = str(workspace_id or "").strip() or "default"
+    # A stable hash (not Python's built-in hash(), which is randomized per
+    # process via PYTHONHASHSEED) so the same workspace always resolves to
+    # the same pool member across restarts and re-pairing attempts.
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    selected = pool[int(digest, 16) % len(pool)]
+    return selected
 
 
 async def configure_telegram_personal_gateway(
@@ -2043,8 +2090,11 @@ async def configure_telegram_personal_gateway(
         TELEGRAM_PERSONAL_CHANNEL_KEY,
         TELEGRAM_PERSONAL_PROVIDER,
     )
-    resolved_api_id = api_id if api_id is not None else _platform_telegram_api_id()
-    resolved_api_hash = str(api_hash or "").strip() or _platform_telegram_api_hash()
+    pool_api_id, pool_api_hash = _platform_telegram_credentials_for_workspace(
+        str(registration.get("workspace_id") or "").strip()
+    )
+    resolved_api_id = api_id if api_id is not None else pool_api_id
+    resolved_api_hash = str(api_hash or "").strip() or pool_api_hash
     arguments: Dict[str, Any] = {}
     if resolved_api_id is not None:
         arguments["api_id"] = int(resolved_api_id)
