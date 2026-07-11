@@ -49,6 +49,8 @@ TELEGRAM_PERSONAL_PROVIDER = channel_lane_contract_service.assert_personal_gatew
 
 TELEGRAM_PERSONAL_CONFIGURE_CAPABILITY = "channel.telegram.personal.configure"
 WHATSAPP_PERSONAL_CONFIGURE_CAPABILITY = "channel.whatsapp.personal.configure"
+TELEGRAM_PERSONAL_DISCONNECT_CAPABILITY = "channel.telegram.personal.disconnect"
+WHATSAPP_PERSONAL_DISCONNECT_CAPABILITY = "channel.whatsapp.personal.disconnect"
 WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX = "whatsapp_personal:noreply:"
 TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX = "telegram_personal:noreply:"
 
@@ -1864,6 +1866,45 @@ async def configure_whatsapp_personal_gateway(
     }
 
 
+async def disconnect_whatsapp_personal_gateway(
+    *,
+    gateway_id: str,
+    registration: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Full reset: tears down any live/stuck session and clears the entire
+    persisted config (phone number, pairing state) so a subsequent setup
+    call starts genuinely fresh rather than inheriting a stuck pending
+    login — see WhatsAppPersonalRuntime.handleDisconnect()'s doc comment."""
+    channel_lane_contract_service.assert_personal_gateway_channel(
+        WHATSAPP_PERSONAL_CHANNEL_KEY,
+        WHATSAPP_PERSONAL_PROVIDER,
+    )
+    run_id = f"gateway-whatsapp-disconnect-{uuid4().hex[:12]}"
+    trace_id = f"gateway-whatsapp-disconnect-{uuid4().hex[:12]}"
+    _enforce_personal_gateway_config_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        registration=registration,
+        capability_id=WHATSAPP_PERSONAL_DISCONNECT_CAPABILITY,
+        run_id=run_id,
+        trace_id=trace_id,
+    )
+    execution = await gateway_execution_service.execute_tool_via_gateway(
+        gateway_id=str(gateway_id or "").strip(),
+        capability_id=WHATSAPP_PERSONAL_DISCONNECT_CAPABILITY,
+        arguments={},
+        run_id=run_id,
+        trace_id=trace_id,
+        workspace_id=str(registration.get("workspace_id") or "").strip(),
+        agent_scope="sage",
+    )
+    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
+    return {
+        "gateway_id": str(gateway_id or "").strip(),
+        "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY,
+        **result,
+    }
+
+
 async def dispatch_approved_personal_channel_outbound(
     *,
     gateway_id: str,
@@ -2121,6 +2162,43 @@ async def configure_telegram_personal_gateway(
         gateway_id=str(gateway_id or "").strip(),
         capability_id=TELEGRAM_PERSONAL_CONFIGURE_CAPABILITY,
         arguments=arguments,
+        run_id=run_id,
+        trace_id=trace_id,
+        workspace_id=str(registration.get("workspace_id") or "").strip(),
+        agent_scope="sage",
+    )
+    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
+    return {
+        "gateway_id": str(gateway_id or "").strip(),
+        "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY,
+        **result,
+    }
+
+
+async def disconnect_telegram_personal_gateway(
+    *,
+    gateway_id: str,
+    registration: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Full reset — see disconnect_whatsapp_personal_gateway()'s doc comment
+    and TelegramPersonalRuntime.handleDisconnect() for why this exists."""
+    channel_lane_contract_service.assert_personal_gateway_channel(
+        TELEGRAM_PERSONAL_CHANNEL_KEY,
+        TELEGRAM_PERSONAL_PROVIDER,
+    )
+    run_id = f"gateway-telegram-disconnect-{uuid4().hex[:12]}"
+    trace_id = f"gateway-telegram-disconnect-{uuid4().hex[:12]}"
+    _enforce_personal_gateway_config_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        registration=registration,
+        capability_id=TELEGRAM_PERSONAL_DISCONNECT_CAPABILITY,
+        run_id=run_id,
+        trace_id=trace_id,
+    )
+    execution = await gateway_execution_service.execute_tool_via_gateway(
+        gateway_id=str(gateway_id or "").strip(),
+        capability_id=TELEGRAM_PERSONAL_DISCONNECT_CAPABILITY,
+        arguments={},
         run_id=run_id,
         trace_id=trace_id,
         workspace_id=str(registration.get("workspace_id") or "").strip(),

@@ -392,6 +392,52 @@ async def configure_whatsapp_personal_gateway(
         raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
+@router.post("/personal-channels/whatsapp/gateways/{gateway_id}/disconnect")
+async def disconnect_whatsapp_personal_gateway(
+    request: Request,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+):
+    """Full reset — see disconnect_telegram_personal_gateway()'s doc comment
+    and WhatsAppPersonalRuntime.handleDisconnect() for why this exists."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="member",
+    )
+    try:
+        result = await personal_channels_service.disconnect_whatsapp_personal_gateway(
+            gateway_id=gateway_id,
+            registration=registration,
+        )
+        _emit_personal_channel_audit(
+            action="personal_channel.whatsapp.disconnect",
+            status="success",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="whatsapp_personal",
+            detail="WhatsApp personal channel was disconnected and reset for a paired gateway.",
+            metadata={},
+        )
+        return result
+    except ValueError as exc:
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.whatsapp.disconnect",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="whatsapp_personal",
+            detail=detail,
+            metadata={},
+        )
+        status_code = 409 if "not currently connected" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
 @router.post("/personal-channels/whatsapp/gateways/{gateway_id}/messages")
 async def send_whatsapp_personal_message(
     request: Request,
@@ -537,6 +583,56 @@ async def configure_telegram_personal_gateway(
                 "has_login_code": bool(str(body.login_code or "").strip()),
                 "has_password": bool(str(body.password or "").strip()),
             },
+        )
+        status_code = 409 if "not currently connected" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/personal-channels/telegram/gateways/{gateway_id}/disconnect")
+async def disconnect_telegram_personal_gateway(
+    request: Request,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+):
+    """Full reset: tears down any live/stuck Telegram session and clears
+    every persisted trace of the previous attempt (session, pending login,
+    api_id/api_hash/phone_number) so the next setup call starts genuinely
+    fresh. Exists because a bad first attempt can otherwise jam a phone
+    number in an unrecoverable retry loop with no way out short of an
+    operator hand-editing Gateway state files."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="member",
+    )
+    try:
+        result = await personal_channels_service.disconnect_telegram_personal_gateway(
+            gateway_id=gateway_id,
+            registration=registration,
+        )
+        _emit_personal_channel_audit(
+            action="personal_channel.telegram.disconnect",
+            status="success",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="telegram_personal",
+            detail="Telegram personal channel was disconnected and reset for a paired gateway.",
+            metadata={},
+        )
+        return result
+    except ValueError as exc:
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.telegram.disconnect",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="telegram_personal",
+            detail=detail,
+            metadata={},
         )
         status_code = 409 if "not currently connected" in detail.lower() else 400
         raise HTTPException(status_code=status_code, detail=detail) from exc
