@@ -84,7 +84,16 @@ export interface WhatsAppRuntimeDependencies {
   adapter?: WhatsAppBaileysAdapter;
 }
 
-const WHATSAPP_REDACT_STRING_KEYS = ["qrCode", "pairingCode", "sessionString", "sessionToken"] as const;
+// qrCode/pairingCode are deliberately NOT redacted: toGatewayStatePayload()'s
+// output (below) is exactly what the owner's authenticated status endpoint
+// serves so their browser can render the QR/pairing code to scan — that's a
+// single-use pairing intent, not durable session material, and redacting it
+// here would make WhatsApp pairing permanently impossible. The real Baileys
+// auth material (creds/keys/signal identities) lives in a separate directory
+// (see authStateDir()) and is never part of this snapshot's fields at all —
+// sessionString/sessionToken/the object keys below are kept as defense in
+// depth in case a future field is ever added under one of these names.
+const WHATSAPP_REDACT_STRING_KEYS = ["sessionString", "sessionToken"] as const;
 const WHATSAPP_REDACT_OBJECT_KEYS = ["creds", "keys", "authState", "signalIdentities", "preKeys", "signedPreKey"] as const;
 
 export function redactWhatsAppCredentials(state: Record<string, unknown>): Record<string, unknown> {

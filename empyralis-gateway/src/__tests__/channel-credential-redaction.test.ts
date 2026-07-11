@@ -1,8 +1,32 @@
+import { mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
+import path from "path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { redactTelegramCredentials } from "../channels/telegram/runtime";
 import { redactWhatsAppCredentials } from "../channels/whatsapp/runtime";
+import { WhatsAppSessionStore, type WhatsAppSessionSnapshot } from "../channels/whatsapp/session-store";
+import { maskPhoneNumber } from "../channels/telegram/login";
+import { GatewayStateDb } from "../state/db";
+
+// ---------------------------------------------------------------------------
+// Telegram phone-number masking (WhatsApp's login.ts already used its own
+// equivalent helper when building loginHint; Telegram's runtime.ts set
+// loginHint to the raw phone number directly at two call sites instead of
+// calling this already-existing helper).
+// ---------------------------------------------------------------------------
+
+test("maskPhoneNumber redacts all but the last 4 digits", () => {
+  assert.equal(maskPhoneNumber("+15551234567"), "*******4567");
+  assert.equal(maskPhoneNumber("442071838750"), "********8750");
+});
+
+test("maskPhoneNumber handles short/empty input without throwing", () => {
+  assert.equal(maskPhoneNumber(""), undefined);
+  assert.equal(maskPhoneNumber(undefined), undefined);
+  assert.equal(maskPhoneNumber("123"), "123");
+});
 
 // ---------------------------------------------------------------------------
 // Telegram credential redaction
@@ -102,16 +126,47 @@ test("whatsapp state: signalIdentities, preKeys, signedPreKey are redacted", () 
   assert.deepEqual(result.signedPreKey, { redacted: true });
 });
 
-test("whatsapp state: qrCode and pairingCode are redacted", () => {
-  const state: Record<string, unknown> = {
-    qrCode: "QR_DATA_12345",
-    pairingCode: "ABC-DEF-GHI",
-    status: "connected",
-  };
-  const result = redactWhatsAppCredentials(state);
-  assert.equal(result.qrCode, "[REDACTED]");
-  assert.equal(result.pairingCode, "[REDACTED]");
-  assert.equal(result.status, "connected");
+// qr_code/pairing_code must survive redaction: they're the single-use pairing
+// intent the owner's authenticated status endpoint is supposed to serve, not
+// durable session material. This exercises the REAL call path — session
+// snapshot -> toGatewayStatePayload() (which is what renames these fields to
+// snake_case) -> redactWhatsAppCredentials() — rather than a synthetic
+// camelCase object no real caller ever produces, so a future casing "fix"
+// can't silently reintroduce a redaction no-op or, worse, start redacting a
+// value the feature depends on.
+test("whatsapp state: real payload chain — qr_code/pairing_code survive, session material is genuinely absent", async () => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "empyralis-whatsapp-redact-"));
+  try {
+    const store = new WhatsAppSessionStore(new GatewayStateDb(rootDir));
+    const snapshot: WhatsAppSessionSnapshot = {
+      channelKey: "whatsapp_personal",
+      provider: "whatsapp_baileys",
+      status: "qr_required",
+      qrCode: "2@QR_DATA_RAW_BAILEYS_PAYLOAD,abc123==",
+      pairingCode: "ABCD-1234",
+    };
+    const payload = store.toGatewayStatePayload(snapshot);
+    const result = redactWhatsAppCredentials(payload) as {
+      personal_channels: { whatsapp_personal: Record<string, unknown> };
+    };
+    const channel = result.personal_channels.whatsapp_personal;
+
+    // Must survive — this is the entire QR/pairing-code delivery path.
+    assert.equal(channel.qr_code, snapshot.qrCode);
+    assert.equal(channel.pairing_code, snapshot.pairingCode);
+
+    // Real Baileys auth material must never appear here at all — it's
+    // structurally absent from WhatsAppSessionSnapshot by construction
+    // (it lives only in the separate auth-state directory), not merely
+    // redacted. Locking that in so a future field addition gets caught.
+    assert.equal("sessionString" in channel, false);
+    assert.equal("sessionToken" in channel, false);
+    assert.equal("creds" in channel, false);
+    assert.equal("keys" in channel, false);
+    assert.equal("authState" in channel, false);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
 });
 
 test("whatsapp state: non-sensitive fields are preserved", () => {

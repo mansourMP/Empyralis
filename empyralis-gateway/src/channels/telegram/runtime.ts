@@ -10,7 +10,7 @@ import type {
   GatewayScope,
   GatewayToolInvokePayload,
 } from "../../protocol/types";
-import { buildTelegramConnectedState, buildTelegramPreflightState, loadTelegramLoginConfig, type TelegramLinkedAccount, type TelegramLoginConfig } from "./login";
+import { buildTelegramConnectedState, buildTelegramPreflightState, loadTelegramLoginConfig, maskPhoneNumber, type TelegramLinkedAccount, type TelegramLoginConfig } from "./login";
 import { mapTelegramInboundMessage, mapTelegramOutboundResult, type TelegramInboundMessage } from "./message-mapper";
 import { TelegramOutboundStore, TelegramTypingKeepalive, type TelegramChatAction } from "./outbound";
 import {
@@ -390,7 +390,7 @@ export class TelegramPersonalRuntime {
       });
       await this.sessionStore.save({
         status: "code_required",
-        loginHint: String(resolvedConfig.phoneNumber || "").trim() || "login_code_required",
+        loginHint: maskPhoneNumber(resolvedConfig.phoneNumber) || "login_code_required",
         codeRequestedAt: requestedAt,
         retryable: false,
         lastDisconnectReason: undefined,
@@ -403,7 +403,7 @@ export class TelegramPersonalRuntime {
     if (resolvedConfig.phoneCodeHash && !resolvedConfig.loginCode) {
       await this.sessionStore.save({
         status: "code_required",
-        loginHint: String(resolvedConfig.phoneNumber || "").trim() || "login_code_required",
+        loginHint: maskPhoneNumber(resolvedConfig.phoneNumber) || "login_code_required",
         codeRequestedAt: String(pendingLogin.codeRequestedAt || "").trim() || new Date().toISOString(),
         retryable: false,
       });

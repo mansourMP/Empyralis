@@ -23,7 +23,7 @@ function normalizePositiveInt(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function maskPhoneNumber(phoneNumber: string | undefined): string | undefined {
+export function maskPhoneNumber(phoneNumber: string | undefined): string | undefined {
   const digits = String(phoneNumber || "").replace(/\D+/g, "");
   if (!digits) {
     return undefined;
