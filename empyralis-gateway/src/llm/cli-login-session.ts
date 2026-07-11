@@ -92,6 +92,13 @@ const MAX_BUFFERED_CHARS_FOR_DIAGNOSTICS = 4_000;
 
 const URL_PATTERN = /https?:\/\/[^\s"'<>]+/;
 const CODE_PROMPT_PATTERN = /paste.{0,20}code|enter.{0,20}code|device.{0,10}code/i;
+// CLIs commonly color/style their URL and code output (`\x1b[94m...\x1b[0m`)
+// — matched against the raw line, URL_PATTERN's `[^\s"'<>]+` doesn't exclude
+// escape-sequence bytes, so an unstripped trailing reset code was getting
+// appended to the end of every captured URL. Strip before matching, not
+// after — tightening URL_PATTERN's boundary alone wouldn't have covered
+// CODE_PROMPT_PATTERN or any future pattern hitting the same bytes.
+const ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[a-zA-Z]/g;
 
 /** Minimal structural subset of node:child_process's ChildProcess — same
  *  spirit as cli-runner.ts's CliChildProcessLike, extended with a writable
@@ -129,6 +136,10 @@ interface ActiveSession {
   settled: boolean;
   diagnosticBuffer: string;
   sawUrl: boolean;
+  /** Codex-only (see extractSafeLines' doc comment): true right after a line
+   *  matched CODE_PROMPT_PATTERN, until the next non-empty line — the actual
+   *  device code — has been consumed. */
+  awaitingCodexCodeValue: boolean;
 }
 
 export interface CliLoginSessionConfig {
@@ -163,12 +174,35 @@ function binaryFor(runtime: CliLoginRuntime, env: NodeJS.ProcessEnv): string {
 /** Splits a raw stdout/stderr chunk into lines and classifies each one. Only
  *  ever returns entries for lines that positively match a known-safe shape —
  *  see the module doc comment for why silence is the safe default here, not
- *  a raw passthrough. */
-function extractSafeLines(chunk: string): { kind: CliLoginOutputKind; text: string }[] {
+ *  a raw passthrough. ANSI escape codes are stripped from each line before
+ *  any matching happens — see ANSI_ESCAPE_PATTERN's comment.
+ *
+ *  Codex-only follow-up capture: Codex's device-auth flow prints its one-time
+ *  code on its OWN line, immediately after a "Enter this one-time code"
+ *  instruction — CODE_PROMPT_PATTERN only matches the instruction sentence,
+ *  so without this the code value itself would never be captured at all (the
+ *  bare code matches neither URL_PATTERN nor CODE_PROMPT_PATTERN). `state` is
+ *  the calling session's own mutable flag, threaded in because a chunk
+ *  boundary can land between the instruction line and the code line. This is
+ *  deliberately gated to runtime === "codex": Claude Code's paste-BACK
+ *  prompt ("Paste code here if prompted") has no such follow-up line — the
+ *  process just blocks on stdin at that point waiting for cli.login.input —
+ *  so applying this to claude_code too would risk mis-capturing whatever
+ *  unrelated line happens to print next. */
+function extractSafeLines(
+  chunk: string,
+  runtime: CliLoginRuntime,
+  state: { awaitingCodexCodeValue: boolean },
+): { kind: CliLoginOutputKind; text: string }[] {
   const out: { kind: CliLoginOutputKind; text: string }[] = [];
   for (const rawLine of chunk.split(/\r?\n/)) {
-    const line = rawLine.trim();
+    const line = rawLine.replace(ANSI_ESCAPE_PATTERN, "").trim();
     if (!line) continue;
+    if (state.awaitingCodexCodeValue) {
+      out.push({ kind: "code_prompt", text: line.slice(0, 300) });
+      state.awaitingCodexCodeValue = false;
+      continue;
+    }
     const urlMatch = URL_PATTERN.exec(line);
     if (urlMatch) {
       out.push({ kind: "url", text: urlMatch[0] });
@@ -176,6 +210,10 @@ function extractSafeLines(chunk: string): { kind: CliLoginOutputKind; text: stri
     }
     if (CODE_PROMPT_PATTERN.test(line)) {
       out.push({ kind: "code_prompt", text: line.slice(0, 300) });
+      if (runtime === "codex") {
+        state.awaitingCodexCodeValue = true;
+      }
+      continue;
     }
     // Anything else is deliberately dropped — never forwarded, never
     // returned from this function.
@@ -257,6 +295,7 @@ export class CliLoginSessionManager {
       settled: false,
       diagnosticBuffer: "",
       sawUrl: false,
+      awaitingCodexCodeValue: false,
       killTimer: setTimeout(() => this.onTimeout(params.runId), this.sessionTimeoutMs),
       forceKillTimer: null,
     };
@@ -268,7 +307,7 @@ export class CliLoginSessionManager {
     const onData = (chunk: Buffer | string) => {
       const text = String(chunk);
       session.diagnosticBuffer = (session.diagnosticBuffer + text).slice(-MAX_BUFFERED_CHARS_FOR_DIAGNOSTICS);
-      for (const line of extractSafeLines(text)) {
+      for (const line of extractSafeLines(text, params.runtime, session)) {
         if (line.kind === "url") session.sawUrl = true;
         void this.emit({ run_id: params.runId, runtime: params.runtime, event: "output", ...line });
       }

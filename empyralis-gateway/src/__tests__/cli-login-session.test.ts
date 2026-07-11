@@ -8,6 +8,7 @@ import {
   type CliLoginChildProcessLike,
   type CliLoginSpawnImpl,
   type CliLoginEvent,
+  type CliLoginOutputEvent,
 } from "../llm/cli-login-session";
 
 interface FakeChild {
@@ -242,4 +243,86 @@ test("starting a second session for the same run_id is rejected", async () => {
   });
   await manager.start({ runId: "dup", runtime: "claude_code" });
   await assert.rejects(manager.start({ runId: "dup", runtime: "claude_code" }));
+});
+
+// ---- Real-output regression tests -----------------------------------------
+// Fixtures below are byte-for-byte what `codex login --device-auth` actually
+// printed in a live test (session of 2026-07-11/12): confirmed via direct
+// `codex login --device-auth` runs, both to a TTY and piped, and via `cat -v`
+// to see every control byte. The device code itself was cancelled
+// immediately after capture and was never a valid credential by the time
+// this test was written.
+
+test("real Codex output: ANSI-wrapped URL is captured without the trailing escape code", async () => {
+  const fake = makeFakeChild();
+  const { events, publish } = collectingPublisher();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    commandExists: () => "/usr/bin/codex",
+  });
+  manager.setEventPublisher(publish);
+
+  await manager.start({ runId: "run-ansi-url", runtime: "codex" });
+  // Real captured line: "   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m"
+  fake.emitStdout("   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n");
+
+  const urlEvents = events.filter((e): e is CliLoginOutputEvent => e.event === "output" && e.kind === "url");
+  assert.equal(urlEvents.length, 1);
+  assert.equal(
+    urlEvents[0].text,
+    "https://auth.openai.com/codex/device",
+    "the trailing \\x1b[0m reset code must not be appended to the captured URL",
+  );
+});
+
+test("real Codex output: the device code on the line AFTER the prompt is captured, not dropped", async () => {
+  const fake = makeFakeChild();
+  const { events, publish } = collectingPublisher();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    commandExists: () => "/usr/bin/codex",
+  });
+  manager.setEventPublisher(publish);
+
+  await manager.start({ runId: "run-code-value", runtime: "codex" });
+  // Real captured two-line sequence from `codex login --device-auth`:
+  fake.emitStdout("2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n");
+  fake.emitStdout("   \x1b[94m158R-XDWM5\x1b[0m\n");
+  // A trailing unrelated line must not be mistaken for a second code value.
+  fake.emitStdout("\x1b[90mContinue only if you started this login in Codex.\x1b[0m\n");
+
+  const codePromptEvents = events.filter(
+    (e): e is CliLoginOutputEvent => e.event === "output" && e.kind === "code_prompt",
+  );
+  assert.equal(codePromptEvents.length, 2, "both the instruction line and the code value line should be forwarded");
+  assert.match(codePromptEvents[0].text, /Enter this one-time code/);
+  assert.equal(
+    codePromptEvents[1].text,
+    "158R-XDWM5",
+    "the bare code value, stripped of ANSI codes, must be forwarded as its own event",
+  );
+});
+
+test("Claude Code's paste-back prompt is unaffected: no follow-up line is mis-captured as a code value", async () => {
+  const fake = makeFakeChild();
+  const { events, publish } = collectingPublisher();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    commandExists: () => "/usr/bin/claude",
+  });
+  manager.setEventPublisher(publish);
+
+  await manager.start({ runId: "run-claude-no-capture", runtime: "claude_code" });
+  fake.emitStdout("Paste code here if prompted: \n");
+  // Unlike Codex, nothing meaningful follows on stdout — the process blocks
+  // on stdin at this point. Whatever prints next (e.g. a stray banner after
+  // the user's paste-back completes) must NOT be captured as if it were a
+  // device code the way Codex's follow-up line is.
+  fake.emitStdout("Some later unrelated line\n");
+
+  const codePromptEvents = events.filter(
+    (e): e is CliLoginOutputEvent => e.event === "output" && e.kind === "code_prompt",
+  );
+  assert.equal(codePromptEvents.length, 1, "claude_code must not gain the codex-only follow-up-line capture");
+  assert.match(codePromptEvents[0].text, /Paste code here/);
 });

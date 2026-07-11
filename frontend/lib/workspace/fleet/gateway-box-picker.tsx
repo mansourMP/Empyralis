@@ -79,13 +79,18 @@ export function gatewayIsOnline(g: FleetGateway): boolean {
  *  not signed in" apart from "ready". `.status` alone can't either: the
  *  Gateway probe reports "degraded" for BOTH "not installed" and "installed,
  *  not authenticated" (service-inventory.ts's probeClaudeCli/probeCodexCli).
- *  `.installed` is the one field that disambiguates, so it goes first. */
+ *  `.installed` is the one field that disambiguates, so it goes first.
+ *  `.authenticated` is the ONLY signal for "ready" — the probe itself already
+ *  folds authentication into `.status` (`installed ? (authenticated ? "ready"
+ *  : "degraded") : "degraded"`), so trusting `.status === "ready"` here too
+ *  was redundant, not an independent check; keeping just `.authenticated`
+ *  is the single source of truth this function exists to provide. */
 export type RuntimeState = "ready" | "unauthenticated" | "missing";
 
 export function gatewayRuntimeState(g: FleetGateway, runtime: "claude_code" | "codex"): RuntimeState {
   const entry = g.llm_runtimes?.[runtime];
   if (!entry || entry.installed === false) return "missing";
-  if (entry.authenticated || entry.status === "ready") return "ready";
+  if (entry.authenticated) return "ready";
   return "unauthenticated";
 }
 
