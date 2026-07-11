@@ -1795,6 +1795,34 @@ def touch_gateway_session(
             conn.close()
 
 
+MAX_GATEWAY_CAPABILITY_COUNT = 200
+MAX_GATEWAY_CAPABILITY_ID_LENGTH = 128
+
+
+def _normalize_gateway_capabilities(raw: Any) -> Optional[List[str]]:
+    """Cleans a capabilities list off the wire (untrusted per-reconnect input,
+    unlike the one-time pairing-token-gated path). Returns None for "caller
+    didn't pass anything" so callers can distinguish that from "pass an empty
+    list to clear it." Declaring a capability only affects routing feasibility
+    (see registration_has_execution_capability()'s callers) — it can't grant
+    new authority, so this only needs to guard against garbage/oversized
+    input, not privilege escalation."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return []
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        token = str(item or "").strip()[:MAX_GATEWAY_CAPABILITY_ID_LENGTH]
+        if token and token not in seen:
+            cleaned.append(token)
+            seen.add(token)
+        if len(cleaned) >= MAX_GATEWAY_CAPABILITY_COUNT:
+            break
+    return cleaned
+
+
 def update_gateway_registration_state(
     *,
     gateway_id: str,
@@ -1804,9 +1832,11 @@ def update_gateway_registration_state(
     checkpoint_cursor: Optional[int] = None,
     device_trust_state: Optional[str] = None,
     status: Optional[str] = None,
+    capabilities: Optional[List[str]] = None,
     db_path: Optional[Path | str] = None,
 ) -> Optional[Dict[str, Any]]:
     now_iso = _utc_now_iso()
+    normalized_capabilities = _normalize_gateway_capabilities(capabilities)
     with _DB_LOCK:
         conn = _connect(db_path)
         try:
@@ -1824,6 +1854,11 @@ def update_gateway_registration_state(
                     merged_metadata.pop(clean_key, None)
             merged_metadata.update(dict(metadata or {}))
             next_status = str(status or registration.get("status") or "active").strip() or "active"
+            next_capabilities = (
+                normalized_capabilities
+                if normalized_capabilities is not None
+                else list(registration.get("capabilities") or [])
+            )
             _enforce_gateway_state_decision(
                 "update_registration_state",
                 tenant_id=registration.get("tenant_id"),
@@ -1840,7 +1875,8 @@ def update_gateway_registration_state(
                 """
                 UPDATE gateway_registrations
                 SET metadata = ?, updated_at = ?, last_seen_at = ?,
-                    journal_cursor = ?, checkpoint_cursor = ?, device_trust_state = ?, status = ?
+                    journal_cursor = ?, checkpoint_cursor = ?, device_trust_state = ?, status = ?,
+                    capabilities = ?
                 WHERE gateway_id = ?
                 """,
                 (
@@ -1851,6 +1887,7 @@ def update_gateway_registration_state(
                     int(checkpoint_cursor if checkpoint_cursor is not None else registration.get("checkpoint_cursor") or 0),
                     str(device_trust_state or registration.get("device_trust_state") or "verified").strip() or "verified",
                     next_status,
+                    _json_dumps(next_capabilities),
                     str(gateway_id or "").strip(),
                 ),
             )

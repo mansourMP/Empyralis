@@ -1802,6 +1802,16 @@ async def handle_gateway_websocket(
                 "auth_session_id": session_id,
                 "runtime_session_id": session_id,
             },
+            # Refresh from what THIS connect declares — a Gateway build that
+            # adds a capability (e.g. a new disconnect/reset action) becomes
+            # dispatchable on its very next reconnect instead of needing a
+            # manual registry patch or a full re-pair. Safe: this list only
+            # gates whether the backend will attempt a dispatch (routing
+            # feasibility) — it is never consulted to choose what capability
+            # to invoke (that's always a fixed constant in application code)
+            # and the kill-switch/policy/approval decision in
+            # _enforce_gateway_service_decision runs independently of it.
+            capabilities=connect_payload.get("requested_capabilities"),
         )
         connection = _LiveGatewayConnection(
             websocket=websocket,
