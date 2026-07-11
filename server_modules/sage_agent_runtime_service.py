@@ -1061,39 +1061,66 @@ async def _dispatch_cli_subscription_gateway_brain(
 
     run_id = f"cli-subscription-{trace_id or uuid.uuid4()}"
     from server_modules import gateway_execution_service
-    try:
-        response = await gateway_execution_service.execute_tool_via_gateway(
-            gateway_id=gateway_id,
-            capability_id="llm.generate",
-            arguments={
-                "runtime": _runtime,
-                "model": _model,
-                "system": system_prompt,
-                "messages": messages,
-                "prompt": user_message,
-                "timeout_seconds": 120,
-            },
-            run_id=run_id,
-            trace_id=trace_id or run_id,
-            workspace_id=workspace_id,
-            timeout_seconds=125,
-            request_id=run_id,
-            runtime_access_mode="default_guarded",
-            empyralis_approved=True,
-            agent_scope="specialist",
-            emit_hardware_activity=False,
-        )
-    except Exception as exc:
-        _reason = str(exc)
-        await _ledger_provider_unavailable(
-            workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription",
-            provider=f"{_runtime}@{gateway_id}", reason=_reason,
-        )
-        await _ledger_cli_subscription_failure(
-            workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id=gateway_id,
-            runtime=_runtime, reason=_reason, trace_id=trace_id,
-        )
-        raise RuntimeError(_friendly_cli_subscription_error(_reason, runtime=_runtime)) from exc
+
+    # The Gateway's WS link to this backend can drop and auto-reconnect in
+    # the background (observed: median ~5-15s, driven by the paired box's
+    # own network path — e.g. a flaky VPN hop — not by anything this
+    # process controls). A dispatch that lands in that gap fails with a
+    # connection-shaped reason even though the box is fine and reconnects
+    # moments later. Retry a couple of times across that window before
+    # surfacing a failure — cheaper than making the user manually resend,
+    # and honest: we only retry reasons that look like the transport, never
+    # CLI/auth/crash reasons where a retry would just waste 15s before the
+    # same real failure.
+    _TRANSIENT_DISPATCH_RETRY_DELAYS_S = (5, 10)
+    _TRANSIENT_KEYWORDS = ("connection", "offline", "heartbeat", "not active", "socket")
+    attempt = 0
+    while True:
+        try:
+            response = await gateway_execution_service.execute_tool_via_gateway(
+                gateway_id=gateway_id,
+                capability_id="llm.generate",
+                arguments={
+                    "runtime": _runtime,
+                    "model": _model,
+                    "system": system_prompt,
+                    "messages": messages,
+                    "prompt": user_message,
+                    "timeout_seconds": 120,
+                },
+                run_id=run_id,
+                trace_id=trace_id or run_id,
+                workspace_id=workspace_id,
+                timeout_seconds=125,
+                request_id=run_id,
+                runtime_access_mode="default_guarded",
+                empyralis_approved=True,
+                agent_scope="specialist",
+                emit_hardware_activity=False,
+            )
+            break
+        except Exception as exc:
+            _reason = str(exc)
+            _transient = any(kw in _reason.lower() for kw in _TRANSIENT_KEYWORDS)
+            if _transient and attempt < len(_TRANSIENT_DISPATCH_RETRY_DELAYS_S):
+                _delay = _TRANSIENT_DISPATCH_RETRY_DELAYS_S[attempt]
+                logging.getLogger(__name__).info(
+                    "cli_subscription dispatch hit a transient-looking reason "
+                    "(%s) on gateway %s — retrying in %ss (attempt %s/%s).",
+                    _reason, gateway_id, _delay, attempt + 1, len(_TRANSIENT_DISPATCH_RETRY_DELAYS_S),
+                )
+                await asyncio.sleep(_delay)
+                attempt += 1
+                continue
+            await _ledger_provider_unavailable(
+                workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription",
+                provider=f"{_runtime}@{gateway_id}", reason=_reason,
+            )
+            await _ledger_cli_subscription_failure(
+                workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id=gateway_id,
+                runtime=_runtime, reason=_reason, trace_id=trace_id,
+            )
+            raise RuntimeError(_friendly_cli_subscription_error(_reason, runtime=_runtime)) from exc
 
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     reply = str(result.get("text") or "").strip()

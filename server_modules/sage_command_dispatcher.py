@@ -110,6 +110,17 @@ def classify_error(
     if raw_error:
         import logging
         logging.getLogger(__name__).debug("classify_error raw: %s", raw_error)
+    stripped = str(error_text or "").strip()
+    if stripped.startswith("Heads up:"):
+        # Already a final, specific, platform-voice message (e.g. from
+        # _friendly_cli_subscription_error / _friendly_cli_setup_error) —
+        # re-running keyword classification on it can only make it VAGUER,
+        # never more accurate, since those messages often embed raw reason
+        # text (e.g. "...(Gateway connection is no longer active)") whose
+        # words ("connection", "timeout") collide with this function's own
+        # generic buckets below and silently downgrade a specific reason to
+        # SAGE_PROVIDER_UNREACHABLE_REPLY. Pass it through untouched.
+        return stripped
     if not error_text:
         base = SAGE_ERROR_REPLY
     else:
