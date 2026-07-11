@@ -477,6 +477,15 @@ export class WhatsAppPersonalRuntime {
       await Promise.resolve(this.authBundle?.saveCreds?.());
     });
     socket.ev.on("connection.update", (update) => {
+      // Baileys keeps emitting on this socket's own event emitter even
+      // after we've abandoned it (e.g. handleDisconnect() nulled
+      // this.socket and moved on) — a late "close" event from the old
+      // socket would otherwise clobber the fresh idle state with a stale
+      // logged_out/retryable:false. Only the socket we currently own may
+      // update state.
+      if (this.socket !== socket) {
+        return;
+      }
       void this.handleConnectionUpdate(update);
     });
     socket.ev.on("messages.upsert", (event) => {
