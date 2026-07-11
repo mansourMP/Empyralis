@@ -129,6 +129,17 @@ export class PersonalChannelConfigStore {
     });
   }
 
+  /** Full reset for disconnect/re-pair: unlike clearTelegramSecrets() (which
+   *  only drops the short-lived login_code/password fields after a
+   *  successful connect), this drops the entire config — api_id, api_hash,
+   *  phone_number included — so a stuck or stale attempt can't leak into
+   *  the next one. */
+  async clearTelegramConfig(): Promise<void> {
+    const snapshot = await this.loadSnapshot();
+    delete snapshot.telegram;
+    await this.saveSnapshot(snapshot);
+  }
+
   async patchWhatsAppConfig(patch: WhatsAppPersonalConfigPatch): Promise<WhatsAppPersonalConfigSnapshot> {
     const snapshot = await this.loadSnapshot();
     snapshot.whatsapp = applyPatch<WhatsAppPersonalConfigSnapshot>(snapshot.whatsapp, {
@@ -137,5 +148,12 @@ export class PersonalChannelConfigStore {
     });
     await this.saveSnapshot(snapshot);
     return snapshot.whatsapp ?? {};
+  }
+
+  /** Full reset for disconnect/re-pair — see clearTelegramConfig(). */
+  async clearWhatsAppConfig(): Promise<void> {
+    const snapshot = await this.loadSnapshot();
+    delete snapshot.whatsapp;
+    await this.saveSnapshot(snapshot);
   }
 }

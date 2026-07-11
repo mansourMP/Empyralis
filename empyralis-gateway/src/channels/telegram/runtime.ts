@@ -101,11 +101,13 @@ export class TelegramPersonalRuntime {
       "channel.telegram.personal.inbound",
       "channel.telegram.personal.outbound",
       "channel.telegram.personal.configure",
+      "channel.telegram.personal.disconnect",
     ];
   }
 
   supportsCapability(capabilityId: string): boolean {
-    return String(capabilityId || "").trim() === "channel.telegram.personal.configure";
+    const id = String(capabilityId || "").trim();
+    return id === "channel.telegram.personal.configure" || id === "channel.telegram.personal.disconnect";
   }
 
   async handleCapabilityInvoke(
@@ -113,6 +115,9 @@ export class TelegramPersonalRuntime {
   ): Promise<Record<string, unknown>> {
     const payload = frame.payload;
     const capabilityId = String(payload.capability_id || "").trim();
+    if (capabilityId === "channel.telegram.personal.disconnect") {
+      return this.handleDisconnect();
+    }
     if (capabilityId !== "channel.telegram.personal.configure") {
       throw new Error(`Unsupported Telegram personal capability: ${capabilityId || "unknown"}`);
     }
@@ -121,6 +126,48 @@ export class TelegramPersonalRuntime {
         ? (payload.arguments as Record<string, unknown>)
         : {};
     return this.handleConfigure(argumentsPayload);
+  }
+
+  /** Full reset: tears down any live/in-flight connection and clears every
+   *  persisted trace of the previous attempt (session string, pending
+   *  login, and the full config — api_id/api_hash/phone_number included),
+   *  so a subsequent configure() starts genuinely fresh rather than
+   *  inheriting a stuck or stale pending-login. This is the exact gap that
+   *  let a bad first attempt jam a phone number in a `code_required` ->
+   *  PHONE_CODE_INVALID -> `code_required` retry loop with no way out
+   *  short of an operator hand-editing Gateway state files. */
+  private async handleDisconnect(): Promise<Record<string, unknown>> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempts = 0;
+    if (this.client) {
+      try {
+        await Promise.resolve(this.client.disconnect?.());
+      } catch {
+        // Best-effort — the session is being wiped regardless.
+      }
+    }
+    this.client = null;
+    await this.sessionStore.clearSessionString();
+    await this.sessionStore.clearPendingLogin();
+    await this.configStore.clearTelegramConfig();
+    await this.sessionStore.save({
+      status: "idle",
+      loginHint: undefined,
+      linkedUserId: undefined,
+      linkedUsername: undefined,
+      linkedPhone: undefined,
+      linkedName: undefined,
+      connectedAt: undefined,
+      codeRequestedAt: undefined,
+      retryable: true,
+      lastDisconnectReason: undefined,
+      lastDisconnectCode: undefined,
+    });
+    await this.flushState();
+    return { status: "disconnected", channel_key: TELEGRAM_PERSONAL_CHANNEL_KEY };
   }
 
   supportsChannel(channelKey: string): boolean {

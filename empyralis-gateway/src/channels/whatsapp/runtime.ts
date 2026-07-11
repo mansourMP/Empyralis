@@ -65,6 +65,12 @@ interface BaileysSocketLike {
   sendPresenceUpdate?: (type: WhatsAppPresenceAction, jid: string) => Promise<void> | void;
   requestPairingCode?: (phoneNumber: string, customPairingCode?: string) => Promise<string>;
   user?: { id?: string; name?: string };
+  /** Tells WhatsApp's servers to unlink this device (a real logout, not
+   *  just closing our local socket) — used by disconnect/reset so a wiped
+   *  local auth state doesn't leave a stale "linked device" entry on the
+   *  account's own WhatsApp settings. */
+  logout?: () => Promise<void>;
+  end?: (error: Error | undefined) => void;
 }
 
 interface WhatsAppBaileysAdapter {
@@ -141,11 +147,13 @@ export class WhatsAppPersonalRuntime {
       "channel.whatsapp.personal.inbound",
       "channel.whatsapp.personal.outbound",
       "channel.whatsapp.personal.configure",
+      "channel.whatsapp.personal.disconnect",
     ];
   }
 
   supportsCapability(capabilityId: string): boolean {
-    return String(capabilityId || "").trim() === "channel.whatsapp.personal.configure";
+    const id = String(capabilityId || "").trim();
+    return id === "channel.whatsapp.personal.configure" || id === "channel.whatsapp.personal.disconnect";
   }
 
   async handleCapabilityInvoke(
@@ -153,6 +161,9 @@ export class WhatsAppPersonalRuntime {
   ): Promise<Record<string, unknown>> {
     const payload = frame.payload;
     const capabilityId = String(payload.capability_id || "").trim();
+    if (capabilityId === "channel.whatsapp.personal.disconnect") {
+      return this.handleDisconnect();
+    }
     if (capabilityId !== "channel.whatsapp.personal.configure") {
       throw new Error(`Unsupported WhatsApp personal capability: ${capabilityId || "unknown"}`);
     }
@@ -161,6 +172,51 @@ export class WhatsAppPersonalRuntime {
         ? (payload.arguments as Record<string, unknown>)
         : {};
     return this.handleConfigure(argumentsPayload);
+  }
+
+  /** Full reset — see TelegramPersonalRuntime.handleDisconnect()'s doc
+   *  comment for why this exists. Also clears the Baileys multi-file auth
+   *  state directory (the real credential material, never part of the
+   *  JSON snapshot) so a subsequent QR/pairing-code attempt is genuinely
+   *  a fresh device link, not a resume of a broken one. */
+  private async handleDisconnect(): Promise<Record<string, unknown>> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempts = 0;
+    this.pairingCodeRequested = false;
+    if (this.socket) {
+      try {
+        await Promise.resolve(this.socket.logout?.());
+      } catch {
+        // Best-effort — the auth state directory is being wiped regardless.
+      }
+      try {
+        this.socket.end?.(undefined);
+      } catch {
+        // Already gone.
+      }
+    }
+    this.socket = null;
+    this.authBundle = null;
+    await this.sessionStore.clearAuthStateDir();
+    await this.configStore.clearWhatsAppConfig();
+    await this.sessionStore.save({
+      status: "idle",
+      qrCode: undefined,
+      loginHint: undefined,
+      pairingCode: undefined,
+      pairingCodeGeneratedAt: undefined,
+      linkedJid: undefined,
+      linkedName: undefined,
+      connectedAt: undefined,
+      retryable: true,
+      lastDisconnectReason: undefined,
+      lastDisconnectCode: undefined,
+    });
+    await this.flushState();
+    return { status: "disconnected", channel_key: WHATSAPP_PERSONAL_CHANNEL_KEY };
   }
 
   supportsChannel(channelKey: string): boolean {
