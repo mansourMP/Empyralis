@@ -41,21 +41,16 @@ test.beforeEach(() => {
     mockWebSocketInstance = instance;
     return instance;
   } as unknown as new (url: string) => MockWebSocketInstance;
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).WebSocket = mockWebSocketClass;
+  (mockWebSocketClass as any).OPEN = 1;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).WebSocket.OPEN = 1;
+  (mockWebSocketClass as any).CONNECTING = 0;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).WebSocket.CONNECTING = 0;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).WebSocket.CLOSED = 3;
+  (mockWebSocketClass as any).CLOSED = 3;
 });
 
 test.afterEach(() => {
   mockWebSocketInstance = null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  delete (globalThis as any).WebSocket;
 });
 
 // Helper to access the mock instance
@@ -167,16 +162,17 @@ test("connection timeout fires if onopen never called", async () => {
     mockTokenStore as any,
     mockCapabilityRouter as any,
     mockPersonalChannelRuntimes as any,
+    mockWebSocketClass as any,
   );
 
   // Access private method via bracket notation
-  const openSocket = (client as unknown as { openSocket: (url: string) => Promise<unknown> }).openSocket;
+  const openSocket = (client as unknown as { openSocket: (url: string, sessionToken: string) => Promise<unknown> }).openSocket;
   assert.ok(openSocket, "openSocket method must exist");
 
   // Don't trigger onopen - the timeout should fire
   const startTime = Date.now();
   await assert.rejects(
-    keepEventLoopAliveUntil(openSocket("ws://localhost:8080")),
+    keepEventLoopAliveUntil(openSocket.call(client, "ws://localhost:8080", "test-session-token")),
     /timed out/,
   );
   const elapsed = Date.now() - startTime;

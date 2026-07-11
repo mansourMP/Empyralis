@@ -1,4 +1,10 @@
 import crypto from "crypto";
+// Node has no global WebSocket in this project's supported range (>=20) —
+// the `ws` package's WebSocket class implements the same browser-style API
+// this file relies on (.onopen/.onerror/.onclose, readyState, static
+// CLOSED/CLOSING constants, subprotocol array as the 2nd constructor arg),
+// so it's a drop-in for the bare `WebSocket` identifier used below.
+import WebSocket from "ws";
 
 import { GatewayConfig, assertWebSocketUrl } from "../config";
 import { GatewayCheckpoints } from "../state/checkpoints";
@@ -124,6 +130,9 @@ export class GatewayWsClient {
     private readonly tokenStore: GatewayTokenStore,
     private readonly capabilityRouter: GatewayCapabilityRouter,
     private readonly personalChannelRuntimes = new PersonalChannelRuntimeRegistry(),
+    // Injectable for tests, same spirit as cli-login-session.ts's spawnImpl —
+    // defaults to the real `ws` package so production code needs no override.
+    private readonly webSocketImpl: typeof WebSocket = WebSocket,
   ) {
     this.reconnect = new ReconnectBackoff({
       minDelayMs: this.config.reconnectMinDelayMs,
@@ -524,7 +533,7 @@ export class GatewayWsClient {
 
   private async openSocket(url: string, sessionToken: string): Promise<WebSocket> {
     return new Promise<WebSocket>((resolve, reject) => {
-      const socket = new WebSocket(url, [
+      const socket = new this.webSocketImpl(url, [
         "empyralis.gateway.v1",
         `empyralis.gateway.session.${sessionToken}`,
       ]);
