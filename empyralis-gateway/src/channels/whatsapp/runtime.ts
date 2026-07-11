@@ -72,6 +72,13 @@ interface WhatsAppBaileysAdapter {
   createSocket: (config: Record<string, unknown>) => BaileysSocketLike;
   disconnectReason: { loggedOut?: number; restartRequired?: number };
   browserDescriptor: (appName: string) => unknown;
+  /** Fetches the currently-live WhatsApp Web client version directly from
+   *  web.whatsapp.com (not Baileys' own bundled default, which goes stale
+   *  between package releases and is a documented cause of clean
+   *  connection rejections — see WhiskeySockets/Baileys#2679). Returns
+   *  undefined on fetch failure so the caller can fall back to Baileys'
+   *  own default rather than fail the whole connection over this. */
+  fetchWaWebVersion: () => Promise<[number, number, number] | undefined>;
 }
 
 export interface WhatsAppGatewayPublisher {
@@ -394,6 +401,12 @@ export class WhatsAppPersonalRuntime {
       retryable: true,
     });
     await this.flushState();
+    // Baileys' own bundled default WA Web version goes stale between package
+    // releases and is a documented cause of clean connection rejections
+    // (WhiskeySockets/Baileys#2679) — fetch the currently-live one instead.
+    // Falls back to Baileys' own default (by simply omitting `version`) if
+    // the fetch fails, rather than failing the whole connection over it.
+    const waWebVersion = await adapter.fetchWaWebVersion();
     const socket = adapter.createSocket({
       auth: this.authBundle.state,
       browser: adapter.browserDescriptor("Empyralis"),
@@ -401,6 +414,7 @@ export class WhatsAppPersonalRuntime {
       printQRInTerminal: false,
       syncFullHistory: false,
       markOnlineOnConnect: false,
+      ...(waWebVersion ? { version: waWebVersion } : {}),
     });
     this.socket = socket;
     socket.ev.on("creds.update", async () => {
@@ -586,12 +600,24 @@ export class WhatsAppPersonalRuntime {
       throw new Error("Baileys multi-file auth state helper is unavailable.");
     }
     const Browsers = baileysModule.Browsers ?? {};
+    const fetchLatestWaWebVersion = baileysModule.fetchLatestWaWebVersion;
     this.adapter = {
       loadAuthState: async (folder: string) => useMultiFileAuthState(path.resolve(folder)),
       createSocket: (config: Record<string, unknown>) => makeWASocket(config),
       disconnectReason: baileysModule.DisconnectReason ?? {},
       browserDescriptor: (appName: string) =>
         typeof Browsers.macOS === "function" ? Browsers.macOS(appName) : ["Empyralis", "Safari", "1.0.0"],
+      fetchWaWebVersion: async () => {
+        if (typeof fetchLatestWaWebVersion !== "function") {
+          return undefined;
+        }
+        try {
+          const result = await fetchLatestWaWebVersion();
+          return Array.isArray(result?.version) ? (result.version as [number, number, number]) : undefined;
+        } catch {
+          return undefined;
+        }
+      },
     };
     return this.adapter;
   }
