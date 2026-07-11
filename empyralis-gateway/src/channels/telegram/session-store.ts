@@ -17,7 +17,8 @@ export interface TelegramSessionSnapshot {
     | "connecting"
     | "connected"
     | "disconnected"
-    | "logged_out";
+    | "logged_out"
+    | "disabled";
   loginHint?: string;
   linkedUserId?: string;
   linkedUsername?: string;

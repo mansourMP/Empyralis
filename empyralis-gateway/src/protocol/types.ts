@@ -132,6 +132,14 @@ export interface GatewayChannelInboundPayload {
     text: string;
     received_at: string;
     from_me?: boolean;
+    /** Group/mention/reply metadata WhatsApp's mapper populates for its
+     *  group-gating logic (see whatsapp/runtime.ts's handleMessagesUpsert) —
+     *  optional since other channel mappers (e.g. Telegram's) don't set them. */
+    is_self_chat?: boolean;
+    is_group?: boolean;
+    is_mentioned?: boolean;
+    is_reply_to_sage?: boolean;
+    quoted_stanza_id?: string;
   };
 }
 
