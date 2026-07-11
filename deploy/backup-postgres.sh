@@ -14,20 +14,24 @@
 # so this re-exec works whether cron invokes it as root or postgres):
 #   17 3 * * * /opt/empyralis-app/deploy/backup-postgres.sh >> /var/log/empyralis-postgres-backup.log 2>&1
 #
-# KNOWN GAP, deliberate, not silently forgotten: this does NOT push the
-# dump off this box yet. No offsite credentials exist on this host as of
-# this writing (checked: no rclone/s3cmd, no DO Spaces keys anywhere).
-# Every run WARNS about this loudly below. Wire in one of:
-#   - DigitalOcean Spaces: `rclone copy "$DUMP_FILE" remote:bucket/path/`
-#   - Another host you control: `scp "$DUMP_FILE" user@host:/path/`
-#     (needs a dedicated SSH key authorized on that host)
-# and remove the warning once real offsite delivery is in place.
+# OFFSITE: after local validation succeeds, the dump is encrypted with age
+# (to a public key only — the matching secret key lives only with the
+# operator, never on this box) and pushed to a private Cloudflare R2
+# bucket via rclone. Order is always encrypt-then-upload: an unencrypted
+# dump must never leave this box. Config lives in:
+#   /etc/empyralis/backup-recipient.txt   — age public key (not secret)
+#   /etc/empyralis/rclone-backup.conf     — R2 credentials, chmod 600,
+#                                            owned by postgres
+# If either file is missing, this script still produces a valid local
+# backup — it just warns loudly and skips the offsite step, rather than
+# failing the whole run over a missing bonus layer.
 #
 # ALSO KNOWN: this box has no working local mail (no postfix/sendmail
 # active), so a cron failure here is loud in the log file and via a
-# non-zero exit code, but will not page or email anyone on its own.
-# Wire up real alerting (a monitoring check on the log, or a webhook) once
-# you have a channel for it.
+# non-zero exit code (1 = local dump itself failed, 2 = local dump is
+# fine but the offsite push failed), but will not page or email anyone
+# on its own. Wire up real alerting (a monitoring check on the log, or a
+# webhook) once you have a channel for it.
 
 set -Eeuo pipefail
 
@@ -96,11 +100,49 @@ if (( DELETED > 0 )); then
   log "Pruned ${DELETED} backup(s) older than ${RETENTION_DAYS} days"
 fi
 
-# ── Offsite: see the KNOWN GAP note at the top of this file.
-if command -v rclone >/dev/null 2>&1 && rclone listremotes 2>/dev/null | grep -q .; then
-  log "rclone is installed and has a configured remote, but this script has not been wired to use it yet — dump stayed local-only. Add the 'rclone copy' step described at the top of this file."
+# ── Offsite: encrypt (age, public key only) then push to R2 (rclone).
+#    See the OFFSITE note at the top of this file for the config paths.
+AGE_RECIPIENT_FILE="${EMPYRALIS_BACKUP_AGE_RECIPIENT_FILE:-/etc/empyralis/backup-recipient.txt}"
+RCLONE_CONFIG_FILE="${EMPYRALIS_BACKUP_RCLONE_CONFIG:-/etc/empyralis/rclone-backup.conf}"
+R2_REMOTE="${EMPYRALIS_BACKUP_R2_REMOTE:-r2}"
+R2_BUCKET="${EMPYRALIS_BACKUP_R2_BUCKET:-empyralis-postgres-backups}"
+OFFSITE_RETENTION_DAYS="${EMPYRALIS_BACKUP_OFFSITE_RETENTION_DAYS:-30}"
+
+# A distinct exit code (2, not 1) for this section: the local backup above
+# already succeeded and is valid on its own — only the offsite copy for
+# *this run* is missing. Worth telling apart from "the dump itself failed."
+offsite_fail() {
+  log "OFFSITE FAILURE: $* (local backup above is still valid — only this run's offsite copy is missing)"
+  exit 2
+}
+
+if [[ ! -f "$AGE_RECIPIENT_FILE" || ! -f "$RCLONE_CONFIG_FILE" ]]; then
+  log "WARNING: offsite not configured (missing $AGE_RECIPIENT_FILE or $RCLONE_CONFIG_FILE). This backup exists ONLY on this box (${BACKUP_DIR})."
 else
-  log "WARNING: no offsite transport configured. This backup exists ONLY on this box (${BACKUP_DIR}) — a droplet or disk loss would still lose every dump. See the KNOWN GAP note at the top of this file."
+  ENCRYPTED_FILE="${DUMP_FILE}.age"
+  if ! age -r "$(cat "$AGE_RECIPIENT_FILE")" -o "$ENCRYPTED_FILE" "$DUMP_FILE"; then
+    rm -f "$ENCRYPTED_FILE"
+    offsite_fail "age encryption failed for $DUMP_FILE"
+  fi
+  if [[ ! -s "$ENCRYPTED_FILE" ]]; then
+    rm -f "$ENCRYPTED_FILE"
+    offsite_fail "encrypted file is missing or zero bytes: $ENCRYPTED_FILE"
+  fi
+
+  if ! rclone --config "$RCLONE_CONFIG_FILE" copy "$ENCRYPTED_FILE" "${R2_REMOTE}:${R2_BUCKET}/"; then
+    rm -f "$ENCRYPTED_FILE"
+    offsite_fail "rclone push to ${R2_REMOTE}:${R2_BUCKET} failed"
+  fi
+
+  # The encrypted copy was only ever needed to get uploaded — local
+  # recovery already has the unencrypted dump (14-day retention above);
+  # a redundant local .age copy would serve no purpose.
+  rm -f "$ENCRYPTED_FILE"
+  log "Offsite: pushed $(basename "$ENCRYPTED_FILE") to ${R2_REMOTE}:${R2_BUCKET}"
+
+  if ! rclone --config "$RCLONE_CONFIG_FILE" delete --min-age "${OFFSITE_RETENTION_DAYS}d" "${R2_REMOTE}:${R2_BUCKET}/"; then
+    log "WARNING: offsite retention prune failed (non-fatal — old objects may accumulate in the bucket, check manually)"
+  fi
 fi
 
 log "Backup complete: $DUMP_FILE (${DUMP_BYTES} bytes)"
