@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft, Check, Copy, Cpu, Loader2, Server } from "lucide-react";
+import { ArrowLeft, Cpu, Loader2, Server } from "lucide-react";
 
+import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { deriveStatus, formatDateTime, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
@@ -48,159 +49,393 @@ function serviceItemPresentation(status: string | undefined): { tone: AgentStatu
   return { tone: "unknown", label: "Unknown" };
 }
 
-/** The exact remediation commands this product already tells owners to run
- *  elsewhere (server_modules/platform_event.py's CLI_SUBSCRIPTION_* errors),
- *  chosen here specifically because they don't need a local GUI browser —
- *  the realistic case for a box managed remotely over SSH: setup-token and
- *  device-auth both avoid the localhost-callback OAuth path that needs a
- *  browser ON this same machine. */
-const INSTALL_COMMAND: Record<"claude_code" | "codex", string> = {
-  claude_code: "npm install -g @anthropic-ai/claude-code",
-  codex: "npm install -g @openai/codex",
-};
-const LOGIN_COMMAND: Record<"claude_code" | "codex", string> = {
-  claude_code: "claude setup-token",
-  codex: "codex login --device-auth",
-};
-
-function CopyableCommand({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
-  const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API can be unavailable — the command is still selectable
-      // text in the box below either way.
-    }
-  }, [command]);
-  return (
-    <div className="gw-pair-panel-row" style={{ marginTop: 6, alignItems: "stretch" }}>
-      <pre className="gw-pair-panel-command" style={{ flex: 1, margin: 0 }}>
-        <code>{command}</code>
-      </pre>
-      <button type="button" className="fleet-btn" onClick={handleCopy}>
-        {copied ? <Check size={14} /> : <Copy size={14} />}
-        {copied ? "Copied" : "Copy"}
-      </button>
-    </div>
-  );
-}
-
 const VERIFY_POLL_MS = 5_000;
 const VERIFY_TIMEOUT_MS = 90_000;
+const LOGIN_EVENTS_POLL_MS = 2_000;
 
-/** Guided install + sign-in for one subscription CLI, plus the verify loop —
- *  the honest, manual fallback this build ships (no automated one-click
- *  login; that needs a new Gateway session primitive, out of scope here).
- *  Renders nothing once `state` is "ready" — the same `gateways` data this
- *  reads flows from the parent's useWorkspaceGateways, so a successful
- *  verify's refresh() naturally re-renders this away without a separate
- *  "verified" callback. */
-function CliSetupGuidance({
+function createRunId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `run_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+async function postCliAction(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}) as Record<string, unknown>);
+  if (!res.ok) {
+    const detail = typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`;
+    throw new Error(detail);
+  }
+  return data;
+}
+
+type CliLoginOutputPayload = {
+  run_id?: string;
+  event?: "output" | "done";
+  kind?: "url" | "code_prompt";
+  text?: string;
+  ok?: boolean;
+  error?: string;
+  error_kind?: string;
+};
+
+/** The async `done` event's error_kind is a raw Gateway-side signal (not run
+ *  through the backend's platform-voice classifier the way a synchronous
+ *  POST failure is) — this is the one place that needs its own honest,
+ *  typed translation. */
+function friendlyLoginFailure(errorKind: string | undefined, error: string | undefined, label: string): string {
+  switch (errorKind) {
+    case "not_installed":
+      return `${label} isn't installed on this computer yet — install it first, then sign in.`;
+    case "timeout":
+      return "Sign-in timed out before it was approved. Try again.";
+    case "cancelled":
+      return "Sign-in was cancelled.";
+    case "crash":
+      return `${label} sign-in exited unexpectedly on this computer. Try again.`;
+    default:
+      return error || `${label} sign-in failed unexpectedly. Try again.`;
+  }
+}
+
+type CliInstallState = "idle" | "installing" | "error";
+type CliLoginPhase = "idle" | "starting" | "active" | "submitting" | "cancelling" | "error";
+
+/** Real install + sign-in for one subscription CLI, wired to Build F's
+ *  cli.install / cli.login.* routes — replaces the SSH copy-paste guidance
+ *  this build shipped before. Reuses the same verify-poll pattern (refresh()
+ *  on an interval, checking gatewayRuntimeState) to detect the box's own
+ *  state catching up to a completed install or sign-in; a login run ALSO
+ *  polls its own /cli/login/{run_id}/events endpoint for the URL/code the
+ *  vendor's CLI prints, since that's a separate, faster-moving async stream
+ *  from the box's heartbeat-driven runtime state. Renders nothing once
+ *  `state` is "ready" — the same `gateways` data this reads flows from the
+ *  parent's useWorkspaceGateways, so a successful verify's refresh()
+ *  naturally re-renders this away. */
+function CliSetupControl({
   runtime,
   state,
   gatewayId,
+  workspaceId,
   refresh,
 }: {
   runtime: "claude_code" | "codex";
   state: RuntimeState;
   gatewayId: string;
+  workspaceId: string;
   refresh: (opts?: { silent?: boolean }) => Promise<FleetGateway[]>;
 }) {
   const label = RUNTIME_LABELS[runtime];
-  const [polling, setPolling] = useState(false);
-  const [timedOut, setTimedOut] = useState(false);
-  const pollRef = useRef<number | null>(null);
+
+  // ---- shared: poll the box's own reported state until it moves past its
+  // current one (install: past "missing"; sign-in: all the way to "ready") ----
+  const [verifying, setVerifying] = useState(false);
+  const [verifyTimedOut, setVerifyTimedOut] = useState(false);
+  const verifyPollRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
+      if (verifyPollRef.current) window.clearInterval(verifyPollRef.current);
     };
   }, []);
 
-  // A verify that's already succeeded (state flipped to "ready" via the
-  // parent's own poll or a real heartbeat) should stop any timer still
-  // running rather than let it spin to its own timeout.
   useEffect(() => {
-    if (state === "ready" && pollRef.current) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
-      setPolling(false);
+    if (state === "ready" && verifyPollRef.current) {
+      window.clearInterval(verifyPollRef.current);
+      verifyPollRef.current = null;
+      setVerifying(false);
     }
   }, [state]);
 
-  const startVerify = useCallback(() => {
-    setTimedOut(false);
-    setPolling(true);
-    const startedAt = Date.now();
-    if (pollRef.current) window.clearInterval(pollRef.current);
-    pollRef.current = window.setInterval(async () => {
-      if (Date.now() - startedAt > VERIFY_TIMEOUT_MS) {
-        if (pollRef.current) window.clearInterval(pollRef.current);
-        pollRef.current = null;
-        setPolling(false);
-        setTimedOut(true);
-        return;
-      }
-      const list = await refresh({ silent: true });
-      const match = list.find((g) => idOf(g) === gatewayId);
-      if (match && gatewayRuntimeState(match, runtime) === "ready") {
-        if (pollRef.current) window.clearInterval(pollRef.current);
-        pollRef.current = null;
-        setPolling(false);
-      }
-    }, VERIFY_POLL_MS);
-  }, [gatewayId, runtime, refresh]);
+  const verifyUntil = useCallback(
+    (predicate: (s: RuntimeState) => boolean) => {
+      setVerifyTimedOut(false);
+      setVerifying(true);
+      const startedAt = Date.now();
+      if (verifyPollRef.current) window.clearInterval(verifyPollRef.current);
+      verifyPollRef.current = window.setInterval(async () => {
+        if (Date.now() - startedAt > VERIFY_TIMEOUT_MS) {
+          if (verifyPollRef.current) window.clearInterval(verifyPollRef.current);
+          verifyPollRef.current = null;
+          setVerifying(false);
+          setVerifyTimedOut(true);
+          return;
+        }
+        const list = await refresh({ silent: true });
+        const match = list.find((g) => idOf(g) === gatewayId);
+        if (match && predicate(gatewayRuntimeState(match, runtime))) {
+          if (verifyPollRef.current) window.clearInterval(verifyPollRef.current);
+          verifyPollRef.current = null;
+          setVerifying(false);
+        }
+      }, VERIFY_POLL_MS);
+    },
+    [gatewayId, runtime, refresh],
+  );
+
+  // ---- install ----
+  const [installState, setInstallState] = useState<CliInstallState>("idle");
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  const runInstall = useCallback(async () => {
+    setInstallState("installing");
+    setInstallError(null);
+    try {
+      await postCliAction(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/install`, {
+        runtime,
+        run_id: createRunId(),
+        workspace_id: workspaceId,
+      });
+      setInstallState("idle");
+      verifyUntil((s) => s !== "missing");
+    } catch (err) {
+      setInstallState("error");
+      setInstallError(err instanceof Error ? err.message : "Install failed.");
+    }
+  }, [gatewayId, runtime, workspaceId, verifyUntil]);
+
+  // ---- sign-in ----
+  const [loginPhase, setLoginPhase] = useState<CliLoginPhase>("idle");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [urlText, setUrlText] = useState<string | null>(null);
+  const [codePromptText, setCodePromptText] = useState<string | null>(null);
+  const [codeInput, setCodeInput] = useState("");
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const eventsPollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (eventsPollRef.current) window.clearInterval(eventsPollRef.current);
+    };
+  }, []);
+
+  const stopEventsPoll = useCallback(() => {
+    if (eventsPollRef.current) {
+      window.clearInterval(eventsPollRef.current);
+      eventsPollRef.current = null;
+    }
+  }, []);
+
+  const pollLoginEvents = useCallback(
+    (runId: string) => {
+      stopEventsPoll();
+      eventsPollRef.current = window.setInterval(async () => {
+        try {
+          const res = await fetch(
+            `/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/${encodeURIComponent(runId)}/events`,
+            { credentials: "include" },
+          );
+          if (!res.ok) return;
+          const data = await res.json().catch(() => null);
+          const items: Array<{ payload?: CliLoginOutputPayload }> = Array.isArray(data?.items) ? data.items : [];
+          for (const item of items) {
+            const payload = item?.payload || {};
+            if (payload.event === "output" && payload.kind === "url" && payload.text) setUrlText(payload.text);
+            if (payload.event === "output" && payload.kind === "code_prompt" && payload.text) setCodePromptText(payload.text);
+            if (payload.event === "done") {
+              stopEventsPoll();
+              if (payload.ok) {
+                setLoginPhase("idle");
+                setActiveRunId(null);
+                verifyUntil((s) => s === "ready");
+              } else {
+                setLoginPhase("error");
+                setLoginError(friendlyLoginFailure(payload.error_kind, payload.error, label));
+              }
+            }
+          }
+        } catch {
+          // a transient poll failure isn't fatal — the next tick tries again
+        }
+      }, LOGIN_EVENTS_POLL_MS);
+    },
+    [gatewayId, stopEventsPoll, verifyUntil, label],
+  );
+
+  const startLogin = useCallback(async () => {
+    setLoginPhase("starting");
+    setLoginError(null);
+    setUrlText(null);
+    setCodePromptText(null);
+    setCodeInput("");
+    setSubmitError(null);
+    const runId = createRunId();
+    try {
+      await postCliAction(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/start`, {
+        runtime,
+        run_id: runId,
+        workspace_id: workspaceId,
+      });
+      setActiveRunId(runId);
+      setLoginPhase("active");
+      pollLoginEvents(runId);
+    } catch (err) {
+      setLoginPhase("error");
+      setLoginError(err instanceof Error ? err.message : "Sign-in failed to start.");
+    }
+  }, [gatewayId, runtime, workspaceId, pollLoginEvents]);
+
+  const submitCode = useCallback(async () => {
+    const code = codeInput.trim();
+    if (!activeRunId || !code) return;
+    setLoginPhase("submitting");
+    setSubmitError(null);
+    try {
+      await postCliAction(
+        `/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/${encodeURIComponent(activeRunId)}/input`,
+        { code, workspace_id: workspaceId },
+      );
+      setCodeInput("");
+      setLoginPhase("active");
+    } catch (err) {
+      setLoginPhase("active");
+      setSubmitError(err instanceof Error ? err.message : "Couldn't submit that code — try again.");
+    }
+  }, [gatewayId, activeRunId, codeInput, workspaceId]);
+
+  const cancelLogin = useCallback(async () => {
+    if (!activeRunId) return;
+    stopEventsPoll();
+    setLoginPhase("cancelling");
+    try {
+      await postCliAction(
+        `/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/${encodeURIComponent(activeRunId)}/cancel`,
+        { workspace_id: workspaceId },
+      );
+    } catch {
+      // best-effort — the Gateway's own session timeout is the backstop
+    } finally {
+      setLoginPhase("idle");
+      setActiveRunId(null);
+      setUrlText(null);
+      setCodePromptText(null);
+      setSubmitError(null);
+    }
+  }, [gatewayId, activeRunId, workspaceId, stopEventsPoll]);
 
   if (state === "ready") return null;
 
   return (
     <div className="fleet-hw-note" style={{ marginTop: 8, paddingTop: 10, borderTop: "1px solid var(--border)", width: "100%" }}>
       {state === "missing" ? (
-        <>
-          <p style={{ margin: "0 0 4px" }}>Install {label} on this computer, over your own SSH session:</p>
-          <CopyableCommand command={INSTALL_COMMAND[runtime]} />
-          <p style={{ margin: "10px 0 4px" }}>Then sign in:</p>
-          <CopyableCommand command={LOGIN_COMMAND[runtime]} />
-        </>
-      ) : (
-        <>
-          <p style={{ margin: "0 0 4px" }}>{label} is installed but not signed in. Run this on the computer:</p>
-          <CopyableCommand command={LOGIN_COMMAND[runtime]} />
-        </>
-      )}
-      {runtime === "claude_code" ? (
-        <p style={{ margin: "10px 0 0" }}>
-          This prints a token — export it as <code className="fleet-md-code">CLAUDE_CODE_OAUTH_TOKEN</code> in
-          the same environment the Gateway process runs in, then restart the Gateway. If it can't open a
-          browser directly, it prints a URL to open elsewhere and a code to paste back here.
+        installState === "error" && installError ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{installError}</span>
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={runInstall}>Retry</button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="fleet-btn fleet-btn--accent"
+              onClick={runInstall}
+              disabled={installState === "installing" || verifying}
+            >
+              {installState === "installing" || verifying ? (
+                <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+              ) : null}
+              {installState === "installing" ? "Installing…" : verifying ? "Checking…" : `Install ${label}`}
+            </button>
+            {verifyTimedOut && (
+              <span className="fleet-channel-expand-error" style={{ margin: 0 }}>
+                Still not detected — this box heartbeats roughly every 20s. Give it another moment, or confirm the
+                install actually succeeded on the machine itself.
+              </span>
+            )}
+          </div>
+        )
+      ) : loginPhase === "idle" ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={startLogin} disabled={verifying}>
+            {verifying ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+            {verifying ? "Checking…" : "Sign in"}
+          </button>
+          {verifyTimedOut && (
+            <span className="fleet-channel-expand-error" style={{ margin: 0 }}>
+              Still not signed in after a couple of checks — try signing in again.
+            </span>
+          )}
+        </div>
+      ) : loginPhase === "error" ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{loginError}</span>
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={startLogin}>Retry</button>
+        </div>
+      ) : loginPhase === "starting" ? (
+        <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Starting sign-in…
         </p>
       ) : (
-        <p style={{ margin: "10px 0 0" }}>
-          Open the URL it prints, on any device, and enter the code it shows — nothing needs to be typed
-          back into this computer's terminal.
-        </p>
+        <>
+          {urlText ? (
+            <p style={{ margin: "0 0 4px", wordBreak: "break-all" }}>
+              Open this link and approve:{" "}
+              <a
+                href={urlText}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="fleet-md-code"
+                style={{ color: "var(--accent)", textDecoration: "underline" }}
+              >
+                {urlText}
+              </a>
+            </p>
+          ) : (
+            <p style={{ margin: "0 0 4px", display: "flex", alignItems: "center", gap: 8 }}>
+              <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Waiting for {label} to print a sign-in link…
+            </p>
+          )}
+          {codePromptText && <p style={{ margin: "0 0 4px", color: "var(--text-muted)" }}>{codePromptText}</p>}
+          {runtime === "claude_code" && (
+            <>
+              <div className="gw-pair-panel-row" style={{ marginTop: 6, alignItems: "stretch", gap: 8 }}>
+                <input
+                  className="fleet-wizard-input"
+                  style={{ flex: 1 }}
+                  placeholder="Paste the code it gives you"
+                  value={codeInput}
+                  disabled={loginPhase === "submitting"}
+                  maxLength={64}
+                  onChange={(e) => setCodeInput(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void submitCode();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="fleet-btn fleet-btn--accent"
+                  onClick={submitCode}
+                  disabled={loginPhase === "submitting" || !codeInput.trim()}
+                >
+                  {loginPhase === "submitting" ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+                  Submit
+                </button>
+              </div>
+              {submitError && (
+                <span className="fleet-channel-expand-error" style={{ margin: "4px 0 0", display: "block" }}>
+                  {submitError}
+                </span>
+              )}
+            </>
+          )}
+          <p style={{ margin: "10px 0 0", color: "var(--text-muted)" }}>
+            Empyralis never sees or stores this credential — the CLI reads its own login directly on this computer.
+          </p>
+          <div style={{ marginTop: 10 }}>
+            <button type="button" className="fleet-btn" onClick={cancelLogin} disabled={loginPhase === "cancelling"}>
+              {loginPhase === "cancelling" ? "Cancelling…" : "Cancel"}
+            </button>
+          </div>
+        </>
       )}
-      <p style={{ margin: "8px 0 0", color: "var(--text-muted)" }}>
-        Empyralis never sees or stores this credential — the CLI reads its own login directly on this
-        computer, the same way it would if you were sitting at it.
-      </p>
-      <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={startVerify} disabled={polling}>
-          {polling ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-          {polling ? "Verifying…" : "Verify"}
-        </button>
-        {timedOut && (
-          <span className="fleet-channel-expand-error" style={{ margin: 0 }}>
-            Still not detected — this box heartbeats roughly every 20s, so a real change should show up
-            within a couple of tries. Run{" "}
-            <code className="fleet-md-code">{runtime === "claude_code" ? "claude /status" : "codex login status"}</code>{" "}
-            on the computer to confirm it worked there, then verify again.
-          </span>
-        )}
-      </div>
     </div>
   );
 }
@@ -324,7 +559,13 @@ export default function GatewayDetailPage() {
                     <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />
                   </span>
                 </div>
-                <CliSetupGuidance runtime={runtime} state={state} gatewayId={targetGatewayId} refresh={refresh} />
+                <CliSetupControl
+                  runtime={runtime}
+                  state={state}
+                  gatewayId={targetGatewayId}
+                  workspaceId={workspaceId}
+                  refresh={refresh}
+                />
               </div>
             );
           }
