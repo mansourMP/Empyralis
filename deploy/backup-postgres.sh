@@ -45,6 +45,12 @@ if [[ "$(id -un)" != "postgres" ]]; then
   exec sudo -u postgres -- "$0" "$@"
 fi
 
+# `exec` preserves cwd across the re-exec above; if that cwd was root's
+# home (the common case when cron or an SSH session invokes this as root),
+# postgres can't read it, and `find` below fails trying to restore its
+# starting directory at the end of a scan. Move somewhere postgres owns.
+cd /var/lib/postgresql || cd /tmp
+
 mkdir -p "$BACKUP_DIR"
 
 TS="$(date -u +%Y%m%d_%H%M%S)"
@@ -72,7 +78,12 @@ if ! gzip -t "$DUMP_FILE" 2>/dev/null; then
   fail "gzip integrity check failed on $DUMP_FILE — corrupt dump"
 fi
 
-if ! gunzip -c "$DUMP_FILE" | head -c 4096 | grep -q "PostgreSQL database dump"; then
+# Captured into a variable rather than checked directly in a pipeline:
+# `head -c` closing early sends gunzip a SIGPIPE, and pipefail reports that
+# as the pipeline's exit status even when the grep after it would have
+# matched — `|| true` neutralizes that so the *content* is what gets judged.
+DUMP_HEADER="$(gunzip -c "$DUMP_FILE" | head -c 4096)" || true
+if ! grep -q "PostgreSQL database dump" <<< "$DUMP_HEADER"; then
   fail "dump does not start with the expected pg_dump header — treating as broken: $DUMP_FILE"
 fi
 
