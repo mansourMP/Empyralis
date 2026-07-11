@@ -6,6 +6,7 @@ import { Cpu, Server, Terminal, X } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
@@ -42,6 +43,7 @@ export default function HardwarePage() {
   const [sshPanelOpen, setSshPanelOpen] = useState(false);
   const [showManualPairing, setShowManualPairing] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const [pendingRemove, setPendingRemove] = useState<{ gatewayId: string; label: string } | null>(null);
 
   const loadRegistrations = useCallback(async () => {
     setLoading(true);
@@ -76,7 +78,12 @@ export default function HardwarePage() {
     setVpsPanelOpen(true);
   };
 
-  const handleRemove = async (gatewayId: string) => {
+  // Removing a device revokes it — the machine has to be paired from
+  // scratch afterward, no undo. The X on the row only opens the confirm
+  // dialog below; this is the function that actually revokes, and it only
+  // ever runs from the dialog's Confirm button.
+  const confirmRemove = async () => {
+    const gatewayId = pendingRemove?.gatewayId;
     if (!gatewayId) return;
     setRemovingId(gatewayId);
     try {
@@ -87,6 +94,7 @@ export default function HardwarePage() {
         body: JSON.stringify({ reason: "removed_from_hardware_page" }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setPendingRemove(null);
       await loadRegistrations();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove that computer");
@@ -152,7 +160,10 @@ export default function HardwarePage() {
             disabled={removingId === gatewayId}
             onClick={(e) => {
               e.stopPropagation();
-              void handleRemove(gatewayId);
+              setPendingRemove({
+                gatewayId,
+                label: r.display_name || r.hardware_label || r.platform || "this computer",
+              });
             }}
             aria-label={`Remove ${r.display_name || r.hardware_label || "computer"}`}
           >
@@ -262,6 +273,17 @@ export default function HardwarePage() {
           setSshPanelOpen(false);
           await loadRegistrations();
         }}
+      />
+
+      <ConfirmDialog
+        open={pendingRemove !== null}
+        title="Remove this computer?"
+        body={`"${pendingRemove?.label}" will be disconnected and revoked. Agents lose hardware access through it immediately, and it has to be paired from scratch to reconnect — this can't be undone.`}
+        confirmLabel="Remove"
+        confirmTone="danger"
+        busy={removingId !== null}
+        onConfirm={() => void confirmRemove()}
+        onCancel={() => setPendingRemove(null)}
       />
     </main>
   );

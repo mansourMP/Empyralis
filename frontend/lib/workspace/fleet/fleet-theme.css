@@ -3951,14 +3951,19 @@ button.fleet-list-row:hover {
 .fleet-list-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .fleet-list-row-title { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary); }
 
-/* Hardware page: click-to-rename a paired box's title (nickname). */
-.fleet-list-row-title-edit {
-  background: none; border: none; padding: 0; margin: 0;
-  font: inherit; font-weight: var(--weight-medium); color: var(--text-primary);
-  cursor: text; text-align: left;
-  border-bottom: 1px dashed transparent;
+/* Hardware page: title text is inert (lets the row's own click through to
+   open the machine-detail page); rename starts only from the pencil button
+   next to it, which stops propagation itself. */
+.fleet-list-row-title-display { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.fleet-list-row-title-rename-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: none; padding: 2px; margin: 0;
+  color: var(--text-muted); cursor: pointer; border-radius: var(--radius-control);
+  opacity: 0; flex-shrink: 0;
 }
-.fleet-list-row-title-edit:hover { border-bottom-color: var(--border-strong); }
+.fleet-list-row:hover .fleet-list-row-title-rename-btn,
+.fleet-list-row-title-rename-btn:focus-visible { opacity: 1; }
+.fleet-list-row-title-rename-btn:hover { color: var(--text-primary); background: var(--bg-card-hover); }
 .fleet-list-row-title-input {
   font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary);
   background: var(--bg-inset); border: 1px solid var(--border-strong); border-radius: 4px;
