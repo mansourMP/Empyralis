@@ -751,6 +751,7 @@ def memory_read_file(
     from server_modules.workspace_context import (
         read_workspace_context_file,
         normalize_workspace_context_filename,
+        is_default_context_content,
     )
     normalized_filename = normalize_workspace_context_filename(filename)
     content = read_workspace_context_file(
@@ -762,6 +763,7 @@ def memory_read_file(
         'file': normalized_filename,
         'content': str(content or ''),
         'chars': len(str(content or '')),
+        'is_default': is_default_context_content(normalized_filename, str(content or '')),
     }
 
 

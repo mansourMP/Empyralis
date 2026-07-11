@@ -2681,10 +2681,34 @@ a.fleet-breadcrumb:hover {
    never reflow: the properties column's space is always there, whether or
    not there's anything eye-catching in it. */
 .fleet-detail-columns {
+  position: relative; /* anchors the Chat tab's mobile properties drawer below */
   flex: 1;
   min-height: 0;
   display: flex;
   overflow: hidden;
+}
+
+/* Chat-tab-only mobile Properties toggle (see FleetAgentDetail.tsx) — inert
+   and hidden on desktop/tablet, where the permanent column above already
+   covers this; shown only alongside the <=768px override below that swaps
+   the permanent column out for this drawer on the Chat tab specifically. */
+.fleet-detail-properties-toggle {
+  display: none;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Defensive, scoped to the agent-detail page only: this instance of the
+   drawer is a mobile-only affordance for the Chat tab (the permanent column
+   above covers desktop/tablet) — unlike the SAME drawer component's OTHER
+   use on the list pages (FleetToolbar's panelOpen), which stays a toggle at
+   every width and must not be touched by this rule. If mobilePropertiesOpen
+   is still true from a narrower session (e.g. resizing wider without
+   closing it first), force THIS one closed visually rather than letting it
+   float over the permanent column it would otherwise duplicate. */
+.fleet-detail-columns .fleet-properties-drawer,
+.fleet-detail-columns .fleet-properties-scrim {
+  display: none;
 }
 
 .fleet-detail-close--inline { position: static; }
@@ -3854,6 +3878,28 @@ a.fleet-breadcrumb:hover {
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
+}
+
+/* Memory tab honesty (U3 chat-parity build): the seeded MEMORY.md template
+   reads exactly like something the owner wrote unless labeled — this note
+   only shows while the file's content is still byte-for-byte the scaffold
+   (see workspace_context.is_default_context_content / memory/file's
+   is_default), so it disappears the moment anyone actually edits it. */
+.fleet-memory-scaffold-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.fleet-memory-scaffold-note svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 .fleet-memory-editor-textarea {
@@ -5176,8 +5222,24 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     overflow: hidden;
     padding: 0;
   }
+  /* Properties has no room as a stacked-below block here (the chat panel
+     above already claims the full fixed height) — swapped for the toggle
+     drawer instead of just hiding with no access route at all. Never a
+     permanent squeezing column either way (contract): this was a straight
+     display:none before, which hid the data with no route back to it. */
   .fleet-detail-columns:has(.fleet-agent-chat-panel) .fleet-detail-properties {
     display: none;
+  }
+  .fleet-detail-properties-toggle {
+    display: inline-flex;
+  }
+  /* Countermand the desktop guard above — this is exactly the width the
+     drawer is for. */
+  .fleet-detail-columns .fleet-properties-drawer {
+    display: flex;
+  }
+  .fleet-detail-columns .fleet-properties-scrim {
+    display: block;
   }
 }
 

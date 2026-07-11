@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 
 import { isPlatformBillingSource } from '@/lib/workspace/platform-brand';
+import { MarkdownLiteText } from '@/lib/workspace/markdown-lite';
 
 function formatTimestamp(value: string | null): string | null {
   if (!value) {
@@ -346,7 +347,7 @@ export const ChatMessage = memo(({
       className="app-chat-message"
     >
       <div className="app-chat-message__content">
-        {text}
+        <MarkdownLiteText text={text} />
       </div>
       {(timestamp || providerLabel || taskRouteLabel || isIncomplete) ? (
         <div className={`app-chat-message__meta${providerLabel || taskRouteLabel || isIncomplete ? ' app-chat-message__meta--visible' : ''}`}>

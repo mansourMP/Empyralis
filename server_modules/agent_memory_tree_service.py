@@ -77,7 +77,12 @@ def list_tree(workspace_id: str, *, agent_install_id: Optional[str] = None) -> D
 def read_file(workspace_id: str, path: str, *, agent_install_id: Optional[str] = None) -> Dict[str, Any]:
     from server_modules import memory_service
     result = memory_service.memory_read_file(workspace_id, path, agent_install_id=agent_install_id)
-    return {"path": _friendly(result.get("file") or path), "content": result.get("content") or "", "chars": int(result.get("chars") or 0)}
+    return {
+        "path": _friendly(result.get("file") or path),
+        "content": result.get("content") or "",
+        "chars": int(result.get("chars") or 0),
+        "is_default": bool(result.get("is_default") or False),
+    }
 
 
 # ── Tree write ──────────────────────────────────────────────────────────────

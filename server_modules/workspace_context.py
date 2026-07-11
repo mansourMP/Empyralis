@@ -595,3 +595,15 @@ def write_workspace_context_file(
 
 def normalize_workspace_context_filename(filename: str) -> str:
     return _validate_context_path(filename)
+
+
+def is_default_context_content(filename: str, content: str) -> bool:
+    """True when ``content`` is byte-for-byte the seeded scaffold for
+    ``filename`` (see DEFAULT_CONTEXT_FILE_CONTENTS / ensure_workspace_context_files)
+    — i.e. the owner has never actually written to this file. Any edit at all,
+    even trivial, flips this False, so callers never need a separate stored
+    flag that could drift from the real content."""
+    default = DEFAULT_CONTEXT_FILE_CONTENTS.get(filename)
+    if default is None:
+        return False
+    return str(content or "") == default.strip() + "\n"

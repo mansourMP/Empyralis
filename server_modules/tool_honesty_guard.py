@@ -72,6 +72,15 @@ _DENIAL_PATTERNS = [
 # so any "based on search/results" framing at that point is a fabrication by
 # construction — live-caught case: "Based on the **Bing** search results"
 # slipped past a literal "based on the search results" match.
+#
+# The last three entries are a second flavor of the same fabrication
+# direction, added after a live case: "Let me search your Gmail" shipped as
+# the FINAL reply with no Gmail tool (or anything else) in the trace at all —
+# a forward-looking promise instead of a retrospective claim, but the same
+# lie in effect: the user is told a lookup is happening when the trace proves
+# nothing did. Scoped to "let me/I'll/I will + a tool-shaped verb + your/the +
+# a noun" specifically so ordinary filler ("let me help with that", "let me
+# know") never matches — there's no tool-shaped verb there to anchor on.
 _CLAIM_PATTERNS = [
     r"\bbased on(?:\s+\w+){0,3}?\s+search results?\b",
     r"\baccording to(?:\s+\w+){0,3}?\s+search\b",
@@ -79,6 +88,9 @@ _CLAIM_PATTERNS = [
     r"\bhere('?s| is) what i found\b",
     r"\bthe search (results?|shows?) (show|indicate|reveal)\b",
     r"\b(search|bing|google) results? (show|indicate|reveal|say)\b",
+    r"\blet me (search|check|look ?up|access|pull up|browse|read|open|go through|dig through)\s+(your|the)\s+\w+",
+    r"\bi'?ll (search|check|look ?up|access|pull up|browse|read|open|go through|dig through)\s+(your|the)\s+\w+",
+    r"\bi will (search|check|look ?up|access|pull up|browse|read|open|go through|dig through)\s+(your|the)\s+\w+",
 ]
 
 
