@@ -507,7 +507,11 @@ export class TelegramPersonalRuntime {
       return this.adapter;
     }
     const telegram = await dynamicImport<Record<string, unknown>>("telegram");
-    const sessions = await dynamicImport<Record<string, unknown>>("telegram/sessions");
+    // "telegram/sessions" is a bare directory import — resolves fine under
+    // CommonJS (implicit index) but fails under native ESM resolution
+    // (no exports map in this package, and sessions/ has no index.js of its
+    // own). Import the specific file that actually defines StringSession.
+    const sessions = await dynamicImport<Record<string, unknown>>("telegram/sessions/StringSession.js");
     const TelegramClient = telegram.TelegramClient as new (...args: unknown[]) => any;
     const NewMessage = telegram.NewMessage as new (...args: unknown[]) => any;
     const StringSession = sessions.StringSession as new (value: string) => any;
