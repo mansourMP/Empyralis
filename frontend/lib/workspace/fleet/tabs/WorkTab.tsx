@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Inbox as InboxIcon, AlertCircle } from "lucide-react";
 
 import type { FleetAgent } from "../fleet-data";
 import { timeAgo } from "../fleet-presentation";
+import { MarkdownLiteText } from "@/lib/workspace/markdown-lite";
 
 /**
  * WORK tab — the agent's end-customer conversations, split-view:
@@ -101,107 +102,6 @@ function stripMarkdownPreview(text: string): string {
     .replace(/^\s*\d+\.\s+/gm, "")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-// ── Markdown-lite ────────────────────────────────────────────────────────
-// Chat turns are plain strings that may contain **bold**, *italic*/_italic_,
-// `code`, [links](url), and simple lists — enough that agent replies with
-// real formatting don't show up as literal asterisks. Not a full markdown
-// document renderer (no new dependency for what's still a chat bubble, not
-// a doc viewer): headings/tables/blockquotes are deliberately out of scope.
-
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
-  const pattern = /`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*|_([^_]+)_/g;
-  const nodes: ReactNode[] = [];
-  let last = 0;
-  let i = 0;
-  let m: RegExpExecArray | null;
-  while ((m = pattern.exec(text))) {
-    if (m.index > last) nodes.push(text.slice(last, m.index));
-    if (m[1] !== undefined) {
-      nodes.push(<code key={`${keyPrefix}-${i++}`} className="fleet-md-code">{m[1]}</code>);
-    } else if (m[2] !== undefined) {
-      nodes.push(
-        <a key={`${keyPrefix}-${i++}`} href={m[3]} target="_blank" rel="noreferrer" className="fleet-link">
-          {m[2]}
-        </a>,
-      );
-    } else if (m[4] !== undefined) {
-      nodes.push(<strong key={`${keyPrefix}-${i++}`}>{m[4]}</strong>);
-    } else if (m[5] !== undefined) {
-      nodes.push(<em key={`${keyPrefix}-${i++}`}>{m[5]}</em>);
-    } else if (m[6] !== undefined) {
-      nodes.push(<em key={`${keyPrefix}-${i++}`}>{m[6]}</em>);
-    }
-    last = pattern.lastIndex;
-  }
-  if (last < text.length) nodes.push(text.slice(last));
-  return nodes;
-}
-
-type Block = { type: "p" | "ul" | "ol"; text?: string; items?: string[] };
-
-function parseBlocks(text: string): Block[] {
-  const lines = text.replace(/\r\n/g, "\n").split("\n");
-  const blocks: Block[] = [];
-  let para: string[] = [];
-  let list: string[] = [];
-  let listType: "ul" | "ol" | null = null;
-
-  const flushPara = () => {
-    if (para.length) blocks.push({ type: "p", text: para.join("\n") });
-    para = [];
-  };
-  const flushList = () => {
-    if (listType && list.length) blocks.push({ type: listType, items: list });
-    list = [];
-    listType = null;
-  };
-
-  for (const line of lines) {
-    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-    const numbered = /^\s*\d+\.\s+(.*)$/.exec(line);
-    if (bullet) {
-      flushPara();
-      if (listType !== "ul") { flushList(); listType = "ul"; }
-      list.push(bullet[1]);
-    } else if (numbered) {
-      flushPara();
-      if (listType !== "ol") { flushList(); listType = "ol"; }
-      list.push(numbered[1]);
-    } else if (line.trim() === "") {
-      flushPara();
-      flushList();
-    } else {
-      flushList();
-      para.push(line);
-    }
-  }
-  flushPara();
-  flushList();
-  return blocks;
-}
-
-function MessageBody({ text }: { text: string }) {
-  const blocks = parseBlocks(text);
-  if (blocks.length === 0) return null;
-  return (
-    <>
-      {blocks.map((b, bi) => {
-        if (b.type === "ul" || b.type === "ol") {
-          const ListTag = b.type;
-          return (
-            <ListTag key={bi} className="fleet-md-list">
-              {(b.items || []).map((item, ii) => (
-                <li key={ii}>{renderInline(item, `${bi}-${ii}`)}</li>
-              ))}
-            </ListTag>
-          );
-        }
-        return <p key={bi} className="fleet-md-p">{renderInline(b.text || "", `${bi}`)}</p>;
-      })}
-    </>
-  );
 }
 
 export function WorkTab({
@@ -389,7 +289,7 @@ export function WorkTab({
                   {isAgentSide(m.role || "") ? agentName : selectedWho || "Customer"}
                 </div>
                 <div className="fleet-work-msg-body">
-                  <MessageBody text={m.content || ""} />
+                  <MarkdownLiteText text={m.content || ""} />
                 </div>
                 {m.created_at && <div className="fleet-work-msg-time">{timeAgo(m.created_at)}</div>}
               </div>

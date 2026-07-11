@@ -13,6 +13,7 @@ import {
   Loader2,
   Lock,
   MessageSquare,
+  PanelRightOpen,
   Pencil,
   Play,
   Plug,
@@ -49,7 +50,7 @@ import {
 } from "./fleet-data";
 import { deriveStatus, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, type AgentStatusTone } from "./fleet-presentation";
 import { StatusChip, StatusDot } from "./fleet-indicators";
-import { PanelSection, PanelRow } from "./FleetRightPanel";
+import { PanelSection, PanelRow, FleetRightPanel } from "./FleetRightPanel";
 import { UsageStat, bucketSeries, type UsageBucket } from "./fleet-sparkline";
 import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
@@ -102,6 +103,9 @@ export function FleetAgentDetail({
   onRenamed?: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<TabId>(initialTab || "overview");
+  // Chat tab's mobile-only properties drawer (see propertiesContent below) —
+  // every other tab keeps the permanent column, so this stays false and unused there.
+  const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
   const { channels } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
@@ -190,39 +194,50 @@ export function FleetAgentDetail({
   // body, never an overlay/toggle (that pattern stays on LIST pages only;
   // see FleetToolbar's panelOpen/onTogglePanel props). Fills what used to be
   // a blank right half at every viewport width instead of hiding behind a
-  // click.
+  // click. The one exception is the Chat tab's mobile layout (<=768px):
+  // that tab needs its full viewport height for the pinned composer (see
+  // fleet-theme.css's Chat-tab mobile override), so there isn't room for a
+  // stacked-below column like every other tab gets. Rather than hide
+  // Properties with no access route at all, that combination alone swaps
+  // to the toggle-opened drawer below (mobilePropertiesOpen) — same content,
+  // reused via propertiesContent so both surfaces can never drift apart.
+  const propertiesContent = (
+    <PanelSection title="Properties">
+      <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
+      <PanelRow label="Placement" value={placement.label} />
+      <PanelRow label="Role" value={<span style={{ textTransform: "capitalize" }}>{role}</span>} />
+      {!isMaster && (
+        <PanelRow
+          label="Customer access"
+          value={`${customerAccessCount} ${customerAccessCount === 1 ? "tool" : "tools"}`}
+          tone={customerAccessCount > 0 ? "default" : "muted"}
+        />
+      )}
+      <PanelRow label="Model" value={resolvedModel} />
+      <UsageStat
+        label="Cost today"
+        total={costToday ?? 0}
+        formattedTotal={costToday === null ? "…" : `$${costToday.toFixed(4)}`}
+        values={bucketSeries(costBuckets, "usd_cost")}
+      />
+      <PanelRow label="Channels" value={connectedChannels} />
+      <PanelRow label="Connectors" value={connectedConnectors} />
+    </PanelSection>
+  );
   const propertiesPanel = (
     <aside className="fleet-detail-properties" aria-label="Properties">
-      <PanelSection title="Properties">
-        <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
-        <PanelRow label="Placement" value={placement.label} />
-        <PanelRow label="Role" value={<span style={{ textTransform: "capitalize" }}>{role}</span>} />
-        {!isMaster && (
-          <PanelRow
-            label="Customer access"
-            value={`${customerAccessCount} ${customerAccessCount === 1 ? "tool" : "tools"}`}
-            tone={customerAccessCount > 0 ? "default" : "muted"}
-          />
-        )}
-        <PanelRow label="Model" value={resolvedModel} />
-        <UsageStat
-          label="Cost today"
-          total={costToday ?? 0}
-          formattedTotal={costToday === null ? "…" : `$${costToday.toFixed(4)}`}
-          values={bucketSeries(costBuckets, "usd_cost")}
-        />
-        <PanelRow label="Channels" value={connectedChannels} />
-        <PanelRow label="Connectors" value={connectedConnectors} />
-      </PanelSection>
+      {propertiesContent}
     </aside>
   );
 
   const inner = (
     <>
       {/* Tabs live at the TOP, under the breadcrumb — one navigation only.
-          No trailing action here: the properties column to the right is
-          permanent on detail pages, never a toggle (that pattern is LIST
-          pages only — see FleetToolbar). */}
+          No trailing action here on desktop: the properties column to the
+          right is permanent on detail pages, never a toggle (that pattern is
+          LIST pages only — see FleetToolbar). The lone exception is a
+          mobile-only Properties toggle on the Chat tab (see propertiesContent
+          above) — CSS keeps it hidden except at <=768px. */}
       <div className="fleet-detail-tabbar">
         <nav className="fleet-detail-toptabs" aria-label="Agent sections">
           {TABS.map((tab) => {
@@ -243,11 +258,23 @@ export function FleetAgentDetail({
             );
           })}
         </nav>
+        {activeTab === "chat" && (
+          <button
+            type="button"
+            className="fleet-icon-btn fleet-detail-properties-toggle"
+            onClick={() => setMobilePropertiesOpen(true)}
+            aria-label="Show properties"
+            title="Properties"
+          >
+            <PanelRightOpen size={16} strokeWidth={1.75} />
+          </button>
+        )}
       </div>
 
       {/* Columns: main content sheet + the permanent properties column, a
           real flex sibling that always reserves its width — it never opens,
-          closes, or reflows the sheet next to it. */}
+          closes, or reflows the sheet next to it (desktop/tablet, and every
+          mobile tab except Chat — see propertiesContent above). */}
       <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
           {activeTab === "overview" && (
@@ -283,6 +310,11 @@ export function FleetAgentDetail({
           {activeTab === "chat" && <ChatTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
         </div>
         {propertiesPanel}
+        {activeTab === "chat" && (
+          <FleetRightPanel open={mobilePropertiesOpen} onClose={() => setMobilePropertiesOpen(false)}>
+            {propertiesContent}
+          </FleetRightPanel>
+        )}
       </div>
     </>
   );

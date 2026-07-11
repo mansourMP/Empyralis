@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { FileText, Loader2, Trash2 } from "lucide-react";
+import { FileText, Info, Loader2, Trash2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import type { FleetAgent } from "../fleet-data";
@@ -30,6 +30,7 @@ export function MemoryTab({
   const [selected, setSelected] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [original, setOriginal] = useState("");
+  const [isDefault, setIsDefault] = useState(false);
   const [fileLoading, setFileLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +68,7 @@ export function MemoryTab({
       const c = String(d?.content ?? d?.text ?? "");
       setContent(c);
       setOriginal(c);
+      setIsDefault(Boolean(d?.is_default));
     } catch {
       setError("Could not open that file.");
     } finally {
@@ -93,6 +95,9 @@ export function MemoryTab({
       const d = await res.json().catch(() => ({}));
       if (!res.ok || d?.ok === false) throw new Error(d?.error || d?.detail || `HTTP ${res.status}`);
       setOriginal(content);
+      // The owner just wrote this content, so it's real regardless of what
+      // it happens to say — never re-flag as the seeded scaffold.
+      setIsDefault(false);
       loadTree();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed.");
@@ -115,6 +120,7 @@ export function MemoryTab({
       setSelected(null);
       setContent("");
       setOriginal("");
+      setIsDefault(false);
       loadTree();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed.");
@@ -160,12 +166,20 @@ export function MemoryTab({
             {fileLoading ? (
               <div className="fleet-page-state-body">Loading…</div>
             ) : (
-              <textarea
-                className="fleet-memory-editor-textarea"
-                value={content}
-                onChange={(e) => setContent(e.currentTarget.value)}
-                spellCheck={false}
-              />
+              <>
+                {isDefault && (
+                  <div className="fleet-memory-scaffold-note">
+                    <Info size={13} strokeWidth={1.75} />
+                    <span>Starter scaffold — nobody has written to this file yet. This is Empyralis&apos; default template, not saved content.</span>
+                  </div>
+                )}
+                <textarea
+                  className="fleet-memory-editor-textarea"
+                  value={content}
+                  onChange={(e) => setContent(e.currentTarget.value)}
+                  spellCheck={false}
+                />
+              </>
             )}
           </>
         ) : (

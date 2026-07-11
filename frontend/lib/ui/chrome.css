@@ -193,6 +193,12 @@ body[data-theme='dark'] {
   --app-font-16: var(--font-size-lg);
   --app-font-18: 18px;
   --app-font-20: var(--font-size-xl);
+  /* Same missing-token bug as --app-font-15 above, same fix: referenced in 4
+     places (.app-auth-title among them — the "Opening Sage" heading this
+     chat-parity build's mobile pass traced the auth/complete page's cramped
+     hierarchy to) but never defined, so font-size fell back to inherited
+     text size instead of a real heading size. */
+  --app-font-24: 24px;
 
   --app-weight-regular: var(--font-weight-normal);
   --app-weight-medium: var(--font-weight-medium);
@@ -2462,6 +2468,22 @@ body[data-theme='dark'] .app-auth-card--elevated {
   margin-bottom: var(--app-space-4);
 }
 
+/* Was never actually styled (signup's identical kicker has the same gap) —
+   it rendered at inherited body size/weight, indistinguishable from
+   .app-auth-title next to it. Combined with --app-font-24 being undefined
+   until this build (see the --app-font-24 fix above), the two collapsed
+   into one same-size text block — the "cramped" auth/complete mobile
+   report. A real eyebrow label restores the kicker → title → subtitle
+   hierarchy this card was designed around. */
+.app-auth-kicker {
+  display: block;
+  color: var(--app-accent);
+  font-size: var(--app-font-12);
+  font-weight: var(--app-weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .app-auth-title {
   margin: 0;
   color: var(--app-text-primary);
@@ -4414,6 +4436,41 @@ body[data-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
+}
+
+/* Markdown-lite (see lib/workspace/markdown-lite.tsx): bold/italic/code/
+   links/lists inside a chat bubble. Defined here (not only in fleet-theme.css,
+   which the live chat surface doesn't always have loaded) so the same four
+   classes resolve correctly wherever ChatMessage renders. */
+.app-chat-message .fleet-md-p {
+  margin: 0 0 8px;
+}
+.app-chat-message .fleet-md-p:last-child {
+  margin-bottom: 0;
+}
+.app-chat-message .fleet-md-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+.app-chat-message .fleet-md-list:last-child {
+  margin-bottom: 0;
+}
+.app-chat-message .fleet-md-list li {
+  margin-bottom: 2px;
+}
+.app-chat-message .fleet-md-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--app-surface-2);
+  font-family: var(--app-font-mono);
+  font-size: 0.9em;
+}
+.app-chat-message .fleet-link {
+  color: var(--app-accent);
+  text-decoration: none;
+}
+.app-chat-message .fleet-link:hover {
+  text-decoration: underline;
 }
 
 .app-chat-message[data-chat-role='user'] {
