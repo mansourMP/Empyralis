@@ -16,7 +16,7 @@ import {
   DESIGN_SYSTEM_TYPOGRAPHY_SCALE,
   DESIGN_SYSTEM_WEB_CSS_VARIABLES,
   resolveWebCssVariables,
-} from '../../shared/design-system/tokens';
+} from '../../../shared/design-system/tokens';
 
 const px = (value: number): string => `${value}px`;
 const ms = (value: number): string => `${value}ms`;

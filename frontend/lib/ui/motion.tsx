@@ -4,7 +4,7 @@ import type { ButtonHTMLAttributes, HTMLAttributes, PropsWithChildren } from 're
 
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 
-import { DESIGN_SYSTEM_MOTION } from '../../shared/design-system/tokens';
+import { DESIGN_SYSTEM_MOTION } from '../../../shared/design-system/tokens';
 
 const joinClassNames = (...values: Array<string | false | null | undefined>): string =>
   values.filter(Boolean).join(' ');

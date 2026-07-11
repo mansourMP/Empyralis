@@ -11,13 +11,13 @@ import {
   type WorkspaceNavRouteDefinition,
   type WorkspaceRouteId,
   type WorkspaceShellProfileId,
-} from '../../shared/nav-manifest';
+} from '../../../shared/nav-manifest';
 
 export type {
   WorkspaceNavDestinationId,
   WorkspaceRouteId,
   WorkspaceShellProfileId,
-} from '../../shared/nav-manifest';
+} from '../../../shared/nav-manifest';
 
 export type WorkspaceShellProfile = {
   id: WorkspaceShellProfileId;
