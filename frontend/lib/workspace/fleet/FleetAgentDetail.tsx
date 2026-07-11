@@ -1613,8 +1613,17 @@ function ContextPolicySection({
         ))}
       </select>
       <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
+        {/* Distinct label is load-bearing, not cosmetic: this save is scoped
+            to ONLY context_policy — it does not touch model/provider/gateway
+            at all. It used to just say "Save" like the unrelated Model-tab
+            save button above it (ModelTab's own save(), a separate PATCH
+            call) — same label, same style, stacked on the same page, so a
+            model/subscription change made above was silently never
+            persisted by clicking this one. Confirmed live: selecting "Your
+            subscription" -> Codex -> a Gateway, then clicking only this
+            button, left model_config completely unchanged. */}
         <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={saving}>
-          {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save"}
+          {saving ? "Saving…" : saved ? <><Check size={14} strokeWidth={2} /> Saved</> : "Save context settings"}
         </button>
         {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
       </div>
