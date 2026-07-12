@@ -39,8 +39,18 @@ export class HeartbeatLoop {
       try {
         let timeoutHandle: NodeJS.Timeout | null = null;
         try {
+          const heartbeatPromise = options.sendHeartbeat();
+          // If the timeout branch below wins the race, this promise keeps
+          // running unobserved. A later rejection from it (e.g. the socket
+          // dying mid-send) would then have no handler attached anywhere —
+          // Node treats that as an unhandled rejection and kills the whole
+          // process by default (observed live: this took the gateway down
+          // with nothing left to restart it). Attaching a no-op catch here
+          // marks it handled regardless of which branch wins; the real
+          // result/error for THIS tick still comes from the race below.
+          heartbeatPromise.catch(() => {});
           await Promise.race([
-            options.sendHeartbeat(),
+            heartbeatPromise,
             new Promise<never>((_, reject) => {
               timeoutHandle = setTimeout(() => {
                 reject(new Error(`Gateway heartbeat timed out after ${timeoutMs}ms.`));

@@ -465,3 +465,145 @@ test("timeout clears pending response entry", async () => {
   // It should reject again (meaning no pending entry was left behind blocking it)
   await assert.rejects(keepEventLoopAliveUntil(promise2), /timed out/);
 });
+
+test("dispatchRequestFrame rejects cleanly (not an uncaught TypeError) when the socket goes null between the top-of-function check and send", async () => {
+  // Regression test for a real production crash: a heartbeat raced a
+  // reconnect, this.socket went null during an awaited outbox call, and
+  // the unguarded `this.socket.send(...)` threw "Cannot read properties
+  // of null (reading 'send')" — which, orphaned by heartbeat.ts's
+  // Promise.race, reached Node as an unhandled rejection and killed the
+  // whole gateway process (see heartbeat-loop.test.ts for that half of
+  // the fix). This test proves dispatchRequestFrame itself now degrades
+  // to a normal, catchable rejection instead.
+  const { GatewayWsClient } = await import("../cloud/ws-client");
+
+  const mockConfig = {
+    apiBaseUrl: "http://localhost:8001/api",
+    stateDir: "/tmp/test-state",
+    heartbeatIntervalMs: 20000,
+    reconnectMinDelayMs: 1000,
+    reconnectMaxDelayMs: 5000,
+    supervisorUrl: "http://localhost:7788",
+    supervisorTimeoutMs: 10000,
+    browserPythonExecutable: "python3",
+    browserProjectRoot: "/tmp",
+    supervisorSecret: undefined,
+    pairingToken: undefined,
+    gatewayId: undefined,
+    deviceId: undefined,
+    gatewayToken: undefined,
+    displayName: "test",
+  };
+
+  const mockDb = {
+    ensureReady: async () => {},
+    filePath: (name: string) => "/tmp/" + name,
+    rootDirPath: () => "/tmp",
+    readJson: async () => ({}),
+    writeJson: async (_name: string, _value: unknown) => _value,
+    appendNdjson: async () => {},
+  };
+
+  const mockJournal = {
+    journalFilePath: () => "/tmp/journal.ndjson",
+    append: async () => ({ cursor: 1 }),
+    lastCursor: async () => 0,
+  };
+
+  const mockCheckpoints = {
+    load: async () => ({}),
+    save: async (s: Record<string, unknown>) => s,
+    saveHealthState: async (_h: string, _s?: Record<string, unknown>) => ({}),
+    markRecovered: async () => ({}),
+    flush: async () => {},
+  };
+
+  const mockTokenStore = {
+    load: async () => ({ sessionId: "sess-1", sessionToken: "tok-1" }),
+    save: async () => {},
+    clearSession: async () => {},
+  };
+
+  const mockCapabilityRouter = {
+    supportedCapabilities: () => [],
+    handleToolInvoke: async () => ({}),
+    handleToolInterrupt: async () => ({}),
+  };
+
+  const mockPersonalChannelRuntimes = {
+    all: () => [],
+    requestedCapabilities: () => [],
+    runtimeForCapability: () => undefined,
+    runtimeForChannel: () => undefined,
+    setPublisher: () => {},
+    startAll: async () => {},
+    stopAll: async () => {},
+    handleGatewayConnected: async () => {},
+    handleGatewayDisconnected: async () => {},
+  };
+
+  const client = new GatewayWsClient(
+    mockConfig as any,
+    mockDb as any,
+    mockJournal as any,
+    // outbox.get is awaited by dispatchRequestFrame BEFORE the send —
+    // nulling the socket here (simulating a close racing in on this exact
+    // await) is what reproduces the live crash.
+    {
+      list: async () => [],
+      get: async (_id: string) => {
+        (client as unknown as { socket: unknown }).socket = null;
+        return null;
+      },
+      enqueue: async () => ({}),
+      markAttemptStarted: async () => {},
+      acknowledge: async () => {},
+      markAttemptFailed: async () => {},
+      markForReplay: async () => {},
+      listReplayablePending: async () => [],
+      summarize: async () => ({ total: 0, pending: 0, failed: 0, acknowledged: 0 }),
+      prune: async () => 0,
+    } as any,
+    mockCheckpoints as any,
+    mockTokenStore as any,
+    mockCapabilityRouter as any,
+    mockPersonalChannelRuntimes as any,
+  );
+
+  const mockSocket = {
+    readyState: 1, // OPEN — passes the top-of-function guard
+    onopen: null,
+    onerror: null,
+    onclose: null,
+    onmessage: null,
+    close() {},
+    send(_data: string) {
+      throw new Error("send() should never be called once the socket is null — this proves the guard did NOT fire");
+    },
+  };
+  (client as unknown as { socket: typeof mockSocket | null }).socket = mockSocket;
+
+  const dispatchRequestFrame = (client as unknown as {
+    dispatchRequestFrame: (frame: unknown, opts: Record<string, unknown>) => Promise<unknown>;
+  }).dispatchRequestFrame.bind(client);
+
+  const frame = {
+    kind: "request" as const,
+    protocolVersion: "v1alpha2",
+    id: "race-req-1",
+    type: "gateway.heartbeat" as const,
+    ts: new Date().toISOString(),
+    scope: {
+      tenant_id: "t1", workspace_id: "w1", user_id: "u1",
+      device_id: "d1", gateway_id: "g1",
+    },
+    payload: {},
+  };
+
+  // persistOutbox: true is what makes dispatchRequestFrame await outbox.get()
+  // before reaching send() — the exact window the real crash raced into.
+  await assert.rejects(
+    keepEventLoopAliveUntil(dispatchRequestFrame(frame, { replayable: true, persistOutbox: true, timeoutMs: 5_000 })),
+    /Gateway socket is not connected/,
+  );
+});

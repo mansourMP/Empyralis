@@ -657,6 +657,15 @@ export class GatewayWsClient {
       options.persistOutbox,
       options.timeoutMs,
     );
+    // Every failure path below (encoding failure, send failure) reports its
+    // error by throwing from THIS function, not by letting the caller await
+    // responsePromise — so on those paths responsePromise is never returned
+    // to anyone, yet clearPendingResponse() still rejects it underneath.
+    // Without a handler attached, that's an orphaned rejection: same crash
+    // shape as the heartbeat.ts Promise.race issue, just one layer deeper.
+    // This no-op catch only marks it handled; the real error still reaches
+    // the caller normally via the throw/return below.
+    responsePromise.catch(() => {});
     const encoded = encodeFrame(frame);
     if (typeof encoded !== "string") {
       const message = encoded.ok === false ? encoded.error : "Frame encoding failed";
@@ -671,6 +680,16 @@ export class GatewayWsClient {
       throw new Error(message);
     }
     try {
+      // Re-check (don't trust the guard at the top of this function): every
+      // await between here and there — outbox.get/enqueue, journal.append —
+      // yields the event loop, and a close/reconnect racing in during that
+      // window nulls out this.socket. Without this, that race throws an
+      // uncaught TypeError from calling .send on null, which crashes the
+      // whole gateway process with no supervisor to bring it back (observed
+      // live: a heartbeat lost exactly this race and took the process down).
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        throw new Error("Gateway socket is not connected.");
+      }
       this.socket.send(encoded);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
