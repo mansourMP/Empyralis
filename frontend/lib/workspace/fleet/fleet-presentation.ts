@@ -45,6 +45,11 @@ export type AgentSummary = {
   // used for "where does this agent run", only for online/offline status.
   hardwareAccess: string;
   preferredGatewayId: string;
+  // Brain placement source for cli_subscription/local agents — see
+  // resolveHardwarePlacement in gateway-box-picker.tsx. Threaded through
+  // here so the list card reads the same Placement a given agent's own
+  // detail page does, not just hardwareAccess/preferredGatewayId.
+  modelConfig: Record<string, any> | null;
   lastActivity: string | null;
   tint: TintKey;
   stopped?: StoppedState;
@@ -102,6 +107,7 @@ export function toAgentSummary(agent: FleetAgent, index: number): AgentSummary {
     hardwareStatus: agent.hardware_status || "unknown",
     hardwareAccess: agent.hardware_access || "none",
     preferredGatewayId: agent.preferred_gateway_id || "",
+    modelConfig: agent.model_config || null,
     lastActivity: agent.last_activity || null,
     tint: tintForAgent(agent, index),
     stopped: agent.stopped,
@@ -158,15 +164,6 @@ export function deriveStatus(
 
 export function statusClass(tone: AgentStatusTone): string {
   return tone === "working" ? "is-working" : tone === "ready" ? "is-ready" : tone === "offline" ? "is-offline" : tone === "stopped" ? "is-stopped" : tone === "error" ? "is-error" : tone === "degraded" ? "is-degraded" : "";
-}
-
-/** Placement/meta line. Never prints raw "unknown". */
-export function derivePlacement(runtimeTarget: string, deployed: boolean): string {
-  if (!deployed || !runtimeTarget || runtimeTarget === "unknown") {
-    return "Ready to configure";
-  }
-  if (runtimeTarget === "cloud") return "Cloud";
-  return runtimeTarget.replace(/:/g, " · ");
 }
 
 /** Compact relative time for list rows ("2h ago", "3d ago"). "—" when unknown. */

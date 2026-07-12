@@ -30,7 +30,7 @@ export function FleetCard({
   onChat: (id: string) => void;
 }) {
   const status = deriveStatus(agent.hardwareStatus, agent.stopped?.active);
-  const placement = resolveHardwarePlacement(agent.hardwareAccess, agent.preferredGatewayId, gateways);
+  const placement = resolveHardwarePlacement(agent.hardwareAccess, agent.preferredGatewayId, gateways, agent.modelConfig);
   const tint = TINTS[agent.tint];
 
   const tileStyle: CSSProperties = {

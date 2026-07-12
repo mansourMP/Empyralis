@@ -171,12 +171,13 @@ export function FleetAgentDetail({
   const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(agent?.model_config));
   // Lives in the permanent properties column now, so it's computed once
   // here rather than per-tab — every tab shows the same placement/role,
-  // not just Overview. Built from hardware_access + preferred_gateway_id +
-  // a live registrations join — never runtime_target/derivePlacement(),
-  // which stay pinned to a runtime_profile FK real Fleet agents never
-  // update (see docs/HARDWARE-BRAIN-REALITY-REPORT.md).
+  // not just Overview. Brain placement (model_config.gateway_binding, for
+  // cli_subscription/local agents) wins over tool-hardware placement
+  // (hardware_access + preferred_gateway_id) — see resolveHardwarePlacement.
+  // Never runtime_target, which stays pinned to a runtime_profile FK real
+  // Fleet agents never update (see docs/HARDWARE-BRAIN-REALITY-REPORT.md).
   const { gateways } = useWorkspaceGateways(workspaceId);
-  const placement = resolveHardwarePlacement(agent?.hardware_access, agent?.preferred_gateway_id, gateways);
+  const placement = resolveHardwarePlacement(agent?.hardware_access, agent?.preferred_gateway_id, gateways, agent?.model_config);
   const role = agent?.role || "agent";
   const isMaster = role === "operator";
   const { tools: agentTools } = useFleetAgentTools(workspaceId, agentId);

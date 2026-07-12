@@ -147,16 +147,34 @@ export function connectionPresentation(g: FleetGateway): { tone: AgentStatusTone
   return { tone: "offline", label: "Offline" };
 }
 
-/** Real placement + live health for "Running on: …" — built ONLY from
- *  hardware_access + preferred_gateway_id + this same registrations join,
- *  never from runtime_target / derivePlacement() / agent.hardware_status.
- *  Those all key off a runtime_profile foreign key that real Fleet agents
- *  never update after creation, so they read as a permanent, wrong "Cloud". */
+/** Real placement + live health for "Running on: …". Two independent
+ *  bindings can put an agent on hardware — a cli_subscription/local BRAIN
+ *  (model_config.gateway_binding: the box that generates completions) and
+ *  Agent-Computer TOOL access (hardware_access + preferred_gateway_id: the
+ *  box its tool calls run on) — and this used to only ever look at the
+ *  second one. An agent with real tool hardware_access:"none" but a live
+ *  cli_subscription gateway_binding read as a permanent "Cloud", even though
+ *  its brain was physically running on a specific paired machine — the exact
+ *  lie a cli_subscription agent can never afford, since "Cloud" implies no
+ *  hardware dependency at all. Brain placement wins when both are checkable:
+ *  it's the more fundamental fact ("where does this agent run" beats "where
+ *  do its tools run"). Never from runtime_target / agent.hardware_status —
+ *  those key off a runtime_profile foreign key that real Fleet agents never
+ *  update after creation, so they read as a permanent, wrong "Cloud". */
 export function resolveHardwarePlacement(
   hardwareAccess: string | undefined,
   preferredGatewayId: string | undefined,
   gateways: FleetGateway[],
+  modelConfig?: Record<string, any> | null,
 ): HardwarePlacement {
+  const brainMode = modelConfig?.mode;
+  if (brainMode === "cli_subscription" || brainMode === "local") {
+    const brainGatewayId = String(modelConfig?.gateway_binding || "").trim();
+    if (!brainGatewayId) return { label: "No computer bound yet", tone: "unpaired" };
+    const match = gateways.find((g) => gatewayId(g) === brainGatewayId);
+    if (match) return { label: gatewayLabel(match), tone: connectionTone(match) };
+    return { label: "Paired computer (disconnected)", tone: "offline" };
+  }
   const access = (hardwareAccess || "none").toLowerCase();
   if (access === "none") return { label: "Cloud", tone: "cloud" };
   const preferred = String(preferredGatewayId || "").trim();

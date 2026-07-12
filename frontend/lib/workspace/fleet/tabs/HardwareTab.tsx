@@ -67,7 +67,12 @@ export function HardwareTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent?.hardware_access, agent?.preferred_gateway_id]);
 
-  const placement = resolveHardwarePlacement(access, preferredGateway, gateways);
+  // model_config passed through even on this tab's own local edit state —
+  // for a cli_subscription/local agent, brain placement wins regardless of
+  // what this picker is set to (see resolveHardwarePlacement), so this
+  // preview must agree with the Overview property and list card rather than
+  // react to a control that doesn't actually govern brain placement.
+  const placement = resolveHardwarePlacement(access, preferredGateway, gateways, agent?.model_config);
 
   async function persist(nextAccess: string, nextGateway: string) {
     setSaving(true);
