@@ -8,6 +8,8 @@ import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { AgentChat } from "./AgentChat";
 import { useFleetAgents } from "./fleet-data";
 import { findSageAgent } from "./fleet-presentation";
+import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
+import type { PersonalChannelKey } from "./personal-channel-pairing";
 
 // Fleet-management tools are live end-to-end — the console reflects real capability.
 const STARTER_PROMPTS = [
@@ -30,6 +32,13 @@ const PERSONAL_CHANNELS: { id: string; label: string; platform: string; descript
   { id: "signal", label: "Signal", platform: "macos", description: "Your personal Signal account via the Gateway." },
   { id: "imessage", label: "iMessage", platform: "macos", description: "Personal iMessage via a Mac running the Gateway." },
 ];
+
+// Only these two have a real setup/status/disconnect backend today — the
+// other two cards still fall through to the bare Gateway-pairing panel below.
+const REAL_PAIRING_CHANNEL_KEYS: Record<string, PersonalChannelKey> = {
+  telegram: "telegram_personal",
+  whatsapp: "whatsapp_personal",
+};
 
 /**
  * Floating "Ask Sage" corner console — a pill-shaped button fixed at the
@@ -170,11 +179,19 @@ export function SageLauncher({
                     <p className="fleet-sage-connect-desc">
                       {selectedChannel?.description}
                     </p>
-                    <GatewayPairPanel
-                      workspaceId={workspaceId}
-                      compact
-                      defaultPlatform={selectedChannel?.platform}
-                    />
+                    {selectedChannel && REAL_PAIRING_CHANNEL_KEYS[selectedChannel.id] ? (
+                      <PersonalChannelConnectPanel
+                        workspaceId={workspaceId}
+                        channelKey={REAL_PAIRING_CHANNEL_KEYS[selectedChannel.id]}
+                        label={selectedChannel.label}
+                      />
+                    ) : (
+                      <GatewayPairPanel
+                        workspaceId={workspaceId}
+                        compact
+                        defaultPlatform={selectedChannel?.platform}
+                      />
+                    )}
                   </div>
                 )}
               </div>

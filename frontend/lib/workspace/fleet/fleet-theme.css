@@ -3551,6 +3551,103 @@ a.fleet-breadcrumb:hover {
   margin: 0;
 }
 
+/* ── Personal-channel (telegram_personal/whatsapp_personal) pairing wizard
+   inside SageLauncher's Connect tab ──────────────────────────────────────── */
+
+.pc-connect-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pc-connect-panel--loading {
+  align-items: center;
+  justify-content: center;
+  padding: 24px 0;
+  color: var(--text-muted);
+}
+
+.pc-connect-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pc-connect-step--waiting {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.pc-connect-connected {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pc-connect-disconnect {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.pc-connect-disconnect-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--offline-text);
+}
+
+.pc-connect-qr {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 220px;
+  height: 220px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.pc-connect-qr img {
+  width: 100%;
+  height: 100%;
+}
+
+.pc-connect-qr--pending {
+  color: var(--text-muted);
+}
+
+.pc-connect-pairing-code {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: center;
+  padding: 12px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+}
+
+.pc-connect-alt-link {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.pc-connect-alt-link:hover {
+  color: var(--text-primary);
+}
+
 /* ── Home page density: status strip + activity feed ─────────────────────── */
 
 .fleet-status-strip {

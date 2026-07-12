@@ -930,7 +930,7 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
     { key: "oauth", label: "Bot app", body: "Install the Discord bot app — signed messages route to Sage.", real: true },
   ],
   whatsapp_personal: [
-    { key: "business", label: "Business (Twilio)", body: "Meta blocks third-party AI assistants on the WhatsApp Business API — not available yet.", real: false },
+    { key: "sage_console", label: "Personal WhatsApp", body: "Pair your own WhatsApp from Sage's Connect tab (the \"Ask Sage\" button) — it answers as Sage across every project, not from this page.", real: false },
   ],
   wechat_personal: [
     { key: "business", label: "Business", body: "The local bridge runtime isn't certified yet.", real: false },
