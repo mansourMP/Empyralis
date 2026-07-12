@@ -1,3 +1,5 @@
+import path from 'path';
+
 import type { NextConfig } from 'next';
 
 // Phase 7A — legacy workstation routes redirect to their new home under the
@@ -35,6 +37,17 @@ const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || '.next',
   typescript: { ignoreBuildErrors: true },
   eslint: { ignoreDuringBuilds: true },
+  // frontend/ isn't self-contained — its own source imports across the
+  // repo boundary via relative path (e.g. lib/ui/tokens.ts pulls from
+  // ../../../shared/design-system/tokens), so the Turbopack root has to
+  // cover the whole repo, not just this directory. But a package-lock.json
+  // at the repo root (real — it's the mobile/tray/Tauri manifest, not
+  // vestigial) made Turbopack's own root *inference* pick that same
+  // directory as an unintentional side effect, which is a coincidence, not
+  // a requirement — declaring the boundary explicitly here documents that
+  // and stops it from silently following whatever lockfile shows up next
+  // to the repo root in the future.
+  turbopack: { root: path.join(__dirname, '..') },
   async redirects() {
     return LEGACY_REDIRECTS.map(({ from, to }) => ({
       source: from,
