@@ -458,7 +458,14 @@ def build_whatsapp_personal_reply(
     text: str,
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
+    linked_user_name: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Build a Sage reply for a WhatsApp personal DM.
+
+    linked_user_name is accepted for future identity-context injection but
+    not yet threaded into _build_unified_sage_personal_reply (same as
+    build_discord_personal_reply_async's linked_user_name parameter above).
+    """
     unified = _build_unified_sage_personal_reply(
         surface_channel="whatsapp_personal",
         workspace_id=workspace_id,
