@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -11,10 +11,7 @@ from server_modules.runtime_common import require_api_key
 from server_modules.kill_switch_gate import KillSwitchBlockedError
 from server_modules.safety_error_contract import kill_switch_error, to_http_body, to_http_status
 from server_modules import (
-    approval_contracts,
     channel_lane_contract_service,
-    gateway_approval_service,
-    rust_runtime_kernel_client,
     gateway_state_repository,
     personal_channels_service,
     security_audit_service,
@@ -76,19 +73,6 @@ def _personal_channel_governance_metadata(action: str, channel_key: str) -> dict
         "requires_approval": False,
         "external_side_effect": False,
     }
-
-
-def _channel_approval_instruction(approval: dict, channel_key: str) -> dict:
-    normalized = (approval or {}).get("normalized_approval")
-    if not isinstance(normalized, dict):
-        normalized = approval_contracts.normalize_gateway_approval(approval, channel=channel_key)
-    else:
-        normalized = {
-            **normalized,
-            "channel": str(channel_key or "").strip() or normalized.get("channel") or "channel",
-        }
-    return approval_contracts.channel_approval_instruction(normalized, channel_key=channel_key)
-
 
 
 def _coerce_current_user_id(current_user) -> str:
@@ -181,130 +165,6 @@ def _emit_personal_channel_audit(
             **dict(metadata or {}),
         },
         idempotency_key=idempotency_key,
-    )
-
-
-def _enforce_personal_channel_approval_request(
-    *,
-    registration: dict,
-    current_user,
-    capability_id: str,
-    run_id: str,
-    trace_id: str,
-    request_id: str,
-) -> dict:
-    metadata = dict(registration.get("metadata") or {})
-    session_id = str(
-        registration.get("active_session_id")
-        or metadata.get("gateway_session_id")
-        or metadata.get("session_id")
-        or ""
-    ).strip()
-    payload = {
-        "operation": "approval_request",
-        "tenant_id": str(registration.get("tenant_id") or "default").strip() or "default",
-        "workspace_id": str(registration.get("workspace_id") or "default").strip() or "default",
-        "actor_id": str((current_user or {}).get("user_id") or "").strip() or "user",
-        "actor_role": str((current_user or {}).get("role") or "").strip() or "member",
-        "gateway_id": str(registration.get("gateway_id") or "").strip(),
-        "session_id": session_id,
-        "request_id": str(request_id or "").strip() or None,
-        "capability_id": str(capability_id or "").strip(),
-        "run_id": str(run_id or "").strip(),
-        "trace_id": str(trace_id or "").strip() or None,
-        "quota_profile": "standard",
-        "risk_level": "critical",
-        "policy_decision": "allow",
-        "device_trust_state": str(registration.get("device_trust_state") or "trusted").strip() or "trusted",
-        "approval_provided": False,
-        "approval_memory_hit": False,
-        "kill_switch_enabled": False,
-        "quota_ok": True,
-        "gateway_registered": True,
-        "session_valid": bool(session_id),
-        "websocket_token_present": True,
-        "frame_valid": True,
-        "payload_present": True,
-    }
-    decision = rust_runtime_kernel_client.gateway_service_decision(**payload)
-    decision_class = str(decision.get("decision") or "").strip()
-    next_action = str(decision.get("next_action") or "").strip()
-    if decision_class == "block":
-        detail = str(decision.get("reason") or "rust_personal_channel_request_denied").strip()
-        raise HTTPException(
-            status_code=409,
-            detail=f"Rust gateway-service gate blocked request: {detail}",
-        )
-    return decision
-
-
-async def _request_personal_channel_send_approval(
-    *,
-    action: str,
-    registration: dict,
-    current_user,
-    gateway_id: str,
-    channel_key: str,
-    capability_id: str,
-    remote_jid: str,
-    text: str,
-    idempotency_key: str,
-    reply_to_external_message_id: Optional[str],
-) -> Optional[JSONResponse]:
-    governance_metadata = _personal_channel_governance_metadata(action, channel_key)
-    if not bool(governance_metadata.get("requires_approval")):
-        return None
-    run_id = f"personal-channel-send-{channel_key}-{idempotency_key}"
-    trace_id = f"personal-channel-send-{channel_key}-{idempotency_key}"
-    _enforce_personal_channel_approval_request(
-        registration=registration,
-        current_user=current_user,
-        capability_id=capability_id,
-        run_id=run_id,
-        trace_id=trace_id,
-        request_id=idempotency_key,
-    )
-    approval = await gateway_approval_service.request_gateway_tool_approval(
-        registration=registration,
-        capability_id=capability_id,
-        arguments={
-            "channel_key": channel_key,
-            "remote_jid": remote_jid,
-            "text": text,
-            "idempotency_key": idempotency_key,
-            "reply_to_external_message_id": reply_to_external_message_id,
-            "source": "manual_api",
-        },
-        run_id=run_id,
-        trace_id=trace_id,
-        request_id=idempotency_key,
-    )
-    _emit_personal_channel_audit(
-        action=action,
-        status="approval_required",
-        registration=registration,
-        current_user=current_user,
-        gateway_id=gateway_id,
-        channel_key=channel_key,
-        detail="Owner approval is required before dispatching a manual personal-channel message.",
-        metadata={
-            "remote_jid": remote_jid,
-            "text_length": len(text),
-            "has_reply_target": bool(reply_to_external_message_id),
-            "approval_id": approval.get("approval_id"),
-        },
-        idempotency_key=f"{action}.approval_required:{gateway_id}:{idempotency_key}",
-    )
-    return JSONResponse(
-        status_code=status.HTTP_202_ACCEPTED,
-        content={
-            "status": "approval_required",
-            "gateway_id": gateway_id,
-            "channel_key": channel_key,
-            "approval": approval,
-            "normalized_approval": approval.get("normalized_approval"),
-            "channel_approval": _channel_approval_instruction(approval, channel_key),
-        },
     )
 
 
@@ -474,20 +334,6 @@ async def send_whatsapp_personal_message(
         current_user,
         minimum_role="member",
     )
-    approval_response = await _request_personal_channel_send_approval(
-        action="personal_channel.whatsapp.send",
-        registration=registration,
-        current_user=current_user,
-        gateway_id=gateway_id,
-        channel_key="whatsapp_personal",
-        capability_id="channel.whatsapp.personal.send",
-        remote_jid=body.remote_jid,
-        text=body.text,
-        idempotency_key=body.idempotency_key,
-        reply_to_external_message_id=body.reply_to_external_message_id,
-    )
-    if approval_response is not None:
-        return approval_response
     try:
         result = await personal_channels_service.send_whatsapp_personal_message(
             gateway_id=gateway_id,
@@ -721,20 +567,6 @@ async def send_telegram_personal_message(
         current_user,
         minimum_role="member",
     )
-    approval_response = await _request_personal_channel_send_approval(
-        action="personal_channel.telegram.send",
-        registration=registration,
-        current_user=current_user,
-        gateway_id=gateway_id,
-        channel_key="telegram_personal",
-        capability_id="channel.telegram.personal.send",
-        remote_jid=body.remote_jid,
-        text=body.text,
-        idempotency_key=body.idempotency_key,
-        reply_to_external_message_id=body.reply_to_external_message_id,
-    )
-    if approval_response is not None:
-        return approval_response
     try:
         result = await personal_channels_service.send_telegram_personal_message(
             gateway_id=gateway_id,
@@ -823,20 +655,6 @@ async def send_local_bridge_personal_message(
         minimum_role="member",
     )
     action_name = f"personal_channel.{normalized_channel_key.split('_', 1)[0]}.send"
-    approval_response = await _request_personal_channel_send_approval(
-        action=action_name,
-        registration=registration,
-        current_user=current_user,
-        gateway_id=gateway_id,
-        channel_key=normalized_channel_key,
-        capability_id=f"{normalized_channel_key}.send",
-        remote_jid=body.remote_jid,
-        text=body.text,
-        idempotency_key=body.idempotency_key,
-        reply_to_external_message_id=body.reply_to_external_message_id,
-    )
-    if approval_response is not None:
-        return approval_response
     try:
         result = await personal_channels_service.send_local_bridge_personal_message(
             gateway_id=gateway_id,

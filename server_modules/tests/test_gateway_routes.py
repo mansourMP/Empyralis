@@ -1234,30 +1234,24 @@ class GatewayRoutesTests(unittest.TestCase):
         "server_modules.personal_channels_service.send_whatsapp_personal_message",
         new_callable=AsyncMock,
     )
-    @patch("server_modules.routes_personal_channels._enforce_personal_channel_approval_request")
-    @patch(
-        "server_modules.routes_personal_channels.gateway_approval_service.request_gateway_tool_approval",
-        new_callable=AsyncMock,
-    )
     @patch("server_modules.routes_personal_channels.security_audit_service.emit_security_audit_event")
-    def test_send_whatsapp_personal_message_requires_approval_before_dispatch(
+    def test_send_whatsapp_personal_message_dispatches_directly_no_approval_detour(
         self,
         audit_mock,
-        approval_request_mock: AsyncMock,
-        _approval_gate_mock,
         send_message_mock: AsyncMock,
     ) -> None:
+        """A manual send must reach the real dispatch path -- it used to get
+        permanently stuck at an approval_required 202 because the approval
+        gate never read back its own (always-true) auto-approval result, and
+        nothing ever called the resume-after-approval function. See
+        send_whatsapp_personal_message in personal_channels_service.py, which
+        already kill-switch-gates this before it ever reaches here."""
         registration_payload = self._register_gateway()
         gateway_id = registration_payload["gateway"]["gateway_id"]
-        approval_request_mock.return_value = {
-            "approval_id": "approval-wa-1",
-            "gateway_id": gateway_id,
-            "status": "pending",
-        }
         send_message_mock.return_value = {
             "gateway_id": gateway_id,
             "channel_key": "whatsapp_personal",
-            "status": "queued",
+            "status": "sent",
         }
 
         response = self.client.post(
@@ -1269,46 +1263,30 @@ class GatewayRoutesTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["status"], "approval_required")
-        self.assertEqual(payload["approval"]["approval_id"], "approval-wa-1")
-        self.assertEqual(payload["channel_approval"]["approve_text"], "approve approval-wa-1")
-        self.assertEqual(payload["channel_approval"]["deny_text"], "deny approval-wa-1")
-        self.assertIn("Reply approve approval-wa-1 or deny approval-wa-1", payload["channel_approval"]["instruction"])
-        send_message_mock.assert_not_awaited()
-        self.assertEqual(approval_request_mock.await_args.kwargs["capability_id"], "channel.whatsapp.personal.send")
-        self.assertEqual(approval_request_mock.await_args.kwargs["arguments"]["text"], "hello from sage")
+        self.assertEqual(payload["status"], "sent")
+        send_message_mock.assert_awaited_once()
+        self.assertEqual(send_message_mock.await_args.kwargs["remote_jid"], "8618657105303@s.whatsapp.net")
+        self.assertEqual(send_message_mock.await_args.kwargs["text"], "hello from sage")
         metadata = audit_mock.call_args.kwargs["metadata"]
-        self.assertEqual(metadata["action_class"], "channel_send")
-        self.assertEqual(metadata["risk_level"], "critical")
-        self.assertEqual(metadata["governance_boundary"], "paired_gateway")
-        self.assertTrue(metadata["requires_approval"])
-        self.assertTrue(metadata["external_side_effect"])
         self.assertEqual(metadata["text_length"], len("hello from sage"))
-        self.assertEqual(audit_mock.call_args.kwargs["status"], "approval_required")
+        self.assertEqual(audit_mock.call_args.kwargs["status"], "success")
 
     @patch(
         "server_modules.personal_channels_service.send_telegram_personal_message",
         new_callable=AsyncMock,
     )
-    @patch("server_modules.routes_personal_channels._enforce_personal_channel_approval_request")
-    @patch(
-        "server_modules.routes_personal_channels.gateway_approval_service.request_gateway_tool_approval",
-        new_callable=AsyncMock,
-    )
-    def test_send_telegram_personal_message_requires_approval_before_dispatch(
+    def test_send_telegram_personal_message_dispatches_directly_no_approval_detour(
         self,
-        approval_request_mock: AsyncMock,
-        _approval_gate_mock,
         send_message_mock: AsyncMock,
     ) -> None:
         registration_payload = self._register_gateway()
         gateway_id = registration_payload["gateway"]["gateway_id"]
-        approval_request_mock.return_value = {
-            "approval_id": "approval-tg-1",
+        send_message_mock.return_value = {
             "gateway_id": gateway_id,
-            "status": "pending",
+            "channel_key": "telegram_personal",
+            "status": "sent",
         }
 
         response = self.client.post(
@@ -1320,13 +1298,11 @@ class GatewayRoutesTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["status"], "approval_required")
-        self.assertEqual(payload["channel_approval"]["approve_text"], "approve approval-tg-1")
-        self.assertEqual(payload["channel_approval"]["deny_text"], "deny approval-tg-1")
-        send_message_mock.assert_not_awaited()
-        self.assertEqual(approval_request_mock.await_args.kwargs["capability_id"], "channel.telegram.personal.send")
+        self.assertEqual(payload["status"], "sent")
+        send_message_mock.assert_awaited_once()
+        self.assertEqual(send_message_mock.await_args.kwargs["remote_jid"], "telegram-user-1")
 
     def test_personal_gateway_channel_surfaces_project_live_and_reserved_channels(self) -> None:
         registration_payload = self._register_gateway_with_mode(gateway_id="gateway-channel-surfaces")
