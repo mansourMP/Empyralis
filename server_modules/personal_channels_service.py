@@ -1829,6 +1829,7 @@ async def configure_whatsapp_personal_gateway(
     phone_number: Optional[str] = None,
     custom_pairing_code: Optional[str] = None,
 ) -> Dict[str, Any]:
+    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(
         WHATSAPP_PERSONAL_CHANNEL_KEY,
         WHATSAPP_PERSONAL_PROVIDER,
@@ -2127,6 +2128,7 @@ async def configure_telegram_personal_gateway(
     login_code: Optional[str] = None,
     password: Optional[str] = None,
 ) -> Dict[str, Any]:
+    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(
         TELEGRAM_PERSONAL_CHANNEL_KEY,
         TELEGRAM_PERSONAL_PROVIDER,

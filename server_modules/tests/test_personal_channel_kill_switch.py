@@ -4,16 +4,39 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import patch
 
-from server_modules import personal_channels_service, kill_switch_gate, safe_mode_service
+from server_modules import personal_channels_service, kill_switch_gate, safe_mode_service, rust_runtime_kernel_client
+
+
+def _rust_kernel_allow(command, payload):
+    """Real gateway.connect handshakes on production run against the real
+    compiled Rust kernel binary, which returns next_action == operation for
+    runtime-state-store-decision (proven live: the /emergency-stop route's
+    set_kill_switch()/clear_kill_switch() calls work correctly in
+    production). Locally there's no binary, so run_runtime_kernel fails
+    closed for every command by default -- without this mock, EVERY test
+    in this file fails in setUp() itself (clear_kill_switch raising
+    KillSwitchRustGateError), which means a real regression in the
+    kill-switch mechanism would be silently invisible here."""
+    return {
+        "ok": True,
+        "decision": "allow",
+        "next_action": payload.get("operation") if isinstance(payload, dict) else command,
+    }
 
 
 class PersonalChannelKillSwitchTests(unittest.TestCase):
     def setUp(self):
+        self._rust_patcher = patch.object(
+            rust_runtime_kernel_client, "run_runtime_kernel", side_effect=_rust_kernel_allow
+        )
+        self._rust_patcher.start()
         safe_mode_service.reset_state_for_tests()
         kill_switch_gate.clear_kill_switch(kill_switch_gate.GLOBAL_KILL_KEY)
         for gw in ("gw-kill-inbound", "gw-kill-wa", "gw-kill-tg",
                    "gw-kill-send-wa", "gw-kill-send-tg", "gw-kill-test",
+                   "gw-kill-configure-wa", "gw-kill-configure-tg",
                    "any-gateway"):
             kill_switch_gate.clear_kill_switch(
                 f"{kill_switch_gate.GATEWAY_KILL_PREFIX}{gw}"
@@ -21,6 +44,7 @@ class PersonalChannelKillSwitchTests(unittest.TestCase):
 
     def tearDown(self):
         safe_mode_service.reset_state_for_tests()
+        self._rust_patcher.stop()
 
     def _set_gateway_kill(self, gateway_id: str) -> None:
         kill_switch_gate.set_kill_switch(
@@ -120,6 +144,39 @@ class PersonalChannelKillSwitchTests(unittest.TestCase):
                     remote_jid="123456789",
                     text="hello",
                     idempotency_key="ik-1",
+                )
+            )
+
+    # ------------------------------------------------------------------
+    # configure_whatsapp_personal_gateway / configure_telegram_personal_gateway (async)
+    #
+    # These had NO kill-switch check at all until this fix -- an active
+    # kill switch blocked sending through an already-paired channel but
+    # did nothing to stop pairing a brand new one. Confirmed live against
+    # production first (identical response with the switch on vs. off),
+    # then fixed by adding assert_not_killed() as these functions' first
+    # line, matching send_*_personal_message's existing pattern exactly.
+    # ------------------------------------------------------------------
+
+    def test_kill_switch_blocks_configure_whatsapp_personal_gateway(self):
+        self._set_gateway_kill("gw-kill-configure-wa")
+        with self.assertRaises(kill_switch_gate.KillSwitchBlockedError):
+            asyncio.run(
+                personal_channels_service.configure_whatsapp_personal_gateway(
+                    gateway_id="gw-kill-configure-wa",
+                    registration={},
+                    phone_number="15550000000",
+                )
+            )
+
+    def test_kill_switch_blocks_configure_telegram_personal_gateway(self):
+        self._set_gateway_kill("gw-kill-configure-tg")
+        with self.assertRaises(kill_switch_gate.KillSwitchBlockedError):
+            asyncio.run(
+                personal_channels_service.configure_telegram_personal_gateway(
+                    gateway_id="gw-kill-configure-tg",
+                    registration={},
+                    phone_number="15550000000",
                 )
             )
 

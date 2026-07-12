@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 from server_modules.auth import enforce_workspace_access
 from server_modules.runtime_common import require_api_key
+from server_modules.kill_switch_gate import KillSwitchBlockedError
+from server_modules.safety_error_contract import kill_switch_error, to_http_body, to_http_status
 from server_modules import (
     approval_contracts,
     channel_lane_contract_service,
@@ -373,6 +375,27 @@ async def configure_whatsapp_personal_gateway(
             },
         )
         return result
+    except KillSwitchBlockedError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.whatsapp.configure",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="whatsapp_personal",
+            detail=exc.decision.detail,
+            metadata={
+                "has_phone_number": bool(str(body.phone_number or "").strip()),
+                "has_custom_pairing_code": bool(str(body.custom_pairing_code or "").strip()),
+                "kill_switch_scope": exc.decision.scope,
+            },
+        )
+        error = kill_switch_error(
+            scope=exc.decision.scope,
+            detail=exc.decision.detail,
+            trace_id=exc.decision.trace_id,
+        )
+        raise HTTPException(status_code=to_http_status(error), detail=to_http_body(error)) from exc
     except ValueError as exc:
         detail = str(exc)
         _emit_personal_channel_audit(
@@ -490,6 +513,29 @@ async def send_whatsapp_personal_message(
             idempotency_key=f"personal_channel.whatsapp.send:{gateway_id}:{body.idempotency_key}",
         )
         return result
+    except KillSwitchBlockedError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.whatsapp.send",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="whatsapp_personal",
+            detail=exc.decision.detail,
+            metadata={
+                "remote_jid": body.remote_jid,
+                "text_length": len(body.text),
+                "has_reply_target": bool(body.reply_to_external_message_id),
+                "kill_switch_scope": exc.decision.scope,
+            },
+            idempotency_key=f"personal_channel.whatsapp.send.denied:{gateway_id}:{body.idempotency_key}",
+        )
+        error = kill_switch_error(
+            scope=exc.decision.scope,
+            detail=exc.decision.detail,
+            trace_id=exc.decision.trace_id,
+        )
+        raise HTTPException(status_code=to_http_status(error), detail=to_http_body(error)) from exc
     except ValueError as exc:
         detail = str(exc)
         _emit_personal_channel_audit(
@@ -566,6 +612,30 @@ async def configure_telegram_personal_gateway(
             },
         )
         return result
+    except KillSwitchBlockedError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.telegram.configure",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="telegram_personal",
+            detail=exc.decision.detail,
+            metadata={
+                "has_api_id": body.api_id is not None,
+                "has_api_hash": bool(str(body.api_hash or "").strip()),
+                "has_phone_number": bool(str(body.phone_number or "").strip()),
+                "has_login_code": bool(str(body.login_code or "").strip()),
+                "has_password": bool(str(body.password or "").strip()),
+                "kill_switch_scope": exc.decision.scope,
+            },
+        )
+        error = kill_switch_error(
+            scope=exc.decision.scope,
+            detail=exc.decision.detail,
+            trace_id=exc.decision.trace_id,
+        )
+        raise HTTPException(status_code=to_http_status(error), detail=to_http_body(error)) from exc
     except ValueError as exc:
         detail = str(exc)
         _emit_personal_channel_audit(
@@ -690,6 +760,29 @@ async def send_telegram_personal_message(
             idempotency_key=f"personal_channel.telegram.send:{gateway_id}:{body.idempotency_key}",
         )
         return result
+    except KillSwitchBlockedError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.telegram.send",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="telegram_personal",
+            detail=exc.decision.detail,
+            metadata={
+                "remote_jid": body.remote_jid,
+                "text_length": len(body.text),
+                "has_reply_target": bool(body.reply_to_external_message_id),
+                "kill_switch_scope": exc.decision.scope,
+            },
+            idempotency_key=f"personal_channel.telegram.send.denied:{gateway_id}:{body.idempotency_key}",
+        )
+        error = kill_switch_error(
+            scope=exc.decision.scope,
+            detail=exc.decision.detail,
+            trace_id=exc.decision.trace_id,
+        )
+        raise HTTPException(status_code=to_http_status(error), detail=to_http_body(error)) from exc
     except ValueError as exc:
         detail = str(exc)
         _emit_personal_channel_audit(
