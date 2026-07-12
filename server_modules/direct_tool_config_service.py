@@ -75,28 +75,12 @@ def approved_action_to_tool_call(
 
 
 def run_async_tool_call(coro: Any) -> Any:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
+    # Delegates to the shared bridge loop — see sync_asyncio_bridge for why
+    # the previous per-call asyncio.run() pattern was a pool-init/Postgres-
+    # connection leak, and why one persistent loop fixes it.
+    from server_modules import sync_asyncio_bridge
 
-    import threading
-
-    result: Dict[str, Any] = {}
-    failure: Dict[str, BaseException] = {}
-
-    def _runner() -> None:
-        try:
-            result["value"] = asyncio.run(coro)
-        except BaseException as err:  # pragma: no cover
-            failure["error"] = err
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    thread.join()
-    if "error" in failure:
-        raise failure["error"]
-    return result.get("value")
+    return sync_asyncio_bridge.run_coro_sync(coro)
 
 
 def format_direct_tool_result(result: Dict[str, Any]) -> str:

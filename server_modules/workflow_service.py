@@ -237,26 +237,12 @@ async def fetch_workflow_snapshot(
 
 
 def _run_coro_sync(coro):
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
+    # Delegates to the shared bridge loop — see sync_asyncio_bridge for why
+    # the previous per-call asyncio.run() pattern was a pool-init/Postgres-
+    # connection leak, and why one persistent loop fixes it.
+    from server_modules import sync_asyncio_bridge
 
-    result: Dict[str, Any] = {}
-    error: Dict[str, BaseException] = {}
-
-    def _runner() -> None:
-        try:
-            result["value"] = asyncio.run(coro)
-        except BaseException as exc:  # pragma: no cover - thread bridge
-            error["value"] = exc
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    thread.join()
-    if "value" in error:
-        raise error["value"]
-    return result.get("value")
+    return sync_asyncio_bridge.run_coro_sync(coro)
 
 
 def fetch_workflow_snapshot_sync(

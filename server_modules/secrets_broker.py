@@ -562,27 +562,12 @@ def _project_secret_payload(payload: Dict[str, Any], allowed_fields: List[str]) 
 
 
 def _run_coro_sync(coro: Any) -> Any:
-    try:
-        return asyncio.run(coro)
-    except RuntimeError as exc:
-        if "asyncio.run() cannot be called from a running event loop" not in str(exc):
-            raise
+    # Delegates to the shared bridge loop — see sync_asyncio_bridge for why
+    # the previous per-call asyncio.run() pattern was a pool-init/Postgres-
+    # connection leak, and why one persistent loop fixes it.
+    from server_modules import sync_asyncio_bridge
 
-    result: Dict[str, Any] = {}
-    failure: Dict[str, BaseException] = {}
-
-    def _runner() -> None:
-        try:
-            result["value"] = asyncio.run(coro)
-        except BaseException as err:  # pragma: no cover
-            failure["error"] = err
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    thread.join()
-    if "error" in failure:
-        raise failure["error"]
-    return result.get("value")
+    return sync_asyncio_bridge.run_coro_sync(coro)
 
 
 def _sanitize_token(value: Any) -> str:
