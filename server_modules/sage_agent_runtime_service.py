@@ -1065,15 +1065,17 @@ async def _dispatch_cli_subscription_gateway_brain(
     # The Gateway's WS link to this backend can drop and auto-reconnect in
     # the background, driven by the paired box's own network path (e.g. a
     # flaky VPN hop) — not by anything this process controls. Most drops
-    # resolve in 5-15s (clean close, immediate reconnect), but a live-traced
-    # case measured 41s end to end: the dead connection wasn't reset, it was
-    # black-holed, so the client itself took 34s just to notice before
-    # reconnecting. Retry across that wider window before surfacing a
-    # failure — cheaper than making the user manually resend, and honest:
-    # we only retry reasons that look like the transport, never CLI/auth/
-    # crash reasons where a retry would just waste time before the same
-    # real failure.
-    _TRANSIENT_DISPATCH_RETRY_DELAYS_S = (5, 10, 15)
+    # resolve in 5-15s (clean close, immediate reconnect); a live-traced
+    # black-holed case measured 41s end to end; a second live case measured
+    # ~59s (first attempt failed at the 41s mark, reconnect didn't complete
+    # until 9s after even the WIDENED (5,10,15)=30s budget had already given
+    # up). Each time this has been sized to the worst case actually observed
+    # so far, not a guess — widen again if a longer one shows up. Retry
+    # across that window before surfacing a failure — cheaper than making
+    # the user manually resend, and honest: we only retry reasons that look
+    # like the transport, never CLI/auth/crash reasons where a retry would
+    # just waste time before the same real failure.
+    _TRANSIENT_DISPATCH_RETRY_DELAYS_S = (5, 10, 20, 20)
     _TRANSIENT_KEYWORDS = ("connection", "offline", "heartbeat", "not active", "socket")
     attempt = 0
     while True:

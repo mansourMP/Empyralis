@@ -56,6 +56,45 @@ import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { providerLabel } from "./fleet-provider-constants";
+import { RUNTIME_LABELS } from "./gateway-box-picker";
+
+/** Single source of truth for "what should this agent's Model summary say" —
+ *  used by both the sidebar's permanent one-line Model row and the Model
+ *  tab's own Provider/Model fields, so they can't independently drift the
+ *  way they did before: the sidebar had no cli_subscription case at all and
+ *  fell straight through to "Platform default" even when Codex was
+ *  correctly bound to a paired Gateway. */
+function resolveAgentModelSummary(modelConfig: Record<string, any> | undefined | null): {
+  provider: string;
+  model: string;
+  isPlatformDefault: boolean;
+} {
+  const config = modelConfig || {};
+  const mode = config.mode;
+  if (mode === "cli_subscription") {
+    const runtime: "claude_code" | "codex" = config.runtime === "codex" ? "codex" : "claude_code";
+    const provider = config.provider ? providerLabel(config.provider) : RUNTIME_LABELS[runtime];
+    return { provider, model: config.model || "CLI default", isPlatformDefault: false };
+  }
+  if (mode === "local") {
+    return { provider: "Local", model: config.model || "Ollama", isPlatformDefault: false };
+  }
+  if (config.provider || config.model || config.resolved_model) {
+    return {
+      provider: config.provider ? providerLabel(config.provider) : (config.resolved_provider_label || "Platform default"),
+      model: config.model || config.resolved_model || "Default",
+      isPlatformDefault: false,
+    };
+  }
+  return { provider: "Platform default", model: "Platform default", isPlatformDefault: true };
+}
+
+function formatModelSummaryLine(summary: ReturnType<typeof resolveAgentModelSummary>): string {
+  if (summary.isPlatformDefault) return "Platform default";
+  if (summary.provider === summary.model) return summary.model;
+  return `${summary.provider} · ${summary.model}`;
+}
 
 type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "chat";
 
@@ -129,12 +168,7 @@ export function FleetAgentDetail({
 
   const connectedChannels = channels.filter((c: any) => c?.connected).length;
   const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
-  const resolvedModel = String(
-    agent?.model_config?.model
-    || agent?.model_config?.resolved_model
-    || (agent?.model_config?.mode === "local" ? "Local · Ollama" : "")
-    || "Platform default",
-  );
+  const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(agent?.model_config));
   // Lives in the permanent properties column now, so it's computed once
   // here rather than per-tab — every tab shows the same placement/role,
   // not just Overview. Built from hardware_access + preferred_gateway_id +
@@ -1495,7 +1529,7 @@ function ToolsTab({
 // ── Model ───────────────────────────────────────────────────────────────────
 
 import {
-  BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, providerLabel, MODE_LABELS,
+  BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, MODE_LABELS,
   COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, type ProviderMode,
   FREEFORM_MODEL_PROVIDERS, modelsForProvider, defaultModelForProvider,
 } from "./fleet-provider-constants";
@@ -1683,11 +1717,10 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const resolvedProvider = config.provider || config.resolved_provider_label;
-  const resolvedModel = config.model || config.resolved_model;
-  const displayProvider = resolvedProvider || "Platform default";
-  const displayModel = resolvedModel || "Platform default";
-  const isPlatformDefault = !config.provider && config.mode !== "byok_api" && config.mode !== "cli_subscription" && config.mode !== "local";
+  const modelSummary = resolveAgentModelSummary(config);
+  const displayProvider = modelSummary.provider;
+  const displayModel = modelSummary.model;
+  const isPlatformDefault = modelSummary.isPlatformDefault;
 
   async function save() {
     if (COMING_SOON_MODES.has(mode)) {
