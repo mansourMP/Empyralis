@@ -1064,66 +1064,51 @@ async def _dispatch_cli_subscription_gateway_brain(
 
     # The Gateway's WS link to this backend can drop and auto-reconnect in
     # the background, driven by the paired box's own network path (e.g. a
-    # flaky VPN hop) — not by anything this process controls. Most drops
-    # resolve in 5-15s (clean close, immediate reconnect); a live-traced
-    # black-holed case measured 41s end to end; a second live case measured
-    # ~59s (first attempt failed at the 41s mark, reconnect didn't complete
-    # until 9s after even the WIDENED (5,10,15)=30s budget had already given
-    # up). Each time this has been sized to the worst case actually observed
-    # so far, not a guess — widen again if a longer one shows up. Retry
-    # across that window before surfacing a failure — cheaper than making
-    # the user manually resend, and honest: we only retry reasons that look
-    # like the transport, never CLI/auth/crash reasons where a retry would
-    # just waste time before the same real failure.
-    _TRANSIENT_DISPATCH_RETRY_DELAYS_S = (5, 10, 20, 20)
-    _TRANSIENT_KEYWORDS = ("connection", "offline", "heartbeat", "not active", "socket")
-    attempt = 0
-    while True:
-        try:
-            response = await gateway_execution_service.execute_tool_via_gateway(
-                gateway_id=gateway_id,
-                capability_id="llm.generate",
-                arguments={
-                    "runtime": _runtime,
-                    "model": _model,
-                    "system": system_prompt,
-                    "messages": messages,
-                    "prompt": user_message,
-                    "timeout_seconds": 120,
-                },
-                run_id=run_id,
-                trace_id=trace_id or run_id,
-                workspace_id=workspace_id,
-                timeout_seconds=125,
-                request_id=run_id,
-                runtime_access_mode="default_guarded",
-                empyralis_approved=True,
-                agent_scope="specialist",
-                emit_hardware_activity=False,
-            )
-            break
-        except Exception as exc:
-            _reason = str(exc)
-            _transient = any(kw in _reason.lower() for kw in _TRANSIENT_KEYWORDS)
-            if _transient and attempt < len(_TRANSIENT_DISPATCH_RETRY_DELAYS_S):
-                _delay = _TRANSIENT_DISPATCH_RETRY_DELAYS_S[attempt]
-                logging.getLogger(__name__).info(
-                    "cli_subscription dispatch hit a transient-looking reason "
-                    "(%s) on gateway %s — retrying in %ss (attempt %s/%s).",
-                    _reason, gateway_id, _delay, attempt + 1, len(_TRANSIENT_DISPATCH_RETRY_DELAYS_S),
-                )
-                await asyncio.sleep(_delay)
-                attempt += 1
-                continue
-            await _ledger_provider_unavailable(
-                workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription",
-                provider=f"{_runtime}@{gateway_id}", reason=_reason,
-            )
-            await _ledger_cli_subscription_failure(
-                workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id=gateway_id,
-                runtime=_runtime, reason=_reason, trace_id=trace_id,
-            )
-            raise RuntimeError(_friendly_cli_subscription_error(_reason, runtime=_runtime)) from exc
+    # flaky VPN hop or a sleeping consumer Mac) — not by anything this
+    # process controls. A hand-rolled sleep-and-retry loop used to live here,
+    # widened three times across one night chasing successively worse
+    # observed outages (30s, then 55s) and still not enough — a symptom that
+    # retry-budget tuning was solving the wrong layer. durable=True moves
+    # that responsibility down into execute_tool_via_gateway /
+    # dispatch_tool_invoke_durable, which survives the connection dying and
+    # reconnecting for up to durable_deadline_seconds by construction (not by
+    # guessing a bigger number), including the case where the Gateway
+    # finishes the CLI call after the original connection is already gone.
+    try:
+        response = await gateway_execution_service.execute_tool_via_gateway(
+            gateway_id=gateway_id,
+            capability_id="llm.generate",
+            arguments={
+                "runtime": _runtime,
+                "model": _model,
+                "system": system_prompt,
+                "messages": messages,
+                "prompt": user_message,
+                "timeout_seconds": 120,
+            },
+            run_id=run_id,
+            trace_id=trace_id or run_id,
+            workspace_id=workspace_id,
+            timeout_seconds=125,
+            request_id=run_id,
+            runtime_access_mode="default_guarded",
+            empyralis_approved=True,
+            agent_scope="specialist",
+            emit_hardware_activity=False,
+            durable=True,
+            durable_deadline_seconds=240,
+        )
+    except Exception as exc:
+        _reason = str(exc)
+        await _ledger_provider_unavailable(
+            workspace_id=workspace_id, agent_id=agent_id, mode="cli_subscription",
+            provider=f"{_runtime}@{gateway_id}", reason=_reason,
+        )
+        await _ledger_cli_subscription_failure(
+            workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id=gateway_id,
+            runtime=_runtime, reason=_reason, trace_id=trace_id,
+        )
+        raise RuntimeError(_friendly_cli_subscription_error(_reason, runtime=_runtime)) from exc
 
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     reply = str(result.get("text") or "").strip()

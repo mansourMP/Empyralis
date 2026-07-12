@@ -51,6 +51,30 @@ _LIVE_GATEWAY_PROBE_TIMEOUT_SECONDS = 8
 _LIVE_GATEWAY_SEND_TIMEOUT_SECONDS = 10.0
 _LOGGER = logging.getLogger(__name__)
 
+# Cross-connection response correlation for durable dispatch (see
+# dispatch_tool_invoke_durable). _LiveGatewayConnection._pending_requests
+# is scoped to ONE connection instance and force-failed the moment that
+# connection dies (fail_pending) — correct for that connection's own
+# requests (gateway.connect/heartbeat/probe, which are meaningless once
+# their connection is gone), but wrong for a durable dispatch: the Gateway
+# may finish the underlying work (e.g. codex exec, up to ~120s) and try to
+# deliver the response on a LATER connection than the one that carried the
+# original request. A waiter registered here survives that swap — whichever
+# connection's receive loop sees a response frame for this request_id can
+# resolve it, not just the one that sent the request.
+_DURABLE_DISPATCH_WAITERS: Dict[str, _PendingGatewayRequest] = {}
+_DURABLE_DISPATCH_WAITERS_LOCK = threading.Lock()
+
+
+def _register_durable_waiter(request_id: str, pending: _PendingGatewayRequest) -> None:
+    with _DURABLE_DISPATCH_WAITERS_LOCK:
+        _DURABLE_DISPATCH_WAITERS[request_id] = pending
+
+
+def _pop_durable_waiter(request_id: str) -> Optional["_PendingGatewayRequest"]:
+    with _DURABLE_DISPATCH_WAITERS_LOCK:
+        return _DURABLE_DISPATCH_WAITERS.pop(request_id, None)
+
 
 @dataclass
 class _PendingGatewayRequest:
@@ -522,10 +546,17 @@ class _LiveGatewayConnection:
         self.mark_inbound_frame()
         request_id = str(frame.get("id") or "").strip()
         pending = self._pending_requests.pop(request_id, None)
-        if pending is None:
-            return "response"
-        _future_set_result_threadsafe(pending.future, pending.loop, dict(frame or {}))
-        return pending.message_type
+        if pending is not None:
+            _future_set_result_threadsafe(pending.future, pending.loop, dict(frame or {}))
+            return pending.message_type
+        # Not tracked on THIS connection instance — either an untracked/
+        # replayed response, or a durable dispatch whose original connection
+        # died mid-wait and is only now being answered on this later one.
+        durable = _pop_durable_waiter(request_id)
+        if durable is not None:
+            _future_set_result_threadsafe(durable.future, durable.loop, dict(frame or {}))
+            return durable.message_type
+        return "response"
 
     def remember_inbound_frame_id(self, frame_id: Any) -> bool:
         self.mark_inbound_frame()
@@ -855,6 +886,203 @@ async def dispatch_tool_invoke(
     except Exception:
         pass  # ledger is best-effort, never blocks execution
     return dict(response.get("payload") or {})
+
+
+_DURABLE_DISPATCH_DEFAULT_DEADLINE_SECONDS = 240  # ~4 minutes
+_DURABLE_DISPATCH_RETRY_SLEEP_SECONDS = 4.0
+
+
+async def dispatch_tool_invoke_durable(
+    *,
+    gateway_id: str,
+    capability_id: str,
+    arguments: Optional[Dict[str, Any]],
+    run_id: str,
+    trace_id: str,
+    workspace_id: str,
+    deadline_seconds: int = _DURABLE_DISPATCH_DEFAULT_DEADLINE_SECONDS,
+    request_id: Optional[str] = None,
+    runtime_access_mode: Optional[str] = None,
+    empyralis_approved: bool = False,
+    agent_scope: Optional[str] = None,
+    policy: Optional[Dict[str, Any]] = None,
+    actor_id: str = "",
+) -> Dict[str, Any]:
+    """Durable sibling of dispatch_tool_invoke: the WebSocket is transport,
+    not the unit of delivery. A dispatch started here survives the Gateway's
+    connection dying and reconnecting — possibly more than once — for up to
+    deadline_seconds total, instead of failing the instant one connection
+    instance goes away.
+
+    Two failure shapes, handled differently on purpose:
+      - the request was never confirmed WRITTEN to a live socket (no
+        connection existed yet, or the write itself raised) — safe to retry
+        the send once a connection reappears, since the Gateway never saw it.
+      - the write DID succeed, so the Gateway may already be running the
+        work (codex exec alone can take up to ~120s) — must NOT resend (that
+        would double-execute); instead just keep waiting for the response,
+        which the Gateway's own durable response queue delivers over
+        whichever connection exists once it's ready, tagged with this same
+        request_id (see empyralis-gateway's PendingResponseQueue). The
+        cross-connection correlation that lets a LATER connection resolve a
+        wait registered against an EARLIER, now-dead one lives in
+        resolve_response()/_DURABLE_DISPATCH_WAITERS above.
+
+    Callers that don't need this (one-shot interactive capabilities like
+    screenshot.capture or a browser action, where "the box was unreachable,
+    tell the user now" is the right answer) should keep using
+    dispatch_tool_invoke — this is specifically for turns where "eventually
+    deliver" beats "fail fast," which today means cli_subscription chat
+    turns on consumer hardware (sleeping Macs, VPNs, NAT) that legitimately
+    drop and come back within a few minutes."""
+    assert_not_killed(gateway_id=gateway_id, trace_id=trace_id)
+    resolved_request_id = str(request_id or f"greq_{uuid.uuid4().hex}").strip()
+    deadline = time.monotonic() + max(int(deadline_seconds or 0), 1)
+
+    loop = asyncio.get_running_loop()
+    durable_future: asyncio.Future[Dict[str, Any]] = loop.create_future()
+    _register_durable_waiter(
+        resolved_request_id,
+        _PendingGatewayRequest(message_type="tool.invoke", future=durable_future, loop=loop),
+    )
+
+    payload = {
+        "capability_id": str(capability_id or "").strip(),
+        "arguments": dict(arguments or {}),
+        "run_id": str(run_id or "").strip(),
+        "trace_id": str(trace_id or "").strip(),
+        "workspace_id": str(workspace_id or "").strip(),
+    }
+    if str(runtime_access_mode or "").strip():
+        payload["runtime_access_mode"] = str(runtime_access_mode or "").strip()
+    if empyralis_approved:
+        payload["empyralis_approved"] = True
+    if str(agent_scope or "").strip():
+        payload["agent_scope"] = str(agent_scope or "").strip()
+    if isinstance(policy, dict):
+        payload["policy"] = dict(policy)
+
+    delivered = False
+    last_error: Optional[Exception] = None
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if not delivered:
+                try:
+                    connection = await _fresh_live_connection(gateway_id, require_recent_inbound=True)
+                    registration = gateway_state_repository.get_gateway_registration(gateway_id) or {}
+                    _enforce_gateway_quota_check(
+                        gateway_id=str(gateway_id or "").strip(),
+                        session_id=str(connection.session_id or "").strip(),
+                        workspace_id=str(workspace_id or "").strip(),
+                        tenant_id=str(registration.get("tenant_id") or connection.scope.get("tenant_id") or "").strip(),
+                        device_id=str(registration.get("device_id") or "").strip(),
+                        request_id=str(request_id or trace_id or run_id or "").strip(),
+                        quota_profile="gateway_tool_execution",
+                    )
+                    _enforce_gateway_tool_execute_protocol_route(
+                        gateway_id=str(gateway_id or "").strip(),
+                        session_id=str(connection.session_id or "").strip(),
+                        workspace_id=str(workspace_id or "").strip(),
+                        tenant_id=str(registration.get("tenant_id") or connection.scope.get("tenant_id") or "").strip(),
+                        device_id=str(registration.get("device_id") or "").strip(),
+                        capability_id=str(capability_id or "").strip(),
+                        run_id=str(run_id or "").strip(),
+                        trace_id=str(trace_id or "").strip(),
+                        request_id=str(request_id or trace_id or run_id or "").strip(),
+                    )
+                    _enforce_gateway_protocol_message_decision(
+                        gateway_id=str(gateway_id or "").strip(),
+                        session_id=str(connection.session_id or "").strip(),
+                        workspace_id=str(workspace_id or "").strip(),
+                        message_type="tool.invoke",
+                        payload=payload,
+                        tool_name=str(capability_id or "").strip(),
+                    )
+                    frame = {
+                        "kind": "request",
+                        "id": resolved_request_id,
+                        "type": "tool.invoke",
+                        "ts": gateway_state_repository._utc_now_iso(),
+                        "scope": dict(connection.scope),
+                        "payload": dict(payload),
+                    }
+                    _enforce_gateway_protocol_request_frame(
+                        gateway_id=str(gateway_id or "").strip(),
+                        session_id=str(connection.session_id or "").strip(),
+                        message_type="tool.invoke",
+                        frame=frame,
+                    )
+                    await connection.send_frame(frame)
+                    delivered = True
+                    gateway_state_repository.record_gateway_event(
+                        gateway_id=str(gateway_id or "").strip(),
+                        session_id=str(connection.session_id or "").strip(),
+                        direction="outbound",
+                        frame_kind="request",
+                        message_type="tool.invoke",
+                        payload=frame,
+                    )
+                except Exception as exc:
+                    # The write itself never landed — nothing for the Gateway
+                    # to have received, so retrying is safe, not a double-send.
+                    last_error = exc
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(_DURABLE_DISPATCH_RETRY_SLEEP_SECONDS, remaining))
+                    continue
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                response = await asyncio.wait_for(asyncio.shield(durable_future), timeout=remaining)
+            except asyncio.TimeoutError:
+                # Delivered, but no response within the outer deadline — do
+                # NOT loop back to resend; that would risk double-executing
+                # work that may still be running or already finished.
+                break
+
+            if not bool(response.get("ok")):
+                error = dict(response.get("error") or {})
+                raise ValueError(
+                    str(error.get("message") or "Gateway tool invocation failed.").strip()
+                    or "Gateway tool invocation failed."
+                )
+            _resolved_actor = str(actor_id or "").strip() or "sage"
+            try:
+                from server_modules import ledger_audit as _la
+                import asyncio as _aio
+                async def _ledger():
+                    await _la.record_gateway_hardware_invoke(
+                        workspace_id=str(workspace_id or "").strip(),
+                        actor_id=_resolved_actor,
+                        capability_id=str(capability_id or "").strip(),
+                        arguments=dict(arguments or {}),
+                        status="executed",
+                        trace_id=str(trace_id or "").strip() or None,
+                        run_id=str(run_id or "").strip() or None,
+                    )
+                try:
+                    _aio.get_running_loop()
+                    _aio.create_task(_ledger())
+                except RuntimeError:
+                    _aio.run(_ledger())
+            except Exception:
+                pass  # ledger is best-effort, never blocks execution
+            return dict(response.get("payload") or {})
+    finally:
+        _pop_durable_waiter(resolved_request_id)
+
+    if not delivered:
+        raise RuntimeError(
+            f"Gateway dispatch could not be delivered within {deadline_seconds}s: "
+            f"{last_error or 'no live connection'}"
+        )
+    raise RuntimeError(f"Gateway dispatch was delivered but no response arrived within {deadline_seconds}s.")
 
 
 async def dispatch_tool_interrupt(

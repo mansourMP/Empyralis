@@ -11,6 +11,7 @@ import { GatewayCheckpoints } from "../state/checkpoints";
 import { GatewayStateDb } from "../state/db";
 import { GatewayJournal } from "../state/journal";
 import { GatewayOutbox, GatewayOutboxItem } from "../state/outbox";
+import { PendingResponseQueue } from "../state/pending-responses";
 import {
   GatewayDeviceIdentity,
   persistDeviceIdentityScope,
@@ -114,6 +115,12 @@ export class GatewayWsClient {
   private readonly heartbeatLoop = new HeartbeatLoop();
   private readonly reconnect: ReconnectBackoff;
   private readonly pendingResponses = new Map<string, PendingResponse>();
+  // Durable, disk-persisted — separate from pendingResponses above (that map
+  // tracks responses TO requests THIS Gateway initiates; this queue holds
+  // responses THIS Gateway OWES the backend for inbound tool.invoke/etc.
+  // requests, for the case where the work finishes after the socket that
+  // carried the original request is already gone — see sendResponse().
+  private readonly responseDeliveryQueue: PendingResponseQueue;
   private activeScope: GatewayScope | null = null;
   private socketFailureReason: string | null = null;
   private _connectionStartedAt: number | null = null;
@@ -138,6 +145,7 @@ export class GatewayWsClient {
       minDelayMs: this.config.reconnectMinDelayMs,
       maxDelayMs: this.config.reconnectMaxDelayMs,
     });
+    this.responseDeliveryQueue = new PendingResponseQueue(this.db);
   }
 
   async registerFromPairing(
@@ -315,6 +323,10 @@ export class GatewayWsClient {
         },
       });
       await this.replayPendingOutbox(session.scope);
+      await this.responseDeliveryQueue.flush((frame) => {
+        this.sendEncodedResponseNow(frame);
+        return Promise.resolve();
+      });
       await this.personalChannelRuntimes.handleGatewayConnected(session.scope);
       await this.checkpoints.markRecovered({
         sessionId: session.session_id,
@@ -951,15 +963,35 @@ export class GatewayWsClient {
     }
   }
 
+  /** Sends one already-encoded response frame over whatever socket is
+   *  currently open. Throws if there isn't one, or if the raw send()
+   *  itself fails — callers decide what "queue it for later" means. */
+  private sendEncodedResponseNow(frame: Record<string, unknown>): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      throw new Error("Gateway socket is not connected.");
+    }
+    const encoded = encodeFrame(frame as unknown as GatewayResponseEnvelope);
+    if (typeof encoded === "string") {
+      this.socket.send(encoded);
+    }
+  }
+
+  /** A response the backend is waiting on (tool.invoke/tool.interrupt/
+   *  channel.outbound) — durable by construction: always queued to disk
+   *  BEFORE the first send attempt, so a socket that dies between "codex
+   *  exec finished" and "bytes left this process" still gets the result
+   *  delivered once a connection exists again (see the post-reconnect
+   *  flush in connect(), and the request-id correlation on the backend
+   *  that lets a later connection resolve an older wait). Never throws —
+   *  from the caller's perspective in handleServerRequest, "queued for
+   *  eventual delivery" and "sent immediately" both just mean the response
+   *  was handled. */
   private async sendResponse(
     requestId: string,
     ok: boolean,
     payload?: Record<string, unknown>,
     error?: GatewayResponseEnvelope["error"],
   ): Promise<void> {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-      throw new Error("Gateway socket is not connected.");
-    }
     const frame: GatewayResponseEnvelope = {
       kind: "response",
       protocolVersion: PROTOCOL_VERSION,
@@ -973,9 +1005,12 @@ export class GatewayWsClient {
       frame.error = error ?? { message: "Unknown gateway request failure." };
     }
     await this.journal.append("outbound", "response", frame as unknown as Record<string, unknown>);
-    const encoded = encodeFrame(frame);
-    if (typeof encoded === "string") {
-      this.socket.send(encoded);
+    await this.responseDeliveryQueue.enqueue(requestId, frame as unknown as Record<string, unknown>);
+    try {
+      this.sendEncodedResponseNow(frame as unknown as Record<string, unknown>);
+      await this.responseDeliveryQueue.remove(requestId);
+    } catch {
+      // Not delivered this attempt — stays queued, flushed on next (re)connect.
     }
   }
 

@@ -487,7 +487,18 @@ async def execute_tool_via_gateway(
     actor_id: Optional[str] = None,
     agent_scope: Optional[str] = None,
     emit_hardware_activity: bool = True,
+    durable: bool = False,
+    durable_deadline_seconds: int = 240,
 ) -> Dict[str, Any]:
+    """durable=True: the socket is transport, not the unit of delivery — a
+    connection drop mid-dispatch (or one that's already down at call time)
+    doesn't fail the turn outright, it rides out reconnects for up to
+    durable_deadline_seconds before giving up. Off by default: this is right
+    for a cli_subscription chat turn on consumer hardware that legitimately
+    drops and comes back within a few minutes, wrong for something
+    interactive like a screenshot where "wait up to 4 minutes" is a worse
+    answer than "tell me now it's offline." See gateway_protocol_service.
+    dispatch_tool_invoke_durable for the delivery mechanics."""
     registration = _require_active_gateway_registration(gateway_id, workspace_id=workspace_id)
     _gw = str(registration.get("gateway_id") or "").strip()
     _ws = str(registration.get("workspace_id") or "").strip()
@@ -568,7 +579,15 @@ async def execute_tool_via_gateway(
         workspace_id=workspace_id,
         capability_id=_cap,
     )
-    if not ready:
+    # A durable dispatch's whole point is to ride out exactly the connection-
+    # shaped reasons (offline / heartbeat stale / unhealthy) this check would
+    # otherwise hard-fail on before ever trying — dispatch_tool_invoke_durable
+    # does its own live-connection wait internally. Anything else (bad
+    # pairing, revoked device, the capability's CLI never installed) is a
+    # real, non-transient problem no amount of reconnect-waiting fixes —
+    # still fails immediately, durable or not.
+    _durable_retryable_reasons = {"gateway_offline", "gateway_heartbeat_stale", "gateway_unhealthy"}
+    if not ready and not (durable and readiness_reason in _durable_retryable_reasons):
         raise ValueError(readiness_reason)
     gateway_transparency_service.emit_gateway_action_event(
         event_type="gateway_action_started",
@@ -582,21 +601,38 @@ async def execute_tool_via_gateway(
     )
     dispatch_started = time.time()
     try:
-        response = await gateway_protocol_service.dispatch_tool_invoke(
-            gateway_id=str(gateway_id or "").strip(),
-            capability_id=normalized_capability_id,
-            arguments=normalized_arguments,
-            run_id=str(run_id or "").strip(),
-            trace_id=str(trace_id or "").strip(),
-            workspace_id=_ws,
-            timeout_seconds=timeout_seconds,
-            request_id=request_id,
-            runtime_access_mode=resolved_runtime_access_mode,
-            empyralis_approved=empyralis_approved,
-            agent_scope=resolved_agent_scope,
-            policy=policy_payload,
-            actor_id=_text(actor_id),
-        )
+        if durable:
+            response = await gateway_protocol_service.dispatch_tool_invoke_durable(
+                gateway_id=str(gateway_id or "").strip(),
+                capability_id=normalized_capability_id,
+                arguments=normalized_arguments,
+                run_id=str(run_id or "").strip(),
+                trace_id=str(trace_id or "").strip(),
+                workspace_id=_ws,
+                deadline_seconds=durable_deadline_seconds,
+                request_id=request_id,
+                runtime_access_mode=resolved_runtime_access_mode,
+                empyralis_approved=empyralis_approved,
+                agent_scope=resolved_agent_scope,
+                policy=policy_payload,
+                actor_id=_text(actor_id),
+            )
+        else:
+            response = await gateway_protocol_service.dispatch_tool_invoke(
+                gateway_id=str(gateway_id or "").strip(),
+                capability_id=normalized_capability_id,
+                arguments=normalized_arguments,
+                run_id=str(run_id or "").strip(),
+                trace_id=str(trace_id or "").strip(),
+                workspace_id=_ws,
+                timeout_seconds=timeout_seconds,
+                request_id=request_id,
+                runtime_access_mode=resolved_runtime_access_mode,
+                empyralis_approved=empyralis_approved,
+                agent_scope=resolved_agent_scope,
+                policy=policy_payload,
+                actor_id=_text(actor_id),
+            )
         result = _materialize_gateway_artifacts(
             capability_id=_cap,
             response=response,
