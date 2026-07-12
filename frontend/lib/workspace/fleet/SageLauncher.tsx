@@ -31,13 +31,26 @@ const PERSONAL_CHANNELS: { id: string; label: string; platform: string; descript
   { id: "whatsapp", label: "WhatsApp", platform: "macos", description: "Your personal WhatsApp account. Messages are routed to Sage." },
   { id: "signal", label: "Signal", platform: "macos", description: "Your personal Signal account via the Gateway." },
   { id: "imessage", label: "iMessage", platform: "macos", description: "Personal iMessage via a Mac running the Gateway." },
+  { id: "wechat", label: "WeChat", platform: "macos", description: "Your personal WeChat account via the Gateway." },
 ];
 
 // Only these two have a real setup/status/disconnect backend today — the
-// other two cards still fall through to the bare Gateway-pairing panel below.
+// rest have no in-app pairing flow at all, see NOT_YET_SUPPORTED below.
 const REAL_PAIRING_CHANNEL_KEYS: Record<string, PersonalChannelKey> = {
   telegram: "telegram_personal",
   whatsapp: "whatsapp_personal",
+};
+
+// These channels have no web-UI pairing flow -- either the bridge has to be
+// run on the user's own machine first (Signal, iMessage), or no working
+// bridge exists yet at all (WeChat, which has no official personal-account
+// API to build one against). Say so plainly instead of falling through to
+// the Gateway hardware-pairing panel, which has nothing to do with these
+// accounts and would look like a working "connect" flow when it isn't one.
+const NOT_YET_SUPPORTED_CHANNELS: Record<string, string> = {
+  signal: "Signal requires a signal-cli bridge already running on your own computer — there's no in-app setup for this yet. If you run signal-cli, point your Gateway at it with the EMPYRALIS_SIGNAL_BRIDGE environment variables.",
+  imessage: "iMessage requires a Mac running BlueBubbles Server — there's no in-app setup for this yet. Point your Gateway at it with the EMPYRALIS_BLUEBUBBLES_SERVER_URL and EMPYRALIS_BLUEBUBBLES_PASSWORD environment variables.",
+  wechat: "Personal WeChat has no official API to build a bridge against, so this isn't supported yet.",
 };
 
 /**
@@ -185,6 +198,10 @@ export function SageLauncher({
                         channelKey={REAL_PAIRING_CHANNEL_KEYS[selectedChannel.id]}
                         label={selectedChannel.label}
                       />
+                    ) : selectedChannel && NOT_YET_SUPPORTED_CHANNELS[selectedChannel.id] ? (
+                      <div className="fleet-sage-connect-unsupported">
+                        {NOT_YET_SUPPORTED_CHANNELS[selectedChannel.id]}
+                      </div>
                     ) : (
                       <GatewayPairPanel
                         workspaceId={workspaceId}
