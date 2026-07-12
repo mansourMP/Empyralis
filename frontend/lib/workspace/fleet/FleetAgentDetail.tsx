@@ -937,6 +937,9 @@ function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId
 
 // ── Channels ────────────────────────────────────────────────────────────────
 
+import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
+import { useGatewayPersonalChannelSurfaces } from "./personal-channel-pairing";
+
 // Fixed platform order the grid renders in, mapped to the backend
 // connection id that carries that platform's live status.
 const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
@@ -944,33 +947,78 @@ const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
   { label: "Slack", id: "slack" },
   { label: "Discord", id: "discord_bot" },
   { label: "WhatsApp", id: "whatsapp_personal" },
+  { label: "iMessage", id: "imessage_personal" },
   { label: "WeChat", id: "wechat_personal" },
 ];
 
 type ChannelDoor = { key: string; label: string; body: string; real: boolean };
 
-// The two-door design: a channel card opens a focused banner showing only the
-// connection paths that are REAL today for that platform — never a door that
-// fails. A door with real:false renders grayed and inert (disabled, no
-// onClick) rather than clickable into an error (contract rule #4).
+// Each channel shows only the connection MODES that are real, safe, and built
+// today for that platform — never a door that fails, and never a second mode
+// standing in for one that doesn't exist yet (contract rule #4). Telegram is
+// the one channel with a genuine two-mode choice (Chatbot vs. Full account);
+// every other channel has exactly one real path, so its door auto-selects
+// with no picker step. "Full account" doors bind to THIS agent's own
+// preferred_gateway_id (see ChannelsTab's `agentGatewayId`), never to a
+// workspace-wide/Sage-routed session.
 const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   sage_telegram_hosted: [
-    { key: "byo_bot", label: "Bot token", body: "Bring your own bot — paste the token BotFather gave you.", real: true },
+    { key: "byo_bot", label: "Chatbot", body: "Agent replies as a separate bot — paste the token BotFather gave you. No control of your own account.", real: true },
+    { key: "full_account", label: "Full account", body: "This agent's own Telegram number — phone, code, and 2FA if enabled — running on this agent's own gateway.", real: true },
   ],
   slack: [
-    { key: "oauth", label: "OAuth workspace", body: "Connect a Slack workspace — signed mentions and DMs route to Sage.", real: true },
+    { key: "oauth", label: "App", body: "Connect a Slack workspace — signed mentions and DMs route to Sage.", real: true },
   ],
   discord_bot: [
-    { key: "oauth", label: "Bot app", body: "Install the Discord bot app — signed messages route to Sage.", real: true },
+    { key: "oauth", label: "Bot", body: "Install the Discord bot app — signed messages route to Sage. Discord's Terms forbid automating a real user account, so this is the only path.", real: true },
   ],
   whatsapp_personal: [
-    { key: "sage_console", label: "Personal WhatsApp", body: "Pair your own WhatsApp from Sage's Connect tab (the \"Ask Sage\" button) — it answers as Sage across every project, not from this page.", real: false },
+    { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number — scan a QR code or use a pairing code — running on this agent's own gateway. There is no chatbot/business-API mode.", real: true },
+  ],
+  imessage_personal: [
+    { key: "full_account", label: "Full account", body: "This agent's own iMessage, via a Mac running BlueBubbles Server as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage.", real: true },
   ],
   wechat_personal: [
-    { key: "business", label: "Business", body: "The local bridge runtime isn't certified yet.", real: false },
-    { key: "personal", label: "Personal", body: "The local bridge runtime isn't certified yet.", real: false },
+    { key: "full_account", label: "Full account", body: "This agent's own WeChat, via a real session on this agent's gateway. WeChat has no official API to build against, so this bridge is rougher than the others and may not hold over time.", real: true },
   ],
 };
+
+// Local-bridge channels (iMessage today; WeChat has no bridge to check at
+// all) have no in-app pairing step — the bridge runs on hardware the user
+// configures themselves. This shows the REAL health snapshot for one
+// channel_key on one gateway; there is no client-invented "connected" state,
+// and no button that claims to "connect" anything.
+function LocalBridgeChannelStatus({ channelKey, gatewayId }: { channelKey: string; gatewayId: string | null }) {
+  const { items, loading } = useGatewayPersonalChannelSurfaces(gatewayId);
+
+  if (!gatewayId) {
+    return (
+      <p className="fleet-channel-expand-hint">
+        This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a
+        BlueBubbles Server on that Mac.
+      </p>
+    );
+  }
+  if (loading) {
+    return <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />;
+  }
+
+  const item = items.find((i) => i.channel_key === channelKey) || null;
+  if (item?.connected) {
+    return (
+      <div className="fleet-channel-expand-success">
+        <Check size={16} strokeWidth={2} /> Connected{item.connected_identity ? ` — ${item.connected_identity}` : ""}
+      </div>
+    );
+  }
+  return (
+    <>
+      <p className="fleet-channel-expand-hint">{item?.detail || "This channel runs through a local bridge on this agent's own gateway."}</p>
+      <p className="fleet-channel-expand-hint">{item?.next_step || "Configure the bridge on this agent's gateway, then this status updates on its own."}</p>
+      <p className="fleet-channel-expand-hint" style={{ color: "var(--text-tertiary)" }}>{item?.status_label || "Not connected yet"}</p>
+    </>
+  );
+}
 
 function channelStatePill(channel: FleetChannel | undefined): { label: string; tone: "connected" | "gateway" | "locked" | "setup" } {
   if (!channel) return { label: "Unavailable", tone: "locked" };
@@ -987,6 +1035,13 @@ export function ChannelsTab({
   const [expanded, setExpanded] = useState<string | null>(null);
   const [oauthBusy, setOauthBusy] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
+
+  // Full-account channels (Telegram/WhatsApp/iMessage/WeChat "full_account"
+  // doors) bind to THIS agent's own gateway, never a workspace-wide/Sage
+  // one — this is that binding. `undefined` would fall back to legacy
+  // workspace-wide behavior in PersonalChannelConnectPanel; passing a
+  // possibly-empty string here always keeps it agent-scoped.
+  const agentGatewayId = agent?.preferred_gateway_id?.trim() || null;
 
   // Which door is picked inside the open banner. Only channels with more than
   // one door need an explicit pick — a single-door channel auto-selects its
@@ -1273,8 +1328,51 @@ export function ChannelsTab({
                 </div>
               )}
 
-              {/* Gateway-based personal-channel pairing lives on Sage's own console
-                   now (SageLauncher Connect tab) — not on individual agent pages. */}
+              {/* Telegram / WhatsApp: full-account (real MTProto / Baileys session),
+                   bound to this agent's own gateway via agentGatewayId — not
+                   Sage's workspace-wide Connect tab. */}
+              {activePlatform.id === "sage_telegram_hosted" && activeDoor?.key === "full_account" && (
+                <div style={{ marginTop: 12 }}>
+                  <PersonalChannelConnectPanel
+                    workspaceId={workspaceId}
+                    channelKey="telegram_personal"
+                    label="Telegram"
+                    agentGatewayId={agentGatewayId}
+                  />
+                </div>
+              )}
+              {activePlatform.id === "whatsapp_personal" && activeDoor?.key === "full_account" && (
+                <div style={{ marginTop: 12 }}>
+                  <PersonalChannelConnectPanel
+                    workspaceId={workspaceId}
+                    channelKey="whatsapp_personal"
+                    label="WhatsApp"
+                    agentGatewayId={agentGatewayId}
+                  />
+                </div>
+              )}
+
+              {/* iMessage: no phone/code/QR step of its own — the bridge lives on
+                   a Mac the user runs themselves, configured via env vars on this
+                   agent's gateway. The only honest thing to show is real bridge
+                   health, not a fake "connect" button. */}
+              {activePlatform.id === "imessage_personal" && activeDoor?.key === "full_account" && (
+                <div style={{ marginTop: 12 }}>
+                  <LocalBridgeChannelStatus channelKey="imessage_personal" gatewayId={agentGatewayId} />
+                </div>
+              )}
+
+              {/* WeChat: same local-bridge shape as iMessage, but there is no
+                   protocol client at all yet (no official API to build one
+                   against) — rails only, said honestly, no live status to check. */}
+              {activePlatform.id === "wechat_personal" && activeDoor?.key === "full_account" && (
+                <div style={{ marginTop: 12 }}>
+                  <p className="fleet-channel-expand-hint">
+                    WeChat has no official API. This bridge is a best-effort rail on this agent's own gateway,
+                    not a certified integration — it may break without warning.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>

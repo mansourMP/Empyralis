@@ -179,6 +179,69 @@ export async function setupWhatsAppPersonalChannel(
   return parseJsonResponse(res);
 }
 
+export interface GatewayPersonalChannelSurfaceItem {
+  channel_key: string;
+  label: string;
+  status: string;
+  status_label: string | null;
+  connected: boolean;
+  running: boolean;
+  live_capable: boolean;
+  connected_identity: string | null;
+  detail: string | null;
+  next_step: string | null;
+}
+
+// Local-bridge channels (iMessage/Signal/WeChat) have no phone/code/QR
+// pairing step of their own — the bridge is configured on the Gateway box
+// itself (env vars), and this is the one honest signal a UI can show: is the
+// bridge actually reachable, per the SAME merged surfaces endpoint the
+// Gateway's own health snapshot feeds. No client-invented "connected" state.
+export function useGatewayPersonalChannelSurfaces(gatewayId: string | null) {
+  const [items, setItems] = useState<GatewayPersonalChannelSurfaceItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!gatewayId) {
+      setItems([]);
+      setLoading(false);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/personal-channels/gateways/${encodeURIComponent(gatewayId)}/channels`, {
+        credentials: "include",
+      });
+      const data = await parseJsonResponse(res);
+      setItems(Array.isArray(data?.items) ? data.items : []);
+    } catch {
+      // Transient — keep the last-known list rather than flashing empty.
+    } finally {
+      setLoading(false);
+    }
+  }, [gatewayId]);
+
+  useEffect(() => {
+    setLoading(true);
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (gatewayId) {
+      pollRef.current = setInterval(refresh, 10_000);
+    }
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [gatewayId, refresh]);
+
+  return { items, loading, refresh };
+}
+
 export async function disconnectPersonalChannel(
   channelKey: PersonalChannelKey,
   gatewayId: string,

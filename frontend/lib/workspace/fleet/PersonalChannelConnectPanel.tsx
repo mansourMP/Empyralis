@@ -33,28 +33,58 @@ function maskedIdentity(state: { linked_phone?: string | null; linked_username?:
  * status, and disconnect endpoints — no new backend routes. Every status
  * badge here is the real enum value from those endpoints; there is no
  * client-invented "connected" state.
+ *
+ * `agentGatewayId` is a three-state override for callers that want this
+ * bound to ONE specific agent's own gateway (its `preferred_gateway_id`)
+ * instead of "any paired workspace computer":
+ *   - omitted (undefined)  -> legacy behavior: workspace-wide, first gateway
+ *     picked automatically (this is what Sage's own Connect tab still wants).
+ *   - null / ""            -> the agent has no gateway configured yet; point
+ *     at Hardware setup instead of a generic "pair a computer" panel, since
+ *     pairing a NEW computer here wouldn't make it THIS agent's gateway.
+ *   - a gateway id          -> pair/poll status against exactly that gateway.
  */
 export function PersonalChannelConnectPanel({
   workspaceId,
   channelKey,
   label,
+  agentGatewayId,
 }: {
   workspaceId: string;
   channelKey: PersonalChannelKey;
   label: string;
+  agentGatewayId?: string | null;
 }) {
+  const scoped = agentGatewayId !== undefined;
+  // Fetched unconditionally either way (hooks can't be conditional); when
+  // `scoped`, its result is simply unused below.
   const { gateways, loading: gatewaysLoading } = useWorkspaceGateways(workspaceId);
-  const [gatewayId, setGatewayId] = useState<string | null>(null);
+  const [gatewayId, setGatewayId] = useState<string | null>(scoped ? (agentGatewayId || null) : null);
 
   useEffect(() => {
+    if (scoped) {
+      setGatewayId(agentGatewayId || null);
+      return;
+    }
     if (gatewayId && gateways.some((g) => String(g.gateway_id) === gatewayId)) return;
     const first = gateways[0];
     setGatewayId(first ? String(first.gateway_id || "") || null : null);
-  }, [gateways, gatewayId]);
+  }, [scoped, agentGatewayId, gateways, gatewayId]);
 
   const { view, loading: statusLoading, refresh } = usePersonalChannelStatus(workspaceId, channelKey, gatewayId);
 
-  if (!gatewaysLoading && gateways.length === 0) {
+  if (scoped && !gatewayId) {
+    return (
+      <div className="pc-connect-panel">
+        <p className="fleet-channel-expand-hint">
+          This agent has no computer of its own yet — set one up on the Hardware tab first, then {label} pairs to
+          that machine specifically.
+        </p>
+      </div>
+    );
+  }
+
+  if (!scoped && !gatewaysLoading && gateways.length === 0) {
     return (
       <div className="pc-connect-panel">
         <p className="fleet-channel-expand-hint">
@@ -69,7 +99,7 @@ export function PersonalChannelConnectPanel({
     );
   }
 
-  if (gatewaysLoading || !gatewayId || statusLoading) {
+  if ((!scoped && gatewaysLoading) || !gatewayId || statusLoading) {
     return (
       <div className="pc-connect-panel pc-connect-panel--loading">
         <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
