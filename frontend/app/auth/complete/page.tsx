@@ -75,9 +75,9 @@ function AuthCompleteContent() {
         <section className="app-auth-card app-auth-card--elevated app-auth-complete-card" aria-live="polite">
           <div className="app-auth-header">
             <span className="app-auth-kicker">Almost there</span>
-            <h2 className="app-auth-title">Opening Sage</h2>
+            <h2 className="app-auth-title">Opening Empyralis</h2>
             <p className="app-auth-subtitle">
-              {error || 'Your Google sign-in succeeded. We are returning you to Sage now.'}
+              {error || 'Your Google sign-in succeeded. Taking you to your workspace now.'}
             </p>
           </div>
           <div className="app-auth-complete-meter" aria-hidden="true">
