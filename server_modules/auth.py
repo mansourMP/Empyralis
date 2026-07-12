@@ -1803,6 +1803,12 @@ def _auth_session_recovery_from_row(row: Any) -> dict[str, Any]:
         "revoked_at": revoked_at,
         "revoked_reason": str(row["revoked_reason"] or "").strip() or None,
         "active": revoked_at is None and (expires_at is None or expires_at > int(time.time())),
+        # Not part of the original public shape, but refresh_authenticated_session
+        # needs the raw hash to verify a presented refresh token -- added here
+        # rather than a second query, since get_auth_session_recovery() (the
+        # Postgres-first wrapper around this row) is the one place both the
+        # SQLite and Postgres paths already converge.
+        "token_hash": str(row["token_hash"] or "").strip(),
     }
 
 
@@ -5760,51 +5766,47 @@ def refresh_authenticated_session(
     clean_session_id, clean_secret = _decode_auth_session_refresh_token(refresh_token)
     expected_hash = _hash_auth_session_refresh_secret(clean_session_id, clean_secret)
 
-    with AUTH_LOCK:
-        with _connect_auth_db() as connection:
-            refresh_row = connection.execute(
-                "SELECT * FROM auth_session_refresh_tokens WHERE session_id = ? LIMIT 1",
-                (clean_session_id,),
-            ).fetchone()
-            if refresh_row is None:
-                raise HTTPException(status_code=401, detail="Refresh token is invalid.")
-            refresh_record = _auth_session_recovery_from_row(refresh_row)
-            if str(refresh_row["token_hash"] or "").strip() != expected_hash:
-                raise HTTPException(status_code=401, detail="Refresh token is invalid.")
-            if refresh_record.get("revoked_at") is not None:
-                raise HTTPException(status_code=401, detail="Refresh token is no longer active.")
-            refresh_expires_at = int(refresh_record.get("refresh_expires_at") or 0)
-            if refresh_expires_at and refresh_expires_at <= int(time.time()):
-                raise HTTPException(status_code=401, detail="Refresh token has expired.")
+    # Postgres-first, matching issue_auth_session_refresh_token() (which wrote
+    # this same row at login) -- this function previously read exclusively via
+    # _connect_auth_db()'s local SQLite file, a completely different store
+    # than the one login writes to whenever Postgres is configured. Every
+    # refresh silently failed to find its own just-issued token as a result:
+    # the loop that made this reachable was fixed (SessionRefreshTimer), but
+    # the endpoint it calls never worked. get_auth_session_recovery() and
+    # get_auth_session() already implement the correct Postgres-first/SQLite-
+    # fallback pattern; this just needed to call them instead of querying
+    # SQLite directly.
+    refresh_record = get_auth_session_recovery(clean_session_id)
+    if not refresh_record:
+        raise HTTPException(status_code=401, detail="Refresh token is invalid.")
+    if str(refresh_record.get("token_hash") or "").strip() != expected_hash:
+        raise HTTPException(status_code=401, detail="Refresh token is invalid.")
+    if refresh_record.get("revoked_at") is not None:
+        raise HTTPException(status_code=401, detail="Refresh token is no longer active.")
+    refresh_expires_at = int(refresh_record.get("refresh_expires_at") or 0)
+    if refresh_expires_at and refresh_expires_at <= int(time.time()):
+        raise HTTPException(status_code=401, detail="Refresh token has expired.")
 
-            session_row = connection.execute(
-                "SELECT * FROM auth_sessions WHERE session_id = ? LIMIT 1",
-                (clean_session_id,),
-            ).fetchone()
-            if session_row is None:
-                raise HTTPException(status_code=401, detail="Auth session is invalid.")
-            session_record = _auth_session_from_row(session_row)
-            if str(session_record.get("status") or "").strip().lower() != "active":
-                raise HTTPException(status_code=401, detail="Auth session is no longer active.")
+    session_record = get_auth_session(clean_session_id)
+    if not session_record:
+        raise HTTPException(status_code=401, detail="Auth session is invalid.")
+    if str(session_record.get("status") or "").strip().lower() != "active":
+        raise HTTPException(status_code=401, detail="Auth session is no longer active.")
 
-            effective_device_id = str(device_id or session_record.get("device_id") or "").strip() or None
-            device_record = None
-            if effective_device_id:
-                device_row = connection.execute(
-                    "SELECT * FROM user_devices WHERE device_id = ? LIMIT 1",
-                    (effective_device_id,),
-                ).fetchone()
-                if device_row is None:
-                    raise HTTPException(status_code=401, detail="Refresh token device is not linked.")
-                device_record = _device_link_from_row(device_row)
-                if str(device_record.get("user_id") or "").strip() != str(session_record.get("user_id") or "").strip():
-                    raise HTTPException(status_code=401, detail="Refresh token device owner mismatch.")
-                if str(device_record.get("status") or "").strip().lower() != "active":
-                    raise HTTPException(status_code=401, detail="Refresh token device is not active.")
-                if str(device_record.get("trust_state") or "").strip().lower() == "revoked":
-                    raise HTTPException(status_code=401, detail="Refresh token device trust was revoked.")
-                if bool(device_record.get("session_binding_required")) and str(session_record.get("device_id") or "").strip() != effective_device_id:
-                    raise HTTPException(status_code=401, detail="Refresh token is not bound to the active device.")
+    effective_device_id = str(device_id or session_record.get("device_id") or "").strip() or None
+    device_record = None
+    if effective_device_id:
+        device_record = get_user_device_link(effective_device_id)
+        if not device_record:
+            raise HTTPException(status_code=401, detail="Refresh token device is not linked.")
+        if str(device_record.get("user_id") or "").strip() != str(session_record.get("user_id") or "").strip():
+            raise HTTPException(status_code=401, detail="Refresh token device owner mismatch.")
+        if str(device_record.get("status") or "").strip().lower() != "active":
+            raise HTTPException(status_code=401, detail="Refresh token device is not active.")
+        if str(device_record.get("trust_state") or "").strip().lower() == "revoked":
+            raise HTTPException(status_code=401, detail="Refresh token device trust was revoked.")
+        if bool(device_record.get("session_binding_required")) and str(session_record.get("device_id") or "").strip() != effective_device_id:
+            raise HTTPException(status_code=401, detail="Refresh token is not bound to the active device.")
 
     user_id = str(session_record.get("user_id") or "").strip()
     user = _find_user_by_id(user_id)
