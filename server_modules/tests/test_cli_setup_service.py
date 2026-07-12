@@ -194,7 +194,13 @@ class CliSetupServiceDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["result"]["ok"])
         kwargs = dispatch_mock.await_args.kwargs
         self.assertEqual(kwargs["capability_id"], "cli.login.input")
-        self.assertEqual(kwargs["arguments"], {"code": "ABCD-1234"})
+        # BYO-brain multi-method: the arguments now include `value` + `kind`
+        # for the multi-method gateway path, and `code` for the legacy
+        # gateway path. The gateway falls back to whichever it understands.
+        self.assertEqual(
+            kwargs["arguments"],
+            {"code": "ABCD-1234", "value": "ABCD-1234", "kind": "code"},
+        )
         self.assertEqual(kwargs["run_id"], "run-2")
 
     async def test_cancel_cli_login_dispatches_interrupt_with_default_reason(self) -> None:

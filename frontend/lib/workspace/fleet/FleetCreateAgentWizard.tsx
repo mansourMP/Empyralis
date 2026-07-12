@@ -304,6 +304,20 @@ export function FleetCreateAgentWizard({
             model: selectedModel.trim() || undefined,
           },
         });
+      } else if (providerMode === "subscription") {
+        // Previously this branch fell through with no PATCH — the wizard
+        // silently accepted the user's subscription choice and left the
+        // agent on the platform-credits default, forcing users to redo
+        // the entire selection on the Model tab afterward. Every BYO-brain
+        // agent created via the wizard hit this bug.
+        await patchAgent(agentId, {
+          model_config: {
+            mode: "cli_subscription",
+            provider: subscriptionProvider,
+            runtime: runtimeForProvider(subscriptionProvider),
+            gateway_binding: gatewayBinding.trim(),
+          },
+        });
       }
       setStep(3);
     } catch (e) {
@@ -416,7 +430,35 @@ export function FleetCreateAgentWizard({
                   )}
                   {showGatewayPair ? (
                     <div style={{ marginTop: 10 }}>
-                      <GatewayPairPanel workspaceId={workspaceId} compact onPaired={handleGatewayPaired} />
+                      <GatewayPairPanel
+                        workspaceId={workspaceId}
+                        compact
+                        onPaired={handleGatewayPaired}
+                        renderPostPairNext={(g) => {
+                          // Wizard-in-flow next-step CTA: keep the user in
+                          // the wizard rather than sending them out to the
+                          // Hardware detail page. On click we advance
+                          // straight to step 2 with this new gateway
+                          // pre-selected as the subscription's brain box.
+                          const gid = String(g.gateway_id || "").trim();
+                          if (!gid) return null;
+                          return (
+                            <button
+                              type="button"
+                              className="fleet-btn fleet-btn--accent"
+                              onClick={() => {
+                                setSelectedNodeId(gid);
+                                setGatewayBinding(gid);
+                                setProviderMode("subscription");
+                                setShowGatewayPair(false);
+                                setStep(2);
+                              }}
+                            >
+                              Use it as this agent&apos;s brain →
+                            </button>
+                          );
+                        }}
+                      />
                     </div>
                   ) : (
                     <button type="button" className="fleet-btn" style={{ marginTop: 10 }} onClick={() => setShowGatewayPair(true)}>

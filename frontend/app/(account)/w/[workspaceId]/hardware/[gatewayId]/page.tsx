@@ -103,7 +103,68 @@ function friendlyLoginFailure(errorKind: string | undefined, error: string | und
 }
 
 type CliInstallState = "idle" | "installing" | "error";
-type CliLoginPhase = "idle" | "starting" | "active" | "submitting" | "cancelling" | "error";
+type CliLoginPhase = "idle" | "picking" | "starting" | "active" | "submitting" | "cancelling" | "error";
+
+/** Auth methods each runtime exposes to the UI. Mirrors the gateway-side
+ *  LOGIN_COMMAND and the backend LOGIN_METHODS map — kept as a static
+ *  constant here (not fetched) so the picker renders instantly on click and
+ *  works offline for demos. If the gateway rejects an unsupported (runtime,
+ *  method) at .start(), the friendly error surfaces the specific "unsupported
+ *  method" reason via the shared classifier.
+ *  Field `inputKind` tells the picker what to collect after the user picks
+ *  a stdin-secret method (null = URL-and-code flow, submits nothing back). */
+type CliAuthMethod = {
+  key: "device_auth" | "api_key" | "access_token" | "console" | "subscription";
+  label: string;
+  description: string;
+  inputKind: null | "api_key" | "access_token";
+  recommended?: boolean;
+};
+
+const CLI_AUTH_METHODS: Record<"claude_code" | "codex", CliAuthMethod[]> = {
+  codex: [
+    {
+      key: "device_auth",
+      label: "Your ChatGPT account (device code)",
+      description: "Uses your ChatGPT Plus / Pro / Team plan quota. Sign in on any browser — no callback needed.",
+      inputKind: null,
+      recommended: true,
+    },
+    {
+      key: "api_key",
+      label: "An OpenAI API key",
+      description: "Bring your own sk-… key. Charged per token to your OpenAI billing.",
+      inputKind: "api_key",
+    },
+    {
+      key: "access_token",
+      label: "A pre-obtained access token",
+      description: "Advanced — paste a token you already hold. Skips the auth handshake entirely.",
+      inputKind: "access_token",
+    },
+  ],
+  claude_code: [
+    {
+      key: "console",
+      label: "Anthropic Console (API billing)",
+      description: "Uses your Anthropic Console account, per-token billing. Device-code flow, works on a headless box.",
+      inputKind: null,
+      recommended: true,
+    },
+    {
+      key: "subscription",
+      label: "Claude subscription long-lived token",
+      description: "Requires a Claude Pro / Max plan. Prefer Console unless you specifically need this.",
+      inputKind: null,
+    },
+    {
+      key: "api_key",
+      label: "An Anthropic API key",
+      description: "Bring your own sk-ant-… key. Charged per token.",
+      inputKind: "api_key",
+    },
+  ],
+};
 
 /** Real install + sign-in for one subscription CLI, wired to Build F's
  *  cli.install / cli.login.* routes — replaces the SSH copy-paste guidance
@@ -130,6 +191,9 @@ function CliSetupControl({
   refresh: (opts?: { silent?: boolean }) => Promise<FleetGateway[]>;
 }) {
   const label = RUNTIME_LABELS[runtime];
+  const capabilityLabel = runtime === "claude_code" ? "Claude Code" : "Codex";
+  const methods = CLI_AUTH_METHODS[runtime];
+  const recommendedMethod = methods.find((m) => m.recommended) || methods[0];
 
   // ---- shared: poll the box's own reported state until it moves past its
   // current one (install: past "missing"; sign-in: all the way to "ready") ----
@@ -181,6 +245,19 @@ function CliSetupControl({
   const [installState, setInstallState] = useState<CliInstallState>("idle");
   const [installError, setInstallError] = useState<string | null>(null);
 
+  // Stale-error auto-clear: if the runtime transitions past "missing" (by
+  // any path — a background heartbeat detected it, another operator ran a
+  // sudo install, whatever), the persisted "install failed" banner from a
+  // prior failed attempt is by definition stale. Without this the banner
+  // survives an inventory recovery and the user has no in-UI way to clear
+  // it without a hard page reload.
+  useEffect(() => {
+    if (state !== "missing" && installState === "error") {
+      setInstallState("idle");
+      setInstallError(null);
+    }
+  }, [state, installState]);
+
   const runInstall = useCallback(async () => {
     setInstallState("installing");
     setInstallError(null);
@@ -206,6 +283,13 @@ function CliSetupControl({
   const [codePromptText, setCodePromptText] = useState<string | null>(null);
   const [codeInput, setCodeInput] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  /** Which method the user picked (or the default if the picker was skipped).
+   *  Drives the input-field placement (secret submitted at start vs pasted
+   *  back after URL) and the input's `kind` field. */
+  const [chosenMethod, setChosenMethod] = useState<CliAuthMethod>(recommendedMethod);
+  /** Value collected in the picker for stdin-secret methods (api_key /
+   *  access_token). Never rendered as plain text — password-style input. */
+  const [secretInput, setSecretInput] = useState("");
   const eventsPollRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -257,28 +341,50 @@ function CliSetupControl({
     [gatewayId, stopEventsPoll, verifyUntil, label],
   );
 
-  const startLogin = useCallback(async () => {
-    setLoginPhase("starting");
-    setLoginError(null);
-    setUrlText(null);
-    setCodePromptText(null);
-    setCodeInput("");
-    setSubmitError(null);
-    const runId = createRunId();
-    try {
-      await postCliAction(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/start`, {
-        runtime,
-        run_id: runId,
-        workspace_id: workspaceId,
-      });
-      setActiveRunId(runId);
-      setLoginPhase("active");
-      pollLoginEvents(runId);
-    } catch (err) {
-      setLoginPhase("error");
-      setLoginError(err instanceof Error ? err.message : "Sign-in failed to start.");
-    }
-  }, [gatewayId, runtime, workspaceId, pollLoginEvents]);
+  /** Kicks off the actual CLI process on the box with the picked method.
+   *  For stdin-secret methods, `secretValue` is written to the session's
+   *  stdin immediately after start returns — the CLI is blocked on read()
+   *  and would sit there until the session-timeout otherwise. */
+  const startLogin = useCallback(
+    async (method: CliAuthMethod, secretValue?: string) => {
+      setLoginPhase("starting");
+      setLoginError(null);
+      setUrlText(null);
+      setCodePromptText(null);
+      setCodeInput("");
+      setSubmitError(null);
+      const runId = createRunId();
+      try {
+        await postCliAction(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/start`, {
+          runtime,
+          method: method.key,
+          run_id: runId,
+          workspace_id: workspaceId,
+        });
+        setActiveRunId(runId);
+        setLoginPhase("active");
+        pollLoginEvents(runId);
+        // Stdin-secret method: submit the API key / access token
+        // immediately. Errors here surface via submitError; the session
+        // stays "active" so the user can retry via the input field if the
+        // gateway rejects the value.
+        if (method.inputKind && secretValue) {
+          try {
+            await postCliAction(
+              `/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/${encodeURIComponent(runId)}/input`,
+              { value: secretValue, kind: method.inputKind, workspace_id: workspaceId },
+            );
+          } catch (err) {
+            setSubmitError(err instanceof Error ? err.message : "Couldn't submit that value — try again.");
+          }
+        }
+      } catch (err) {
+        setLoginPhase("error");
+        setLoginError(err instanceof Error ? err.message : "Sign-in failed to start.");
+      }
+    },
+    [gatewayId, runtime, workspaceId, pollLoginEvents],
+  );
 
   const submitCode = useCallback(async () => {
     const code = codeInput.trim();
@@ -288,7 +394,7 @@ function CliSetupControl({
     try {
       await postCliAction(
         `/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/${encodeURIComponent(activeRunId)}/input`,
-        { code, workspace_id: workspaceId },
+        { value: code, kind: "code", workspace_id: workspaceId },
       );
       setCodeInput("");
       setLoginPhase("active");
@@ -315,126 +421,312 @@ function CliSetupControl({
       setUrlText(null);
       setCodePromptText(null);
       setSubmitError(null);
+      setSecretInput("");
     }
   }, [gatewayId, activeRunId, workspaceId, stopEventsPoll]);
+
+  const openPicker = useCallback(() => {
+    setLoginPhase("picking");
+    setLoginError(null);
+    setChosenMethod(recommendedMethod);
+    setSecretInput("");
+  }, [recommendedMethod]);
+
+  // Small design-system helpers scoped to this component. Local because
+  // they're only meaningful inside the row+expansion pattern below.
+  const rowStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    width: "100%",
+  };
+  const rightSlotStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
+
+  const statusChip = <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />;
+
+  // Primary action button in the right-side slot — one per row state.
+  // Layout: [label · status chip · action button]. Everything else the
+  // component might render (chooser, URL/code, input, error) drops into
+  // the expansion area below.
+  let primaryAction: React.ReactNode = null;
+  if (state === "missing") {
+    const installBusy = installState === "installing" || verifying;
+    primaryAction = (
+      <button
+        type="button"
+        className="fleet-btn fleet-btn--accent"
+        onClick={runInstall}
+        disabled={installBusy}
+      >
+        {installBusy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+        {installState === "installing" ? "Installing…" : verifying ? "Checking…" : installState === "error" ? "Retry" : `Install ${label}`}
+      </button>
+    );
+  } else if (state === "unauthenticated" && loginPhase === "idle") {
+    primaryAction = (
+      <button
+        type="button"
+        className="fleet-btn fleet-btn--accent"
+        onClick={openPicker}
+        disabled={verifying}
+      >
+        {verifying ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+        {verifying ? "Checking…" : "Sign in ▾"}
+      </button>
+    );
+  } else if (state === "unauthenticated" && loginPhase !== "idle") {
+    // A run is in flight (picking, starting, active, submitting, cancelling,
+    // error). Right-slot action becomes Cancel so it's always one click to
+    // stop; primary continuation lives in the expansion area.
+    primaryAction = (
+      <button
+        type="button"
+        className="fleet-btn"
+        onClick={cancelLogin}
+        disabled={loginPhase === "cancelling"}
+      >
+        {loginPhase === "cancelling" ? "Cancelling…" : "Cancel"}
+      </button>
+    );
+  }
+
+  // Expansion area — everything that doesn't fit in the row goes here.
+  // Rendered as a sibling section under the row when non-empty.
+  const expansion: React.ReactNode[] = [];
+
+  if (state === "missing" && installState === "error" && installError) {
+    expansion.push(
+      <span key="install-error" className="fleet-channel-expand-error" style={{ margin: 0 }}>
+        {installError}
+      </span>,
+    );
+  }
+  if (state === "missing" && verifyTimedOut) {
+    expansion.push(
+      <span key="verify-timeout" className="fleet-channel-expand-error" style={{ margin: 0 }}>
+        Still not detected — this box heartbeats roughly every 20s. Give it another moment, or
+        confirm the install actually succeeded on the machine itself.
+      </span>,
+    );
+  }
+
+  if (state === "unauthenticated" && loginPhase === "picking") {
+    const needsSecret = Boolean(chosenMethod.inputKind);
+    expansion.push(
+      <div key="picker" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>
+          Sign {capabilityLabel} in with…
+        </div>
+        {methods.map((m) => {
+          const isChosen = chosenMethod.key === m.key;
+          return (
+            <label
+              key={m.key}
+              style={{
+                display: "flex",
+                gap: 12,
+                padding: "10px 12px",
+                border: `1px solid ${isChosen ? "var(--accent)" : "var(--border)"}`,
+                borderRadius: 6,
+                cursor: "pointer",
+                background: isChosen ? "var(--bg-accent-soft, transparent)" : "transparent",
+              }}
+            >
+              <input
+                type="radio"
+                name={`cli-method-${runtime}`}
+                checked={isChosen}
+                onChange={() => setChosenMethod(m)}
+                style={{ marginTop: 3 }}
+              />
+              <div style={{ flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 500 }}>
+                  {m.label}
+                  {m.recommended && (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        letterSpacing: 0.08,
+                        textTransform: "uppercase",
+                        color: "var(--accent)",
+                        padding: "1px 6px",
+                        borderRadius: 3,
+                        border: "1px solid var(--accent)",
+                      }}
+                    >
+                      Recommended
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{m.description}</div>
+              </div>
+            </label>
+          );
+        })}
+        {needsSecret && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <input
+              type="password"
+              className="fleet-wizard-input"
+              placeholder={chosenMethod.inputKind === "api_key" ? "sk-…" : "Paste your access token"}
+              value={secretInput}
+              onChange={(e) => setSecretInput(e.currentTarget.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              This value is sent once to the CLI on your computer. Empyralis never stores it.
+            </span>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--accent"
+            onClick={() => {
+              const secret = needsSecret ? secretInput.trim() : undefined;
+              if (needsSecret && !secret) return;
+              void startLogin(chosenMethod, secret);
+            }}
+            disabled={needsSecret && !secretInput.trim()}
+          >
+            Continue
+          </button>
+          <button type="button" className="fleet-btn" onClick={() => setLoginPhase("idle")}>
+            Back
+          </button>
+        </div>
+      </div>,
+    );
+  }
+
+  if (state === "unauthenticated" && loginPhase === "error") {
+    expansion.push(
+      <div key="login-error" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span className="fleet-channel-expand-error" style={{ margin: 0 }}>
+          {loginError}
+        </span>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={openPicker}>
+          Try again
+        </button>
+      </div>,
+    );
+  }
+
+  if (state === "unauthenticated" && loginPhase === "starting") {
+    expansion.push(
+      <p key="starting" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Starting sign-in…
+      </p>,
+    );
+  }
+
+  if (
+    state === "unauthenticated"
+    && (loginPhase === "active" || loginPhase === "submitting" || loginPhase === "cancelling")
+  ) {
+    expansion.push(
+      <div key="active-flow">
+        {urlText ? (
+          <p style={{ margin: "0 0 4px", wordBreak: "break-all" }}>
+            Open this link and approve:{" "}
+            <a
+              href={urlText}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="fleet-md-code"
+              style={{ color: "var(--accent)", textDecoration: "underline" }}
+            >
+              {urlText}
+            </a>
+          </p>
+        ) : chosenMethod.inputKind ? (
+          // Stdin-secret method — no URL phase.
+          <p style={{ margin: "0 0 4px", display: "flex", alignItems: "center", gap: 8 }}>
+            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Verifying with {label}…
+          </p>
+        ) : (
+          <p style={{ margin: "0 0 4px", display: "flex", alignItems: "center", gap: 8 }}>
+            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Waiting for {label} to print a sign-in link…
+          </p>
+        )}
+        {codePromptText && (
+          <p style={{ margin: "0 0 4px", color: "var(--text-muted)" }}>{codePromptText}</p>
+        )}
+        {runtime === "claude_code" && chosenMethod.key === "subscription" && !chosenMethod.inputKind && (
+          <>
+            <div className="gw-pair-panel-row" style={{ marginTop: 6, alignItems: "stretch", gap: 8 }}>
+              <input
+                className="fleet-wizard-input"
+                style={{ flex: 1 }}
+                placeholder="Paste the code it gives you"
+                value={codeInput}
+                disabled={loginPhase === "submitting"}
+                maxLength={64}
+                onChange={(e) => setCodeInput(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void submitCode();
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="fleet-btn fleet-btn--accent"
+                onClick={submitCode}
+                disabled={loginPhase === "submitting" || !codeInput.trim()}
+              >
+                {loginPhase === "submitting" ? (
+                  <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+                ) : null}
+                Submit
+              </button>
+            </div>
+            {submitError && (
+              <span
+                className="fleet-channel-expand-error"
+                style={{ margin: "4px 0 0", display: "block" }}
+              >
+                {submitError}
+              </span>
+            )}
+          </>
+        )}
+        <p style={{ margin: "10px 0 0", color: "var(--text-muted)" }}>
+          Empyralis never sees or stores this credential — the CLI reads its own login directly on this computer.
+        </p>
+      </div>,
+    );
+  }
+
+  if (state === "unauthenticated" && loginPhase === "idle" && verifyTimedOut) {
+    expansion.push(
+      <span key="signin-timeout" className="fleet-channel-expand-error" style={{ margin: 0 }}>
+        Still not signed in after a couple of checks — try signing in again.
+      </span>,
+    );
+  }
 
   if (state === "ready") return null;
 
   return (
-    <div className="fleet-hw-note" style={{ marginTop: 8, paddingTop: 10, borderTop: "1px solid var(--border)", width: "100%" }}>
-      {state === "missing" ? (
-        installState === "error" && installError ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{installError}</span>
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={runInstall}>Retry</button>
-          </div>
-        ) : (
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <button
-              type="button"
-              className="fleet-btn fleet-btn--accent"
-              onClick={runInstall}
-              disabled={installState === "installing" || verifying}
-            >
-              {installState === "installing" || verifying ? (
-                <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
-              ) : null}
-              {installState === "installing" ? "Installing…" : verifying ? "Checking…" : `Install ${label}`}
-            </button>
-            {verifyTimedOut && (
-              <span className="fleet-channel-expand-error" style={{ margin: 0 }}>
-                Still not detected — this box heartbeats roughly every 20s. Give it another moment, or confirm the
-                install actually succeeded on the machine itself.
-              </span>
-            )}
-          </div>
-        )
-      ) : loginPhase === "idle" ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={startLogin} disabled={verifying}>
-            {verifying ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-            {verifying ? "Checking…" : "Sign in"}
-          </button>
-          {verifyTimedOut && (
-            <span className="fleet-channel-expand-error" style={{ margin: 0 }}>
-              Still not signed in after a couple of checks — try signing in again.
-            </span>
-          )}
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%" }}>
+      <div style={rowStyle}>
+        <span className="fleet-hw-label">{capabilityLabel}</span>
+        <span className="fleet-hw-value" style={rightSlotStyle}>
+          {statusChip}
+          {primaryAction}
+        </span>
+      </div>
+      {expansion.length > 0 && (
+        <div
+          className="fleet-hw-note"
+          style={{ paddingTop: 10, borderTop: "1px solid var(--border)", width: "100%", display: "flex", flexDirection: "column", gap: 10 }}
+        >
+          {expansion}
         </div>
-      ) : loginPhase === "error" ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{loginError}</span>
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={startLogin}>Retry</button>
-        </div>
-      ) : loginPhase === "starting" ? (
-        <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Starting sign-in…
-        </p>
-      ) : (
-        <>
-          {urlText ? (
-            <p style={{ margin: "0 0 4px", wordBreak: "break-all" }}>
-              Open this link and approve:{" "}
-              <a
-                href={urlText}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="fleet-md-code"
-                style={{ color: "var(--accent)", textDecoration: "underline" }}
-              >
-                {urlText}
-              </a>
-            </p>
-          ) : (
-            <p style={{ margin: "0 0 4px", display: "flex", alignItems: "center", gap: 8 }}>
-              <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Waiting for {label} to print a sign-in link…
-            </p>
-          )}
-          {codePromptText && <p style={{ margin: "0 0 4px", color: "var(--text-muted)" }}>{codePromptText}</p>}
-          {runtime === "claude_code" && (
-            <>
-              <div className="gw-pair-panel-row" style={{ marginTop: 6, alignItems: "stretch", gap: 8 }}>
-                <input
-                  className="fleet-wizard-input"
-                  style={{ flex: 1 }}
-                  placeholder="Paste the code it gives you"
-                  value={codeInput}
-                  disabled={loginPhase === "submitting"}
-                  maxLength={64}
-                  onChange={(e) => setCodeInput(e.currentTarget.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void submitCode();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="fleet-btn fleet-btn--accent"
-                  onClick={submitCode}
-                  disabled={loginPhase === "submitting" || !codeInput.trim()}
-                >
-                  {loginPhase === "submitting" ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-                  Submit
-                </button>
-              </div>
-              {submitError && (
-                <span className="fleet-channel-expand-error" style={{ margin: "4px 0 0", display: "block" }}>
-                  {submitError}
-                </span>
-              )}
-            </>
-          )}
-          <p style={{ margin: "10px 0 0", color: "var(--text-muted)" }}>
-            Empyralis never sees or stores this credential — the CLI reads its own login directly on this computer.
-          </p>
-          <div style={{ marginTop: 10 }}>
-            <button type="button" className="fleet-btn" onClick={cancelLogin} disabled={loginPhase === "cancelling"}>
-              {loginPhase === "cancelling" ? "Cancelling…" : "Cancel"}
-            </button>
-          </div>
-        </>
       )}
     </div>
   );
@@ -547,18 +839,31 @@ export default function GatewayDetailPage() {
           if (isCli) {
             const runtime: "claude_code" | "codex" = id === "claude_cli" ? "claude_code" : "codex";
             const state = gatewayRuntimeState(gateway, runtime);
+            // A CLI row with state==="ready" collapses to nothing extra —
+            // the CliSetupControl returns null and we render just the
+            // label + status chip like every other row.
+            if (state === "ready") {
+              return (
+                <div className="fleet-hw-row" key={id}>
+                  <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
+                  <span className="fleet-hw-value">
+                    <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />
+                  </span>
+                </div>
+              );
+            }
+            // CliSetupControl now OWNS the row layout for missing /
+            // unauthenticated states — label, status chip, primary action
+            // button all sit on ONE flex row, with the expansion area
+            // (chooser / URL+code / input / error) rendered below only
+            // when non-empty. See the memo at
+            // https://claude.ai/code/artifact/d3280431-5697-49e7-89bc-cad15f013af2
             return (
               <div
                 className="fleet-hw-row"
                 key={id}
                 style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", gap: 4 }}
               >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
-                  <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
-                  <span className="fleet-hw-value">
-                    <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />
-                  </span>
-                </div>
                 <CliSetupControl
                   runtime={runtime}
                   state={state}

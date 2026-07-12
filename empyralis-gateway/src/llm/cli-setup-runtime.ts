@@ -1,6 +1,7 @@
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 import { installCliSubscriptionRuntime, CliInstallError, type CliInstallRuntime } from "./cli-installer";
-import { CliLoginSessionManager, CliLoginError, type CliLoginEventPublisher, type CliLoginRuntime } from "./cli-login-session";
+import { CliLoginSessionManager, CliLoginError, type CliLoginEventPublisher, type CliLoginInputKind, type CliLoginMethod, type CliLoginRuntime } from "./cli-login-session";
+import { invalidatePassiveInventoryCache } from "../health/service-inventory";
 
 // BYO-brain onboarding (Build F): the real install + sign-in plumbing behind
 // what was, until this build, copy-paste guidance only. Sibling to
@@ -74,7 +75,19 @@ export class GatewayCliSetupRuntime {
    *  push their URL/code/done events through this, out of band from the
    *  cli.login.start request/response itself. */
   setEventPublisher(publisher: CliLoginEventPublisher): void {
-    this.loginSessions.setEventPublisher(publisher);
+    // Wrap the caller's publisher so a successful "done" event ALSO
+    // invalidates the passive-inventory cache — that flip authenticates
+    // the runtime on disk, and the UI must see .authenticated: true on
+    // the very next heartbeat, not up to 60 seconds later.
+    this.loginSessions.setEventPublisher(async (event) => {
+      try {
+        await publisher(event);
+      } finally {
+        if (event.event === "done" && event.ok) {
+          invalidatePassiveInventoryCache();
+        }
+      }
+    });
   }
 
   requestedCapabilities(): string[] {
@@ -108,6 +121,10 @@ export class GatewayCliSetupRuntime {
       const runtime = requireRuntime(args.runtime);
       try {
         const result = await this.installer({ runtime, timeoutMs: this.installTimeoutMs });
+        // The service-inventory cache would otherwise report "not
+        // installed" for up to 60 more seconds — the UI's row would sit
+        // on the stale value until the TTL expired plus one heartbeat.
+        invalidatePassiveInventoryCache();
         return { ...result };
       } catch (error) {
         throw new Error(setupErrorMessage("install", runtime, error));
@@ -119,8 +136,10 @@ export class GatewayCliSetupRuntime {
       if (!runId) {
         throw new Error("cli.login.start requires run_id.");
       }
+      const rawMethod = token(args.method);
+      const method = rawMethod ? (rawMethod as CliLoginMethod) : undefined;
       try {
-        return await this.loginSessions.start({ runId, runtime });
+        return await this.loginSessions.start({ runId, runtime, method });
       } catch (error) {
         throw new Error(setupErrorMessage("login", runtime, error));
       }
@@ -130,9 +149,17 @@ export class GatewayCliSetupRuntime {
       if (!runId) {
         throw new Error("cli.login.input requires run_id.");
       }
-      const code = token(args.code);
+      // Legacy shape (Build F): {code: "…"} → treated as kind="code".
+      // Extended shape (multi-method BYO-brain): {kind: "api_key" |
+      // "access_token" | "code", value: "…"} — the kind chooses which
+      // stdin-write path to use in the session manager.
+      const legacyCode = token(args.code);
+      const explicitKind = token(args.kind);
+      const explicitValue = token(args.value);
+      const value = explicitValue || legacyCode;
+      const kind = (explicitKind || "code") as CliLoginInputKind;
       try {
-        return await this.loginSessions.input({ runId, code });
+        return await this.loginSessions.input({ runId, value, kind });
       } catch (error) {
         throw new Error(setupErrorMessage("login", "claude_code", error));
       }

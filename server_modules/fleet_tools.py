@@ -855,7 +855,7 @@ async def fleet_configure_agent(
         # never dispatch (the turn-time error would otherwise only surface
         # much later, mid-conversation, instead of at save time).
         if mode == "cli_subscription" and isinstance(gateway_binding, str) and gateway_binding.strip():
-            from server_modules import gateway_state_repository
+            from server_modules import gateway_state_repository, gateway_registry_service
 
             _gateway_id = gateway_binding.strip()
             _registration = gateway_state_repository.get_gateway_registration(_gateway_id)
@@ -878,6 +878,38 @@ async def fleet_configure_agent(
                         "to this workspace. Pair a Gateway first, then bind it here."
                     ),
                 }
+            # And the CLI itself must be installed AND authenticated on that
+            # Gateway — save-time honesty, so users hear "sign it in first"
+            # here instead of getting an opaque "Gateway dispatch could not
+            # be delivered" the first time they send a message. Mirrors what
+            # the frontend GatewayBoxPicker's `gatewayRuntimeState` already
+            # checks client-side — this is the server-side enforcement so
+            # a raw API PATCH can't bypass it.
+            _runtime = str(mc.get("runtime") or "").strip().lower() or "claude_code"
+            if _runtime in {"claude_code", "codex"}:
+                _payload = gateway_registry_service.gateway_registration_public_payload(_registration)
+                _llm_runtimes = _payload.get("llm_runtimes") if isinstance(_payload.get("llm_runtimes"), dict) else {}
+                _entry = _llm_runtimes.get(_runtime) if isinstance(_llm_runtimes.get(_runtime), dict) else {}
+                _installed = bool(_entry.get("installed"))
+                _authenticated = bool(_entry.get("authenticated"))
+                if not _installed or not _authenticated:
+                    _label = "Codex" if _runtime == "codex" else "Claude Code"
+                    _box_label = str(
+                        _registration.get("metadata", {}).get("display_name")
+                        or _registration.get("metadata", {}).get("hostname")
+                        or _gateway_id
+                    )
+                    if not _installed:
+                        _msg = (
+                            f"{_label} isn't installed on {_box_label} yet. Open that computer's "
+                            "Hardware page, install it there, then bind."
+                        )
+                    else:
+                        _msg = (
+                            f"{_label} isn't signed in on {_box_label} yet. Open that computer's "
+                            "Hardware page, sign in there, then bind."
+                        )
+                    return {"ok": False, "error": _msg}
 
     try:
         bundle = await repo.get_workspace_agent_install_bundle(

@@ -66,17 +66,26 @@ async function fetchGateway(workspaceId: string, gatewayId: string): Promise<Gat
  * Self-contained gateway pairing flow: generate a pair code/command, poll
  * until a new gateway registration shows up, report success. Mountable
  * inline anywhere — manages its own state, only needs a workspace id.
+ *
+ * renderPostPairNext: optional callback the caller passes to render an
+ * in-flow next-step CTA under the success pill (e.g. "Install Codex on
+ * this computer" / "Bind as this agent's brain"). Without it, the pair
+ * success is a dead end — the user has to navigate elsewhere in the app
+ * to make anything happen with the new gateway. See the wizard step 1's
+ * handleGatewayPaired for the canonical in-flow pattern.
  */
 export function GatewayPairPanel({
   workspaceId,
   onPaired,
   compact = false,
   defaultPlatform,
+  renderPostPairNext,
 }: {
   workspaceId: string;
   onPaired?: (gateway: GatewayRegistrationRecord) => void;
   compact?: boolean;
   defaultPlatform?: string;
+  renderPostPairNext?: (gateway: GatewayRegistrationRecord) => React.ReactNode;
 }) {
   const [displayName, setDisplayName] = useState("My device");
   const [platform, setPlatform] = useState(defaultPlatform || "macos");
@@ -162,10 +171,14 @@ export function GatewayPairPanel({
   }, [intent, displayName, workspaceId]);
 
   if (paired) {
+    const postPair = renderPostPairNext?.(paired);
     return (
-      <div className="gw-pair-panel gw-pair-panel--success">
-        <Check size={16} strokeWidth={2} />
-        <span>Connected — {String(paired.display_name || paired.gateway_id || "device")} is paired.</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div className="gw-pair-panel gw-pair-panel--success">
+          <Check size={16} strokeWidth={2} />
+          <span>Connected — {String(paired.display_name || paired.gateway_id || "device")} is paired.</span>
+        </div>
+        {postPair}
       </div>
     );
   }

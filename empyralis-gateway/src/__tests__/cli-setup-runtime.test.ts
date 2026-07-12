@@ -100,17 +100,19 @@ test("cli.login.start requires run_id", async () => {
 });
 
 test("cli.login.start dispatches to the login session manager with the frame's run_id", async () => {
-  let startedWith: { runId: string; runtime: string } | null = null;
+  let startedWith: { runId: string; runtime: string; method?: string } | null = null;
   const fakeSessions = {
-    start: async (params: { runId: string; runtime: "claude_code" | "codex" }) => {
+    start: async (params: { runId: string; runtime: "claude_code" | "codex"; method?: string }) => {
       startedWith = params;
-      return { run_id: params.runId, status: "started" as const };
+      return { run_id: params.runId, status: "started" as const, method: "device_auth", awaits_secret: false };
     },
   } as unknown as CliLoginSessionManager;
   const runtime = new GatewayCliSetupRuntime({ loginSessions: fakeSessions });
   const result = await runtime.handleCapabilityInvoke(makeFrame(CLI_LOGIN_START_CAPABILITY, { runtime: "codex" }, "run-42"));
-  assert.deepEqual(result, { run_id: "run-42", status: "started" });
-  assert.deepEqual(startedWith, { runId: "run-42", runtime: "codex" });
+  assert.deepEqual(result, { run_id: "run-42", status: "started", method: "device_auth", awaits_secret: false });
+  // BYO-brain multi-method: `method` is threaded through (undefined when
+  // omitted, letting the session manager resolve the runtime's default).
+  assert.deepEqual(startedWith, { runId: "run-42", runtime: "codex", method: undefined });
 });
 
 test("cli.login.start wraps a not_installed failure honestly", async () => {
@@ -127,19 +129,22 @@ test("cli.login.start wraps a not_installed failure honestly", async () => {
 });
 
 test("cli.login.input dispatches run_id + code to the login session manager", async () => {
-  let inputWith: { runId: string; code: string } | null = null;
+  let inputWith: { runId: string; value: string; kind?: string } | null = null;
   const fakeSessions = {
-    input: async (params: { runId: string; code: string }) => {
+    input: async (params: { runId: string; value: string; kind?: string }) => {
       inputWith = params;
       return { ok: true };
     },
   } as unknown as CliLoginSessionManager;
   const runtime = new GatewayCliSetupRuntime({ loginSessions: fakeSessions });
   const result = await runtime.handleCapabilityInvoke(
+    // Legacy shape: caller sends `code` only — the router auto-fills
+    // `kind: "code"` and passes the code as `value` to the session
+    // manager. Both new and old backend shapes hit this same path.
     makeFrame(CLI_LOGIN_INPUT_CAPABILITY, { code: "WXYZ-9876" }, "run-9"),
   );
   assert.deepEqual(result, { ok: true });
-  assert.deepEqual(inputWith, { runId: "run-9", code: "WXYZ-9876" });
+  assert.deepEqual(inputWith, { runId: "run-9", value: "WXYZ-9876", kind: "code" });
 });
 
 test("interruptRun delegates to the login session manager's cancel()", async () => {

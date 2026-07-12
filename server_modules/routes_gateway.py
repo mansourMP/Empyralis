@@ -903,10 +903,21 @@ class CliLoginStartRequest(BaseModel):
     workspace_id: Optional[str] = None
     trace_id: Optional[str] = None
     request_id: Optional[str] = None
+    # BYO-brain multi-method (see cli_setup_service.LOGIN_METHODS). Absent
+    # means "use the runtime's default method" (device_auth for Codex,
+    # console for Claude Code) — preserving the legacy behavior for callers
+    # that haven't been upgraded to the auth-method chooser UI.
+    method: Optional[str] = None
 
 
 class CliLoginInputRequest(BaseModel):
-    code: str = Field(min_length=1, max_length=64)
+    # Legacy shape: `code` on its own. New shape: `value` + optional `kind`
+    # (`code` | `api_key` | `access_token`). If `code` is present and `value`
+    # isn't, the service treats it as `{kind: "code", value: code}`. Length
+    # cap widened for API keys / access tokens.
+    code: Optional[str] = Field(default=None, max_length=4096)
+    value: Optional[str] = Field(default=None, max_length=4096)
+    kind: Optional[str] = None
     workspace_id: Optional[str] = None
     trace_id: Optional[str] = None
     request_id: Optional[str] = None
@@ -2479,6 +2490,7 @@ async def start_gateway_cli_login(
             gateway_id=gateway_id,
             workspace_id=resolved_workspace_id,
             runtime=body.runtime,
+            method=str(body.method or "").strip() or None,
             run_id=body.run_id,
             trace_id=str(body.trace_id or "").strip(),
             request_id=str(body.request_id or "").strip() or None,
@@ -2501,12 +2513,16 @@ async def submit_gateway_cli_login_input(
         workspace_id=body.workspace_id,
         minimum_role="member",
     )
+    resolved_value = str(body.value or body.code or "").strip()
+    if not resolved_value:
+        raise HTTPException(status_code=400, detail="Value is required.")
     try:
         return await cli_setup_service.submit_cli_login_input(
             gateway_id=gateway_id,
             workspace_id=resolved_workspace_id,
             run_id=run_id,
-            code=body.code,
+            value=resolved_value,
+            kind=str(body.kind or "").strip() or None,
             trace_id=str(body.trace_id or "").strip(),
             request_id=str(body.request_id or "").strip() or None,
             actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
@@ -2540,6 +2556,17 @@ async def cancel_gateway_cli_login(
         )
     except cli_setup_service.CliSetupError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/gateway/cli/methods")
+async def list_gateway_cli_login_methods(
+    current_user=Depends(require_api_key),
+):
+    """List every auth method each runtime supports, in display order.
+    The frontend's CliSetupControl uses this to render the auth-method
+    chooser instead of hardcoding a single flow. Static; safe to cache."""
+    del current_user  # not workspace-scoped, static shape
+    return {"runtimes": cli_setup_service.LOGIN_METHODS}
 
 
 @router.get("/gateway/registrations/{gateway_id}/cli/login/{run_id}/events")

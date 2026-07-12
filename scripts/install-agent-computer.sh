@@ -137,9 +137,16 @@ create_service_user() {
 
 prepare_directories() {
   mkdir -p "${INSTALL_ROOT}" "${BIN_DIR}" "${STATE_ROOT}/gateway" "${STATE_ROOT}/supervisor" "${CONFIG_DIR}" "${LOG_DIR}" "${RUN_DIR}"
-  chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_ROOT}" "${LOG_DIR}" "${RUN_DIR}"
+  # BYO-brain: writable npm global prefix for cli.install (@openai/codex etc.).
+  # /usr/lib/node_modules is EACCES under this service's strict sandbox
+  # (ProtectSystem=strict). This dir sits under INSTALL_ROOT which is already
+  # in the gateway service's ReadWritePaths, and its bin/ is prepended to
+  # PATH via the env file below, so cli.install lands binaries where the
+  # gateway can find and exec them without further wiring.
+  mkdir -p "${INSTALL_ROOT}/cli/bin" "${INSTALL_ROOT}/cli/lib"
+  chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_ROOT}" "${LOG_DIR}" "${RUN_DIR}" "${INSTALL_ROOT}/cli"
   chmod 0750 "${STATE_ROOT}" "${LOG_DIR}" "${RUN_DIR}"
-  chmod 0755 "${INSTALL_ROOT}" "${BIN_DIR}" "${CONFIG_DIR}"
+  chmod 0755 "${INSTALL_ROOT}" "${BIN_DIR}" "${CONFIG_DIR}" "${INSTALL_ROOT}/cli" "${INSTALL_ROOT}/cli/bin"
 }
 
 existing_env_value() {
@@ -197,6 +204,20 @@ write_env_file() {
     printf 'EMPYRALIS_GATEWAY_BROWSER_PROJECT_ROOT=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
     printf 'EMPYRALIS_GATEWAY_BROWSER_PYTHON="python3"\n'
     printf 'EMPYRALIS_AGENT_COMPUTER_INSTALL_DIR=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
+    # BYO-brain: enable cli.install / cli.login.* by default on a
+    # user-paired gateway. The flag exists for a hardening story that never
+    # applied to a self-paired box; leaving it off dead-ends every user's
+    # first Install click with a "your operator has to turn this on" wall
+    # they can't reach without SSH.
+    printf 'EMPYRALIS_GATEWAY_CLI_SETUP_ENABLED="true"\n'
+    # BYO-brain: point npm's global prefix at a directory already in the
+    # gateway service's ReadWritePaths, so `npm install -g @openai/codex`
+    # succeeds instead of EACCES against /usr/lib/node_modules. Also
+    # prepend that bin/ to PATH so the gateway process can find the CLI
+    # after cli.install lands it. See cli-installer.ts for the paired
+    # gateway-side --prefix defense-in-depth.
+    printf 'NPM_CONFIG_PREFIX=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli")"
+    printf 'PATH=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
     if [[ -n "${existing_gateway_token}" ]]; then
       printf 'EMPYRALIS_GATEWAY_TOKEN=%s\n' "$(shell_quote_env "${existing_gateway_token}")"
     fi

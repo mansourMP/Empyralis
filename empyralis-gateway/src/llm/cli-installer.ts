@@ -254,7 +254,18 @@ export async function installCliSubscriptionRuntime(
     );
   }
 
+  // Defense-in-depth for the sandbox / prefix mismatch scenario: even
+  // though npm honors NPM_CONFIG_PREFIX via env already, a stray .npmrc on
+  // the box otherwise wins over the env-var. Passing --prefix explicitly
+  // guarantees the write lands in the writable location the systemd unit
+  // grants (see scripts/install-agent-computer.sh's ReadWritePaths).
+  // Without it, `npm install -g` on a paired gateway hits EACCES on
+  // /usr/lib/node_modules and fails every user's first Install click.
   const args = ["install", "-g", pkg];
+  const explicitPrefix = String(env.NPM_CONFIG_PREFIX || "").trim();
+  if (explicitPrefix) {
+    args.push("--prefix", explicitPrefix);
+  }
   const outcome = await spawnAndCollect(npmPath, args, { timeoutMs, spawnImpl, env });
 
   if (outcome.spawnError) {

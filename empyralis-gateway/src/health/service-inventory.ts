@@ -118,6 +118,17 @@ const LOCAL_RUNNER_CAPABILITIES: ReadonlySet<string> = new Set([
 
 let passiveInventoryCache: { key: string; capturedAtMs: number; snapshot: PassiveInventorySnapshot } | null = null;
 
+/** Force the next collectPassiveInventorySnapshot() call to actually probe
+ *  rather than serve up-to-60-second-stale cached data. Called by
+ *  cli-setup-runtime after a successful cli.install or cli.login.finalize
+ *  so the UI's "Sign in" row flips from "Installed, not signed in" to
+ *  "Ready" on the very next heartbeat instead of waiting out the cache
+ *  TTL. Never call from a hot code path; there's an intentional single-
+ *  flight guard on the async probe itself in ws-client.ts. */
+export function invalidatePassiveInventoryCache(): void {
+  passiveInventoryCache = null;
+}
+
 function truncate(value: unknown, maxLength = 240): string {
   const token = String(value ?? "").replace(/\s+/g, " ").trim();
   return token.length > maxLength ? `${token.slice(0, maxLength - 3)}...` : token;

@@ -14,6 +14,81 @@ CLI_LOGIN_OUTPUT_MESSAGE_TYPE = "cli.login.output"
 _SUPPORTED_RUNTIMES = ("claude_code", "codex")
 _GATEWAY_EVENTS_PAGE_SIZE = 500
 
+# BYO-brain: which auth methods each runtime advertises to the UI. First
+# entry is the default a call to /cli/login/start with no method gets, AND
+# the one the frontend marks with the "Recommended" badge. Kept in sync
+# with the gateway-side LOGIN_COMMAND in cli-login-session.ts — that map
+# is the source of truth for whether a (runtime, method) pair actually
+# works; this is the shape the frontend enumerates. Fields per method:
+# `key`, human `label`, one-line `description`, `input_kind` (what the
+# frontend should collect and submit via cli.login.input for that method,
+# or None if the flow is URL-and-code with no extra input).
+LOGIN_METHODS: Dict[str, List[Dict[str, Any]]] = {
+    "codex": [
+        {
+            "key": "device_auth",
+            "label": "Your ChatGPT account (device code)",
+            "description": (
+                "Uses your ChatGPT Plus / Pro / Team plan quota. Sign in on any browser — "
+                "no callback needed. Recommended for a paired remote box."
+            ),
+            "input_kind": None,
+        },
+        {
+            "key": "api_key",
+            "label": "An OpenAI API key",
+            "description": (
+                "Bring your own sk-… key. Charged per token to your OpenAI billing. "
+                "Best for teams already spending on the API."
+            ),
+            "input_kind": "api_key",
+        },
+        {
+            "key": "access_token",
+            "label": "A pre-obtained access token",
+            "description": (
+                "Advanced — paste a token you already hold. Skips the auth handshake entirely."
+            ),
+            "input_kind": "access_token",
+        },
+    ],
+    "claude_code": [
+        {
+            "key": "console",
+            "label": "Anthropic Console (API billing)",
+            "description": (
+                "Uses your Anthropic Console account — per-token billing. Device-code flow, "
+                "works reliably on a headless box. Recommended for a paired remote box."
+            ),
+            "input_kind": None,
+        },
+        {
+            "key": "subscription",
+            "label": "Claude subscription long-lived token",
+            "description": (
+                "Requires a Claude Pro / Max plan. Some CLI versions hang on headless boxes — "
+                "prefer the Console option unless you specifically need this."
+            ),
+            "input_kind": None,
+        },
+        {
+            "key": "api_key",
+            "label": "An Anthropic API key",
+            "description": "Bring your own sk-ant-… key. Charged per token.",
+            "input_kind": "api_key",
+        },
+    ],
+}
+
+
+_VALID_INPUT_KINDS_BY_METHOD = {
+    "device_auth": None,
+    "console": None,
+    "subscription": None,
+    "api_key": "api_key",
+    "access_token": "access_token",
+}
+
 
 class CliSetupError(RuntimeError):
     """Raised by every cli_setup dispatch function below. Callers (routes)
@@ -123,16 +198,27 @@ async def start_cli_login(
     workspace_id: str,
     runtime: str,
     run_id: str,
+    method: Optional[str] = None,
     trace_id: str = "",
     request_id: Optional[str] = None,
     actor_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     normalized_runtime = _normalize_runtime(runtime)
+    normalized_method = str(method or "").strip() or None
+    if normalized_method and normalized_method not in _VALID_INPUT_KINDS_BY_METHOD.keys():
+        # Not a hard reject — the gateway itself will authoritatively
+        # validate the (runtime, method) combination against LOGIN_COMMAND
+        # and return "unsupported_method" if it's not populated. Passing an
+        # unknown method through keeps the mapping trustable end-to-end.
+        pass
+    arguments: Dict[str, Any] = {"runtime": normalized_runtime}
+    if normalized_method:
+        arguments["method"] = normalized_method
     try:
         return await gateway_execution_service.execute_tool_via_gateway(
             gateway_id=gateway_id,
             capability_id=CLI_LOGIN_START_CAPABILITY,
-            arguments={"runtime": normalized_runtime},
+            arguments=arguments,
             run_id=run_id,
             trace_id=trace_id or run_id,
             workspace_id=workspace_id,
@@ -153,19 +239,36 @@ async def submit_cli_login_input(
     gateway_id: str,
     workspace_id: str,
     run_id: str,
-    code: str,
+    value: Optional[str] = None,
+    code: Optional[str] = None,
+    kind: Optional[str] = None,
     trace_id: str = "",
     request_id: Optional[str] = None,
     actor_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    clean_code = str(code or "").strip()
-    if not clean_code:
-        raise CliSetupError("Heads up: a code is required to continue sign-in.", status_code=400)
+    # Back-compat: the pre-multi-method signature took `code=`; callers
+    # (including existing tests and pre-upgrade UI) still pass it. New
+    # callers pass `value=` + optional `kind=`. If both are given, `value`
+    # wins.
+    clean_value = str(value if value is not None else code or "").strip()
+    if not clean_value:
+        raise CliSetupError("Heads up: a value is required to continue sign-in.", status_code=400)
+    normalized_kind = str(kind or "").strip().lower() or "code"
+    if normalized_kind not in {"code", "api_key", "access_token"}:
+        raise CliSetupError(
+            f"Heads up: unknown input kind '{normalized_kind}' (expected code, api_key, or access_token).",
+            status_code=400,
+        )
+    # Send both legacy `code` (for older gateways still on Build F's
+    # single-shape input path) and new `value`/`kind` fields. The gateway
+    # falls back to `code` when neither `value` nor `kind` is set — see
+    # cli-setup-runtime.ts.
+    arguments = {"code": clean_value, "value": clean_value, "kind": normalized_kind}
     try:
         return await gateway_execution_service.execute_tool_via_gateway(
             gateway_id=gateway_id,
             capability_id=CLI_LOGIN_INPUT_CAPABILITY,
-            arguments={"code": clean_code},
+            arguments=arguments,
             run_id=run_id,
             trace_id=trace_id or run_id,
             workspace_id=workspace_id,

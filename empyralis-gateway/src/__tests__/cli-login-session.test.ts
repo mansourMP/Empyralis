@@ -124,7 +124,10 @@ test("start() resolves immediately without waiting for the process to finish", a
     commandExists: () => "/usr/bin/codex",
   });
   const result = await manager.start({ runId: "run-3", runtime: "codex" });
-  assert.deepEqual(result, { run_id: "run-3", status: "started" });
+  // BYO-brain multi-method: start() now also reports the resolved method
+  // (defaulting to device_auth for codex) and whether the flow expects a
+  // stdin secret. See LOGIN_METHODS / LOGIN_COMMAND in cli-login-session.
+  assert.deepEqual(result, { run_id: "run-3", status: "started", method: "device_auth", awaits_secret: false });
   // Process hasn't closed — start() must not have blocked on it.
   assert.equal(fake.killCalls.length, 0);
 });
