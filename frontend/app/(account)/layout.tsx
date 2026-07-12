@@ -7,6 +7,7 @@ import {
   loadAccountShellSession,
 } from '@/lib/server/load-account-shell-session';
 import { ShellRecoveryActions } from '@/app/(account)/ShellRecoveryActions';
+import { SessionRefreshTimer } from '@/app/(account)/SessionRefreshTimer';
 
 export default async function AccountLayout({ children }: { children: ReactNode }) {
   const session = await loadAccountShellSession();
@@ -32,5 +33,10 @@ export default async function AccountLayout({ children }: { children: ReactNode 
     );
   }
 
-  return children;
+  return (
+    <>
+      <SessionRefreshTimer />
+      {children}
+    </>
+  );
 }
