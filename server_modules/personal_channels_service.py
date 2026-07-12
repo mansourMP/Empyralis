@@ -1839,8 +1839,9 @@ async def configure_whatsapp_personal_gateway(
         arguments["phone_number"] = str(phone_number).strip()
     if str(custom_pairing_code or "").strip():
         arguments["custom_pairing_code"] = str(custom_pairing_code).strip()
-    if not arguments:
-        raise ValueError("At least one WhatsApp personal setup field is required.")
+    # Unlike Telegram, an empty call is valid here -- it means "begin/retry
+    # the QR flow", which needs no fields at all. See the matching change in
+    # WhatsAppPersonalRuntime.handleConfigure() (empyralis-gateway) for why.
     run_id = f"gateway-whatsapp-setup-{uuid4().hex[:12]}"
     trace_id = f"gateway-whatsapp-setup-{uuid4().hex[:12]}"
     _enforce_personal_gateway_config_decision(

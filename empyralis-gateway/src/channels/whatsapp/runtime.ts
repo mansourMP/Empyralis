@@ -703,10 +703,14 @@ export class WhatsAppPersonalRuntime {
       }
       patch.customPairingCode = token;
     }
-    if (Object.keys(patch).length === 0) {
-      throw new Error("At least one WhatsApp personal setup field is required.");
-    }
-    const storedConfig = await this.configStore.patchWhatsAppConfig(patch);
+    // Unlike Telegram, WhatsApp's QR path needs no fields at all -- an empty
+    // call is a valid "begin/retry" request, not an error. This closes the
+    // gap that stranded the wizard after disconnect(): the runtime sat idle
+    // forever with no UI-reachable way to try again short of restarting the
+    // whole Gateway process.
+    const storedConfig = Object.keys(patch).length > 0
+      ? await this.configStore.patchWhatsAppConfig(patch)
+      : await this.configStore.loadWhatsAppConfig();
     let reconnectRequested = false;
     const currentState = await this.sessionStore.load();
     if (this.started && currentState.status !== "connected") {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2, LogOut } from "lucide-react";
 
 import { GatewayPairPanel, type GatewayRegistrationRecord } from "@/lib/gateway/GatewayPairPanel";
@@ -303,8 +303,41 @@ function WhatsAppConnectBody({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const autoStartedFor = useRef<string | null>(null);
 
   const qrCode = view?.state?.qr_code || null;
+  const pairingCode = view?.state?.metadata?.pairing_code || null;
+  const isRestIdle = status === "idle" || status === "disconnected" || status === "logged_out" || status === "authorization_required";
+
+  const beginOrRetry = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setupWhatsAppPersonalChannel(gatewayId, {});
+      onRefresh();
+    } catch (e) {
+      setError(friendlyPersonalChannelError(e instanceof Error ? e.message : String(e), label));
+    } finally {
+      setBusy(false);
+    }
+  }, [gatewayId, label, onRefresh]);
+
+  // The gap this closes: after disconnect(), the runtime sits in idle
+  // forever -- previously a QR only ever appeared because the whole Gateway
+  // process happened to auto-attempt a connection on its own boot. Fire the
+  // same begin/retry call the "Generate QR code" button below uses, once per
+  // idle state entered (not once per poll), so opening the wizard (including
+  // right after disconnecting) reaches a QR without a restart.
+  useEffect(() => {
+    if (!isRestIdle || usePhone || qrCode || pairingCode) return;
+    if (autoStartedFor.current === gatewayId) return;
+    autoStartedFor.current = gatewayId;
+    void beginOrRetry();
+  }, [isRestIdle, usePhone, qrCode, pairingCode, gatewayId, beginOrRetry]);
+
+  useEffect(() => {
+    if (!isRestIdle) autoStartedFor.current = null;
+  }, [isRestIdle]);
 
   useEffect(() => {
     if (!qrCode) {
@@ -402,6 +435,12 @@ function WhatsAppConnectBody({
         </div>
       )}
       {error && <p className="fleet-channel-expand-error">{error}</p>}
+      {isRestIdle && !qrCode && (
+        <button type="button" className="fleet-btn" onClick={() => void beginOrRetry()} disabled={busy}>
+          {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+          {busy ? "Requesting…" : error ? "Try again" : "Generate QR code"}
+        </button>
+      )}
       <button type="button" className="pc-connect-alt-link" onClick={() => { setUsePhone(true); setError(null); }}>
         Use phone number instead
       </button>
