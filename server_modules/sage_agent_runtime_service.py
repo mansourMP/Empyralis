@@ -1096,7 +1096,16 @@ async def _dispatch_cli_subscription_gateway_brain(
             agent_scope="specialist",
             emit_hardware_activity=False,
             durable=True,
-            durable_deadline_seconds=240,
+            # Live evidence 2026-07-12: 5 consecutive real attempts on a
+            # gateway with a healthy reconnect cycle all failed at exactly
+            # 240s, one missing a fresh reconnect by 3 seconds. The gateway's
+            # actual disconnect-to-reconnect gaps run longer than 240s on
+            # this box's WS path (root cause not yet found — see the
+            # matching gap on an unrelated test gateway the same day, which
+            # points at something shared/edge-side, not this specific box).
+            # Widened as an immediate mitigation, not a fix for the
+            # underlying cycle; revisit once that's diagnosed.
+            durable_deadline_seconds=600,
         )
     except Exception as exc:
         _reason = str(exc)
