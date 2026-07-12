@@ -111,7 +111,11 @@ PERSONAL_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
         "channel_key": "discord_personal",
         "label": "Discord",
         "provider": "discord_bot",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
+        # Uses a bot token, not a paired-gateway user-account session (Discord
+        # ToS prohibits self-bots) — matches PERSONAL_CHANNEL_SPECS above and
+        # session_owner below; this previously said personal_gateway, which
+        # contradicted both.
+        "runtime_lane": "cloud_connector",
         "stage": "live",
         "live_capable": "true",
         "family": "personal",
@@ -576,7 +580,9 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "binding_channel_key": "discord_personal",
         "label": "Discord Personal DM",
         "provider": "discord_bot",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
+        # Bot-token-backed, not a paired-gateway session — see
+        # PERSONAL_CHANNEL_SPECS's discord_personal entry for why.
+        "runtime_lane": "cloud_connector",
         "category": "personal_runtime",
         "stage": "live",
         "status": "personal_dm",
