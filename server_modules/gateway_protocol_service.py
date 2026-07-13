@@ -2212,6 +2212,26 @@ async def handle_gateway_websocket(
                 )
                 gateway_state_repository.mark_gateway_session_disconnected(session_id, reason=exc.error_code)
                 break
+            except RuntimeError:
+                # Starlette raises a bare RuntimeError (not WebSocketDisconnect)
+                # from receive_text() when the socket's own state already
+                # moved past "connected" -- e.g. it closed in the gap between
+                # this loop's previous iteration and this one. Found live in
+                # prod 2026-07-13: unhandled here, it crashed the whole
+                # handler instead of exiting the loop the same way a normal
+                # disconnect does. Don't try to send or close on a socket
+                # Starlette itself says isn't there -- that would just raise
+                # again; only the outer finally's _unregister_live_connection
+                # is needed, same as the WebSocketDisconnect path below.
+                disconnected = True
+                _enforce_gateway_session_mutation(
+                    registration=registration,
+                    session=session,
+                    operation="mark_session_disconnected",
+                    reason="websocket_disconnect",
+                )
+                gateway_state_repository.mark_gateway_session_disconnected(session_id, reason="websocket_disconnect")
+                break
             if frame_seq is not None and last_client_seq is not None and frame_seq <= last_client_seq:
                 await _send_frame(
                     _response_frame(
