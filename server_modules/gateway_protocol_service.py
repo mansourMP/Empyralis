@@ -1873,7 +1873,26 @@ async def handle_gateway_websocket(
 
     async def _send_frame(frame: Dict[str, Any]) -> None:
         if connection is not None:
-            await connection.send_frame(frame)
+            try:
+                await connection.send_frame(frame)
+            except RuntimeError as exc:
+                # The connection can die between this handler accepting a
+                # frame and getting around to acknowledging it (e.g. the
+                # socket closes mid-heartbeat-processing) — an expected
+                # race, not a crash: the gateway gets nothing either way
+                # once its socket is gone, and will retry on its next
+                # heartbeat or reconnect. Same exception-translation intent
+                # as dispatch_tool_invoke/interrupt's RuntimeError guard,
+                # applied here at the one shared send choke point instead
+                # of enumerating every message-type call site.
+                _LOGGER.info(
+                    "Gateway frame send skipped, connection already gone "
+                    "gateway_id=%s session_id=%s frame_type=%s error=%s",
+                    gateway_id,
+                    session_id,
+                    str(frame.get("type") or frame.get("kind") or "unknown"),
+                    str(exc),
+                )
             return
         await websocket.send_json(frame)
 
