@@ -3154,6 +3154,91 @@ against `test_skills_service.py`, `test_workspace_context_files.py`, and
 
 ---
 
+## Part 28: Provider Resolution — Per-Agent `model_config` Audit (2026-07-14)
+
+Scoped to `sage_agent_runtime_service.py`'s `_resolve_cloud_provider`/
+`_resolve_agent_cloud_provider` + `provider_catalog_service.py` only —
+three reported gaps, one fixed in that scope, two root-caused precisely
+and flagged because the real fix needs code outside it.
+
+### 28.1 Fixed: Sage's own subscription setting was silently ignored (§25.1, closed)
+
+`_resolve_cloud_provider` — Sage's own turn-time resolver — had zero
+knowledge of `model_config` at all, so saving `cli_subscription`/`local`
+mode on Sage's own Model tab (the save itself always succeeded;
+`fleet_configure_agent` has no master/operator guard) did nothing: Sage
+kept answering on DeepSeek/platform credits with no error, no signal,
+nothing an owner could see short of noticing Sage never actually used
+their subscription.
+
+**Fixed with an opt-in check**, `check_master_model_config: bool = False`
+— NOT unconditional, on purpose. `_resolve_cloud_provider` is also called
+on behalf of a completely unrelated agent's `platform_credits` mode
+(`_resolve_agent_cloud_provider`'s `platform_credits` branch delegates to
+the same shared workspace-default resolution). An unconditional check
+would mean a stale/wrong setting on Sage's own card could break a
+different specialist's unrelated turn — exactly the cross-agent coupling
+class of bug Part 27 fixed for memory. So the check is opt-in, defaults to
+completely off (proven by a test that makes the master-lookup functions
+raise `AssertionError` if ever called with the default), and the one
+in-scope caller (`_resolve_agent_cloud_provider`'s `platform_credits`
+branch) explicitly passes `False`. When a future caller resolves Sage's
+own turn specifically, it should pass `True` — see §28.2.
+
+### 28.2 Flagged, not fixed: two gaps whose real fix is outside this scope
+
+Both were root-caused with file:line evidence, not left as guesses — but
+completing them means editing `handle_sage_chat` (same file, explicitly
+outside this pass's `_resolve_cloud_provider`/`_resolve_agent_cloud_provider`-
+only scope) and/or `runs_execution.py` (a different subsystem entirely).
+Recorded here so the next pass doesn't have to re-derive them.
+
+**Scheduled/autonomous `cli_subscription` turns hit a generic credentials
+error instead of reaching the agent's gateway brain.** Root cause is
+**not** in this scope's files at all: scheduled/system turns run through
+`agent_turn.py`'s `execute_system_agent_turn` → `turn_runtime.py`'s
+`execute_agent_turn_request`, which for a durable/system turn branches to
+`run_service.execute_durable_agent_turn_dispatch` — a completely different
+path from `handle_sage_chat` (which normal chat turns use, via
+`direct_chat_service.py`'s "route web chat through the SAME
+`handle_sage_chat()` that channels use"). That durable path's own provider
+resolution, `runs_execution.py`'s `_resolve_agent_generation_state`
+(`:1354-1374`), has **zero concept of `model_config.mode`/
+`cli_subscription` at all** — it hardcodes
+`provider = runtime.get("provider") or execution_context.get("provider")
+or metadata.get("provider") or "openai"` (`:1359`) and two more `or
+"openai"` fallbacks nearby (`:1986`, `:5783`). For a `cli_subscription`
+agent, none of those three sources populate a provider, so it silently
+defaults to `"openai"`, which has no credentials — hence the observed
+error. Fixing this means either making `runs_execution.py` aware of
+`model_config.mode` (a different subsystem, `runs`/durable-execution —
+adjacent to "scheduler" in the DO-NOT-TOUCH sense) or routing
+`cli_subscription`/`local`-mode scheduled turns through `handle_sage_chat`'s
+existing gateway-brain dispatch instead of the durable-run engine.
+Neither is a `_resolve_cloud_provider`/`_resolve_agent_cloud_provider`
+change.
+
+**`_resolve_agent_cloud_provider` has zero callers anywhere in the
+codebase** (§25.3, still true — confirmed again this pass by grep, only
+its own `def` line and its one internal delegation to
+`_resolve_cloud_provider` match). The function itself is complete and
+correct: all 4 modes (`platform_credits`/`byok_api`/`cli_subscription`/
+`local`), proper per-mode error messages via `_friendly_cli_subscription_error`,
+proper ledgering via `_ledger_provider_unavailable` on every failure path.
+"Wiring it so each agent uses its own key" means replacing
+`handle_sage_chat`'s current ad-hoc logic — the unconditional
+`_resolve_cloud_provider(normalized_workspace_id)` call
+(`:3641` pre-this-pass numbering) followed by a same-function manual
+`provider` string override when a specialist has its own `.provider`
+(`:3643-3646`, which changes the provider label but never re-fetches
+matching credentials — the exact BYOK-credential-mismatch gap §25.3
+already flagged) — with a real call to
+`_resolve_agent_cloud_provider(workspace_id, agent_model_config, agent_id)`.
+That edit is in `handle_sage_chat`, outside this pass's declared 2-function
+scope in the same file.
+
+---
+
 ## Appendix A: Architecture Decisions (Why It's Built This Way)
 
 These are recorded in `docs/PLATFORM.md` Section 7. Do NOT reverse without explicit instruction.
