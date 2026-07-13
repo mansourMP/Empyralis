@@ -3568,6 +3568,9 @@ async def handle_sage_chat(
 
     context_files_payload = _read_context_files_payload(workspace_id=normalized_workspace_id)
 
+    import time as _perf_time  # DIAG-PERF
+    _CTX_PROF_T0 = _perf_time.monotonic()  # DIAG-PERF
+
     if _spec_install_id:
         # Specialist turn: load the memory brief from THIS install's isolated
         # namespace (agent_memory keys by install id), never Sage's/workspace-wide.
@@ -3994,6 +3997,7 @@ async def handle_sage_chat(
     if _spec is not None and str(getattr(_spec, "mode", "") or "").strip().lower() == "cli_subscription":
         _cli_runtime = str(getattr(_spec, "runtime", "") or "").strip().lower() or "claude_code"
         _cli_gateway_id = str(getattr(_spec, "gateway_binding", "") or "").strip()
+        logging.getLogger(__name__).info("DIAG-PERF context+prompt assembly before dispatch: %dms", int((_perf_time.monotonic() - _CTX_PROF_T0) * 1000))  # DIAG-PERF
         _cli_reply, _cli_usage, _cli_model = await _dispatch_cli_subscription_gateway_brain(
             workspace_id=normalized_workspace_id,
             tenant_id=effective_tenant_id,
