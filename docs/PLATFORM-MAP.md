@@ -1425,7 +1425,7 @@ Per the platform vision: the cure for doubt is ONE real user who finds it useful
 | **Per-agent channel identities not built** | One shared workspace bot per channel — specialists can't have their own Telegram/Discord identities. Confirmed worse than previously stated: Discord's per-agent OAuth button silently produces a *workspace-wide* credential (Part 5.5), and Slack has no working per-agent bind at all — every connected Slack workspace answers as Sage. | Agent identity is invisible to end users |
 | **No channel health alerts** | If a Telegram bot token expires or Discord webhook fails, no alert | Silent failures lose messages |
 | **No mandate/schedule UI** | The Authority Mandate's `mandate.audience_tools` allowlist (Part 10) and per-agent wake/heartbeat scheduling are both real, enforced backend mechanisms with **zero frontend surface for the mandate half** — owners can only set `audience_tools` via a raw PATCH. (The wake-schedule half now *does* have a real UI — `ScheduleSection` in the agent Overview tab — see the next row for why scheduling still doesn't work.) | Owners can't see or control what their agent lets end-customers trigger without reading API docs |
-| **Scheduled wake-ups silently never fire** | An owner can use the real "Schedule a wake-up" UI and the request is genuinely written to `agent_scheduler_wake_requests` — but the one scheduler instance that would execute it (`HeartbeatScheduler`) is started with `workspace_id=None` and every tick dies at a `scope_missing` short-circuit before ever calling the function that would advance a row. This includes the manual "trigger now" endpoint, which hits the same misconfigured instance. Confirmed the thread genuinely starts in the real production process (cross-checked against `deploy/empyralis-backend.service`) — it just can never do the one thing it exists to do. A *separate* cron/weekly scheduler is genuinely live in production (starts by default, polls every 20s) but has no UI anywhere to create a schedule through it. (Part 18) | An owner who schedules a wake-up gets no error and no result — the feature looks like it worked and never does anything |
+| ~~**Scheduled wake-ups silently never fire**~~ **RESOLVED 2026-07-13, live-verified — no longer a blocker.** | Was: the one scheduler instance that would execute a wake-up (`HeartbeatScheduler`) is started with `workspace_id=None` and dies at `scope_missing` before ever advancing a row — still true of *that specific* legacy instance. Fixed by a second, cross-workspace scanner (already on this branch as `dbde0a6aa`) that claims due wake requests across all workspaces independent of that broken instance; live-verified twice (a real scheduled wake-up claimed within ~1-16s of due and reached `status="executed"`, cross-confirmed by a matching `HEARTBEAT.md` entry). Two secondary bugs found and fixed in the same pass: the finalized wake request's own `run_id` was always null (wrong nesting level read), and `trigger_source` was never set to `"schedule"` (silently defaulted to `"user"`) — both confirmed fixed by inspecting the resulting run's own persisted metadata. (Part 18, top-of-section update) | An owner who schedules a wake-up now gets a real, autonomous turn — this un-blocks the whole "autonomous agent" story, not just this one feature. A newly-surfaced, separate, NOT-yet-fixed issue: the test run itself failed with a credentials error instead of reaching the agent's actual `cli_subscription` gateway brain — flagged as follow-up work, not fixed here (out of that fix's scope). |
 | **Sub-agent delegation has a complete backend and zero confirmed callers** | `POST /runs/{run_id}/delegate` and its two siblings are fully implemented (role model, depth cap, trace events the chat UI already knows how to render) but a repo-wide search found no code — frontend, tool registration, or scripts — that ever calls them. A separate agent-to-agent mailbox tool (`fleet__message_agent`) writes real rows but nothing ever reads them back out into a turn. (Part 17) | A cofounder should not assume agents can currently delegate to each other in the live product |
 | **Two of three "skills" subsystems are backend-only or fully dead** | The marketplace install/publish pipeline works over a direct API call but has no frontend and is never invoked from any agent-facing code path; the curated device-skill pack (1Password, Apple Notes, Apple Reminders, tmux) is described to the LLM as available but has no execution implementation anywhere — not in the backend, not in the Gateway. Only the Tools-tab enable/disable toggle (which the product calls "Tools," not "Skills") is genuinely wired end-to-end. (Part 14) | The product's public description of "skills" is broader than what a user can actually create, install, or run |
 | **No marketing landing page exists, so there's nothing to gate** | `frontend/app/page.tsx` is a pure 25-line auth-redirect (logged out → `/login`, logged in → workspace). No hero/pricing/marketing component exists anywhere in the frontend. Separately, both invite-gating mechanisms that *do* exist in code (`EMPYRALIS_INVITE_CODE`, `ORION_PILOT_SIGNUP_MODE`) are unset in every env file in this repo, so signup is open as shipped here. (Part 23) | Anything describing a marketing site or invite-only positioning is describing work that either isn't merged to `verify` or isn't turned on |
@@ -2093,10 +2093,51 @@ The only way to change it today is to ask the agent to call
 ## Part 18: Scheduled / Autonomous Wake-Up
 
 **This is two entirely separate scheduler systems that happen to share the
-word "schedule." Do not conflate them — one has a real UI and a dead
-executor; the other has a live executor and no UI.**
+word "schedule." Do not conflate them.**
 
-### 18.1 Per-agent wake-up requests — real UI, dead executor
+> **2026-07-13 update — §18.1's executor is FIXED and live-verified, not
+> dead anymore.** A commit already on this branch when this update was
+> written, `dbde0a6aa` ("make scheduled wake-ups actually fire, not just
+> save"), added a second, cross-workspace scanner
+> (`bounded_scheduler_service.run_wake_request_scan_forever` +
+> `scan_due_wake_requests_once`, started by
+> `runtime_route_registration_service._ensure_wake_request_scanner_started`)
+> that works around the still-broken single-workspace `HeartbeatScheduler`
+> described below rather than fixing it directly — it polls
+> `control_plane_repository.list_due_agent_scheduler_wake_request_scopes`
+> (a `bypass_rls=True` cross-tenant scan) every 20s for which
+> `(tenant_id, workspace_id)` pairs have due work, then runs the SAME
+> claim → tier-grouped execute → finalize pipeline §18.1 already documents
+> below, once per scope found. This was **verified live, twice, not just
+> read as code**: a real wake-up scheduled ~2 minutes out was claimed
+> within ~1-16s of its due time and reached `status="executed"`, cross-
+> confirmed by a matching `HEARTBEAT.md` log entry with the correct
+> `acted`/tier-group counts. Two secondary bugs were found and fixed in the
+> same pass (both in `runtime_heartbeat_service.py`, both live-verified):
+> the finalized wake request's own `metadata.run_id` was always `null`
+> (the durable-dispatch result nests the real run's `run_id` one level
+> down under a `"result"` key; the code read the top level) — fixed via a
+> new `_extract_turn_run_id()` helper; and `trigger_source` was never set
+> for scheduler-driven turns, so it silently defaulted to the generic
+> `"user"` value instead of `"schedule"` (unlike §18.2's cron/weekly path,
+> which already tagged this correctly via a real `schedule_id`) — now set
+> explicitly. Both confirmed by querying the resulting run's own persisted
+> metadata in `run_archive` after a live test. **A separate, NOT yet fixed
+> issue surfaced during this same verification** (flagged, not fixed, since
+> its fix lives in `sage_agent_runtime_service.py` — out of scope for that
+> pass): the test run itself (for an agent on `cli_subscription`/`codex`)
+> failed with `"No credentials available for provider 'openai'"` instead of
+> reaching the gateway/CLI path a normal chat turn to the same agent
+> reaches correctly — the scheduler-triggered durable-run path appears to
+> resolve the agent's provider differently than the direct-chat path does.
+> The rest of this section (the `HeartbeatScheduler`/`workspace_id=None`
+> bug, §18.2, §18.3) is preserved below exactly as originally investigated,
+> since it's still an accurate description of the *legacy* single-workspace
+> path that the new scanner works around rather than replaces — that
+> legacy path is still broken on its own, it's just no longer the only way
+> a wake-up gets executed.
+
+### 18.1 Per-agent wake-up requests — real UI, now a live executor (via a second, cross-workspace scanner — see update above)
 
 **Creation is fully wired.** `bounded_scheduler_service.py:631-711`
 (`propose_self_wakeup`) and `:561-628` (`maybe_schedule_event_trigger`)
@@ -2139,8 +2180,12 @@ daemon thread genuinely starts in the real, deployed production process —
 cross-checked against `deploy/empyralis-backend.service` — it just can never
 advance a single row past `status="pending"`.
 
-**Net effect:** a user schedules a wake-up through a real UI, the request is
-durably saved, and nothing ever happens. No error surfaces anywhere.
+**Net effect (as originally investigated — see the 2026-07-13 update above
+for the current, fixed state):** a user schedules a wake-up through a real
+UI, the request is durably saved, and nothing ever happens via *this*
+single-workspace `HeartbeatScheduler` path specifically. No error surfaces
+anywhere on this path. As of the update above, the cross-workspace scanner
+now claims and executes it regardless — the wake-up itself does fire.
 
 ### 18.2 Cron / weekly scheduler — live executor, no UI
 
@@ -2170,23 +2215,28 @@ to the *other* subsystem entirely.
 ### 18.3 The direct answer to "has any scheduled run actually fired in
 production, per the ledger"
 
-No ledger event type exists anywhere meaning "a scheduled/autonomous run
-fired." The closest is `event_class="delegation"` /
-`title="Delegated wake request scheduled"`
+**Superseded for §18.1 by the 2026-07-13 update at the top of this Part —
+a scheduled wake-up has now been directly, live-verified to fire, twice,
+independent of the ledger question below** (which remains true and is kept
+for the record): no ledger event type exists anywhere meaning "a
+scheduled/autonomous run fired." The closest is `event_class="delegation"`
+/ `title="Delegated wake request scheduled"`
 (`bounded_scheduler_service.py:526-556`) — which fires at **creation** time,
 not execution time. `finalize_wake_requests`
 (`bounded_scheduler_service.py:759-808`), the function that resolves a
-claimed wake request, never calls `activity_ledger_service` at all. For
-§18.1's wake-queue path, tracing every caller of the one function that would
-ever advance a wake request past `pending` shows they all route through a
-scheduler instance permanently misconfigured with `workspace_id=None` — so,
-independent of ledger evidence, that code path is not reachable. For §18.2's
-cron/weekly path, the tick loop is unambiguously live in the real deployed
-process and would execute a due schedule — but there is no DB or log access
-available to confirm whether any schedule has ever actually been created by
-a real user (state lives in a local JSON file this investigation had no
-access to), and there is no dedicated ledger event type that would let you
-query the answer even with that access.
+claimed wake request, never calls `activity_ledger_service` at all. The
+evidence used instead was direct: polling `agent_scheduler_wake_requests`
+for the `pending → claimed → executed` transition, and cross-checking the
+matching `HEARTBEAT.md` entry and the resulting `run_archive` row's own
+metadata — none of which are ledger events, which is why this gap is worth
+closing separately (a real "autonomous run fired" ledger event would make
+this answerable without a live test every time). For §18.2's cron/weekly
+path, the tick loop is unambiguously live in the real deployed process and
+would execute a due schedule — but there is no DB or log access available
+to confirm whether any schedule has ever actually been created by a real
+user (state lives in a local JSON file this investigation had no access
+to), and there is no dedicated ledger event type that would let you query
+the answer even with that access.
 
 ---
 
@@ -3139,7 +3189,7 @@ Skills (built-in):  server_modules/skill_registry.py, skills_service.py (Part 14
 Skills (marketplace, no UI): server_modules/skills_registry.py, skill_scanner.py (Part 14)
 Memory (Sage):      server_modules/agent_memory_tools.py, sage_instruction_compiler_service.py (Part 16)
 Sub-agent delegation (no caller): server_modules/runtime_run_delegation_service.py, runs_delegation.py (Part 17)
-Scheduled wake-up (dead executor): server_modules/bounded_scheduler_service.py, runtime_heartbeat_service.py (Part 18)
+Scheduled wake-up (fixed 2026-07-13, live-verified): server_modules/bounded_scheduler_service.py (scan_due_wake_requests_once, run_wake_request_scan_forever), runtime_heartbeat_service.py (_extract_turn_run_id) (Part 18)
 Cron/weekly scheduler (live, no UI): server_modules/runs_core.py, run_service.py (Part 18)
 Connectors execution: server_modules/connectors/notion_connector.py, github_connector.py (Part 20)
 Tool-honesty guard: server_modules/tool_honesty_guard.py (Part 21)
