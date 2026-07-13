@@ -3237,6 +3237,95 @@ already flagged) — with a real call to
 That edit is in `handle_sage_chat`, outside this pass's declared 2-function
 scope in the same file.
 
+### 28.3 Correction + honest-failure fix for scheduled `cli_subscription` turns (2026-07-14)
+
+The follow-up task assigned to fix §28.2's first gap cited
+`_resolve_agent_generation_state` (`runs_execution.py:1354-1359`) as root
+cause, scoped to `runs_execution.py` "provider-resolution path only." Live
+verification proved that citation imprecise: a real scheduled wake-up
+(`run_id c6ffc089-3e16-438c-99f1-fe6906733cd6`, DAG `orion-standard-v1`)
+showed the code that actually executes for heartbeat/wake-triggered turns
+is a *different* function — the orion DAG's `"runtime_resolve"` node kind
+(`runs_execution.py:5680`), which called `resolve_run_execution_context()`
+(defined in `runs_engine.py:74`, a different file) directly, with no
+pre-population step at all. That shared resolver has its own `or "openai"`
+default (`runs_engine.py:76`) — a second, independent silent fallback
+alongside the one `_resolve_agent_generation_state` had.
+
+**Fixed** — both real provider-resolution entry points inside
+`runs_execution.py` now raise a clear, context-aware `RuntimeError`
+instead of silently defaulting to `"openai"`: generic ("No AI provider is
+configured for workflow X / this run...") when no provider signal exists
+anywhere, and heartbeat-specific (naming the real gap explicitly) when
+`metadata.source == "heartbeat"` / `wake_request_ids` is present. Explicit-
+provider runs are byte-for-byte unaffected (verified via stash-diff
+against the existing suite). 14 new tests in
+`test_runs_execution_provider_resolution.py`, confirmed to fail without
+the fix. **Live-reverified**: firing the identical wake-up mechanism again
+post-deploy (new `run_id b6f9a72e-d718-4ec2-bdbf-d3aea9320eec`, claimed 2s
+after due, executed 3s after that) now persists —
+
+> "No AI provider is configured for this scheduled/heartbeat run.
+> Heartbeat and wake-up runs currently execute as the workspace
+> orchestrator and do not dispatch to a specific agent's own
+> cli_subscription/BYOK model_config -- that requires the acting agent's
+> identity to be threaded through the scheduler, which is not wired up
+> today. Set an explicit provider for heartbeat runs, or wire per-agent
+> dispatch upstream before relying on scheduled cli_subscription/BYOK
+> turns."
+
+— replacing the old, misleading `"No credentials available for provider
+'openai'."`
+
+**NOT fixed — two independent, hard-evidenced gaps confirmed
+architecturally out of reach from `runs_execution.py` alone:**
+
+1. **Agent identity never reaches the run context.**
+   `runtime_heartbeat_service.py::build_heartbeat_turn_request`
+   (`:87-153` — "Agent 1's branch" *and* "scheduler," doubly out of scope)
+   groups wake requests only by `authority_tier`; a wake request's
+   `agent_id` is read solely for its human-readable `summary`/`reason`
+   text ("Wake reasons:\n- [kind] summary"), never for identity/
+   model_config lookup. The resulting turn's `context_hints["agent_role"]`
+   (`:150`) is always `merged_metadata.get("agent_role") or "orchestrator"`
+   — every heartbeat/wake-triggered run executes as Sage's generic
+   orchestrator, never as the specific agent that requested the wake-up.
+   Confirmed with a fresh live query of both persisted runs: `agent_role:
+   "orchestrator"`, `owner_user_id: "telegram-bot"`, and zero occurrences
+   of Pixel's `agent_install_id` anywhere in either ~30KB payload.
+2. **Even with agent identity, this engine has no gateway-dispatch
+   capability.** `resolve_run_execution_context` (`runs_engine.py:74`) +
+   `_build_provider_credential_candidates` (`provider_profiles.py:3149`)
+   are a workspace-scoped vault-credential/provider-profile system.
+   `PROVIDER_CATALOG` (`provider_profiles.py:460`) lists real cloud
+   providers only (`openai`, `openai-codex`, `anthropic`, ...) —
+   `cli_subscription`/`local` aren't providers in this system at all,
+   they're `model_config.mode` values `sage_agent_runtime_service.py`
+   alone understands. Per that file's own docstring (`:515-523`),
+   `cli_subscription` is never resolved to a cloud endpoint — "the actual
+   completion is dispatched to the bound Gateway at the turn seam
+   (`handle_sage_chat` → `_dispatch_cli_subscription_gateway_brain` → the
+   same gateway WSS rail 'local' mode uses)." Routing a durable/scheduled
+   run to an agent's gateway needs either calling into or duplicating
+   those dispatch functions (`sage_agent_runtime_service.py`, another
+   agent's scope) — a cross-cutting architecture change, not a provider-
+   resolution tweak.
+
+`_resolve_agent_cloud_provider` is cleanly reusable exactly as instructed
+(plain top-level `async def`, no hidden coupling) — but no safe, low-
+coupling "fetch one agent install's `model_config` by `agent_install_id`"
+primitive was found reachable from `runs_execution.py` (checked
+`agent_registry_repository.py`, `fleet_tools.py`, `agent_registry_api.py`),
+and per gap 1, no caller populates that identity today regardless.
+Building that wiring now would be unverified, uncalled code — not shipped.
+
+**Bottom line**: scheduled `cli_subscription` turns now fail with an
+honest, specific explanation instead of a misleading credential error —
+task point 2, fully met. Actually routing them to the agent's own gateway
+brain (task point 1) needs upstream scheduler work (gap 1) *and*
+gateway-dispatch wiring inside the durable-run engine (gap 2), both
+outside a `runs_execution.py`-scoped pass.
+
 ---
 
 ## Appendix A: Architecture Decisions (Why It's Built This Way)
