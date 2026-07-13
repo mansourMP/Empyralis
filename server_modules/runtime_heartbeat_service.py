@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from typing import Any, Callable, Optional
 
 from server_modules import authority_mandate_service
+
+_logger = logging.getLogger(__name__)
 
 
 def _resolve_sync(value: Any) -> Any:
@@ -406,6 +409,12 @@ def build_heartbeat_run_callback(
                     run_execution_services=run_execution_services(),
                 )
             except Exception as exc:
+                _logger.exception(
+                    "Heartbeat/wake-request turn execution failed (workspace_id=%s, tier=%s, wake_request_ids=%s)",
+                    workspace_id,
+                    group_tier,
+                    [str(item.get("id") or "").strip() for item in group_wake_requests],
+                )
                 if group_wake_requests and tenant_id and callable(finalize_scheduler_wake_requests):
                     _resolve_sync(
                         finalize_scheduler_wake_requests(

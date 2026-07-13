@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from server_modules import agent_registry_repository, authority_mandate_service, control_plane_repository, entitlements_service, rust_runtime_kernel_client, workspace_context
+from server_modules.config_loader import config_bool, config_int
 
 
 DEFAULT_QUIET_HOURS_START = 23
@@ -17,6 +19,8 @@ DEFAULT_MINIMUM_BATTERY_PERCENT = 20
 DEFAULT_WAKE_BATCH_LIMIT = 5
 EVENT_TRIGGER_PRIORITY_THRESHOLD = 60
 IMMEDIATE_TRIGGER_WINDOW_SECONDS = 5
+DEFAULT_WAKE_SCAN_POLL_SECONDS = 20
+DEFAULT_WAKE_SCAN_SCOPE_LIMIT = 200
 
 _AMBIENT_MONITOR_REGISTRY_LOCK = threading.Lock()
 _AMBIENT_MONITOR_REGISTRY: dict[str, dict[str, Callable[[], Any]]] = {}
@@ -740,6 +744,85 @@ async def claim_due_wake_requests(
         "workspace": workspace or {},
         "master_install": master_install or {},
     }
+
+
+def wake_request_scan_enabled() -> bool:
+    return config_bool("EMPYRALIS_WAKE_SCAN_ENABLED", True)
+
+
+def wake_request_scan_poll_seconds() -> int:
+    return max(5, config_int("EMPYRALIS_WAKE_SCAN_POLL_SECONDS", DEFAULT_WAKE_SCAN_POLL_SECONDS))
+
+
+def _run_sync(coro: Any) -> Any:
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+async def scan_due_wake_requests_once(
+    *,
+    run_workspace_heartbeat: Callable[[List[str], Dict[str, Any]], Any],
+    limit: int = DEFAULT_WAKE_SCAN_SCOPE_LIMIT,
+) -> Dict[str, Any]:
+    """Cross-workspace tick for the wake-request scanner daemon.
+
+    claim_due_wake_requests (above) is intentionally RLS-scoped to one
+    (tenant_id, workspace_id) at a time -- there is no single query that can
+    claim due wake requests across tenants, by design. This finds which
+    scopes currently have due work via a system-level, bypass_rls scan
+    (control_plane_repository.list_due_agent_scheduler_wake_request_scopes),
+    then runs the existing, already-correct per-workspace claim -> tier-
+    grouped execute -> finalize pipeline (run_workspace_heartbeat, i.e.
+    runtime_heartbeat_service's heartbeat run callback) once per scope found.
+    No new turn-dispatch or authority-tier logic here -- this only adds the
+    "which workspaces have work" step RLS otherwise makes invisible to a
+    single global query, and reuses everything already proven correct for a
+    single workspace (including authority-tier grouping and the pending ->
+    executed status transition on success).
+    """
+    scopes = await control_plane_repository.list_due_agent_scheduler_wake_request_scopes(
+        due_before=_utc_now(),
+        limit=limit,
+    )
+    results: List[Dict[str, Any]] = []
+    for scope in scopes:
+        tenant_id = str(scope.get("tenant_id") or "").strip()
+        workspace_id = str(scope.get("workspace_id") or "").strip()
+        if not tenant_id or not workspace_id:
+            continue
+        try:
+            outcome = run_workspace_heartbeat(
+                [],
+                {"workspace_id": workspace_id, "tenant_id": tenant_id, "trigger": "schedule"},
+            )
+        except Exception as exc:
+            outcome = {"acted": False, "summary": f"wake scan failed: {exc}"}
+        results.append({"tenant_id": tenant_id, "workspace_id": workspace_id, "result": outcome})
+    return {"scanned": len(scopes), "results": results}
+
+
+def run_wake_request_scan_forever(
+    *,
+    run_workspace_heartbeat: Callable[[List[str], Dict[str, Any]], Any],
+    stop_event: threading.Event,
+    poll_seconds: Optional[int] = None,
+) -> None:
+    """Daemon-thread entry point -- same shape as run_service's
+    run_weekly_scheduler_forever (plain while-not-stopped/sleep loop, started
+    once at boot). Not asyncio-native since it's started from a sync
+    bootstrap context; each tick opens and closes its own event loop via
+    _run_sync, matching the sync/async bridge pattern already used in
+    runtime_heartbeat_service for the same reason."""
+    interval = int(poll_seconds) if poll_seconds is not None else wake_request_scan_poll_seconds()
+    interval = max(5, interval)
+    while not stop_event.wait(interval):
+        try:
+            _run_sync(scan_due_wake_requests_once(run_workspace_heartbeat=run_workspace_heartbeat))
+        except Exception:
+            continue
 
 
 def _extract_context_event_ids(wake_requests: List[Dict[str, Any]]) -> List[str]:

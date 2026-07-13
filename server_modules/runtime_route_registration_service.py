@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import queue
+import threading
 from typing import Any
 import uuid
 
@@ -208,6 +209,43 @@ def build_runtime_route_bindings(
     )
 
 
+_WAKE_REQUEST_SCANNER_LOCK = threading.Lock()
+_WAKE_REQUEST_SCANNER_STATE: dict[str, Any] = {"started": False}
+
+
+def _ensure_wake_request_scanner_started(run_workspace_heartbeat: Any) -> None:
+    """Starts the cross-workspace wake-request scanner exactly once per
+    process, independent of the legacy single-workspace HeartbeatScheduler's
+    `workspace_id` (frequently unset -- see HeartbeatScheduler's own
+    scope_missing short-circuit in heartbeat.py). Scheduled wake-up execution
+    must not depend on that value ever being configured: it was landing on
+    `None` here on every boot, so due wake requests were written but never
+    claimed. run_workspace_heartbeat is the same fully-wired, tier-safe
+    claim -> execute -> finalize callback the legacy scheduler already uses
+    (see bootstrap_callbacks.heartbeat_run_callback below) -- this just makes
+    sure it actually gets invoked, per workspace that has due work, instead
+    of only for one hardcoded-by-omission workspace that never existed."""
+    if not bounded_scheduler_service.wake_request_scan_enabled():
+        return
+    with _WAKE_REQUEST_SCANNER_LOCK:
+        if _WAKE_REQUEST_SCANNER_STATE["started"]:
+            return
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=bounded_scheduler_service.run_wake_request_scan_forever,
+            kwargs={
+                "run_workspace_heartbeat": run_workspace_heartbeat,
+                "stop_event": stop_event,
+            },
+            daemon=True,
+            name="wake-request-scanner",
+        )
+        thread.start()
+        _WAKE_REQUEST_SCANNER_STATE["started"] = True
+        _WAKE_REQUEST_SCANNER_STATE["stop_event"] = stop_event
+        _WAKE_REQUEST_SCANNER_STATE["thread"] = thread
+
+
 def register_runtime_run_routes_from_api(
     app,
     *,
@@ -373,6 +411,7 @@ def register_runtime_run_routes_from_api(
             trigger_now=heartbeat_scheduler.trigger_now,
             status=heartbeat_scheduler.status,
         )
+    _ensure_wake_request_scanner_started(bootstrap_callbacks.heartbeat_run_callback)
 
     if runtime_route_binding_service is None:
         runtime_route_binding_service = type(

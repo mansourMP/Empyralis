@@ -12228,6 +12228,42 @@ async def claim_due_agent_scheduler_wake_requests(
     return [dict(row) for row in rows]
 
 
+async def list_due_agent_scheduler_wake_request_scopes(
+    *,
+    due_before: Any,
+    limit: int = 200,
+) -> List[Dict[str, str]]:
+    """System-level scheduler-daemon scan: which (tenant_id, workspace_id)
+    pairs currently have at least one pending, due wake request. bypass_rls=True
+    because this has no single tenant scope to apply -- same shape as
+    list_workspaces_for_user's cross-tenant scan (filtered on something other
+    than the tenant/workspace dimension itself). The actual claim stays fully
+    RLS-scoped: callers must still go through claim_due_agent_scheduler_wake_requests
+    per (tenant_id, workspace_id) pair returned here."""
+    resolved_due_before = _coerce_timestamptz(due_before)
+    if resolved_due_before is None:
+        return []
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            return []
+        rows = await connection.fetch(
+            """
+            SELECT DISTINCT tenant_id, workspace_id
+            FROM agent_scheduler_wake_requests
+            WHERE status = 'pending'
+              AND due_at <= $1::timestamptz
+            LIMIT $2
+            """,
+            resolved_due_before,
+            max(1, int(limit or 200)),
+        )
+    return [
+        {"tenant_id": str(row["tenant_id"]), "workspace_id": str(row["workspace_id"])}
+        for row in rows
+        if row["tenant_id"] and row["workspace_id"]
+    ]
+
+
 async def update_agent_scheduler_wake_request_status(
     *,
     tenant_id: str,
