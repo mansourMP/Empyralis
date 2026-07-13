@@ -1351,18 +1351,54 @@ def _workflow_agent_fast_extract(
     return None
 
 
+def _honest_no_provider_error(context: Dict[str, Any], metadata: Dict[str, Any]) -> RuntimeError:
+    """Clear, honest error for a durable run reaching provider resolution
+    with no provider signal anywhere (context, metadata, node runtime
+    config). Without this, resolve_run_execution_context silently assumes
+    "openai" and fails one layer down with a misleading "No credentials
+    available for provider 'openai'" -- indistinguishable from an actually
+    missing OpenAI key even though no provider was ever requested.
+    """
+    is_heartbeat = bool(
+        metadata.get("wake_request_ids")
+        or str(metadata.get("source") or "").strip().lower() == "heartbeat"
+        or str(metadata.get("heartbeat_trigger") or "").strip()
+    )
+    if is_heartbeat:
+        return RuntimeError(
+            "No AI provider is configured for this scheduled/heartbeat run. "
+            "Heartbeat and wake-up runs currently execute as the workspace "
+            "orchestrator and do not dispatch to a specific agent's own "
+            "cli_subscription/BYOK model_config -- that requires the acting "
+            "agent's identity to be threaded through the scheduler, which is "
+            "not wired up today. Set an explicit provider for heartbeat runs, "
+            "or wire per-agent dispatch upstream before relying on scheduled "
+            "cli_subscription/BYOK turns."
+        )
+    workflow_id = str(context.get("workflow_id") or metadata.get("workflow_id") or "").strip()
+    where = f"workflow '{workflow_id}'" if workflow_id else "this run"
+    return RuntimeError(
+        f"No AI provider is configured for {where}: context.provider and "
+        "metadata.provider are both empty. The run's initiator must set a "
+        "provider explicitly -- silently assuming 'openai' here previously "
+        "produced a misleading credential error instead of surfacing the "
+        "real problem."
+    )
+
+
 def _resolve_agent_generation_state(base_context: Dict[str, Any], config: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
     runtime = config.get("runtime") if isinstance(config.get("runtime"), dict) else {}
     execution_context = dict(base_context)
     metadata = dict(base_context.get("metadata") if isinstance(base_context.get("metadata"), dict) else {})
     profile_id = str(runtime.get("provider_profile_id") or "").strip()
-    provider = str(runtime.get("provider") or execution_context.get("provider") or metadata.get("provider") or "openai").strip()
+    provider = str(runtime.get("provider") or execution_context.get("provider") or metadata.get("provider") or "").strip()
+    if not provider:
+        raise _honest_no_provider_error(execution_context, metadata)
     model = str(runtime.get("model") or execution_context.get("model") or metadata.get("model") or "").strip()
     if profile_id:
         metadata["profile_id"] = profile_id
-    if provider:
-        metadata["provider"] = provider
-        execution_context["provider"] = provider
+    metadata["provider"] = provider
+    execution_context["provider"] = provider
     if model:
         metadata["model"] = model
         execution_context["model"] = model
@@ -5682,6 +5718,8 @@ def _execute_orion_dag_node(
         business_plan = str(context.get("business_plan") or "")
         agent_summary = format_agent_summary(context.get("agents"))
         memory_context_block = _memory_prompt_context_block(context)
+        if not (str(context.get("provider") or "").strip() or str(metadata.get("provider") or "").strip()):
+            raise _honest_no_provider_error(context, metadata)
         provider, selected_model, candidates, _ = resolve_run_execution_context(context)
         plan_input = (
             f"Workflow ID: {workflow_id}\n"
