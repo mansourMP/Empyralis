@@ -111,7 +111,16 @@ class _PendingInvoke:
     run_id: str
     trace_id: str
     enforce_request_id: str
+    # True only once a send has COMPLETED successfully — after that, nobody
+    # ever resends (the gateway does not dedup inbound tool.invoke, so a
+    # resend would double-execute codex).
     delivered: bool = False
+    # The session currently attempting delivery, or None if free. A claim held
+    # by one session can be PREEMPTED by a different session (see
+    # _claim_pending_invoke) — a different session means the claim-holder's
+    # connection is being superseded and its in-flight send was already killed
+    # by _register_live_connection's close_stale, so it will not double-land.
+    delivering_session: Optional[str] = None
 
 
 _PENDING_GATEWAY_INVOKES: Dict[str, List["_PendingInvoke"]] = {}
@@ -138,21 +147,37 @@ def _snapshot_pending_invokes(gateway_id: str) -> List["_PendingInvoke"]:
         return list(_PENDING_GATEWAY_INVOKES.get(gateway_id, ()))
 
 
-def _claim_pending_invoke(pending: "_PendingInvoke") -> bool:
-    # Atomically claim delivery so the dispatcher fast-path and the
-    # connect/heartbeat flush can never both send the same invoke.
+def _claim_pending_invoke(pending: "_PendingInvoke", session_id: str) -> bool:
+    # Claim delivery for `session_id`. Returns True if this session may send.
+    #
+    # Preemption is the whole point: if a DIFFERENT session already holds the
+    # claim, take it over anyway. A different session exists only because the
+    # gateway reconnected, which means the old claim-holder's connection was
+    # superseded (and _register_live_connection.close_stale already failed its
+    # in-flight send) — so the fresh connection must not be blocked waiting on
+    # a doomed send that is hung against a half-open socket for up to the
+    # 10s write timeout. Once `delivered` is set (a send actually completed),
+    # nobody sends again.
     with _PENDING_GATEWAY_INVOKES_LOCK:
         if pending.delivered:
             return False
-        pending.delivered = True
+        if pending.delivering_session == session_id:
+            return False  # this same session is already attempting
+        pending.delivering_session = session_id
         return True
 
 
-def _release_pending_invoke(pending: "_PendingInvoke") -> None:
-    # Delivery attempt failed — release the claim so the next connect/heartbeat
-    # flush retries this invoke (it never actually reached the gateway).
+def _release_pending_invoke(pending: "_PendingInvoke", session_id: str) -> None:
+    # A delivery attempt by `session_id` failed — release the claim, but ONLY
+    # if it is still ours (a newer session may have preempted us meanwhile).
     with _PENDING_GATEWAY_INVOKES_LOCK:
-        pending.delivered = False
+        if pending.delivering_session == session_id:
+            pending.delivering_session = None
+
+
+def _mark_pending_invoke_delivered(pending: "_PendingInvoke") -> None:
+    with _PENDING_GATEWAY_INVOKES_LOCK:
+        pending.delivered = True
 
 
 def _future_set_result_threadsafe(future: asyncio.Future[Any], loop: asyncio.AbstractEventLoop, value: Any) -> None:
@@ -1069,17 +1094,20 @@ async def _deliver_tool_invoke(connection: _LiveGatewayConnection, pending: _Pen
 
 async def _deliver_pending_invoke_via(connection: _LiveGatewayConnection, pending: _PendingInvoke) -> bool:
     """Claim, deliver, and dequeue a pending invoke over `connection`. Returns
-    True if THIS caller delivered it, False if it was already claimed/delivered
-    elsewhere. On delivery failure the claim is released so a later flush
-    retries — the frame never reached the gateway, so a resend is not a
-    double-execute (and the gateway dedups by frame id regardless)."""
-    if not _claim_pending_invoke(pending):
+    True if THIS caller delivered it, False if it was already delivered or is
+    being attempted by this same session. `delivered` is set only after the
+    send COMPLETES, so a hung/failed send on a superseded connection leaves the
+    invoke deliverable — a fresh connection preempts the claim (see
+    _claim_pending_invoke) rather than waiting on the doomed send."""
+    session_id = str(connection.session_id or "").strip()
+    if not _claim_pending_invoke(pending, session_id):
         return False
     try:
         await _deliver_tool_invoke(connection, pending)
     except Exception:
-        _release_pending_invoke(pending)
+        _release_pending_invoke(pending, session_id)
         raise
+    _mark_pending_invoke_delivered(pending)
     _remove_pending_invoke(pending.gateway_id, pending.request_id)
     return True
 
@@ -1190,22 +1218,34 @@ async def dispatch_tool_invoke_durable(
     # lost just because no socket was live at this exact moment. The response
     # half is already reconnect-proof via _DURABLE_DISPATCH_WAITERS.
     _enqueue_pending_invoke(pending)
-    last_error: Optional[Exception] = None
+    fast_path_task: Optional[asyncio.Task] = None
     try:
         # Fast path: if the gateway is already connected and fresh, deliver
-        # now instead of waiting for its next connect/heartbeat. If this fails
-        # (socket died mid-send, or a per-send gate a later connection clears),
-        # the invoke stays enqueued and the flush hook retries it.
+        # immediately instead of waiting for its next connect/heartbeat — but
+        # as a BACKGROUND task, never inline. A send into a socket that is
+        # dying can hang up to the 10s write timeout; awaiting it here would
+        # stall this dispatcher AND hold the delivery claim exactly when a
+        # fresh reconnect's flush should be taking over. As a detached task it
+        # can't block us: if it hangs, the connect/heartbeat flush preempts the
+        # claim (different session) and delivers on the new connection instead.
         connection = _get_live_connection(gateway_id)
         if (
             connection is not None
             and not _connection_is_stale(connection)
             and _connection_has_recent_inbound_frame(connection)
         ):
-            try:
-                await _deliver_pending_invoke_via(connection, pending)
-            except Exception as exc:
-                last_error = exc
+            async def _fast_path_deliver(conn: _LiveGatewayConnection) -> None:
+                try:
+                    await _deliver_pending_invoke_via(conn, pending)
+                except Exception as exc:
+                    _LOGGER.info(
+                        "Fast-path invoke delivery deferred to flush gateway_id=%s request_id=%s error=%s",
+                        gateway_id,
+                        resolved_request_id,
+                        str(exc) or type(exc).__name__,
+                    )
+
+            fast_path_task = asyncio.ensure_future(_fast_path_deliver(connection))
 
         remaining = deadline - time.monotonic()
         try:
@@ -1216,11 +1256,11 @@ async def dispatch_tool_invoke_durable(
             # Genuinely out of budget. If it was never delivered, the gateway
             # was unreachable for the whole window; if it WAS delivered, the
             # work ran but no response came back in time — don't resend either
-            # way (the gateway dedups, and a resend could double-execute).
+            # way (a resend would double-execute; the gateway does not dedup).
             if not pending.delivered:
                 raise RuntimeError(
                     f"Gateway dispatch could not be delivered within {deadline_seconds}s: "
-                    f"{last_error or 'Gateway is not currently connected.'}"
+                    f"Gateway is not currently connected."
                 )
             raise RuntimeError(
                 f"Gateway dispatch was delivered but no response arrived within {deadline_seconds}s."
@@ -1257,6 +1297,11 @@ async def dispatch_tool_invoke_durable(
     finally:
         _pop_durable_waiter(resolved_request_id)
         _remove_pending_invoke(gateway_id, resolved_request_id)
+        # Abandon a still-running fast-path send (e.g. hung against a dying
+        # socket) — delivery, if it was going to happen, already did via the
+        # flush; a lingering send would only risk a late double-execute.
+        if fast_path_task is not None and not fast_path_task.done():
+            fast_path_task.cancel()
 
 
 async def dispatch_tool_interrupt(

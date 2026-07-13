@@ -259,5 +259,64 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
         asyncio.run(run_test())
 
 
+    def test_flush_preempts_a_claim_held_by_a_superseded_session(self) -> None:
+        """Regression for the 2026-07-13 self-inflicted bug: a fast-path send
+        hung against a dying socket held the delivery claim, so the fresh
+        reconnect's flush skipped the invoke and the turn failed at the
+        deadline. A flush on a DIFFERENT (newer) session must PREEMPT such a
+        stuck claim and deliver — and once actually delivered, nobody resends."""
+        connection_b_sent: list[dict] = []
+
+        async def run_test() -> None:
+            pending = gateway_protocol_service._PendingInvoke(
+                request_id="durable-req-5",
+                gateway_id="gw-1",
+                capability_id="llm.generate",
+                payload={
+                    "capability_id": "llm.generate", "arguments": {},
+                    "run_id": "run-1", "trace_id": "trace-1", "workspace_id": "ws-1",
+                },
+                workspace_id="ws-1",
+                run_id="run-1",
+                trace_id="trace-1",
+                enforce_request_id="trace-1",
+            )
+            gateway_protocol_service._enqueue_pending_invoke(pending)
+
+            # The old connection's fast-path claimed the invoke and then hung
+            # mid-send: claim held, never released, never delivered.
+            self.assertTrue(gateway_protocol_service._claim_pending_invoke(pending, "sess-old"))
+            # A redundant attempt by that SAME stuck session must not re-send.
+            self.assertFalse(gateway_protocol_service._claim_pending_invoke(pending, "sess-old"))
+
+            connection_b = SimpleNamespace(
+                session_id="sess-new",
+                scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+                send_frame=AsyncMock(side_effect=lambda frame: connection_b_sent.append(frame)),
+            )
+            with (
+                patch(
+                    "server_modules.gateway_protocol_service.gateway_state_repository.get_gateway_registration",
+                    return_value={"gateway_id": "gw-1", "workspace_id": "ws-1", "tenant_id": "tenant-1", "device_id": "device-1"},
+                ),
+                patch("server_modules.gateway_protocol_service._enforce_gateway_quota_check", return_value=None),
+                patch("server_modules.gateway_protocol_service._enforce_gateway_tool_execute_protocol_route", return_value=None),
+                patch("server_modules.gateway_protocol_service._enforce_gateway_protocol_message_decision", return_value=None),
+                patch("server_modules.gateway_protocol_service._enforce_gateway_protocol_request_frame", return_value={}),
+                patch("server_modules.gateway_protocol_service.gateway_state_repository.record_gateway_event", return_value=None),
+            ):
+                # The fresh reconnect's flush must preempt the stuck claim.
+                await gateway_protocol_service._flush_pending_invokes("gw-1", connection_b)
+
+            self.assertEqual(len(connection_b_sent), 1, "fresh session must preempt the stuck claim and deliver")
+            self.assertEqual(connection_b_sent[0]["id"], "durable-req-5")
+            self.assertTrue(pending.delivered)
+            # Now that it is truly delivered, no session — not even a brand new
+            # one — may resend (the gateway does not dedup inbound invokes).
+            self.assertFalse(gateway_protocol_service._claim_pending_invoke(pending, "sess-newer"))
+
+        asyncio.run(run_test())
+
+
 if __name__ == "__main__":
     unittest.main()
