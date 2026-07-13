@@ -11,7 +11,15 @@ from server_modules import auth, execution_mode_policy, gateway_state_repository
 
 
 DEFAULT_GATEWAY_SESSION_TTL_SECONDS = 15 * 60
-DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_SECONDS = 20
+# 10s (was 20s). The gateway reads this from the backend on connect and drives
+# its own heartbeat loop + dead-socket detection from it (2 missed beats ->
+# terminate + reconnect). At 20s a half-open socket took ~60-80s to be noticed
+# — longer than a dispatch deadline, so a turn arriving just as the socket
+# silently died had no reconnect (and thus no durable-inbound flush) in time.
+# At 10s that detection window roughly halves to ~40s, inside the deadline, and
+# it also doubles how often the per-heartbeat pending-invoke flush runs. Still
+# well under Cloudflare's ~100s idle cutoff.
+DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_SECONDS = 10
 DEFAULT_GATEWAY_FRESH_HEARTBEAT_SECONDS = max(45, DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_SECONDS * 2)
 
 
