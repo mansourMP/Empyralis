@@ -37,6 +37,35 @@ function stepKindForTransparencyEventType(eventType: string): string {
 
 const TRANSPARENCY_ERROR_STATUSES = new Set(["failed", "denied", "blocked"]);
 
+// Edge/proxy failures (Cloudflare 524s, nginx 502/504s, expired-session 401s)
+// return HTML or plain-text bodies, not JSON — never let those render verbatim
+// in the chat as a raw error dump. Always reduce to one clean sentence.
+function friendlyTurnFailureMessage(status: number, rawBody: string): string {
+  const trimmed = rawBody.trim();
+  if (trimmed && !trimmed.startsWith("<") && trimmed.length < 300) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const detail = parsed && typeof parsed === "object" ? (parsed.detail ?? parsed.message ?? parsed.error) : null;
+      if (typeof detail === "string" && detail.trim() && !detail.trim().startsWith("<")) {
+        return detail.trim();
+      }
+    } catch {
+      // Not JSON — fall through to a status-based message below.
+    }
+  }
+
+  if (status === 401 || status === 403) {
+    return "Your session expired. Reload the page and sign in again, then resend.";
+  }
+  if (status === 429) {
+    return "Too many requests right now. Wait a moment and try again.";
+  }
+  if (status === 502 || status === 503 || status === 504 || status === 524) {
+    return "This took too long to respond. It may still finish in the background — check back in a moment, or send again.";
+  }
+  return `Could not send that (HTTP ${status}). Try again.`;
+}
+
 // Reuses chat-message.tsx's existing "activity_step" display_kind (already
 // rendered by ChatMessage for other producers) instead of building a new
 // component — see docs/PLACEMENT-EXECUTION-AUTHORITY-REPORT.md §6 on why a
@@ -278,7 +307,7 @@ export function AgentChat({
 
       if (!turnRes.ok) {
         const body = await turnRes.text().catch(() => "");
-        throw new Error(body || `HTTP ${turnRes.status}`);
+        throw new Error(friendlyTurnFailureMessage(turnRes.status, body));
       }
 
       const contentType = turnRes.headers.get("content-type") || "";
