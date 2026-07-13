@@ -1104,7 +1104,17 @@ async def _dispatch_cli_subscription_gateway_brain(
             agent_scope="specialist",
             emit_hardware_activity=False,
             durable=True,
-            durable_deadline_seconds=60,
+            # 120s is a max RECONNECT wait, not a busy-wait. With durable
+            # delivery a healthy connection still answers in codex-time
+            # (seconds) — the dispatch returns the moment the response future
+            # resolves, not at the deadline. This budget only bounds the
+            # UNhealthy case: a consumer/edge (Cloudflare) socket can die
+            # silently and take ~50-60s to be noticed + reconnected; the
+            # deadline must exceed that gap for the connect-flush to deliver
+            # across the reconnect at all. Set above the observed detection
+            # gap, well under the SSE-stream keepalive that holds the client
+            # request open.
+            durable_deadline_seconds=120,
         )
     except Exception as exc:
         _reason = str(exc)
