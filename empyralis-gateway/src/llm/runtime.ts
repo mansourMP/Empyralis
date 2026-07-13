@@ -1,6 +1,7 @@
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 import { runCliSubscription, CliRunError, type CliRunResult, type CliSubscriptionRuntime } from "./cli-runner";
 import { sharedCodexAppServer, codexAppServerEnabled } from "./codex-app-server";
+import { sharedClaudeCliPrewarmPool, claudeCliPrewarmEnabled } from "./claude-cli-prewarm";
 
 // BYO-brain Phase 2: the on-box LLM capability. This runs on the USER's paired
 // box and forwards a turn to the box's OWN local Ollama endpoint
@@ -319,6 +320,10 @@ export class GatewayLLMRuntime {
     // system prompt separately (thread/start baseInstructions), so DON'T inline
     // it for that path; the exec path still inlines system for codex as before.
     const useCodexDaemon = params.runtime === "codex" && codexAppServerEnabled();
+    // Phase 1 (latency), claude_code variant: route through the single-use
+    // prewarm pool when enabled (see claude-cli-prewarm.ts for why this is a
+    // pool of one-shot processes, not a reused multi-turn daemon like codex's).
+    const useClaudePrewarm = params.runtime === "claude_code" && claudeCliPrewarmEnabled();
     const { systemPrompt, promptText } = buildCliPrompt(params.messages, {
       includeSystemInline: params.runtime === "codex" && !useCodexDaemon,
     });
@@ -329,6 +334,13 @@ export class GatewayLLMRuntime {
     try {
       if (useCodexDaemon) {
         result = await sharedCodexAppServer().generate({
+          prompt: promptText,
+          systemPrompt,
+          model: params.model,
+          timeoutMs: params.timeoutMs,
+        });
+      } else if (useClaudePrewarm) {
+        result = await sharedClaudeCliPrewarmPool().generate({
           prompt: promptText,
           systemPrompt,
           model: params.model,
