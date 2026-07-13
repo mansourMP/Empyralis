@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from fastapi import WebSocket, WebSocketDisconnect
@@ -88,6 +88,71 @@ class _QueuedGatewaySend:
     frame: Dict[str, Any]
     future: asyncio.Future[None]
     loop: asyncio.AbstractEventLoop
+
+
+# Durable INBOUND delivery (the mirror of the gateway-side outbox).
+#
+# The response half of a durable dispatch already survives reconnects
+# (_DURABLE_DISPATCH_WAITERS above). The DELIVERY half used to not: a
+# tool.invoke was pushed at whatever socket happened to be live and, if none
+# was fresh within the deadline, the whole turn failed — a timing race against
+# the gateway's reconnect cycle. These invokes are instead enqueued per
+# gateway_id and flushed onto the socket the moment the gateway is connected
+# or heartbeats, so a command can no longer be lost just because the socket
+# blinked at the wrong instant. Delivered exactly once (claim/release below);
+# the gateway's own frame-id dedup + PendingResponseQueue handle the rest.
+@dataclass
+class _PendingInvoke:
+    request_id: str
+    gateway_id: str
+    capability_id: str
+    payload: Dict[str, Any]
+    workspace_id: str
+    run_id: str
+    trace_id: str
+    enforce_request_id: str
+    delivered: bool = False
+
+
+_PENDING_GATEWAY_INVOKES: Dict[str, List["_PendingInvoke"]] = {}
+_PENDING_GATEWAY_INVOKES_LOCK = threading.Lock()
+
+
+def _enqueue_pending_invoke(pending: "_PendingInvoke") -> None:
+    with _PENDING_GATEWAY_INVOKES_LOCK:
+        _PENDING_GATEWAY_INVOKES.setdefault(pending.gateway_id, []).append(pending)
+
+
+def _remove_pending_invoke(gateway_id: str, request_id: str) -> None:
+    with _PENDING_GATEWAY_INVOKES_LOCK:
+        queue = _PENDING_GATEWAY_INVOKES.get(gateway_id)
+        if not queue:
+            return
+        queue[:] = [p for p in queue if p.request_id != request_id]
+        if not queue:
+            _PENDING_GATEWAY_INVOKES.pop(gateway_id, None)
+
+
+def _snapshot_pending_invokes(gateway_id: str) -> List["_PendingInvoke"]:
+    with _PENDING_GATEWAY_INVOKES_LOCK:
+        return list(_PENDING_GATEWAY_INVOKES.get(gateway_id, ()))
+
+
+def _claim_pending_invoke(pending: "_PendingInvoke") -> bool:
+    # Atomically claim delivery so the dispatcher fast-path and the
+    # connect/heartbeat flush can never both send the same invoke.
+    with _PENDING_GATEWAY_INVOKES_LOCK:
+        if pending.delivered:
+            return False
+        pending.delivered = True
+        return True
+
+
+def _release_pending_invoke(pending: "_PendingInvoke") -> None:
+    # Delivery attempt failed — release the claim so the next connect/heartbeat
+    # flush retries this invoke (it never actually reached the gateway).
+    with _PENDING_GATEWAY_INVOKES_LOCK:
+        pending.delivered = False
 
 
 def _future_set_result_threadsafe(future: asyncio.Future[Any], loop: asyncio.AbstractEventLoop, value: Any) -> None:
@@ -938,7 +1003,102 @@ async def dispatch_tool_invoke(
 
 
 _DURABLE_DISPATCH_DEFAULT_DEADLINE_SECONDS = 240  # ~4 minutes
-_DURABLE_DISPATCH_RETRY_SLEEP_SECONDS = 4.0
+
+
+async def _deliver_tool_invoke(connection: _LiveGatewayConnection, pending: _PendingInvoke) -> None:
+    """Run the per-send enforcement gates against `connection` and write the
+    tool.invoke frame. Raises on any enforcement failure or write error — the
+    caller decides whether to leave the invoke enqueued for a later retry. The
+    enforcement checks must run here (not at enqueue time) because they need a
+    concrete live connection's session_id/scope, and the delivering connection
+    may not be the one that existed when the dispatch started."""
+    gateway_id = pending.gateway_id
+    registration = gateway_state_repository.get_gateway_registration(gateway_id) or {}
+    _enforce_gateway_quota_check(
+        gateway_id=str(gateway_id or "").strip(),
+        session_id=str(connection.session_id or "").strip(),
+        workspace_id=str(pending.workspace_id or "").strip(),
+        tenant_id=str(registration.get("tenant_id") or connection.scope.get("tenant_id") or "").strip(),
+        device_id=str(registration.get("device_id") or "").strip(),
+        request_id=pending.enforce_request_id,
+        quota_profile="gateway_tool_execution",
+    )
+    _enforce_gateway_tool_execute_protocol_route(
+        gateway_id=str(gateway_id or "").strip(),
+        session_id=str(connection.session_id or "").strip(),
+        workspace_id=str(pending.workspace_id or "").strip(),
+        tenant_id=str(registration.get("tenant_id") or connection.scope.get("tenant_id") or "").strip(),
+        device_id=str(registration.get("device_id") or "").strip(),
+        capability_id=str(pending.capability_id or "").strip(),
+        run_id=str(pending.run_id or "").strip(),
+        trace_id=str(pending.trace_id or "").strip(),
+        request_id=pending.enforce_request_id,
+    )
+    _enforce_gateway_protocol_message_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        session_id=str(connection.session_id or "").strip(),
+        workspace_id=str(pending.workspace_id or "").strip(),
+        message_type="tool.invoke",
+        payload=pending.payload,
+        tool_name=str(pending.capability_id or "").strip(),
+    )
+    frame = {
+        "kind": "request",
+        "id": pending.request_id,
+        "type": "tool.invoke",
+        "ts": gateway_state_repository._utc_now_iso(),
+        "scope": dict(connection.scope),
+        "payload": dict(pending.payload),
+    }
+    _enforce_gateway_protocol_request_frame(
+        gateway_id=str(gateway_id or "").strip(),
+        session_id=str(connection.session_id or "").strip(),
+        message_type="tool.invoke",
+        frame=frame,
+    )
+    await connection.send_frame(frame)
+    gateway_state_repository.record_gateway_event(
+        gateway_id=str(gateway_id or "").strip(),
+        session_id=str(connection.session_id or "").strip(),
+        direction="outbound",
+        frame_kind="request",
+        message_type="tool.invoke",
+        payload=frame,
+    )
+
+
+async def _deliver_pending_invoke_via(connection: _LiveGatewayConnection, pending: _PendingInvoke) -> bool:
+    """Claim, deliver, and dequeue a pending invoke over `connection`. Returns
+    True if THIS caller delivered it, False if it was already claimed/delivered
+    elsewhere. On delivery failure the claim is released so a later flush
+    retries — the frame never reached the gateway, so a resend is not a
+    double-execute (and the gateway dedups by frame id regardless)."""
+    if not _claim_pending_invoke(pending):
+        return False
+    try:
+        await _deliver_tool_invoke(connection, pending)
+    except Exception:
+        _release_pending_invoke(pending)
+        raise
+    _remove_pending_invoke(pending.gateway_id, pending.request_id)
+    return True
+
+
+async def _flush_pending_invokes(gateway_id: str, connection: _LiveGatewayConnection) -> None:
+    """Deliver any invokes queued for this gateway onto a just-connected /
+    freshly-heartbeating socket. Best-effort per invoke: a failure leaves that
+    invoke enqueued for the next connect/heartbeat, and the dispatcher's own
+    deadline bounds how long a truly-unreachable gateway keeps one alive."""
+    for pending in _snapshot_pending_invokes(gateway_id):
+        try:
+            await _deliver_pending_invoke_via(connection, pending)
+        except Exception as exc:
+            _LOGGER.info(
+                "Pending tool.invoke flush deferred gateway_id=%s request_id=%s error=%s",
+                gateway_id,
+                pending.request_id,
+                str(exc) or type(exc).__name__,
+            )
 
 
 async def dispatch_tool_invoke_durable(
@@ -958,24 +1118,27 @@ async def dispatch_tool_invoke_durable(
     actor_id: str = "",
 ) -> Dict[str, Any]:
     """Durable sibling of dispatch_tool_invoke: the WebSocket is transport,
-    not the unit of delivery. A dispatch started here survives the Gateway's
-    connection dying and reconnecting — possibly more than once — for up to
-    deadline_seconds total, instead of failing the instant one connection
-    instance goes away.
+    not the unit of delivery. Both directions are durable, symmetric with the
+    gateway-side outbox that already makes RESULTS reconnect-proof:
 
-    Two failure shapes, handled differently on purpose:
-      - the request was never confirmed WRITTEN to a live socket (no
-        connection existed yet, or the write itself raised) — safe to retry
-        the send once a connection reappears, since the Gateway never saw it.
-      - the write DID succeed, so the Gateway may already be running the
-        work (codex exec alone can take up to ~120s) — must NOT resend (that
-        would double-execute); instead just keep waiting for the response,
-        which the Gateway's own durable response queue delivers over
-        whichever connection exists once it's ready, tagged with this same
-        request_id (see empyralis-gateway's PendingResponseQueue). The
-        cross-connection correlation that lets a LATER connection resolve a
-        wait registered against an EARLIER, now-dead one lives in
+      - DELIVERY (this side, cloud -> gateway): the invoke is enqueued per
+        gateway_id (_enqueue_pending_invoke) and delivered exactly once, either
+        immediately on a currently-fresh socket (the fast path below) or by the
+        flush hook the instant the gateway next connects or heartbeats
+        (_flush_pending_invokes in handle_gateway_websocket). A command can no
+        longer be dropped just because no socket was live at the exact instant
+        the turn arrived — the old race against the gateway's reconnect cycle.
+      - RESPONSE (gateway -> cloud): once delivered, the gateway's own
+        PendingResponseQueue returns the reply over whichever connection is up
+        when it's ready, tagged with this request_id; the cross-connection
+        correlation that lets a LATER connection resolve a wait registered
+        against an EARLIER, now-dead one lives in
         resolve_response()/_DURABLE_DISPATCH_WAITERS above.
+
+    deadline_seconds is now a genuine upper bound — "the gateway was actually
+    unreachable this whole time" — not a race window. Delivered exactly once,
+    so the expensive work (codex exec, ~120s) never double-executes even across
+    multiple reconnects.
 
     Callers that don't need this (one-shot interactive capabilities like
     screenshot.capture or a browser action, where "the box was unreachable,
@@ -1011,129 +1174,89 @@ async def dispatch_tool_invoke_durable(
     if isinstance(policy, dict):
         payload["policy"] = dict(policy)
 
-    delivered = False
+    pending = _PendingInvoke(
+        request_id=resolved_request_id,
+        gateway_id=str(gateway_id or "").strip(),
+        capability_id=str(capability_id or "").strip(),
+        payload=payload,
+        workspace_id=str(workspace_id or "").strip(),
+        run_id=str(run_id or "").strip(),
+        trace_id=str(trace_id or "").strip(),
+        enforce_request_id=str(request_id or trace_id or run_id or "").strip(),
+    )
+    # Enqueue FIRST. If the gateway is offline or mid-reconnect right now, the
+    # flush hook in handle_gateway_websocket delivers this invoke the instant
+    # the gateway next connects or heartbeats — the command can no longer be
+    # lost just because no socket was live at this exact moment. The response
+    # half is already reconnect-proof via _DURABLE_DISPATCH_WAITERS.
+    _enqueue_pending_invoke(pending)
     last_error: Optional[Exception] = None
     try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            if not delivered:
-                try:
-                    connection = await _fresh_live_connection(
-                        gateway_id, require_recent_inbound=True, deadline=deadline,
-                    )
-                    registration = gateway_state_repository.get_gateway_registration(gateway_id) or {}
-                    _enforce_gateway_quota_check(
-                        gateway_id=str(gateway_id or "").strip(),
-                        session_id=str(connection.session_id or "").strip(),
-                        workspace_id=str(workspace_id or "").strip(),
-                        tenant_id=str(registration.get("tenant_id") or connection.scope.get("tenant_id") or "").strip(),
-                        device_id=str(registration.get("device_id") or "").strip(),
-                        request_id=str(request_id or trace_id or run_id or "").strip(),
-                        quota_profile="gateway_tool_execution",
-                    )
-                    _enforce_gateway_tool_execute_protocol_route(
-                        gateway_id=str(gateway_id or "").strip(),
-                        session_id=str(connection.session_id or "").strip(),
-                        workspace_id=str(workspace_id or "").strip(),
-                        tenant_id=str(registration.get("tenant_id") or connection.scope.get("tenant_id") or "").strip(),
-                        device_id=str(registration.get("device_id") or "").strip(),
-                        capability_id=str(capability_id or "").strip(),
-                        run_id=str(run_id or "").strip(),
-                        trace_id=str(trace_id or "").strip(),
-                        request_id=str(request_id or trace_id or run_id or "").strip(),
-                    )
-                    _enforce_gateway_protocol_message_decision(
-                        gateway_id=str(gateway_id or "").strip(),
-                        session_id=str(connection.session_id or "").strip(),
-                        workspace_id=str(workspace_id or "").strip(),
-                        message_type="tool.invoke",
-                        payload=payload,
-                        tool_name=str(capability_id or "").strip(),
-                    )
-                    frame = {
-                        "kind": "request",
-                        "id": resolved_request_id,
-                        "type": "tool.invoke",
-                        "ts": gateway_state_repository._utc_now_iso(),
-                        "scope": dict(connection.scope),
-                        "payload": dict(payload),
-                    }
-                    _enforce_gateway_protocol_request_frame(
-                        gateway_id=str(gateway_id or "").strip(),
-                        session_id=str(connection.session_id or "").strip(),
-                        message_type="tool.invoke",
-                        frame=frame,
-                    )
-                    await connection.send_frame(frame)
-                    delivered = True
-                    gateway_state_repository.record_gateway_event(
-                        gateway_id=str(gateway_id or "").strip(),
-                        session_id=str(connection.session_id or "").strip(),
-                        direction="outbound",
-                        frame_kind="request",
-                        message_type="tool.invoke",
-                        payload=frame,
-                    )
-                except Exception as exc:
-                    # The write itself never landed — nothing for the Gateway
-                    # to have received, so retrying is safe, not a double-send.
-                    last_error = exc
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    await asyncio.sleep(min(_DURABLE_DISPATCH_RETRY_SLEEP_SECONDS, remaining))
-                    continue
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
+        # Fast path: if the gateway is already connected and fresh, deliver
+        # now instead of waiting for its next connect/heartbeat. If this fails
+        # (socket died mid-send, or a per-send gate a later connection clears),
+        # the invoke stays enqueued and the flush hook retries it.
+        connection = _get_live_connection(gateway_id)
+        if (
+            connection is not None
+            and not _connection_is_stale(connection)
+            and _connection_has_recent_inbound_frame(connection)
+        ):
             try:
-                response = await asyncio.wait_for(asyncio.shield(durable_future), timeout=remaining)
-            except asyncio.TimeoutError:
-                # Delivered, but no response within the outer deadline — do
-                # NOT loop back to resend; that would risk double-executing
-                # work that may still be running or already finished.
-                break
+                await _deliver_pending_invoke_via(connection, pending)
+            except Exception as exc:
+                last_error = exc
 
-            if not bool(response.get("ok")):
-                error = dict(response.get("error") or {})
-                raise ValueError(
-                    str(error.get("message") or "Gateway tool invocation failed.").strip()
-                    or "Gateway tool invocation failed."
+        remaining = deadline - time.monotonic()
+        try:
+            response = await asyncio.wait_for(
+                asyncio.shield(durable_future), timeout=max(remaining, 0.1)
+            )
+        except asyncio.TimeoutError:
+            # Genuinely out of budget. If it was never delivered, the gateway
+            # was unreachable for the whole window; if it WAS delivered, the
+            # work ran but no response came back in time — don't resend either
+            # way (the gateway dedups, and a resend could double-execute).
+            if not pending.delivered:
+                raise RuntimeError(
+                    f"Gateway dispatch could not be delivered within {deadline_seconds}s: "
+                    f"{last_error or 'Gateway is not currently connected.'}"
                 )
-            _resolved_actor = str(actor_id or "").strip() or "sage"
+            raise RuntimeError(
+                f"Gateway dispatch was delivered but no response arrived within {deadline_seconds}s."
+            )
+
+        if not bool(response.get("ok")):
+            error = dict(response.get("error") or {})
+            raise ValueError(
+                str(error.get("message") or "Gateway tool invocation failed.").strip()
+                or "Gateway tool invocation failed."
+            )
+        _resolved_actor = str(actor_id or "").strip() or "sage"
+        try:
+            from server_modules import ledger_audit as _la
+            import asyncio as _aio
+            async def _ledger():
+                await _la.record_gateway_hardware_invoke(
+                    workspace_id=str(workspace_id or "").strip(),
+                    actor_id=_resolved_actor,
+                    capability_id=str(capability_id or "").strip(),
+                    arguments=dict(arguments or {}),
+                    status="executed",
+                    trace_id=str(trace_id or "").strip() or None,
+                    run_id=str(run_id or "").strip() or None,
+                )
             try:
-                from server_modules import ledger_audit as _la
-                import asyncio as _aio
-                async def _ledger():
-                    await _la.record_gateway_hardware_invoke(
-                        workspace_id=str(workspace_id or "").strip(),
-                        actor_id=_resolved_actor,
-                        capability_id=str(capability_id or "").strip(),
-                        arguments=dict(arguments or {}),
-                        status="executed",
-                        trace_id=str(trace_id or "").strip() or None,
-                        run_id=str(run_id or "").strip() or None,
-                    )
-                try:
-                    _aio.get_running_loop()
-                    _aio.create_task(_ledger())
-                except RuntimeError:
-                    _aio.run(_ledger())
-            except Exception:
-                pass  # ledger is best-effort, never blocks execution
-            return dict(response.get("payload") or {})
+                _aio.get_running_loop()
+                _aio.create_task(_ledger())
+            except RuntimeError:
+                _aio.run(_ledger())
+        except Exception:
+            pass  # ledger is best-effort, never blocks execution
+        return dict(response.get("payload") or {})
     finally:
         _pop_durable_waiter(resolved_request_id)
-
-    if not delivered:
-        raise RuntimeError(
-            f"Gateway dispatch could not be delivered within {deadline_seconds}s: "
-            f"{last_error or 'no live connection'}"
-        )
-    raise RuntimeError(f"Gateway dispatch was delivered but no response arrived within {deadline_seconds}s.")
+        _remove_pending_invoke(gateway_id, resolved_request_id)
 
 
 async def dispatch_tool_interrupt(
@@ -2183,6 +2306,14 @@ async def handle_gateway_websocket(
         )
         last_client_seq = first_seq
 
+        # Durable inbound delivery: deliver any tool.invokes that were enqueued
+        # while this gateway was offline or mid-reconnect. The connection is
+        # fully handshaked and fresh here — the reliable moment to flush the
+        # inbound queue, mirroring the gateway replaying its own outbox on
+        # connect (ws-client.ts replayPendingOutbox).
+        if connection is not None:
+            await _flush_pending_invokes(gateway_id, connection)
+
         while True:
             try:
                 raw_text = await websocket.receive_text()
@@ -2422,6 +2553,12 @@ async def handle_gateway_websocket(
                 if connection is not None:
                     connection.cache_frame_response(str(frame.get("id") or "").strip(), heartbeat_response)
                 await _drain_connection_outbound_queue()
+                # A heartbeat just proved this connection is alive and fresh —
+                # also the moment to deliver any invoke that was enqueued while
+                # the socket was up but momentarily stale (so it doesn't wait
+                # for a full disconnect/reconnect cycle to be flushed).
+                if connection is not None:
+                    await _flush_pending_invokes(gateway_id, connection)
                 continue
             if message_type == "gateway.state.update":
                 previous_health_state = str(registration.get("metadata", {}).get("health_state") or "").strip().lower()

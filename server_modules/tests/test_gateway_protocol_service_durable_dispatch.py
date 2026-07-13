@@ -8,6 +8,15 @@ from server_modules import gateway_protocol_service
 
 
 class DispatchToolInvokeDurableTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        # These durability stores are module-global; a test that fails mid-way
+        # could otherwise leak a pending invoke / waiter into the next test.
+        with gateway_protocol_service._PENDING_GATEWAY_INVOKES_LOCK:
+            gateway_protocol_service._PENDING_GATEWAY_INVOKES.clear()
+        with gateway_protocol_service._DURABLE_DISPATCH_WAITERS_LOCK:
+            gateway_protocol_service._DURABLE_DISPATCH_WAITERS.clear()
+
+
     # The enforcement chain (quota / protocol route / message decision /
     # request frame) is real production logic, each with its own
     # rust-kernel-decision payload shape and expected next_action — already
@@ -87,30 +96,20 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    def test_retries_the_send_when_no_connection_exists_yet_then_delivers(self) -> None:
-        """The other half: nothing was ever written (no live connection at
-        all when the dispatch started) — safe to retry the send itself,
-        unlike the delivered-but-no-response case above."""
-        attempts = {"get_connection_calls": 0}
-        connection_a = SimpleNamespace(
-            session_id="sess-a",
-            scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
-            send_frame=AsyncMock(return_value=None),
-        )
-
-        def flaky_get_live_connection(_gateway_id):
-            attempts["get_connection_calls"] += 1
-            if attempts["get_connection_calls"] < 3:
-                return None
-            return connection_a
+    def test_enqueues_when_offline_then_the_connect_flush_delivers(self) -> None:
+        """The core new guarantee: when NO connection is live at dispatch time,
+        the invoke is ENQUEUED (not dropped, not dependent on the dispatcher
+        polling for a socket) and delivered by the connect/heartbeat flush the
+        moment the gateway reappears — then the response resolves the original
+        caller. This is the durable-INBOUND mirror of the gateway replaying its
+        own outbox on reconnect."""
+        connection_b_sent: list[dict] = []
 
         async def run_test() -> None:
             with (
                 patch("server_modules.gateway_protocol_service.assert_not_killed", return_value=None),
-                patch(
-                    "server_modules.gateway_protocol_service._get_live_connection",
-                    side_effect=flaky_get_live_connection,
-                ),
+                # No live connection exists when the dispatch starts.
+                patch("server_modules.gateway_protocol_service._get_live_connection", return_value=None),
                 patch(
                     "server_modules.gateway_protocol_service.gateway_state_repository.get_gateway_registration",
                     return_value={"gateway_id": "gw-1", "workspace_id": "ws-1", "tenant_id": "tenant-1", "device_id": "device-1"},
@@ -120,10 +119,6 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
                 patch("server_modules.gateway_protocol_service._enforce_gateway_protocol_message_decision", return_value=None),
                 patch("server_modules.gateway_protocol_service._enforce_gateway_protocol_request_frame", return_value={}),
                 patch("server_modules.gateway_protocol_service.gateway_state_repository.record_gateway_event", return_value=None),
-                patch(
-                    "server_modules.gateway_protocol_service._DURABLE_DISPATCH_RETRY_SLEEP_SECONDS",
-                    0.01,
-                ),
             ):
                 dispatch_task = asyncio.ensure_future(
                     gateway_protocol_service.dispatch_tool_invoke_durable(
@@ -138,20 +133,41 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
                     )
                 )
 
+                # The dispatch should reach the "enqueued, waiting" state
+                # without any socket ever being live.
                 for _ in range(200):
-                    if connection_a.send_frame.await_count:
+                    if gateway_protocol_service._snapshot_pending_invokes("gw-1"):
                         break
                     await asyncio.sleep(0.02)
-                self.assertEqual(connection_a.send_frame.await_count, 1)
-                self.assertGreaterEqual(attempts["get_connection_calls"], 3)
+                self.assertTrue(
+                    gateway_protocol_service._snapshot_pending_invokes("gw-1"),
+                    "invoke should be enqueued while the gateway is offline",
+                )
 
-                connection_b = gateway_protocol_service._LiveGatewayConnection(
+                # The gateway reconnects: a fresh connection appears and the
+                # flush hook delivers the enqueued invoke onto it.
+                connection_b = SimpleNamespace(
+                    session_id="sess-b",
+                    scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+                    send_frame=AsyncMock(side_effect=lambda frame: connection_b_sent.append(frame)),
+                )
+                await gateway_protocol_service._flush_pending_invokes("gw-1", connection_b)
+                self.assertEqual(len(connection_b_sent), 1, "flush should deliver the enqueued invoke once")
+                self.assertEqual(connection_b_sent[0]["id"], "durable-req-2")
+                self.assertFalse(
+                    gateway_protocol_service._snapshot_pending_invokes("gw-1"),
+                    "invoke should be dequeued once delivered",
+                )
+
+                # The result comes back on that connection and resolves the
+                # original caller.
+                real_conn = gateway_protocol_service._LiveGatewayConnection(
                     websocket=object(),
                     gateway_id="gw-1",
                     session_id="sess-b",
                     scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
                 )
-                connection_b.resolve_response({
+                real_conn.resolve_response({
                     "kind": "response",
                     "id": "durable-req-2",
                     "ok": True,
@@ -160,6 +176,57 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
 
                 result = await asyncio.wait_for(dispatch_task, timeout=5)
                 self.assertEqual(result, {"result": {"text": "eventually delivered"}})
+
+        asyncio.run(run_test())
+
+    def test_delivered_exactly_once_across_fast_path_and_flush(self) -> None:
+        """A fast-path delivery and a concurrent connect flush must never both
+        send the same invoke — the claim/release guard makes delivery
+        exactly-once even if both fire."""
+        connection = SimpleNamespace(
+            session_id="sess-a",
+            scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+            send_frame=AsyncMock(return_value=None),
+        )
+
+        async def run_test() -> None:
+            with self._patches(connection):
+                dispatch_task = asyncio.ensure_future(
+                    gateway_protocol_service.dispatch_tool_invoke_durable(
+                        gateway_id="gw-1",
+                        capability_id="llm.generate",
+                        arguments={"prompt": "hello"},
+                        run_id="run-1",
+                        trace_id="trace-1",
+                        workspace_id="ws-1",
+                        deadline_seconds=10,
+                        request_id="durable-req-4",
+                    )
+                )
+                # Wait for the fast path to deliver.
+                for _ in range(100):
+                    if connection.send_frame.await_count:
+                        break
+                    await asyncio.sleep(0.02)
+                # A redundant flush (e.g. a heartbeat right after) must NOT
+                # resend — the invoke was already claimed + dequeued.
+                await gateway_protocol_service._flush_pending_invokes("gw-1", connection)
+                self.assertEqual(connection.send_frame.await_count, 1, "must deliver exactly once")
+
+                real_conn = gateway_protocol_service._LiveGatewayConnection(
+                    websocket=object(),
+                    gateway_id="gw-1",
+                    session_id="sess-a",
+                    scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+                )
+                real_conn.resolve_response({
+                    "kind": "response",
+                    "id": "durable-req-4",
+                    "ok": True,
+                    "payload": {"result": {"text": "once"}},
+                })
+                result = await asyncio.wait_for(dispatch_task, timeout=5)
+                self.assertEqual(result, {"result": {"text": "once"}})
 
         asyncio.run(run_test())
 
