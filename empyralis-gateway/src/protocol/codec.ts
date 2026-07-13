@@ -20,6 +20,7 @@ export const SAFE_FRAME_TYPES: ReadonlySet<string> = new Set([
   "gateway.presence",
   "channel.inbound",
   "cli.login.output",
+  "tool.invoke.chunk",
 ]);
 
 interface FrameValidationError {

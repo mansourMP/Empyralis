@@ -15,6 +15,8 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
             gateway_protocol_service._PENDING_GATEWAY_INVOKES.clear()
         with gateway_protocol_service._DURABLE_DISPATCH_WAITERS_LOCK:
             gateway_protocol_service._DURABLE_DISPATCH_WAITERS.clear()
+        with gateway_protocol_service._PENDING_DELTA_SINKS_LOCK:
+            gateway_protocol_service._PENDING_DELTA_SINKS.clear()
 
 
     # The enforcement chain (quota / protocol route / message decision /
@@ -326,6 +328,161 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
             # Now that it is truly delivered, no session — not even a brand new
             # one — may resend (the gateway does not dedup inbound invokes).
             self.assertFalse(gateway_protocol_service._claim_pending_invoke(pending, "sess-newer"))
+
+        asyncio.run(run_test())
+
+
+class StreamingDeltaSinkTests(unittest.TestCase):
+    """Phase 2 (streaming): tool.invoke.chunk events routed to an on_delta
+    sink registered by dispatch_tool_invoke_durable, keyed by request_id."""
+
+    def tearDown(self) -> None:
+        with gateway_protocol_service._PENDING_GATEWAY_INVOKES_LOCK:
+            gateway_protocol_service._PENDING_GATEWAY_INVOKES.clear()
+        with gateway_protocol_service._DURABLE_DISPATCH_WAITERS_LOCK:
+            gateway_protocol_service._DURABLE_DISPATCH_WAITERS.clear()
+        with gateway_protocol_service._PENDING_DELTA_SINKS_LOCK:
+            gateway_protocol_service._PENDING_DELTA_SINKS.clear()
+
+    def _patches(self, connection) -> ExitStack:
+        stack = ExitStack()
+        stack.enter_context(patch("server_modules.gateway_protocol_service.assert_not_killed", return_value=None))
+        stack.enter_context(patch("server_modules.gateway_protocol_service._get_live_connection", return_value=connection))
+        stack.enter_context(patch(
+            "server_modules.gateway_protocol_service.gateway_state_repository.get_gateway_registration",
+            return_value={"gateway_id": "gw-1", "workspace_id": "ws-1", "tenant_id": "tenant-1", "device_id": "device-1"},
+        ))
+        stack.enter_context(patch("server_modules.gateway_protocol_service._enforce_gateway_quota_check", return_value=None))
+        stack.enter_context(patch("server_modules.gateway_protocol_service._enforce_gateway_tool_execute_protocol_route", return_value=None))
+        stack.enter_context(patch("server_modules.gateway_protocol_service._enforce_gateway_protocol_message_decision", return_value=None))
+        stack.enter_context(patch("server_modules.gateway_protocol_service._enforce_gateway_protocol_request_frame", return_value={}))
+        stack.enter_context(patch("server_modules.gateway_protocol_service.gateway_state_repository.record_gateway_event", return_value=None))
+        return stack
+
+    def test_deltas_delivered_while_in_flight_reach_the_caller_on_delta(self) -> None:
+        """Chunks arriving for the SAME request_id while a durable dispatch is
+        awaiting its response must reach the caller's on_delta — the whole
+        point of the feature."""
+        connection = SimpleNamespace(
+            session_id="sess-a",
+            scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+            send_frame=AsyncMock(return_value=None),
+        )
+        received: list[str] = []
+
+        async def run_test() -> None:
+            with self._patches(connection):
+                dispatch_task = asyncio.ensure_future(
+                    gateway_protocol_service.dispatch_tool_invoke_durable(
+                        gateway_id="gw-1",
+                        capability_id="llm.generate",
+                        arguments={"prompt": "hello"},
+                        run_id="run-1",
+                        trace_id="trace-1",
+                        workspace_id="ws-1",
+                        deadline_seconds=10,
+                        request_id="durable-req-stream-1",
+                        on_delta=received.append,
+                    )
+                )
+                for _ in range(100):
+                    if gateway_protocol_service._snapshot_pending_invokes("gw-1"):
+                        break
+                    await asyncio.sleep(0.02)
+                await gateway_protocol_service._flush_pending_invokes("gw-1", connection)
+
+                # Two chunk events arrive for this exact request_id, before the
+                # final response — this is what the Gateway does while a codex
+                # daemon turn is still generating.
+                gateway_protocol_service._deliver_delta_to_sink(
+                    {"request_id": "durable-req-stream-1", "delta": "Hel"}
+                )
+                gateway_protocol_service._deliver_delta_to_sink(
+                    {"request_id": "durable-req-stream-1", "delta": "lo"}
+                )
+                self.assertEqual(received, ["Hel", "lo"])
+
+                real_conn = gateway_protocol_service._LiveGatewayConnection(
+                    websocket=object(), gateway_id="gw-1", session_id="sess-a",
+                    scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+                )
+                real_conn.resolve_response({
+                    "kind": "response", "id": "durable-req-stream-1", "ok": True,
+                    "payload": {"result": {"text": "Hello"}},
+                })
+                result = await asyncio.wait_for(dispatch_task, timeout=5)
+                self.assertEqual(result, {"result": {"text": "Hello"}})
+
+                # And the sink is unregistered afterward — not left dangling.
+                with gateway_protocol_service._PENDING_DELTA_SINKS_LOCK:
+                    self.assertNotIn("durable-req-stream-1", gateway_protocol_service._PENDING_DELTA_SINKS)
+
+        asyncio.run(run_test())
+
+    def test_a_chunk_for_an_unregistered_request_id_is_a_silent_no_op(self) -> None:
+        """A chunk that arrives for a request_id nobody registered (wrong id,
+        or arrived after the dispatch already settled and cleaned up) must
+        never raise — it's fire-and-forget by design."""
+        gateway_protocol_service._deliver_delta_to_sink({"request_id": "no-such-request", "delta": "x"})
+        gateway_protocol_service._deliver_delta_to_sink({"delta": "no request_id at all"})
+        gateway_protocol_service._deliver_delta_to_sink({"request_id": "no-such-request", "delta": ""})
+        # No assertion needed beyond "didn't raise" — this is the whole test.
+
+    def test_a_broken_sink_never_crashes_delivery(self) -> None:
+        """wrap_generation_with_sink's own contract says a sink error must
+        never break the caller — the gateway-side delivery must honor the
+        same guarantee for its half of the bridge."""
+        def _exploding_sink(_delta: str) -> None:
+            raise RuntimeError("boom")
+
+        gateway_protocol_service._register_delta_sink("durable-req-broken", _exploding_sink)
+        try:
+            gateway_protocol_service._deliver_delta_to_sink({"request_id": "durable-req-broken", "delta": "x"})
+        finally:
+            gateway_protocol_service._unregister_delta_sink("durable-req-broken")
+
+    def test_on_delta_is_never_registered_when_not_provided(self) -> None:
+        """Callers that don't pass on_delta (every capability today except the
+        codex daemon path) must leave no trace in the registry — confirms the
+        feature is fully inert unless explicitly opted into."""
+        connection = SimpleNamespace(
+            session_id="sess-a",
+            scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+            send_frame=AsyncMock(return_value=None),
+        )
+
+        async def run_test() -> None:
+            with self._patches(connection):
+                dispatch_task = asyncio.ensure_future(
+                    gateway_protocol_service.dispatch_tool_invoke_durable(
+                        gateway_id="gw-1",
+                        capability_id="llm.generate",
+                        arguments={"prompt": "hello"},
+                        run_id="run-1",
+                        trace_id="trace-1",
+                        workspace_id="ws-1",
+                        deadline_seconds=10,
+                        request_id="durable-req-stream-2",
+                    )
+                )
+                for _ in range(100):
+                    if gateway_protocol_service._snapshot_pending_invokes("gw-1"):
+                        break
+                    await asyncio.sleep(0.02)
+                await gateway_protocol_service._flush_pending_invokes("gw-1", connection)
+
+                with gateway_protocol_service._PENDING_DELTA_SINKS_LOCK:
+                    self.assertEqual(gateway_protocol_service._PENDING_DELTA_SINKS, {})
+
+                real_conn = gateway_protocol_service._LiveGatewayConnection(
+                    websocket=object(), gateway_id="gw-1", session_id="sess-a",
+                    scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+                )
+                real_conn.resolve_response({
+                    "kind": "response", "id": "durable-req-stream-2", "ok": True,
+                    "payload": {"result": {"text": "fine"}},
+                })
+                await asyncio.wait_for(dispatch_task, timeout=5)
 
         asyncio.run(run_test())
 

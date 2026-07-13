@@ -14,7 +14,8 @@ export type GatewayEventType =
   | "gateway.hello"
   | "gateway.presence"
   | "channel.inbound"
-  | "cli.login.output";
+  | "cli.login.output"
+  | "tool.invoke.chunk";
 
 export type GatewayFrameKind = "request" | "response" | "event";
 
@@ -119,6 +120,16 @@ export interface GatewayToolInterruptPayload {
   trace_id: string;
   workspace_id: string;
   reason?: string;
+}
+
+/** Phase 2 (streaming): a partial-text event for an in-flight tool.invoke,
+ *  correlated by request_id (the SAME id as the eventual response frame).
+ *  Fire-and-forget, best-effort — the durable tool.invoke/response pair is
+ *  still the authoritative delivery; losing a chunk changes nothing except
+ *  how "live" the reply looks while streaming. */
+export interface GatewayToolInvokeChunkPayload {
+  request_id: string;
+  delta: string;
 }
 
 export interface GatewayChannelInboundPayload {

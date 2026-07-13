@@ -182,6 +182,9 @@ async function main(): Promise<void> {
   // constructed before client exists (the router needs it first), so the
   // event-push side of it is wired here, after the fact.
   cliSetupRuntime.setEventPublisher((payload) => client.publishEvent("cli.login.output", payload));
+  // Phase 2 (streaming): same reason — llmRuntime is constructed before
+  // client exists.
+  llmRuntime.setEventPublisher((payload) => client.publishEvent("tool.invoke.chunk", payload));
 
   const cleanup = async (reason: string) => {
     await journal.append("system", "gateway.process.stop", {

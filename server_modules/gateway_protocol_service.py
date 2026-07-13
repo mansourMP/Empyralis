@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 from fastapi import WebSocket, WebSocketDisconnect
@@ -178,6 +178,48 @@ def _release_pending_invoke(pending: "_PendingInvoke", session_id: str) -> None:
 def _mark_pending_invoke_delivered(pending: "_PendingInvoke") -> None:
     with _PENDING_GATEWAY_INVOKES_LOCK:
         pending.delivered = True
+
+
+# ── Streaming deltas (Phase 2) ───────────────────────────────────────────────
+# The Gateway may push zero or more `tool.invoke.chunk` EVENT frames for an
+# in-flight durable invoke, correlated by request_id — the same id the
+# eventual `response` frame resolves. This is deliberately NOT part of the
+# request/response future machinery above: a chunk is fire-and-forget, never
+# awaited, never retried, and losing one changes nothing about correctness —
+# the durable tool.invoke/response pair remains the sole source of truth for
+# the actual result. A sink is only registered while dispatch_tool_invoke_durable
+# is actually awaiting a response for that request_id; any chunk that arrives
+# after (a late/duplicate frame) finds nothing registered and is silently
+# dropped, matching resolve_response()'s own "already popped" behavior above.
+_PENDING_DELTA_SINKS: Dict[str, Callable[[str], None]] = {}
+_PENDING_DELTA_SINKS_LOCK = threading.Lock()
+
+
+def _register_delta_sink(request_id: str, sink: Callable[[str], None]) -> None:
+    with _PENDING_DELTA_SINKS_LOCK:
+        _PENDING_DELTA_SINKS[request_id] = sink
+
+
+def _unregister_delta_sink(request_id: str) -> None:
+    with _PENDING_DELTA_SINKS_LOCK:
+        _PENDING_DELTA_SINKS.pop(request_id, None)
+
+
+def _deliver_delta_to_sink(payload: Dict[str, Any]) -> None:
+    request_id = str(payload.get("request_id") or "").strip()
+    if not request_id:
+        return
+    with _PENDING_DELTA_SINKS_LOCK:
+        sink = _PENDING_DELTA_SINKS.get(request_id)
+    if sink is None:
+        return
+    delta = str(payload.get("delta") or "")
+    if not delta:
+        return
+    try:
+        sink(delta)
+    except Exception:
+        pass  # a broken sink must never break the gateway's receive loop
 
 
 def _future_set_result_threadsafe(future: asyncio.Future[Any], loop: asyncio.AbstractEventLoop, value: Any) -> None:
@@ -1175,6 +1217,7 @@ async def dispatch_tool_invoke_durable(
     agent_scope: Optional[str] = None,
     policy: Optional[Dict[str, Any]] = None,
     actor_id: str = "",
+    on_delta: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Durable sibling of dispatch_tool_invoke: the WebSocket is transport,
     not the unit of delivery. Both directions are durable, symmetric with the
@@ -1216,6 +1259,12 @@ async def dispatch_tool_invoke_durable(
         resolved_request_id,
         _PendingGatewayRequest(message_type="tool.invoke", future=durable_future, loop=loop),
     )
+    # Phase 2 (streaming): register on_delta under the SAME request_id so any
+    # tool.invoke.chunk event frame the Gateway sends while this invoke is
+    # in flight reaches the caller's sink (see _deliver_delta_to_sink). Purely
+    # additive — callers that don't pass on_delta see no change at all.
+    if on_delta is not None:
+        _register_delta_sink(resolved_request_id, on_delta)
 
     payload = {
         "capability_id": str(capability_id or "").strip(),
@@ -1307,6 +1356,8 @@ async def dispatch_tool_invoke_durable(
     finally:
         _pop_durable_waiter(resolved_request_id)
         _remove_pending_invoke(gateway_id, resolved_request_id)
+        if on_delta is not None:
+            _unregister_delta_sink(resolved_request_id)
 
 
 async def dispatch_tool_interrupt(
@@ -2515,6 +2566,14 @@ async def handle_gateway_websocket(
                         ack=frame_ack,
                         metadata={"last_personal_channel_event": "channel.inbound"},
                     )
+                    continue
+                if str(frame.get("type") or "").strip() == "tool.invoke.chunk":
+                    # Fire-and-forget: no future to resolve, no ack needed, no
+                    # session mutation — just route the delta to whichever
+                    # in-flight durable dispatch registered a sink for this
+                    # request_id (a no-op if none did, or if it already
+                    # finished — see _deliver_delta_to_sink).
+                    _deliver_delta_to_sink(dict(payload))
                     continue
                 continue
             if frame_kind != "request":

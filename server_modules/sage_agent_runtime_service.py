@@ -1111,6 +1111,29 @@ async def _dispatch_cli_subscription_gateway_brain(
     # guard on unregister plus eviction of any stale connection on register.
     # A healthy connection now answers in seconds — the deadline below is
     # back to a real timeout, not a workaround.
+
+    # Phase 2 (streaming): forward Codex's real-time deltas into the SAME
+    # live-event sink web chat already uses for every other provider
+    # (_GENERATION_EVENT_SINK / wrap_generation_with_sink in
+    # direct_chat_generation_service.py) — no new transport, just plugging
+    # into the existing one. `sink` is resolved ONCE, here, in this call's own
+    # thread/context (the only place it's guaranteed to be set correctly);
+    # `_on_delta` below is a plain closure over it, safe to invoke later from
+    # a different thread (the gateway WS receive loop) — the sink itself is
+    # already required to be thread-safe by wrap_generation_with_sink's own
+    # contract. None for Telegram/API/background turns, exactly like every
+    # other provider's streaming today.
+    from server_modules.direct_chat_generation_service import _GENERATION_EVENT_SINK
+
+    _sink = _GENERATION_EVENT_SINK.get(None)
+
+    def _on_delta(delta: str) -> None:
+        if _sink is not None:
+            try:
+                _sink({"type": "chunk", "delta": delta})
+            except Exception:
+                pass
+
     try:
         response = await gateway_execution_service.execute_tool_via_gateway(
             gateway_id=gateway_id,
@@ -1135,13 +1158,18 @@ async def _dispatch_cli_subscription_gateway_brain(
             durable=True,
             # Deliberately short (was 120s) so a turn that CAN'T be delivered
             # fails fast instead of making the user wait out a long window for
-            # a guaranteed failure. The known blocker upstream (the direct-chat
-            # turn runs on a detached worker-thread event loop, so gateway
-            # sends are cross-loop and time out — see direct_chat_service.py
-            # _run_sage) prevents delivery regardless of how long we wait, so a
-            # wide budget only hurts. Restore a larger reconnect window once
-            # the turn runs on the main loop that owns the gateway socket.
+            # a guaranteed failure. The cross-loop blocker this comment used to
+            # describe (direct_chat_service.py _run_sage's worker-thread event
+            # loop starving gateway sends) is fixed — that WAS the event-loop
+            # freeze in direct_chat_stream_response_service.py, not a property
+            # of running on a worker thread per se; see docs/PLATFORM-MAP.md
+            # §26.2 (BUG3) and today's live re-verification (3 sequential
+            # turns, real replies, 3.7-7.8s each). 40s stays the right number
+            # on its own merits — a healthy connection answers in seconds, so
+            # there's no longer any failure mode that legitimately needs a
+            # wider window.
             durable_deadline_seconds=40,
+            on_delta=_on_delta,
         )
     except Exception as exc:
         _reason = str(exc)

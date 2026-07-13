@@ -178,6 +178,12 @@ export class GatewayLLMRuntime {
   private readonly fetchImpl: FetchImpl;
   private readonly defaultTimeoutMs: number;
   private readonly cliRunner: CliRunnerImpl;
+  // Phase 2 (streaming): set post-construction by index.ts once the
+  // GatewayWsClient exists (same "setter after the fact" pattern already
+  // used for cliSetupRuntime.setEventPublisher — the ws client and the
+  // capability router/runtimes have a circular construction order).
+  // Undefined until wired, and safely a no-op if it never is.
+  private publishChunk?: (payload: { request_id: string; delta: string }) => Promise<void>;
 
   constructor(config: GatewayLLMRuntimeConfig = {}) {
     this.ollamaBaseUrl = (
@@ -188,6 +194,15 @@ export class GatewayLLMRuntime {
     this.fetchImpl = config.fetchImpl ?? ((globalThis.fetch as unknown) as FetchImpl);
     this.defaultTimeoutMs = config.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.cliRunner = config.cliRunner ?? runCliSubscription;
+  }
+
+  /** Wires the ability to stream partial-text `tool.invoke.chunk` events for
+   *  an in-flight turn. Best-effort by design: a chunk that fails to publish
+   *  (e.g. a momentary reconnect) is dropped, never retried — the durable
+   *  tool.invoke/response pair remains the sole source of truth for the
+   *  actual reply; this only affects how "live" it looks while streaming. */
+  setEventPublisher(publish: (payload: { request_id: string; delta: string }) => Promise<void>): void {
+    this.publishChunk = publish;
   }
 
   requestedCapabilities(): string[] {
@@ -230,7 +245,13 @@ export class GatewayLLMRuntime {
       // model name. An unset model means "let the CLI use its own configured
       // default", never a fabricated model id the CLI wouldn't recognize.
       const model = token(args.model);
-      return this.generateViaCli({ runtime: runtime as CliSubscriptionRuntime, model, messages, timeoutMs });
+      return this.generateViaCli({
+        runtime: runtime as CliSubscriptionRuntime,
+        model,
+        messages,
+        timeoutMs,
+        requestId: token(frame.id),
+      });
     }
     throw new Error(
       `llm.generate runtime "${runtime}" is not supported on this Gateway (expected "ollama", "claude_code", or "codex").`,
@@ -314,6 +335,7 @@ export class GatewayLLMRuntime {
     model: string;
     messages: OllamaChatMessage[];
     timeoutMs: number;
+    requestId: string;
   }): Promise<Record<string, unknown>> {
     // Phase 1 (latency): route codex through the warm app-server daemon when
     // enabled — no per-turn `codex exec` cold start. The daemon takes the
@@ -330,6 +352,18 @@ export class GatewayLLMRuntime {
     if (!promptText) {
       throw new Error("llm.generate requires a non-empty prompt (messages, or system + prompt).");
     }
+    // Phase 2 (streaming): only the codex daemon path streams real deltas
+    // today (it's the only backend that emits them pre-completion — the
+    // Claude pool and both cold-spawn paths only ever produce one final
+    // text). A publish failure (e.g. a momentary reconnect) must never fail
+    // or slow the turn itself — chunks are strictly best-effort.
+    const onDelta = (useCodexDaemon && this.publishChunk)
+      ? (delta: string) => {
+        void this.publishChunk?.({ request_id: params.requestId, delta }).catch(() => {
+          // best-effort — the durable tool.invoke/response pair is authoritative
+        });
+      }
+      : undefined;
     let result: CliRunResult;
     try {
       if (useCodexDaemon) {
@@ -338,7 +372,7 @@ export class GatewayLLMRuntime {
           systemPrompt,
           model: params.model,
           timeoutMs: params.timeoutMs,
-        });
+        }, onDelta);
       } else if (useClaudePrewarm) {
         result = await sharedClaudeCliPrewarmPool().generate({
           prompt: promptText,

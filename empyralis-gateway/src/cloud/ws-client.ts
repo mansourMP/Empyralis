@@ -29,6 +29,7 @@ import type {
   GatewayScope,
   GatewaySessionPayload,
   GatewayToolInterruptPayload,
+  GatewayToolInvokeChunkPayload,
   GatewayToolInvokePayload,
 } from "../protocol/types";
 import { PROTOCOL_VERSION } from "../protocol/types";
@@ -468,8 +469,8 @@ export class GatewayWsClient {
   }
 
   async publishEvent(
-    type: "channel.inbound" | "cli.login.output",
-    payload: GatewayChannelInboundPayload | GatewayCliLoginOutputPayload | Record<string, unknown>,
+    type: "channel.inbound" | "cli.login.output" | "tool.invoke.chunk",
+    payload: GatewayChannelInboundPayload | GatewayCliLoginOutputPayload | GatewayToolInvokeChunkPayload | Record<string, unknown>,
   ): Promise<void> {
     if (!this.activeScope) {
       await this.journal.append("outbound", type, {

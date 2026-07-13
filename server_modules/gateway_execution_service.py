@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from server_modules import (
     agent_computer_policy_service,
@@ -489,6 +489,7 @@ async def execute_tool_via_gateway(
     emit_hardware_activity: bool = True,
     durable: bool = False,
     durable_deadline_seconds: int = 240,
+    on_delta: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """durable=True: the socket is transport, not the unit of delivery — a
     connection drop mid-dispatch (or one that's already down at call time)
@@ -498,7 +499,12 @@ async def execute_tool_via_gateway(
     drops and comes back within a few minutes, wrong for something
     interactive like a screenshot where "wait up to 4 minutes" is a worse
     answer than "tell me now it's offline." See gateway_protocol_service.
-    dispatch_tool_invoke_durable for the delivery mechanics."""
+    dispatch_tool_invoke_durable for the delivery mechanics.
+
+    on_delta (Phase 2, streaming): only meaningful when durable=True — a
+    one-shot capability like a screenshot has nothing to stream. Ignored
+    entirely unless the Gateway actually emits tool.invoke.chunk events for
+    this capability (today: only codex's warm daemon does)."""
     registration = _require_active_gateway_registration(gateway_id, workspace_id=workspace_id)
     _gw = str(registration.get("gateway_id") or "").strip()
     _ws = str(registration.get("workspace_id") or "").strip()
@@ -616,6 +622,7 @@ async def execute_tool_via_gateway(
                 agent_scope=resolved_agent_scope,
                 policy=policy_payload,
                 actor_id=_text(actor_id),
+                on_delta=on_delta,
             )
         else:
             response = await gateway_protocol_service.dispatch_tool_invoke(
