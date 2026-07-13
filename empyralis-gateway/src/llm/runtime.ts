@@ -1,5 +1,6 @@
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 import { runCliSubscription, CliRunError, type CliRunResult, type CliSubscriptionRuntime } from "./cli-runner";
+import { sharedCodexAppServer, codexAppServerEnabled } from "./codex-app-server";
 
 // BYO-brain Phase 2: the on-box LLM capability. This runs on the USER's paired
 // box and forwards a turn to the box's OWN local Ollama endpoint
@@ -313,21 +314,35 @@ export class GatewayLLMRuntime {
     messages: OllamaChatMessage[];
     timeoutMs: number;
   }): Promise<Record<string, unknown>> {
+    // Phase 1 (latency): route codex through the warm app-server daemon when
+    // enabled — no per-turn `codex exec` cold start. The daemon takes the
+    // system prompt separately (thread/start baseInstructions), so DON'T inline
+    // it for that path; the exec path still inlines system for codex as before.
+    const useCodexDaemon = params.runtime === "codex" && codexAppServerEnabled();
     const { systemPrompt, promptText } = buildCliPrompt(params.messages, {
-      includeSystemInline: params.runtime === "codex",
+      includeSystemInline: params.runtime === "codex" && !useCodexDaemon,
     });
     if (!promptText) {
       throw new Error("llm.generate requires a non-empty prompt (messages, or system + prompt).");
     }
     let result: CliRunResult;
     try {
-      result = await this.cliRunner({
-        runtime: params.runtime,
-        prompt: promptText,
-        systemPrompt,
-        model: params.model,
-        timeoutMs: params.timeoutMs,
-      });
+      if (useCodexDaemon) {
+        result = await sharedCodexAppServer().generate({
+          prompt: promptText,
+          systemPrompt,
+          model: params.model,
+          timeoutMs: params.timeoutMs,
+        });
+      } else {
+        result = await this.cliRunner({
+          runtime: params.runtime,
+          prompt: promptText,
+          systemPrompt,
+          model: params.model,
+          timeoutMs: params.timeoutMs,
+        });
+      }
     } catch (error) {
       throw new Error(cliErrorMessage(params.runtime, error));
     }
