@@ -56,6 +56,14 @@ def build_heartbeat_turn_request(
     merged_metadata.update(
         {
             "source": "heartbeat",
+            # This function only ever builds a turn for a scheduler-driven
+            # execution (a heartbeat checklist tick or a claimed wake
+            # request) -- never a live user message -- so trigger_source is
+            # unconditionally "schedule", read by
+            # run_service._enforce_rust_run_service_decision for attribution/
+            # audit (previously unset here, so it silently fell back to the
+            # generic "user" default on every autonomous run).
+            "trigger_source": "schedule",
             "heartbeat_tasks": list(tasks),
             "heartbeat_pending_schedules": pending_started if isinstance(pending_started, list) else [],
             "heartbeat_trigger": str(metadata.get("trigger") or "scheduled"),
@@ -210,6 +218,26 @@ def trigger_heartbeat_payload(*, scheduler: Optional[Any]) -> dict[str, Any]:
         "ok": True,
         **scheduler.trigger_now(),
     }
+
+
+def _extract_turn_run_id(result_payload: dict[str, Any]) -> Optional[str]:
+    """execute_system_agent_turn's return shape differs by execution path:
+    a durable dispatch nests the actual run dict (with its own "run_id") one
+    level down under "result" (see run_service.py's execute_durable_turn_request
+    -> {"kind": "durable_run", "result": {...}}), so a flat .get("run_id")
+    on the outer dict is always None for every heartbeat/wake-request turn
+    (they're always durable — see build_heartbeat_turn_request's
+    execution_mode="durable"). Check both shapes rather than assume one,
+    since a future execution path could return either."""
+    flat = result_payload.get("run_id")
+    if flat:
+        return str(flat).strip() or None
+    nested = result_payload.get("result")
+    if isinstance(nested, dict):
+        nested_run_id = nested.get("run_id")
+        if nested_run_id:
+            return str(nested_run_id).strip() or None
+    return None
 
 
 def _append_heartbeat_entry(workspace_id: str, result: dict) -> None:
@@ -430,6 +458,7 @@ def build_heartbeat_run_callback(
                     first_error = exc
                 continue
             result_payload = result if isinstance(result, dict) else {}
+            resolved_run_id = _extract_turn_run_id(result_payload)
             if group_wake_requests and tenant_id and callable(finalize_scheduler_wake_requests):
                 _resolve_sync(
                     finalize_scheduler_wake_requests(
@@ -438,12 +467,13 @@ def build_heartbeat_run_callback(
                         wake_requests=group_wake_requests,
                         status="executed",
                         mark_context_seen=True,
-                        metadata_patch={"run_id": str(result_payload.get("run_id") or "").strip() or None},
+                        metadata_patch={"run_id": resolved_run_id},
                     )
                 )
             results.append({
                 "authority_tier": group_tier,
                 **result_payload,
+                "run_id": resolved_run_id,
                 "wake_request_ids": [
                     str(item.get("id") or "").strip()
                     for item in group_wake_requests
