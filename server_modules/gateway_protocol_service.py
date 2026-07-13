@@ -1129,6 +1129,37 @@ async def _flush_pending_invokes(gateway_id: str, connection: _LiveGatewayConnec
             )
 
 
+def _kick_immediate_flush(gateway_id: str) -> None:
+    """Deliver a just-enqueued invoke NOW instead of waiting up to a full
+    heartbeat interval for the next heartbeat-flush. The flush is scheduled on
+    the live connection's OWN owner loop (via call_soon_threadsafe), so the
+    send is a direct same-loop write to the socket — never the cross-loop
+    writer path that previously (before the event-loop-freeze fix) could stall
+    the owner loop. If no socket is live yet, this is a no-op and the
+    connect/heartbeat flush remains the backstop, so the command is never lost.
+
+    This is what makes a healthy turn fast: measured 2026-07-13, waiting for
+    the heartbeat added ~10-16s of pure latency before Codex even saw the
+    command."""
+    connection = _get_live_connection(gateway_id)
+    if connection is None:
+        return
+    owner_loop = getattr(connection, "_owner_loop", None)
+    if owner_loop is None or not owner_loop.is_running():
+        return
+
+    def _run() -> None:
+        try:
+            asyncio.ensure_future(_flush_pending_invokes(gateway_id, connection))
+        except Exception:
+            pass  # heartbeat-flush is the backstop
+
+    try:
+        owner_loop.call_soon_threadsafe(_run)
+    except RuntimeError:
+        pass  # loop shutting down — heartbeat-flush remains the backstop
+
+
 async def dispatch_tool_invoke_durable(
     *,
     gateway_id: str,
@@ -1218,18 +1249,14 @@ async def dispatch_tool_invoke_durable(
     # lost just because no socket was live at this exact moment. The response
     # half is already reconnect-proof via _DURABLE_DISPATCH_WAITERS.
     _enqueue_pending_invoke(pending)
+    # Deliver NOW: schedule an immediate flush on the connection's owner loop
+    # rather than waiting up to a full heartbeat interval. The flush runs on
+    # the loop that owns the socket (a direct write), so it does not take the
+    # cross-loop writer path that — before the event-loop-freeze fix — could
+    # stall the owner loop. If no socket is live yet, this no-ops and the
+    # connect/heartbeat flush in handle_gateway_websocket still delivers.
+    _kick_immediate_flush(gateway_id)
     try:
-        # Delivery happens ONLY via the connect/heartbeat flush in
-        # handle_gateway_websocket, which runs on the WebSocket's own owner
-        # loop. There is deliberately no dispatcher-side "fast path" send:
-        # the turn runs on a different event loop than the WS handler, so a
-        # dispatcher-side send takes the cross-loop writer path, and a single
-        # slow/hung write there was observed to stall the WS owner loop for
-        # minutes — starving the very heartbeat-flush that is supposed to
-        # deliver this invoke (DIAG 2026-07-13: flushes ran every ~10s until a
-        # dispatcher send was attempted, then stopped for 2 min). Letting the
-        # owner loop drive every send keeps writes on the one loop that owns
-        # the socket, so a live gateway's next heartbeat (<=10s) delivers this.
         remaining = deadline - time.monotonic()
         try:
             response = await asyncio.wait_for(
