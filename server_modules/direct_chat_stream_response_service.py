@@ -5,11 +5,29 @@ from typing import Any, Callable, Optional
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from server_modules.agent_turn import AgentTurnRequest
 from server_modules import error_response_service
 from server_modules.error_contracts import INTERNAL_ERROR, POLICY_BLOCK, USER_INPUT_ERROR
 from server_modules import rust_runtime_kernel_client
+
+
+# Sentinel returned by _producer_first_event when the producer yielded nothing.
+# (StopIteration cannot cross a thread boundary / run_in_threadpool cleanly, so
+# the blocking first-next is wrapped to return this instead of raising.)
+_PRODUCER_EXHAUSTED = object()
+
+
+def _producer_first_event(producer_iter: Any) -> Any:
+    """Advance a chat-stream producer to its first yielded event. Runs on a
+    worker thread (via run_in_threadpool) because that first next() can block
+    for the entire turn on a gateway/CLI dispatch — it must never run on the
+    main event loop."""
+    try:
+        return next(producer_iter)
+    except StopIteration:
+        return _PRODUCER_EXHAUSTED
 
 
 @dataclass(slots=True)
@@ -213,9 +231,17 @@ async def build_agent_turn_stream_response(
     session["metadata"] = session_metadata
     if not bool(session.get("producer_started")):
         producer_iter = producer()
-        try:
-            first_event = next(producer_iter)
-        except StopIteration:
+        # CRITICAL: pull the first event OFF the event loop. next() drives the
+        # producer up to its first yield; for a gateway/CLI-subscription turn
+        # that first event only arrives once the whole dispatch completes, so
+        # calling next() inline here froze the ENTIRE main event loop for the
+        # full turn (proven 2026-07-13: /health returned nothing for ~70s while
+        # a turn ran). That freeze starved the very gateway heartbeats and
+        # cross-loop sends the dispatch was waiting on — the real root cause of
+        # every "gateway not connected / stale" failure. run_in_threadpool
+        # keeps the blocking wait on a worker thread; the loop stays live.
+        first_event = await run_in_threadpool(_producer_first_event, producer_iter)
+        if first_event is _PRODUCER_EXHAUSTED:
             error = error_response_service.platform_error(
                 code="chat_unavailable",
                 message="Chat ended before producing a response.",
