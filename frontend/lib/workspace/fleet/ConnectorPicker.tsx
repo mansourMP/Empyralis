@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { CONNECTOR_ICONS } from "./fleet-icons";
 import {
   useFleetAgentConnectors,
+  useFleetAgents,
   useFleetProjectConnectors,
   type FleetConnector,
 } from "./fleet-data";
@@ -35,6 +36,15 @@ export function ConnectorPicker({
 }) {
   const { connectors, loading: agentLoading, refresh: refreshAgent } = useFleetAgentConnectors(workspaceId, agentId);
   const { projectConnectors, loading: projectLoading, refresh: refreshProject } = useFleetProjectConnectors(workspaceId, projectId);
+  // Shared with useFleetAgents(workspaceId) callers elsewhere on the page
+  // (polled-resource cache keyed by workspaceId) — just for id -> label so
+  // the "used by" notice below can name agents instead of showing raw ids.
+  const { agents } = useFleetAgents(workspaceId);
+  const agentLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of agents) map.set(a.agent_id, a.label);
+    return map;
+  }, [agents]);
 
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -172,23 +182,39 @@ export function ConnectorPicker({
                 {projectCreds.map((cred) => {
                   const selected = cred.subscribed_agent_ids.includes(agentId);
                   const rowBusy = busyKey === `${c.id}:${cred.id}`;
+                  // This account is account/cloud-level, not per-agent — every
+                  // OTHER agent already subscribed to it will keep using the
+                  // SAME live connection the instant this agent joins too, so
+                  // the owner should see that before (and after) clicking.
+                  const otherSubscribers = cred.subscribed_agent_ids
+                    .filter((id) => id !== agentId)
+                    .map((id) => agentLabelById.get(id) || id);
                   return (
-                    <button
-                      key={cred.id}
-                      type="button"
-                      className={`fleet-connector-picker-row${selected ? " is-selected" : ""}`}
-                      disabled={selected || rowBusy}
-                      onClick={() => useCredential(c, cred.id)}
-                    >
-                      {rowBusy ? (
-                        <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
-                      ) : (
-                        <span className="fleet-connector-picker-radio" aria-hidden="true" />
+                    <div key={cred.id} className="fleet-connector-picker-row-group">
+                      <button
+                        type="button"
+                        className={`fleet-connector-picker-row${selected ? " is-selected" : ""}`}
+                        disabled={selected || rowBusy}
+                        onClick={() => useCredential(c, cred.id)}
+                      >
+                        {rowBusy ? (
+                          <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                        ) : (
+                          <span className="fleet-connector-picker-radio" aria-hidden="true" />
+                        )}
+                        <span className="fleet-connector-picker-account">
+                          {cred.account_label || cred.label || "Connected account"}
+                        </span>
+                      </button>
+                      {otherSubscribers.length > 0 && (
+                        <p
+                          className="fleet-connector-picker-shared-warning"
+                          style={{ color: "var(--warning-text)", fontSize: 12, margin: "2px 0 0 22px" }}
+                        >
+                          Also used by {otherSubscribers.join(", ")} — this is the same account, not a copy.
+                        </p>
                       )}
-                      <span className="fleet-connector-picker-account">
-                        {cred.account_label || cred.label || "Connected account"}
-                      </span>
-                    </button>
+                    </div>
                   );
                 })}
                 <button
@@ -225,7 +251,15 @@ export function ConnectorPicker({
                     <input
                       type={/key|token|secret|password/i.test(field) ? "password" : "text"}
                       value={fieldValues[field] || ""}
-                      onChange={(e) => setFieldValues((cur) => ({ ...cur, [field]: e.currentTarget.value }))}
+                      onChange={(e) => {
+                        // Read the value synchronously — e.currentTarget is
+                        // null by the time a state-updater callback runs
+                        // (React nulls out the synthetic event after the
+                        // handler returns), so capturing it outside the
+                        // updater is required, not stylistic.
+                        const value = e.currentTarget.value;
+                        setFieldValues((cur) => ({ ...cur, [field]: value }));
+                      }}
                     />
                   </label>
                 ))}
