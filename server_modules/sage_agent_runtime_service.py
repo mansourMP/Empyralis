@@ -768,6 +768,27 @@ async def _dispatch_local_gateway_brain(
 # ── cli_subscription: the owner's own Claude Code / Codex CLI, executing on
 # their own paired Gateway (BYO-brain Phase 3) ──────────────────────────────
 
+def _extract_cli_gateway_detail(reason: str) -> str:
+    """Pull the CLI's OWN message out of a gateway crash reason of the form
+    '<label> exited unexpectedly on this Gateway (<CLI message>)..'. That inner
+    message — e.g. "You've hit your usage limit ... try again at <date>" — is
+    exactly what the user needs and can act on; a blind "check Gateway logs"
+    (which the user cannot even see) is not. Returns "" when there is no such
+    wrapped detail, so the caller keeps its generic message."""
+    text = str(reason or "").strip()
+    marker = "on this Gateway ("
+    idx = text.find(marker)
+    if idx < 0:
+        return ""
+    start = idx + len(marker)
+    # rfind so a CLI message that itself contains parens (e.g. a URL) is kept
+    # intact — the LAST ')' is the gateway's own wrapper close.
+    end = text.rfind(")")
+    if end <= start:
+        return ""
+    return text[start:end].strip()
+
+
 def _friendly_cli_subscription_error(reason: str, *, runtime: str) -> str:
     """Map a raw dispatch/readiness reason to a platform-voice message, one
     per distinct failure mode (G5) — never one blanket string. The turn is
@@ -806,6 +827,14 @@ def _friendly_cli_subscription_error(reason: str, *, runtime: str) -> str:
     if "timed out" in r or "timeout" in r:
         return _say(_pe.CLI_SUBSCRIPTION_TIMEOUT)
     if "exited unexpectedly" in r or "crash" in r or "empty_completion" in r or "empty completion" in r:
+        # Surface the CLI's own message (usage limit + reset time, a real
+        # crash reason, etc.) instead of an opaque "check Gateway logs" the
+        # user can't see. Fall back to the generic event only when there is
+        # no wrapped detail to show.
+        detail = _extract_cli_gateway_detail(reason)
+        if detail:
+            label = "Codex" if is_codex else "Claude Code"
+            return f"Heads up: {label} couldn't complete this turn — {detail}"
         return _say(_pe.CLI_SUBSCRIPTION_CRASH)
     # Fallback — still honest (includes the raw reason), never a silently
     # generic string per this repo's fail-loud convention.
