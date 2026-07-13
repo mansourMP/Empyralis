@@ -1,12 +1,87 @@
 # Empyralis — Complete Platform Map
 
-**Updated:** 2026-07-09  
-**Commit:** `04ccc0e8` (post-Phase 8; this refresh also reflects substantial uncommitted work on top — Phase 7B consolidation, the Authority Mandate system, kill switch, and activity/usage attribution — see changelog below)  
+**Updated:** 2026-07-13  
+**Commit:** `01c6081ce` (on branch `verify`; HEAD moved `2d5396d27` → `b3c122028` → `13f9fc09e` → `01c6081ce` the same day — the transport root-cause fix, the durable-delivery redesign, the event-loop-freeze fix, the Phase 1 warm-daemon builds for both codex and claude_code, and the Phase 2 streaming wire-up, all documented in **Part 26**; Phases 1a/1b/2 are now live-enabled on the prod-box Gateway, not just committed)  
 **Graph:** 97,296 nodes · 190,019 edges · 4,448 communities · 3,259 files _(fresh graphify run 2026-07-08 — predates the changes in this refresh; treat as directional, not current)_  
 **Test baseline:** ~1,319 pre-existing failures — compare failing sets in isolation, not counts  
 **Code:** ~275,000 lines Python (server_modules/) + TypeScript (frontend/, gateway/) + Rust (kernel/; supervisor/ archived, see §2.3)  
 **For:** Outside engineers and agents — read this cold, understand the entire platform.
 
+> **2026-07-13 refresh #2 (later the same day) — the `cli_subscription`
+> transport itself was root-caused and rebuilt; see the new Part 26 for the
+> full wire-level trace.** Orthogonal to the cofounder-inventory pass below
+> (that one audited product surfaces read-only; this one is the
+> BYO-subscription execution path). Short version: the multi-day "Gateway
+> shows Online but dispatch says not connected" symptom had two real bugs
+> (a reconnect map-eviction race, an auth-retry storm) plus one that
+> dwarfed both — a synchronous `next()` call on the FastAPI event loop that
+> froze the entire backend for the full duration of every
+> `cli_subscription` turn, which in turn starved the Gateway's own
+> heartbeats and made a perfectly healthy connection look dead. All three
+> are fixed. Gateway→machine delivery was redesigned from
+> push-and-retry-until-deadline to enqueue-then-flush-on-connect-or-heartbeat
+> (the pattern GitHub Actions runners and Buildkite use for unreliable
+> worker machines). First confirmed real end-to-end turn landed (Codex
+> genuinely ran, returned a real usage-limit message from the actual
+> ChatGPT account). Turn latency measured and cut ~18.7s → ~4.4s. Phase 1
+> of a 4-phase latency plan (a warm, reused `codex app-server` daemon
+> instead of a cold `codex exec` per turn) is built and committed,
+> flag-gated OFF by default — not yet enabled in production.
+>
+> **2026-07-13 refresh — a cofounder-decision inventory ran 11 independent
+> read-only investigations in parallel across every capability this map
+> either didn't cover or only mentioned in passing, each one required to cite
+> `file:line` for every claim and write "NOT FOUND" rather than guess.**
+> Eleven new/expanded sections were added: **Skills** (§14), **Self-Improving
+> Agents** (§15, mostly a gap — the `reflection_enabled` flag and
+> `REFLECTION.md`'s own "loaded every turn" claim are both dead scaffolding),
+> **Persistent Memory** (§16, expands §3.6 — the MemoryTab "starter scaffold"
+> banner is confirmed real, byte-compared against a template), **Sub-Agent
+> Delegation** (§17, a fully-built backend pipeline with zero confirmed
+> callers), **Scheduled/Autonomous Wake-Up** (§18 — the critical finding: the
+> per-agent "schedule a wake-up" feature writes real rows to a real table,
+> but the one scheduler that would execute them starts with
+> `workspace_id=None` and dies at `scope_missing` on every tick, while a
+> *separate* cron/weekly scheduler genuinely runs in production with no UI to
+> create a schedule through), **Tool Governance** (§19), **Connectors — Vault,
+> Bindings & Execution** (§20, confirms Notion/GitHub actually execute, not
+> just store credentials), **Tool-Honesty Guard** (§21, previously
+> undocumented — two independent runtime pipelines, both wired), **Hardware**
+> (§22, confirms the placement-resolver claim "`cli_subscription` reads
+> `gateway_binding`, not `hardware_access`" is TRUE and that
+> `docs/HARDWARE-BRAIN-REALITY-REPORT.md`'s contrary claims predate a real
+> fix), **Landing Page, Invite Gating & Auth** (§23 — there is no marketing
+> landing page to gate; both invite-code mechanisms are OFF by default in
+> this repo, so signup is open as shipped here), and **Sage's Actual
+> Boundaries** (§24 — the "Sage has no connectors" framing is backwards: Sage
+> has *strictly more* tool access than a deployed agent, not less; "Ask
+> Sage" → "Ask AI" has not been started anywhere in the code), and **BYO
+> Subscription/BYOK/Platform-Credits execution-layer findings** (§25 — the
+> durable-dispatch deadline is reconciled definitively at 60s, not the 240s
+> or 600s either individual commit message suggests on its own; a real,
+> saveable UI path lets an owner set Sage's own Model tab to
+> `cli_subscription`/`local` and it is silently never honored at turn time;
+> a specialist's own BYOK provider choice can diverge from the credentials
+> actually sent with it; every new specialist is seeded with the specific
+> DeepSeek model the platform's own code comment says measured worse on a
+> tool-honesty metric). Existing sections amended in place with corrections
+> where the new pass found
+> something the map previously got wrong or missed: §2.5/§9.1 (Agent Detail
+> is 8 tabs plus a deliberately-hidden 9th `chat` route, not just 8), §5
+> (Slack's checked-in app manifest points at stale URLs; Discord's per-agent
+> OAuth silently produces a workspace-wide credential, not an agent-scoped
+> one; a third, UI-unreachable Telegram mode exists via Cloud Session
+> Manager), §10 (adds the soft pre-turn tool-visibility filter,
+> `audience_tool_filter.py`, distinct from the two hard execution gates
+> already documented), §11 (the channel kill-switch scope has a real,
+> owner-gated write path that actually persists — the gap is that the one
+> function which would read it back before dispatching a channel message is
+> never called), §12 (`channel_activity_service.py` is fully dead — its
+> caller was deleted in the Phase 7B consolidation and nothing replaced it;
+> `config/agent_activity_timeline_map.json`'s event-class list has drifted
+> from the real enum in `activity_ledger_service.py` and nothing in the
+> runtime reads the file anyway).
+>
 > **2026-07-09 refresh — this map was materially stale and had already caused
 > wrong briefs.** Corrected in this pass: the create-agent wizard is
 > documented as its actual current 4-step flow (Placement → Brain → Channels
@@ -175,17 +250,31 @@ MODE 4: local (Runs on customer's own hardware)
 └── Zero platform cost
 ```
 
+**See Part 26 for the exact wire-level trace of a `cli_subscription` turn**
+— every hop from the browser's `fetch("/api/turn")` through backend
+dispatch, the Gateway on the customer's own machine, the real `codex`/
+`claude` CLI, and back — plus the three bugs that broke it for days and
+the latency work in progress.
+
 **Where each mode is configured:**
 
 | Surface | File | What it does |
 |---------|------|--------------|
-| Create-agent wizard | `FleetCreateAgentWizard.tsx` | `model_config` defaults to `platform_credits` the moment the agent is created (Step 1, "Placement"); the "Brain" step (Step 2) only PATCHes it if the user picks BYOK or local |
-| Agent detail → Model tab | `FleetAgentDetail.tsx` (ModelTab) | Edits model_config post-creation via PATCH |
+| Create-agent wizard | `FleetCreateAgentWizard.tsx` | `model_config` defaults to `platform_credits` the moment the agent is created (Step 1, "Placement"); the "Brain" step (Step 2) only PATCHes it if the user picks BYOK or local. **`cli_subscription` was silently broken here until recently** — the wizard's own code comment (`:307-312`) records that this branch used to fall through with no PATCH at all, so "Every BYO-brain agent created via the wizard hit this bug," fixed by commit `df06f7577`. Confirmed fixed as of `verify` HEAD. |
+| Agent detail → Model tab | `FleetAgentDetail.tsx` (ModelTab) | Edits model_config post-creation via PATCH. **Rendered for every agent with no `isMaster` gate** (`:341`) — unlike sibling rows in the same file that do gate on `isMaster` — see Part 25 for what happens when you actually use it on Sage's own card. |
 | Backend validation | `fleet_tools.py` `_VALID_MODEL_MODES` | Rejects invalid modes |
 | Provider catalog | `provider_profiles.py` `PROVIDER_CATALOG` | 17 providers with auth modes, models, scopes |
 | Platform credit gating | `provider_catalog_service.py` `PLATFORM_CREDIT_MODEL_ALLOWLIST` | Only DeepSeek for platform credits |
 | Tier routing | `empyralis_model_tier_routing_service.py` | Maps public tiers → internal provider+model |
 | Provider resolution | `provider_catalog_service.py` `resolve_provider_model_selection()` | Validates provider+model+surface+payer |
+
+**See Part 25 for the 2026-07-13 execution-layer deep dive** — confirms
+DeepSeek-as-default with a passing unit test, confirms BYOK storage is
+genuinely Fernet-encrypted (not plaintext), and finds two gaps this summary
+table doesn't show: `cli_subscription`/`local` mode saved on **Sage's own**
+Model tab is silently never honored at turn time, and a specialist's own
+`byok_api` provider choice can diverge from the credentials actually sent
+with it.
 
 **Provider catalog (full list):**
 
@@ -518,6 +607,7 @@ The Gateway runs on user hardware, opens an outbound WSS tunnel to cloud, and ro
 | **Cloud** | `cloud/ws-client.ts` (997 lines), `cloud/heartbeat.ts`, `cloud/heartbeat-payload.ts`, `cloud/reconnect.ts` | WSS connection, heartbeat, exponential-backoff reconnection |
 | **Channels** | `channels/telegram/runtime.ts` (825 lines), `channels/whatsapp/runtime.ts` (665 lines), `channels/foundation/` (6 files: credential-redactor, draft-manager, outbound-store, reconnect-utils, typing-keepalive), `channels/local-bridge-runtime.ts` (433 lines), `channels/personal-runtime.ts`, `channels/personal-config-store.ts` | Personal messaging: Telegram (GramJS), WhatsApp (Baileys), Signal/iMessage/WeChat (local HTTP bridge) |
 | **Capability router** | `supervisor/capability-router.ts` (directory name is historical — the Rust supervisor executor was removed from it in the 2026-07-04 archival) | Central dispatch hub — current `ExecutorName` type is `browser \| external_agent_proxy \| personal_channel \| shell_sandbox \| llm`. No supervisor executor; `supervisor/client.ts` and `supervisor/signing.ts` now live in `_archive/supervisor/gateway/`, not here. |
+| **LLM / CLI runtime** | `llm/runtime.ts` (`generateViaCli` — picks daemon/pool vs. cold-spawn), `llm/cli-runner.ts` (373 lines — `buildInvocation`/`spawnAndCollect`, the real non-shell `child_process.spawn` of the customer's own `claude`/`codex` binary), `llm/codex-app-server.ts` (400 lines, NEW 2026-07-13 — persistent, reused `codex app-server` JSON-RPC daemon, flag-gated OFF by default), `llm/claude-cli-prewarm.ts` (NEW 2026-07-13 — a pool of pre-spawned, SINGLE-USE `claude` CLI processes; deliberately not a reused daemon like codex's — see Part 26.5 for why — flag-gated OFF by default), `llm/cli-installer.ts`, `llm/cli-login-session.ts`, `llm/cli-setup-runtime.ts` | Executes `capability_id="llm.generate"` for `cli_subscription` agents (Mode 3, §1) — the code that actually runs Codex/Claude on the customer's machine under their own login. See Part 26 for the full wire trace and the warm-daemon latency work. |
 | **Browser** | `browser/runtime.ts`, `browser/worker.ts`, `browser/session-store.ts` | Browser automation via Python subprocess |
 | **Pairing** | `pairing/device-identity.ts`, `pairing/token-store.ts` | Device UUID + pairing token persistence |
 | **Protocol** | `protocol/types.ts`, `protocol/codec.ts` | Wire format `v1alpha2`: frame types, validation, 256KB limit, 32-level nesting limit |
@@ -625,7 +715,7 @@ Fleet components own their own data (no `useWorkspaceBoundary()` context).
 | `FleetShell.tsx` / `FleetShellDecider.tsx` / `FleetContentFrame.tsx` | Themed root (canvas), segment router, and bordered content panel + breadcrumbs. |
 | `PrimaryRail.tsx` | Persistent left rail (Inbox, Projects, Agents, Hardware, Billing, Settings) with keyboard chords. |
 | `FleetHome.tsx` | Agent grid + status strip + "New agent" button. Opens wizard. |
-| `FleetAgentDetail.tsx` | **Routed, deep-linkable** agent detail (not a modal) — `/projects/[pid]/agents/[aid]/[tab]`. 8 tabs (`TABS`, `FleetAgentDetail.tsx:54-63`): Overview, Work, Channels, Connectors, **Tools**, Hardware, Model (editable), Memory. Exports `ChannelsTab` for wizard reuse. Overview hosts `AgentTitle` (inline click-to-edit rename, `:497-588`) and `PersonaEditor` (instructions, `:593-639`) — the only places those fields are set post-creation. |
+| `FleetAgentDetail.tsx` | **Routed, deep-linkable** agent detail (not a modal) — `/projects/[pid]/agents/[aid]/[tab]`. **2,132 lines.** 8 visible tabs (`TABS`, `FleetAgentDetail.tsx:101-110`): Overview, Work, Channels, Connectors, **Tools**, Hardware, Model (editable), Memory — confirmed as exactly 8 in the 2026-07-13 pass, re-verified against the live array, not assumed from the tab folder (see next row). **Plus a 9th, deliberately hidden tab: `chat`** — present in the `TabId` type (`:99`) and the route's `VALID_TABS` (`.../[agentId]/[tab]/page.tsx:11`), but excluded from the `TABS` pill array on purpose; reached only via the "Chat with this agent" CTA (`:362-365`) or a direct URL (`.../agents/{id}/chat`). Six of the 8+1 tab bodies (`OverviewTab` `:495`, `ChannelsTab` `:1032`, `ConnectorsTab` `:1387`, `ToolsTab` `:1476`, `ModelTab` `:1782`, `ChatTab` `:921`) are defined **inline inside this one file** — only Work/Hardware/Memory got broken out to `tabs/*.tsx` (see below), which is why a `*Tab.tsx` filename glob undercounts. Exports `ChannelsTab` for wizard reuse. Overview hosts `AgentTitle` (inline click-to-edit rename, `:596`) and `PersonaEditor` (instructions, `:692`) — the only places those fields are set post-creation. |
 | `tabs/WorkTab.tsx` | End-customer conversations, split-view. **Live** — 7s polling of the list + open transcript, unread dots, "{n} new" count (Phase 8 Part A). |
 | `first-agent-empty.tsx` | Shared first-run empty state + create-agent wizard (`FirstAgentEmpty` / `CreateFirstAgentEmpty`) used by Agents/Projects/Inbox (Phase 8 Part B). |
 | `fleet-states.tsx` | Shared `FleetListSkeleton` + `FleetSurfaceError` — human error states + loading skeletons on every list/tab (Phase 8 Part C5). |
@@ -1083,7 +1173,18 @@ Both should be split. Community 1 is a catch-all for UI components that don't re
 - **Frontend only shows 2 channels** (Telegram, WhatsApp) despite 27 in backend catalog
 - **Only 3 studio channels route through Sage**: `slack`, `discord`, `github`. All others return `channel_unavailable`
 - **Two `telegram_personal` paths**: Gateway (GramJS on user machine) vs Cloud Session Manager (GramJS in cloud) — no code sharing
-- **`discord_personal` metadata contradiction**: `runtime_lane: personal_gateway` but `session_owner: cloud_connector`
+- **`discord_personal` metadata contradiction**: ~~`runtime_lane: personal_gateway` but `session_owner: cloud_connector`~~ — **fixed as of the 2026-07-13 pass.** `channel_lane_contract_service.py:114-118` now carries an explicit comment ("this previously said `personal_gateway`, which contradicted both") and correctly declares `discord_personal` as `runtime_lane: "cloud_connector"` throughout — there is no self-hosted/Gateway mode for Discord by design (Discord's ToS forbids automating a real user account; `FleetAgentDetail.tsx:974` states this directly in a comment). The contradiction this map used to describe no longer exists in the code.
+
+### 5.5 2026-07-13 pass — per-channel corrections and new findings
+
+Re-verified each of the six channels above against current code. What changed or was newly confirmed, per channel:
+
+- **Telegram** — the most fully-built of the six. Self-hosted Gateway path (`empyralis-gateway/src/channels/telegram/runtime.ts:73`, real GramJS), hosted-bot path (`routes_sage_telegram_hosted.py:131-233`), and genuine per-agent BYO-bot binding (`hosted_bot_provisioning_service.py:171-216` → `agent_channel_bindings` unique index) are all wired end-to-end, click through DB constraint. **But** a third, fully-coded mode — a cloud-hosted personal account via Cloud Session Manager (`cloud-session-manager/src/telegram/client-factory.js:16-350`, real GramJS, real relay to the backend) — has session-*creation* endpoints (`cloud-session-manager/src/api/routes.js:162-220`) that nothing in the frontend ever calls; a user cannot self-serve into this mode. A second, generic pairing-UI component, `frontend/lib/workspace/workspace-channel-pairing-surface.tsx`, is dead code — its backend (`routes_auth.py:419-452`) and Next.js proxy routes are real, but nothing renders the component.
+- **WhatsApp** — exactly one real path: personal account via Gateway/Baileys (`empyralis-gateway/src/channels/whatsapp/runtime.ts:116`), with genuine QR-code and pairing-code UI (`PersonalChannelConnectPanel.tsx:318-478`). "WhatsApp Business" via Twilio (`routes_connectors.py:546` → `connectors/autopilot_runtime_exports.py`) is real, dormant legacy code — `channel_lane_contract_service.py:164-174,317-332` itself marks it `"stage": "roadmap"`, `"live_capable": False`, and there is no setup UI for it at all (only an icon-name string). No cloud-hosted alternative exists for WhatsApp (confirmed: no `whatsapp/` subdirectory under `cloud-session-manager/src/`).
+- **Discord** — the bot runtime is a genuine live Discord Gateway WebSocket running **inside the Python backend process itself** (`server_modules/connectors/discord_connector.py:1062-1141`, started at boot via `server.py:269-292`) — there is no TypeScript/Gateway bridge for Discord at all. DM-to-Sage pairing (`/pair CODE`) and OAuth identify-bind both work. **New finding:** the per-agent "Bot" OAuth button in the Channels tab (`FleetAgentDetail.tsx:1108-1132`) never sends `metadata.agent_install_id` in its `startOAuth()` call — per `connection_oauth_service.py:1701-1731`'s own code comment, the resulting credential is stored as *"a bare workspace credential,"* not bound to the specific agent whose tab it was clicked from. The backend mechanism that *would* do a real per-agent Discord bind (`discord_bot_provisioning_service.py:133-198`) exists and is DB-enforced, but has zero frontend callers (contrast: the equivalent Telegram string IS found in the frontend).
+- **Slack** — the OAuth-connect and inbound-webhook-to-reply round trip is real, live code (`connectors/slack_connector.py`, 707 lines; `connectors_actions.py:1105` `slack_events_webhook`). **New finding:** the checked-in `slack-app-manifest.json` declares OAuth/event URLs that don't match the actually-registered routes — the manifest is stale relative to the code. **New finding:** binding a specific deployed agent (rather than Sage) to a specific Slack workspace does not work — the one DB writer for a `"slack"` channel binding is never called, and `agent_channel_router.py:2251-2298`'s own comment says specialist dispatch was deferred to a future stage ("Stage 5") and a literal `pass` discards the resolved candidate. Every connected Slack workspace answers as Sage today, by the router's own comment.
+- **iMessage** — the most complete of the three "bridge" channels: `empyralis-gateway/src/bridges/bluebubbles-bridge.ts` (421 lines) is a genuinely complete BlueBubbles HTTP bridge, and the UI (`LocalBridgeChannelStatus`, `FleetAgentDetail.tsx:987-1022`) honestly shows live bridge health rather than a faked "connected" state — its own comment explicitly rejects inventing a connected state. There is no in-app pairing *flow* by design (the UI tells the user to set two env vars manually), and — same pattern as Slack/Discord — no verified way for an agent other than Sage to own an iMessage conversation.
+- **WeChat** — every layer's own code comments call it unbuilt: *"Personal WeChat has no official API to build a bridge against, so this isn't supported yet"* (`SageLauncher.tsx:53`); the connector catalog entry itself says *"Not launch-ready until the local bridge runtime is certified"* (`connection_catalog_service.py:272`). No bridge program exists anywhere under `empyralis-gateway/src/bridges/` (confirmed by directory listing — only BlueBubbles and signal-cli live there). The generic personal-channel HTTP route would accept and forward a `wechat_personal` send, but nothing at the far end can deliver it. (A separately-named, unrelated `wechat_work` connector — outbound-only enterprise WeCom webhooks — is real and marked "PROVEN" in §5.3; don't conflate the two.)
 
 ---
 
@@ -1310,15 +1411,28 @@ Per the platform vision: the cure for doubt is ONE real user who finds it useful
 - ✅ **Activity and usage attribution** — an agent's Overview activity feed and per-agent cost/usage now correctly filter by that agent's own install_id instead of returning empty or blending into Sage's identity (Part 12)
 - ✅ **First-run honesty** — a freshly created agent's Overview ("Now" status strip, recent-activity feed), chat transparency events, and Work tab conversation rows show true zero/empty state instead of stale or fabricated data
 - ✅ **One agent class** — Fleet is the only live agent path; Deployed/Studio is frozen as a dormant reference implementation, not active scaffolding (Part 13)
+- ✅ **Persistent memory** — MEMORY.md is genuinely injected into every Sage turn, the agent is instructed to silently write facts to it, and an owner can read/edit it live in the Memory tab; the "starter scaffold" banner shown before anyone has written to it is a real byte-comparison against a template, not a guess (Part 16)
+- ✅ **Tool enable/disable** — the Tools tab toggle genuinely changes what the LLM can call; a real historical bug (toggles silently inert due to an id-space mismatch) was fixed via `migrations/unify_fleet_tool_toggle_ids.sql` (Part 19)
+- ✅ **Connector execution, confirmed for at least 2 of 46 catalog entries** — once connected, a chat agent can actually call the Notion and GitHub APIs, not just store a credential (Part 20)
+- ✅ **Tool-honesty guard** — two independent runtime pipelines (Sage-mediated chat and a specialist's own direct chat) both run a structural post-hoc check that catches an agent claiming success without a tool call, or denying success after one succeeded, plus three separate proactive prompt-construction sites that tell the model only about tools actually installed (Part 21)
+- ✅ **Hardware placement resolver** — a `cli_subscription` agent's brain dispatch reads `model_config.gateway_binding` exclusively; it does not fall back to `hardware_access` at all, confirmed by grep returning zero hits in either owning file (Part 22)
 
 ### 9.2 What Blocks a Real User
 
 | Blocker | Detail | Impact |
 |---------|--------|--------|
 | **No production deploy** | Frontend runs on localhost:3000 — no public URL, no HTTPS, no production build. Unchanged since the last refresh — still the single biggest blocker. | Nobody outside this machine can use it |
-| **Per-agent channel identities not built** | One shared workspace bot per channel — specialists can't have their own Telegram/Discord identities | Agent identity is invisible to end users |
+| **Per-agent channel identities not built** | One shared workspace bot per channel — specialists can't have their own Telegram/Discord identities. Confirmed worse than previously stated: Discord's per-agent OAuth button silently produces a *workspace-wide* credential (Part 5.5), and Slack has no working per-agent bind at all — every connected Slack workspace answers as Sage. | Agent identity is invisible to end users |
 | **No channel health alerts** | If a Telegram bot token expires or Discord webhook fails, no alert | Silent failures lose messages |
-| **No mandate/schedule UI** | The Authority Mandate's `mandate.audience_tools` allowlist (Part 10) and per-agent wake/heartbeat scheduling (`runtime_heartbeat_service.py`) are both real, enforced backend mechanisms with **zero frontend surface** — owners can only set either via a raw PATCH | Owners can't see or control what their agent lets end-customers trigger, or when it wakes up, without reading API docs |
+| **No mandate/schedule UI** | The Authority Mandate's `mandate.audience_tools` allowlist (Part 10) and per-agent wake/heartbeat scheduling are both real, enforced backend mechanisms with **zero frontend surface for the mandate half** — owners can only set `audience_tools` via a raw PATCH. (The wake-schedule half now *does* have a real UI — `ScheduleSection` in the agent Overview tab — see the next row for why scheduling still doesn't work.) | Owners can't see or control what their agent lets end-customers trigger without reading API docs |
+| **Scheduled wake-ups silently never fire** | An owner can use the real "Schedule a wake-up" UI and the request is genuinely written to `agent_scheduler_wake_requests` — but the one scheduler instance that would execute it (`HeartbeatScheduler`) is started with `workspace_id=None` and every tick dies at a `scope_missing` short-circuit before ever calling the function that would advance a row. This includes the manual "trigger now" endpoint, which hits the same misconfigured instance. Confirmed the thread genuinely starts in the real production process (cross-checked against `deploy/empyralis-backend.service`) — it just can never do the one thing it exists to do. A *separate* cron/weekly scheduler is genuinely live in production (starts by default, polls every 20s) but has no UI anywhere to create a schedule through it. (Part 18) | An owner who schedules a wake-up gets no error and no result — the feature looks like it worked and never does anything |
+| **Sub-agent delegation has a complete backend and zero confirmed callers** | `POST /runs/{run_id}/delegate` and its two siblings are fully implemented (role model, depth cap, trace events the chat UI already knows how to render) but a repo-wide search found no code — frontend, tool registration, or scripts — that ever calls them. A separate agent-to-agent mailbox tool (`fleet__message_agent`) writes real rows but nothing ever reads them back out into a turn. (Part 17) | A cofounder should not assume agents can currently delegate to each other in the live product |
+| **Two of three "skills" subsystems are backend-only or fully dead** | The marketplace install/publish pipeline works over a direct API call but has no frontend and is never invoked from any agent-facing code path; the curated device-skill pack (1Password, Apple Notes, Apple Reminders, tmux) is described to the LLM as available but has no execution implementation anywhere — not in the backend, not in the Gateway. Only the Tools-tab enable/disable toggle (which the product calls "Tools," not "Skills") is genuinely wired end-to-end. (Part 14) | The product's public description of "skills" is broader than what a user can actually create, install, or run |
+| **No marketing landing page exists, so there's nothing to gate** | `frontend/app/page.tsx` is a pure 25-line auth-redirect (logged out → `/login`, logged in → workspace). No hero/pricing/marketing component exists anywhere in the frontend. Separately, both invite-gating mechanisms that *do* exist in code (`EMPYRALIS_INVITE_CODE`, `ORION_PILOT_SIGNUP_MODE`) are unset in every env file in this repo, so signup is open as shipped here. (Part 23) | Anything describing a marketing site or invite-only positioning is describing work that either isn't merged to `verify` or isn't turned on |
+| **Sage has broader tool access than a deployed agent, not a restricted one** | The recurring internal framing that Sage "has no connectors, only helps operate the platform" does not match the code: Sage's turn gets the full, unfiltered workspace tool registry plus exclusive operator-only tools, while a deployed specialist is restricted to its explicitly-bound connectors. The one real restriction is that Sage cannot be given a public/business-channel persona (a Slack app, a Discord bot identity) — a hard 403, confirmed. The "Ask Sage" → "Ask AI" rename referenced elsewhere has not been started: zero occurrences of "Ask AI" anywhere in the codebase. (Part 24) | Any plan premised on "Sage is sandboxed relative to specialists" or "the rename already happened" needs correcting first |
+| **Channel-scope kill switch is dead** | An owner can flip a channel-scope kill switch through a real, owner-gated API and it saves correctly to `security_control_states` — but the one function that would check it before dispatching an inbound channel message (`is_channel_disabled`) is imported and never called anywhere in production. Global/workspace/agent/gateway scopes are genuinely wired (with caveats — see amended Part 11); channel is the exception. | Setting a channel-scope kill switch currently has no effect |
+| **Setting Sage's own Model tab to a subscription/local brain silently does nothing** | The Model tab renders for Sage with no master-agent gate, and the PATCH that saves `cli_subscription`/`local` mode succeeds — but Sage's own turn-time provider resolution (`_resolve_cloud_provider`) has zero knowledge of `model_config` modes at all; only specialist agents' turns ever reach the function that understands them. No error is shown. (Part 25.1) | An owner can configure Sage to use their own Claude/Codex subscription, see it save, and Sage will keep silently running on the platform-credits/DeepSeek default instead |
+| **A specialist's own BYOK provider choice can outrun its credentials** | If a specialist sets its own `model_config.provider` different from the workspace default, the code swaps the provider label but doesn't re-fetch matching credentials — the stale credentials dict flows through four call sites unchanged. The one function that resolves provider+credentials together correctly is never called from anywhere in the codebase. Traced at the source level; the live failure mode (error vs. silently wrong key) wasn't observed directly. (Part 25.3) | A specialist configured with its own API key may not actually be using it |
 
 Smaller known gaps, not re-verified in this pass (carried forward from the
 prior version of this map — confirm against the tree before relying on
@@ -1332,8 +1446,8 @@ automation).
 To get ONE real user:
 
 1. **Deploy frontend** — production build, public URL, HTTPS
-2. **Per-agent channel identities** — so specialists have their own Telegram/Discord identities, not one shared workspace bot
-3. **Mandate/schedule UI** — a real settings surface for `audience_tools` and wake scheduling, so owners aren't PATCHing JSON by hand
+2. **Per-agent channel identities** — so specialists have their own Telegram/Discord identities, not one shared workspace bot (and so an agent's own OAuth actually binds to it, per Part 5.5)
+3. **Mandate/schedule UI** — a real settings surface for `audience_tools`, and a fix to the scheduler's `workspace_id=None` bug so the wake-up UI that already exists actually does something (Part 18)
 4. **Channel health alerts** — so a dead bot token fails loudly instead of silently
 
 That's the shortest path to validating with a real user. The fleet console,
@@ -1460,6 +1574,18 @@ caller cannot grant itself more access.
 validation), `test_agent_turn.py` (run-start tier precedence),
 `test_bounded_scheduler_service.py` (wake-request tier grouping).
 
+**Addendum (2026-07-13 pass) — a third, softer layer sits in front of the
+two hard gates above.** `audience_tool_filter.py:46-94`
+(`filter_tools_for_audience`, reading each `ToolDescriptor.audience_safe`
+manifest flag) prunes the tool list the LLM is even *shown* for a
+non-owner turn, called at `sage_agent_runtime_service.py:2072-2075`. This is
+visibility only — it's what keeps a non-owner-safe tool out of the model's
+menu in the first place — and it is not itself an enforcement point: a tool
+call that slips past it (e.g. the model calls a tool it wasn't shown) still
+has to clear `is_tool_call_allowed()` at one of the two hard gates above, which
+is what actually raises `RuntimeError`. Don't mistake the filter for the
+enforcement — it's defense in depth, not the backstop.
+
 ---
 
 ## Part 11: Kill Switch
@@ -1541,6 +1667,27 @@ channel-scoped safe-mode kill never affects `kill_switch_gate`'s decision.
 A unifying reader, `safe_mode_service.resolve_operator_control_report()`,
 exists but has zero callers — built, never wired.
 
+**Confirmed independently (2026-07-13 pass) — channel scope is dead by a
+second, more direct route too, not just the bridge gap above.** Setting a
+channel-scope kill through `safe_mode_service` is real: the write path
+(`safe_mode_service.py:523-530`, scope="channel") persists a genuine row to
+`security_control_states`, and it's reachable through the same real,
+owner-gated `POST /agent-registry/security/kill-switches` route used for
+workspace/agent scopes. The *read* side is also correctly implemented —
+`safe_mode_service.resolve_channel_disable_state()` (`:1271-1327`) and
+`is_channel_disabled()` (`:1327-1343`) both exist and look correct. But the
+one function that would call `is_channel_disabled()` before an inbound
+channel message is processed, `channel_preflight_service.assert_inbound_allowed()`
+(`:33-39`), is imported into `channel_turn_request_service.py` and never
+actually invoked anywhere in that file or anywhere else in production —
+confirmed by a full read of the file. Its only callers anywhere in the repo
+are two unit tests exercising it in isolation. So: an owner can flip a
+channel kill switch through a real API, it saves durably and correctly, and
+it currently has **zero effect** on any live message — not because the
+scope doesn't exist, but because nothing downstream ever asks it the
+question. Global, workspace, agent, and gateway scopes don't have this gap;
+channel is the one exception, confirmed from two independent angles now.
+
 **UI:** workspace scope — Settings page "Emergency stop"
 (`StopAllAgentsSection`, `frontend/app/(account)/w/[workspaceId]/settings/page.tsx:24-115`).
 Per-agent scope — `StopAgentControl` in the agent Overview header
@@ -1613,6 +1760,46 @@ and the ledger writes' `install_id=...` — so a change to how the acting
 install is resolved affects both, but they otherwise write to different
 tables through different plumbing and should be reasoned about separately.
 
+**Addendum (2026-07-13 pass) — three more attribution surfaces checked,
+two turned out dead, one turned out drifted:**
+
+- **`fleet_get_project_activity()`** (`fleet_tools.py:614-674`, route
+  `routes_fleet.py:497-517`) is a real, correctly-written query — resolves a
+  project's agent ids, then `WHERE install_id = ANY($2::text[])` — but a
+  repo-wide search for its route string finds zero frontend callers. It's
+  backend-complete, unreachable from the product today.
+- **`channel_activity_service.record_result()`** (`channel_activity_service.py:34-218`)
+  is a fully-implemented recorder that would log `sage_activity`/
+  `specialist_activity`/`blocked_action`/`artifact_created` rows per channel
+  turn — but its evident caller, `channel_execution_service.py`, was one of
+  the files deleted in the Phase 7B consolidation (see the changelog at the
+  top of this document and Part 13) and nothing replaced it. The only other
+  reference to `channel_activity_service.py` anywhere in `server_modules/`
+  is a filename listed in an architecture-boundary allowlist test. This file
+  is fully dead, not partially — flag for the same cleanup pass that already
+  removed `computer_control.py` and `supervisor_client.py`.
+- **`config/agent_activity_timeline_map.json`** — not read by any runtime
+  code (the only reference anywhere in the repo is the path constant inside
+  `test_architecture_docs.py`, which only asserts the JSON is internally
+  consistent with itself, never cross-checked against real code). It has
+  drifted: its `event_classes` list includes `artifact_activity`,
+  `approval_state`, and `connector_action`, none of which exist in the real,
+  enforced `EVENT_CLASSES` at `activity_ledger_service.py:14-31` — and the
+  real enum has seven classes (`run_status`, `system_activity`,
+  `gateway_channel`, `gateway_hardware`, `fleet_control`,
+  `platform_integrity`, `mandate_blocked`) the JSON never mentions at all.
+  Treat this file as a stale design artifact, not a contract anything
+  enforces.
+- One more, smaller finding: the BFF auth-guard comment markers in
+  `frontend/app/api/activity/timeline/route.ts` (`enforceBffRouteGuard` /
+  `requireControlPlaneSession` / `requireControlPlaneWorkspaceAccess`) are
+  comment text only, never actually called — real auth for this route
+  happens via the backend's own `require_api_key` + `enforce_workspace_access`
+  dependencies (`runtime_events_api.py:401,417,421-426`), not via these named
+  functions. `test_architecture_docs.py:467-474` passes on a substring match
+  against the comment text, which is why this drift wasn't caught — doc/test
+  rot, not an open auth hole; the real auth check is present and correct.
+
 ---
 
 ## Part 13: One Agent Class
@@ -1675,6 +1862,1118 @@ docstring is the owner-level warning not to casually extend it.
 
 ---
 
+## Part 14: Skills
+
+"Skills" turns out to name three separate, largely-disconnected subsystems
+in this codebase, none of which share a frontend surface with the others.
+
+**1. The built-in catalog (this is what the product UI actually calls
+"Tools," not "Skills") — VERIFIED, wired end-to-end.**
+`skill_registry.py:31-49` (`SkillDefinition` dataclass), `:1147`
+(`list_skill_definitions`), `:367` (`enforcement_tool_name`). Consumed live
+at `sage_agent_runtime_service.py:1224-1240` (`_load_safe_skill_catalog`)
+and enforced at `:1951-2050`. API: `routes_fleet.py:959-978` →
+`fleet_tools.py:696-786` (`fleet_get_agent_tools`). Frontend: the **Tools
+tab** in `FleetAgentDetail.tsx:1476-1626` (see Part 19 for the full
+governance picture — presets, admin-only contracts, the `/tools` chat
+command). Data: `workspace_agent_installs.tool_toggles` JSONB column,
+confirmed by `migrations/unify_fleet_tool_toggle_ids.sql` (a real historical
+bug — toggles were silently inert due to an id-space mismatch — is evidence
+this loop is real and was in active use).
+
+**2. Marketplace install/publish pipeline — PARTIAL, backend-complete,
+zero live consumers.** Seven routes at `routes_health.py:131-137` →
+`skills_registry.py` (`install_marketplace_skill:494`,
+`publish_marketplace_skill:575`, `list_marketplace_skills:433`) → a real
+security scanner (`skill_scanner.py`) → storage (`installed_skills.py:27,34`).
+Storage is JSON files on disk (`marketplace/registry.json` +
+per-workspace `.registry.json`), **not** a database table. This is a
+complete, working git-clone/zip-install pipeline reachable with a direct API
+call and an admin key — but a repo-wide grep for its routes across
+`frontend/lib` and `frontend/app` returns zero matches, and it's never
+called from any agent-facing tool code either (`skill_registry.py`,
+`skills_service.py`, `universal_operator.py` all grepped for
+`skills_registry` calls: zero).
+
+**3. The curated device-skill pack — DEAD SCAFFOLDING at the execution
+layer.** `sage_skills_api.py:21-65` defines `_CURATED_SKILL_PACK`: 1Password,
+Apple Notes, Apple Reminders, tmux — with real setup-instruction copy,
+registered at `routes_workflows.py:8,21` as `/api/sage-skills` and
+`/api/sage-capabilities`. The fallback executor for skills with no real
+implementation, `skill_registry.py:52-62` (`_manual_skill_stub`), literally
+replies *"Heads up: {skill_label} is not wired to a live execution path
+yet."* A repo-wide, case-insensitive grep of `empyralis-gateway/src` for
+"skill", "1password", "apple.notes", "apple.reminders", and "tmux" returns
+**zero matches anywhere** — there is no Gateway implementation for any of
+these. Frontend API-client methods exist (`workstation-client.ts:737-738,2258`
+`listSageSkills`; `:738,2263` `listSageCapabilities`) with zero call sites.
+The curated pack's metadata does feed into the LLM's own capability manifest
+(`sage_instruction_compiler_service.py:580-584`), so the model can be told a
+skill is nominally "ready" — but no code path anywhere makes it actually do
+anything when called.
+
+**Practical read:** if someone asks "can an agent use a skill," the honest
+answer depends entirely on which of the three systems they mean. Only #1
+(the Tools tab toggle) is real and reachable by a user today, and it's an
+enable/disable switch over a fixed catalog, not a place to author a new
+skill.
+
+---
+
+## Part 15: Self-Improving Agents
+
+The closest thing to "an agent that gets better from experience" in this
+codebase is a memory-note-writing habit, not skill or tool authoring — and
+even the one policy flag that gestures at something richer is inert.
+
+**What's real: prompted memory-fact capture (see Part 16 for the full
+memory picture).** The system prompt itself instructs the model to silently
+call `memory_write` after meaningful exchanges — the "Durable Memory Rule"
+at `sage_instruction_compiler_service.py:404-456` — backed by a dedicated,
+retry-once, forced flush before old turns get compacted away
+(`sage_agent_runtime_service.py:3154-3256`,
+`_run_memory_flush_before_compaction` — this call must succeed before
+compaction proceeds). This genuinely runs, end to end. But it produces
+plain-text notes in `MEMORY.md`, not new skills, new tools, or changed
+behavior beyond "remember this fact next time."
+
+**What's NOT FOUND: any `write_skill`/`generate_skill` equivalent.** No
+mechanism lets an agent autonomously create a new skill or tool definition
+from what it learned. Every one of the ~30 `ToolDescriptor` registrations in
+`skills_service.py` was grepped for a "skill"-authoring `tool_name`: zero.
+The one function that *could* create a new skill,
+`skills_registry.install_marketplace_skill` (Part 14, #2), is never called
+from any agent-facing or tool-dispatch code — only from the admin HTTP
+routes.
+
+**What's DEAD SCAFFOLDING: the `reflection_enabled` policy flag.**
+`agent_manifest.py:67-69` defines `AgentManifestPolicy.reflection_enabled`,
+default `True` (`:182`). It's serialized into the manifest's API
+representation (`agent_specialist_repository.py:244`) — and then never
+consulted anywhere else; grepped for `.reflection_enabled` beyond its
+definition and serialization: zero hits. There's also a
+`REFLECTION.md` starter template (`workspace_context.py:128-136`) whose own
+seeded copy claims *"Sage writes here after meaningful conversations"* and
+*"Loaded every turn so Sage learns and improves over time."* Both claims are
+contradicted by the actual injection code, which has an explicit comment
+stating it loads **only** `MEMORY.md` every turn
+(`sage_instruction_compiler_service.py:260-262`: *"inject ONLY MEMORY.md
+content ... Every other file is available on-demand"*). `REFLECTION.md` is
+just another optional note file the agent may or may not choose to write to
+— same mechanism as any other memory file, not an autonomous
+loaded-every-turn reflection loop.
+
+**Correction to a plausible-sounding lead:** `agent_turn.py`, despite its
+name, is a request/data-shape contract (the `AgentTurnRequest` dataclass and
+its normalizers) — not turn-construction or prompt-assembly logic. It
+contains zero memory or skill references. The actual prompt construction
+happens in `sage_instruction_compiler_service.py`
+(`build_sage_instruction_bundle`), called from `handle_sage_chat`
+(`sage_agent_runtime_service.py:3367`).
+
+---
+
+## Part 16: Persistent Memory (expands §3.6)
+
+§3.6 above sketches the read/write/list tool surface. Here's the full,
+verified picture of how memory actually reaches the model and what an owner
+sees.
+
+**Tools and dispatch.** `agent_memory_tools.py:110-254` implements
+`memory_read`/`memory_write`/`memory_list` (path-traversal hardened),
+dispatched through `tool_broker.py:489-539`.
+
+**Turn injection — this is the load-bearing part.**
+`sage_instruction_compiler_service.py:249-334`
+(`build_root_memory_brief_sections`) is called from `:611-619` inside
+`build_sage_instruction_bundle` (`:554`), itself called from
+`handle_sage_chat` (`sage_agent_runtime_service.py:3714`) on every Sage
+turn, reached via `POST /api/sage/chat` (`sage_chat_api.py:99-173`, mounted
+through `routes_workflows.py:10,23`). This is a real, traced, end-to-end
+path from HTTP request to LLM system prompt.
+
+**Storage.** Plain markdown files on disk:
+`<workspace_context_dir>/agents/<install_id>/memory/MEMORY.md` plus
+`memory/files/**.md` (path rules in `workspace_context.py:13-48`) — not a
+database table.
+
+**Frontend — the Memory tab.** `frontend/lib/workspace/fleet/tabs/MemoryTab.tsx`,
+rendered at `FleetAgentDetail.tsx:342-344`, live at the real routed URL
+(`.../agents/[agentId]/[tab]/page.tsx`, `memory` is a `VALID_TABS` entry).
+Tree API: `routes_fleet.py:566-624` → `agent_memory_tree_service.py`.
+
+**The "starter scaffold" honesty banner — confirmed real, exact text.**
+`MemoryTab.tsx:173`: *"Starter scaffold — nobody has written to this file
+yet. This is Empyralis' default template, not saved content."* This is not
+a hardcoded guess — it's driven by a real byte-for-byte comparison,
+`is_default_context_content()` (`workspace_context.py:600-609`), checked
+against `DEFAULT_CONTEXT_FILE_CONTENTS` (`:50-145`), propagated through
+`memory_service.py:766` → `agent_memory_tree_service.py:84` →
+`routes_fleet.py:591`. Full data lineage traced from disk to banner.
+
+**A second, gated retrieval layer sits on top of the always-on MEMORY.md
+injection.** `workspace_context_memory_adapter.py:220-320`
+(`load_workspace_context_payload`) calls semantic/topic search
+(`agent_memory_tree_service.retrieve_relevant_topics:132-178`) against a
+SQLite `memory_entries` table (`agent_memory.py:267-274`), with optional
+embeddings via `sentence_transformers` that soft-fail to none if the
+package isn't installed. It only fires when a message-content heuristic
+(`_message_needs_memory_context`, `sage_instruction_compiler_service.py:459-491`)
+decides the query looks like it needs it — not on every turn.
+
+**Cross-session continuity.** `sage_agent_runtime_service.py:3300-3360`
+(`_apply_fresh_session_context_policy`) summarizes old turns via
+`compaction_service.compact_turns` and carries a `carried_summary` into a
+new session's `runtime_sessions.metadata` JSONB — how the agent survives a
+context-window reset without losing everything.
+
+**Not fully traced this pass:** a "memory sheet" hook cluster in the
+frontend (`workstation-chat-pane-hooks.ts`'s `useChatMemoryProfileState`)
+calls a real, separate `/api/sage-memory` CRUD API
+(`sage_memory_api.py:26-208`, with export/wipe/pin endpoints) — no live
+component was found that renders based on it, but this codebase has two
+apparent UI generations layered on top of each other and a negative grep
+result isn't proof no consumer exists anywhere.
+
+---
+
+## Part 17: Sub-Agent Delegation
+
+Two distinct mechanisms exist under this name. Neither is confirmed reachable
+from the live product today.
+
+**Mechanism A — orchestrator→specialist child-run spawning.** Routes:
+`POST /runs/{run_id}/delegate` (`runtime_route_registry_service.py:360`),
+`/delegate/auto` (`:376`), `/delegate/retry-failed` (`:393`). Service:
+`runtime_run_delegation_service.py:413` (`delegate_run_children`), `:544`
+(`auto_delegate_run_children`), `:731` (`retry_failed_delegation_runs`).
+Role model (`orchestrator`/`support`/`sales`/`research`/`finance`/`builder`/
+`private-assistant`) and auto-routing planner in `runs_delegation.py:35-43,
+190-237, 555-567`. A depth cap (`MAX_SUBAGENT_DEPTH_DEFAULT=1`) is enforced
+at `run_service.py:81-128`, gated on a per-agent `subagents_enabled` flag
+(below), and emits real `delegation.started`/`delegation.finished` trace
+events (`agent_trace_service.py:678-717`) — which the chat UI already knows
+how to render (`frontend/lib/workspace/codex-chat/event-projector.ts:771-795`
+maps them to "Delegated to {specialist}" / "Specialist finished" cells). But
+a search across every frontend route, every `ToolDescriptor` registration in
+`skills_service.py`/`skill_registry.py`, and `scripts/` found **no caller**
+of any of the three HTTP endpoints outside unit tests calling the Python
+functions directly with mocked callbacks. **PARTIAL — no confirmed caller.**
+The backend and the UI's rendering path are both real; nothing triggers it.
+
+**Mechanism B — operator→agent mailbox messaging.** The `fleet__message_agent`
+tool is a real, callable LLM tool (`skills_service.py:1295-1312`, dispatched
+to `fleet_tools.py:1085-1152`), which writes into the target agent's
+`workspace_agent_installs.metadata.fleet_inbox` (capped at 20 entries) and
+ledgers the action. Gated to operator-role callers only. **DEAD SCAFFOLDING
+on the read side.** A repo-wide grep for `fleet_inbox` finds exactly two
+writers and **zero readers** — nothing in `sage_agent_runtime_service.py`,
+`direct_chat_runtime_service.py`, `turn_runtime.py`, or `agent_turn.py` ever
+pulls a `fleet_inbox` entry back out into a turn's context. The tool's own
+docstring promises *"the target agent's next turn may read and process
+it"* — no implementation of that promise was found anywhere. Messages go
+into the mailbox and are never delivered.
+
+**The permission gate itself, `subagents_enabled`, is real but has no UI.**
+Resolved at `fleet_tools.py:92-98` (operator role defaults `True`,
+specialist defaults `False`), seeded by `capability_presets.py:57-99`
+(Knowledge/Standard presets → `False`; the Operator preset → `True`, but
+Operator is explicitly reserved and "not creatable through the normal
+create-agent flow"). It's a genuinely enforced gate — flipping it off blocks
+Mechanism A with a ledgered denial (`runtime_run_delegation_service.py:438-465`)
+— but a repo-wide grep for `subagent` across all of `frontend/` returns only
+one bare type declaration (`fleet-data.ts:42`), never rendered as a control.
+The only way to change it today is to ask the agent to call
+`fleet__configure_agent` on its own behalf.
+
+---
+
+## Part 18: Scheduled / Autonomous Wake-Up
+
+**This is two entirely separate scheduler systems that happen to share the
+word "schedule." Do not conflate them — one has a real UI and a dead
+executor; the other has a live executor and no UI.**
+
+### 18.1 Per-agent wake-up requests — real UI, dead executor
+
+**Creation is fully wired.** `bounded_scheduler_service.py:631-711`
+(`propose_self_wakeup`) and `:561-628` (`maybe_schedule_event_trigger`)
+write rows via `control_plane_repository.append_agent_scheduler_wake_request`
+(`:506`). Reachable two ways that both funnel into the same function: an LLM
+tool, `fleet__schedule_task` (`skills_service.py:1313-1342` →
+`fleet_tools.py:1640-1740`), and a real owner-facing REST route, `POST
+.../fleet/agents/{agent_id}/schedule` (`routes_fleet.py:423-449`). The
+frontend UI is genuinely real and live: **"Schedule a wake-up,"**
+`ScheduleSection` in the agent Overview tab
+(`FleetAgentDetail.tsx:750-910`, rendered at `:532-533` for non-master
+agents), calling `createFleetAgentSchedule`/`previewFleetAgentSchedule`/
+`deleteFleetAgentSchedule` (`fleet-data.ts:498-580`). Requests land in a real
+Postgres table, `agent_scheduler_wake_requests`
+(`control_plane_repository.py:1211-1232`: `due_at`, `status`, `claimed_at`,
+`executed_at`, ...), and creation is separately ledgered
+(`bounded_scheduler_service.py:526-556`). (Note: despite its docstring
+claiming cron support, the natural-language time parser,
+`fleet_tools.py:1597-1637` `_parse_when`, has no cron-expression branch and
+returns `None` for one — it only understands ISO-8601 and "in N
+minutes/hours/seconds.")
+
+**Execution is not wired — confirmed, not inferred, by tracing every call
+site.** The only consumer of the queue is `claim_due_wake_requests`
+(`bounded_scheduler_service.py:714-742`), reachable solely through
+`HeartbeatScheduler.run_callback` → `_execute_heartbeat_run`
+(`runtime_heartbeat_service.py:304-310`). That scheduler is instantiated
+exactly once, at server import time: `server.py:255` imports
+`routes_runs.py`, whose module-level `register_run_routes(router)`
+(`routes_runs.py:19` → `runtime_runs_api.py:948-980`) **does not pass a
+`workspace_id`**, so the value defaults to `None`
+(`runtime_route_registration_service.py:221-222`). Every heartbeat tick then
+short-circuits at `heartbeat.py:119-126`
+(`if not self.workspace_id: return ...status="scope_missing"`) **before**
+`run_callback`/`claim_due_wake_requests` is ever invoked. The manual "trigger
+now" route (`POST /heartbeat/trigger`, `runtime_route_registry_service.py:271-277`)
+hits the exact same misconfigured instance and dies the same way. No other
+instantiation of `HeartbeatScheduler(` exists anywhere in the repo. The
+daemon thread genuinely starts in the real, deployed production process —
+cross-checked against `deploy/empyralis-backend.service` — it just can never
+advance a single row past `status="pending"`.
+
+**Net effect:** a user schedules a wake-up through a real UI, the request is
+durably saved, and nothing ever happens. No error surfaces anywhere.
+
+### 18.2 Cron / weekly scheduler — live executor, no UI
+
+A completely separate subsystem. REST routes `POST /schedules` (croniter
+cron expressions) and `POST /schedules/weekly` (`routes_runs.py:120-130`),
+handlers `runs_core.py:1042` (`list_schedules`) / `:1193`
+(`create_schedule`). The tick loop, `run_service.py:2913-3008`
+(`run_weekly_scheduler_forever`, a genuine `while True: sleep(poll_seconds)`
+loop), starts as a daemon thread at `run_service.py:3099-3101`, invoked from
+`runs_core.initialize_runtime_services()`, which **is** called at real
+FastAPI startup (`server.py:290`, inside the `runtime_app_lifespan` ASGI
+handler). Gated by `ORION_SCHEDULER_ENABLED` (`runtime_config.py:545`,
+**defaults on**), polling every 20 seconds by default. A due schedule fires
+through `_execute_scheduled_run_request` (`runs_core.py:965-970`), which
+creates a genuine run through the normal turn-runtime pipeline, tagged
+`trigger_source="schedule"`.
+
+Storage is unusual for this codebase: `WEEKLY_SCHEDULES` is an in-memory
+dict persisted to a **local JSON file**, `automations/weekly_schedules.json`
+(`runtime_config.py:519`, load/save at `runs_core.py:160-179`) — not a SQL
+table, unlike almost everything else in this map.
+
+**No frontend UI was found anywhere that creates a cron or weekly schedule
+through these specific routes** — the "Schedule a wake-up" UI in §18.1 talks
+to the *other* subsystem entirely.
+
+### 18.3 The direct answer to "has any scheduled run actually fired in
+production, per the ledger"
+
+No ledger event type exists anywhere meaning "a scheduled/autonomous run
+fired." The closest is `event_class="delegation"` /
+`title="Delegated wake request scheduled"`
+(`bounded_scheduler_service.py:526-556`) — which fires at **creation** time,
+not execution time. `finalize_wake_requests`
+(`bounded_scheduler_service.py:759-808`), the function that resolves a
+claimed wake request, never calls `activity_ledger_service` at all. For
+§18.1's wake-queue path, tracing every caller of the one function that would
+ever advance a wake request past `pending` shows they all route through a
+scheduler instance permanently misconfigured with `workspace_id=None` — so,
+independent of ledger evidence, that code path is not reachable. For §18.2's
+cron/weekly path, the tick loop is unambiguously live in the real deployed
+process and would execute a due schedule — but there is no DB or log access
+available to confirm whether any schedule has ever actually been created by
+a real user (state lives in a local JSON file this investigation had no
+access to), and there is no dedicated ledger event type that would let you
+query the answer even with that access.
+
+---
+
+## Part 19: Tool Governance — Presets, Contracts & the `/tools` Command
+
+Supplements Part 14 §1 (the Tools tab itself) with the surrounding
+governance layer: what decides a *new* agent's starting toolset, who can
+manage the catalog centrally, and one confirmed source of drift.
+
+**Capability presets — backend-complete, unreachable from the wizard.**
+`capability_presets.py:57-99` defines three presets (`knowledge`, `standard`,
+`operator`) with real, different starting toolsets
+(`build_install_defaults`, `:115-143`), validated at agent-creation time
+(`fleet_tools.py:1357-1385` correctly rejects the reserved `operator`
+preset) and exposed via `FleetCreateAgentRequest.capability_preset`
+(`routes_fleet.py:199-224`). But `FleetCreateAgentWizard.tsx:197` — the
+wizard's only creation call — hardcodes `capability_preset: "standard"`.
+The `knowledge` preset (locked-down, cheap-tier, no hardware) is fully
+implemented and completely unreachable: every agent created through the
+product today gets the same default preset.
+
+**Admin-only tool contracts — an ops kill-switch layer, not a product
+feature.** `connectors_core.py:274-299` (`get_tool_contracts`,
+`update_tool_contract_state`) backs three admin-key-gated routes
+(`routes_connectors.py:526-528`: `GET /tools/contracts`, `PUT
+/tools/contracts/{tool_id}`, `POST /tools/policy/evaluate`). Real and
+working, reachable only with a platform-ops key — a repo-wide grep of
+`frontend/lib` and `frontend/app` for these paths returns zero matches, and
+none was expected: this is infrastructure, not a workspace-owner-facing
+control.
+
+**The `/tools` chat command has drifted from the catalog the Tools tab
+uses.** `command_registry.py:467-469` registers `/tools`; the handler
+(`:736-759`, `_handle_tools`) replies with a **hand-maintained, hardcoded
+tool-name string list** (`:743-745`) — not a call into `skill_registry`, the
+same catalog source the Tools tab and the runtime enforcement both use. The
+command works and is dispatched from real channel/chat entry points
+(`direct_chat_runtime_service.py:777`, `sage_turn_adapter.py:174-175`,
+`sage_command_dispatcher.py:276`), but what it lists can silently disagree
+with what's actually enabled for that agent.
+
+**Shared risk backbone, not itself a Tools-tab feature.**
+`capability_registry.py:47-660` (`CAPABILITY_REGISTRY`, ~40 risk/approval
+contracts) and `capability_risk_classifier_service.py` are widely imported
+(browser, hardware, policy, runs-execution, runtime-policy, skills, unified
+governance, gateway routes) — real and central, but this is shared plumbing
+for hardware/approval flows generally (see Part 21's note on the same file
+from the tool-honesty angle), not the enable/disable mechanism itself.
+
+---
+
+## Part 20: Connectors — Vault, Bindings & Execution
+
+**The connect/disconnect round trip is real, VERIFIED end-to-end in both
+directions, for both OAuth and manual-credential paths.** Setup:
+`routes_connections.py:333-504` (`POST .../setup/start`), OAuth callback
+`:523-617` → `connection_oauth_service.complete_oauth_callback`
+(`connection_oauth_service.py:1642-1741`). Manual add/reuse/remove:
+`routes_fleet.py:744-818` → `connectors_actions.py`
+(`store_agent_connector_credential:2470-2540`,
+`subscribe_agent_to_project_credential:2543-2596`,
+`unsubscribe_agent_connector:2642-2668`). Status:
+`routes_fleet.py:679-729` → `connection_catalog_service.agent_status_items`
+(`connection_catalog_service.py:1479-1558`). Frontend: `ConnectorPicker.tsx`
+(253 lines), rendered by the Connectors tab (`FleetAgentDetail.tsx:1387-1407`)
+and reused verbatim by the wizard's Connections step. Storage: a real
+`vault_credentials` table (`control_plane_repository.py:765-778`,
+project-scoped) plus an `agent_connector_bindings` table
+(`:718-729`, per-agent enable/disable) — traced through every layer, in
+both the connect and disconnect directions.
+
+**The catalog is large — 46 entries — but catalog presence isn't proof of
+working actions.** `connection_catalog_service.py:161` onward defines
+`_CATALOG` (46 `connection_id` entries), backed by ~30 `validate_*_connector`
+functions in `connector_validators.py`. What was independently confirmed to
+**execute real third-party API calls**, not just store a credential: Notion
+(`connectors/notion_connector.py:128-253` — `search`, `get_page`,
+`create_page`, `update_page`, `append_blocks`, `query_database`,
+`create_database_item`, all real HTTP calls) and GitHub
+(`connectors/github_connector.py`, 682 lines — `list_repos`, `get_repo`,
+`list_issues`, `create_issue`, `comment_on_issue`, confirmed present).
+Dispatched from workflow nodes (`runs_execution.py:3571+`) and from
+direct-chat LLM tool calls (`skills_service.py:3272-3329`
+`_execute_custom_connector_tool_call_sync`), gated by the same
+authority-mandate enforcement described in Part 10. **Not** independently
+verified for the other ~44 catalog entries this pass — they may rely
+entirely on the MCP auto-registration path below, which was not traced
+end-to-end for any single provider.
+
+**A second, parallel connector pathway runs on every OAuth completion.**
+`connection_oauth_service.py:1732-1738`
+(`_register_mcp_servers_for_provider`) fires automatically after every OAuth
+callback, using `APP_MCP_SERVER_MAP` (`:1194-1283+`, ~15 providers with
+official vendor remote-MCP endpoints). Its registry is stored in a local
+**file** (`mcp_servers.json`, `mcp_registry_service.py:33-40`) — an
+inconsistency with the Postgres-backed storage everywhere else in this
+capability. `GET /connections/mcp-catalog` exists (`routes_connections.py:732-796`)
+but no confirmed frontend caller was found for it.
+
+**Dead scaffolding: a superseded credential-vault API, kept alive only by
+one internal fallback.** `POST/PATCH/DELETE /api/connectors/vault`
+(`routes_connectors.py:558-561` → `connectors_actions.create_connector_vault`
+et al.) is fully functional. A frontend client method exists
+(`workstation-client.ts:1206,2659-2663`, `listConnectorsVault`) with **zero
+callers**. `FleetAgentDetail.tsx:1847-1850` carries a code comment that
+explicitly documents this history: the route was mistakenly used in the
+past for LLM-provider credentials before being corrected to
+`/api/credentials/vault`. It's kept technically alive only because one
+non-agent-scoped OAuth-callback fallback path still calls it internally
+(`connection_oauth_service.py:1719-1731`) — no UI reaches it.
+
+---
+
+## Part 21: Tool-Honesty Guard
+
+Previously undocumented in this map. Core module: `tool_honesty_guard.py`
+(300 lines). Its own docstring (`:12-19`) states the architecture plainly:
+**"Two live pipelines reach a 'final reply, about to be delivered' point
+with no shared code between them"** — Pipeline A is
+`sage_agent_runtime_service.py`'s `_run_sage_action_loop_v3` (Sage-mediated
+chat, which covers every channel including all personal channels); Pipeline
+B is `direct_chat_generation_service.py`'s
+`stream_provider_backed_direct_chat` (a specialist's own Chat tab / `/api/turn`).
+Both are independently, verifiably wired.
+
+**Forward-looking guards — three separate prompt-construction sites, all
+proactive, all confirmed present in the live code:**
+1. A capability manifest genuinely filtered to what's actually installed —
+   `sage_instruction_compiler_service.py:341-370`
+   (`build_model_capability_manifest`) filters the live, per-workspace
+   `sage_skills_api.build_sage_capabilities_payload()` down to
+   status "ready"/"approval_required," emits *"Do not mention or invent
+   unavailable tools"* (`:373-395`), and is injected into every Sage system
+   prompt (`:625`, inside `build_sage_instruction_bundle`). This is derived
+   from the live tool registry at prompt-build time, not a static string.
+2. A specialist-specific "tool honesty" rule —
+   `sage_agent_runtime_service.py:3841-3854` (`_spec_honesty_rule`): used a
+   tool → say so; didn't run it → say so; never fabricate a result.
+3. A direct-chat "Tool Use Rules" section —
+   `direct_chat_prompt_service.py:62-98` (`build_system_prompt`), rule text
+   at `:83-91`.
+
+**A structural, post-hoc consistency check backs up the prompt-level
+rules.** `tool_honesty_guard.py:113-128`
+(`check_tool_reply_consistency`) detects two failure shapes: denying success
+after a tool actually succeeded (`_DENIAL_PATTERNS`, `:52-66`) and claiming
+a result without any tool call having run (`_CLAIM_PATTERNS`, `:84-94`),
+with a deterministic non-model fallback (`:147-158`) if a regeneration
+attempt is still inconsistent. Gated by
+`EMPYRALIS_TOOL_HONESTY_GUARD_ENABLED` (default **on**, `:34-39`), with its
+own dedicated test file, `test_tool_honesty_guard.py`. Wired into both
+pipelines independently: Pipeline A calls `apply_tool_honesty_guard`
+(`sage_agent_runtime_service.py:4100-4150`, call at `:4133`); Pipeline B
+calls the sync twin, `apply_tool_honesty_guard_sync`
+(`direct_chat_generation_service.py:1998-2036`, call at `:2021`).
+
+**The display guard — raw HTML/proxy error bodies never rendered in
+chat.** Frontend-only, `AgentChat.tsx:43-67`
+(`friendlyTurnFailureMessage`), called on a non-OK turn response (`:310`).
+This is commit `e37898d83`, confirmed present at the current lines on
+`verify` HEAD. Two other, independently-written HTML-body guards
+pre-existed elsewhere in the frontend for the same general intent
+(`workstation-client.ts:1362-1367`, `workspace-json-request.ts:18-61`) —
+same goal, no shared code, not part of this specific commit.
+
+**Related but distinct — flagging to prevent conflation with tool-honesty:**
+`capability_risk_classifier_service.py` (451 lines) classifies
+blast-radius/risk for hardware and computer-use actions and feeds an
+allow/approval/block decision into `unified_governance_gate.py`, and
+`computer_action_safety.py` (416 lines) separately classifies dangerous
+on-screen actions (delete/purchase/credential/system-settings/app-install)
+to owner-only. Both are real governance mechanisms; neither is about
+whether the agent is being truthful about what it did — they gate whether
+an action is allowed to happen at all, a different axis entirely.
+
+---
+
+## Part 22: Hardware
+
+**The Hardware tab (per-agent access picker) — VERIFIED.**
+`fleet_tools.py:800-912` (`fleet_configure_agent`) validates
+`hardware_access` (`none`/`gateway`/`vps`/`all`) and
+`model_config.gateway_binding` as two **fully independent** patch keys —
+this independence matters, see the placement-resolver finding below.
+Frontend: `HardwareTab.tsx` (full component). Data:
+`workspace_agent_installs.hardware_access` column.
+
+**Machine list/detail pages and the capabilities grid — all VERIFIED,
+traced end-to-end.** `GET /gateway/registrations`
+(`routes_gateway.py:1923-1933`) backs both `hardware/page.tsx` (291 lines)
+and `hardware/[gatewayId]/page.tsx` (927 lines). The capabilities grid is
+genuinely wired from the Gateway's own TypeScript source through to the
+rendered UI: capability ids emitted by
+`empyralis-gateway/src/health/service-inventory.ts` (`postgres`, `docker`,
+`ollama`, `codex_cli`, `claude_cli`, `gpu`) match exactly what's ingested
+server-side (`gateway_protocol_service.py:2354-2419` via heartbeat) and what
+the detail page renders (`hardware/[gatewayId]/page.tsx:34-42,835-888`).
+
+**A separate, unused hardware-probe endpoint exists alongside the (wired)
+capabilities grid — DEAD SCAFFOLDING, don't confuse the two.**
+`GET /gateway/hardware/capabilities` (`routes_gateway.py:1936-1979`) is a
+real, on-demand shell probe via the Gateway — with zero references anywhere
+in the frontend.
+
+**"Agents running here" undercounts by one binding type.**
+`hardware/[gatewayId]/page.tsx:744-747` filters agents by
+`preferred_gateway_id` only (the *tool-access* binding) — it never checks
+`model_config.gateway_binding` (the *brain* binding, see below). An agent
+whose CLI-subscription brain is bound to this exact machine, but whose
+`preferred_gateway_id` is empty or points elsewhere, won't appear in this
+list even though the placement resolver would genuinely dispatch its turns
+to this box.
+
+**Unpair/remove — VERIFIED.** `POST .../revoke`
+(`routes_gateway.py:2077-2119`, owner-only) backs a real confirmation dialog
+(`hardware/page.tsx:81-104,278-287`).
+
+### The placement-resolver claim — "`cli_subscription` reads
+`gateway_binding`, not just `hardware_access`"
+
+**TRUE, and more strongly true than the phrasing implies.** The brain-dispatch
+code for a `cli_subscription` agent does not read `hardware_access` **at
+all**, in any capacity — grepping both files that own this resolution for
+the literal string `hardware_access` returns zero hits in
+`sage_agent_runtime_service.py` and `specialist_runtime_context.py`.
+
+The resolver, `_resolve_agent_cloud_provider`
+(`sage_agent_runtime_service.py:391-524`), branches on `model_config.mode`.
+For `cli_subscription` (`:467-488`): it reads `model_config.gateway_binding`
+and, if empty, **raises** rather than falling back to anything —
+`_friendly_cli_subscription_error("no_gateway_bound", ...)`. The dispatcher,
+`_dispatch_cli_subscription_gateway_brain` (`:985-1141`), takes
+`gateway_binding` as an explicit parameter, looks up the registration
+directly, checks CLI install+auth readiness
+(`_cli_subscription_readiness_reason`, `:816-854`), and dispatches a real
+completion over the Gateway's WSS rail:
+`gateway_execution_service.execute_tool_via_gateway(gateway_id=..., capability_id="llm.generate", ...)`
+(`:1086-1108`). `hardware_access` doesn't appear as a field on
+`SpecialistRuntimeContext` at all. Independently, `fleet_tools.py:800-912`
+(the one function that persists both fields) validates them as two
+completely separate, independently-checked patch keys — architecturally two
+unrelated bindings, not one falling back to the other.
+
+**The one place that reads *both* fields is the frontend display resolver,**
+`resolveHardwarePlacement` (`gateway-box-picker.tsx:164-188`) — for
+`cli_subscription`/`local` modes it reads `gateway_binding`; only for other
+modes does it fall through to `hardware_access`/`preferred_gateway_id`. Its
+own comment narrates the bug this fixed: previously it only ever looked at
+`hardware_access`, so an agent with real tool access `none` but a live
+`cli_subscription` `gateway_binding` displayed as a permanent "Cloud." That
+was a **display** bug, not a dispatch bug — no evidence was found that the
+backend dispatcher itself ever fell back to `hardware_access`.
+
+**Correction to `docs/HARDWARE-BRAIN-REALITY-REPORT.md`.** That document's
+claims — that dispatch "fires unconditionally... never checks if a Gateway
+is online, never checks if the CLI is installed," and that
+`fleet_configure_agent` "only type-checks `gateway_binding`" with a
+"confirmed bypass" for a blank/garbage value — are **false as of current
+code**. The current dispatcher does check online/installed/authenticated
+state and does call a real `llm.generate` WSS handler; the current
+`fleet_configure_agent` does reject an unresolvable, wrong-workspace,
+revoked, or CLI-not-ready `gateway_binding` at save time. The doc's own
+findings are cited by name as the design rationale inside
+`HardwareTab.tsx`/`resolveHardwarePlacement` — strong evidence the doc was
+accurate when written and has since been acted on, not that it was simply
+wrong. Treat it as historical record of a bug that's now fixed, not a
+current defect list.
+
+---
+
+## Part 23: Landing Page, Invite Gating & Auth
+
+**There is no marketing landing page in this repo to gate.**
+`frontend/app/page.tsx` (25 lines) is a pure server-side auth redirect:
+unauthenticated → `/login`; authenticated → the workspace or
+`/workspaces/new`. No hero, pricing, or marketing component exists anywhere
+under `frontend/app` or `frontend/lib` — a case-insensitive grep for
+hero/marketing/pricing/waitlist across both trees returns nothing except the
+signup page's own auth-flow copy. `.claude/worktrees/build-landing-page`
+exists as a separate, unmerged worktree, confirming this work is in flight
+elsewhere but not on `verify`.
+
+**Two independent, fully-coded invite gates exist — both OFF by default in
+this repo's checked-in config, so signup is open as shipped here.**
+1. A static env-var gate: `EMPYRALIS_INVITE_CODE`, checked at
+   `routes_auth.py:242-253` (`_validate_platform_invite_code`), reflected to
+   the client as `invite_required` (`auth.py:422`), rendered as a required
+   field on `frontend/app/signup/page.tsx:87-91,308-325` when set. Unset in
+   `.env`, `.env.example`, and every `frontend/.env*` variant present in
+   this repo.
+2. A richer, DB-backed pilot-invite system: `ORION_PILOT_SIGNUP_MODE`
+   (`pilot_invite_service.py:15-16,19-20`), full create/validate/claim round
+   trip, a real `pilot_invites` table
+   (`control_plane_repository.py:390-405`), and a dedicated landing page,
+   `frontend/app/invite/[code]/page.tsx` (126 lines), that shows real
+   valid/invalid/error states and routes to signup/login with the pilot
+   code attached. Also inert by default — `ORION_PILOT_SIGNUP_MODE` isn't
+   set to `invite_only` anywhere visible in this repo either.
+
+Both mechanisms are genuinely wired end-to-end when an operator turns them
+on; neither appears to be turned on in this codebase's own checked-in
+config. Whether either is set in an actual deployed environment's env vars
+(Render/Vercel dashboard, etc.) isn't visible from the repo.
+
+**Mobile.** Login/signup/auth-complete have purpose-built, explicitly
+commented mobile CSS (`chrome.css:3087-3109`, an `@media (max-width: 768px)`
+block that names these three pages by intent). Privacy/terms rely only on
+generic fluid-width CSS with no dedicated breakpoint — functional, but not
+evidence of deliberate mobile tuning the way the auth pages show.
+
+---
+
+## Part 24: Sage's Actual Boundaries
+
+**The recurring internal framing — "Sage has no connectors, only helps
+operate the platform" — is backwards. Sage has *more* tool access than a
+deployed specialist, not less.** `sage_agent_runtime_service.py:1864-1868`'s
+own docstring says so directly: a specialist install gets a computed tool
+whitelist, "or **None for the master/Sage path (no per-install
+restriction)**." Enforced at `:2002-2058` (`_direct_tool_bundle`): when the
+specialist toolset is `None` (i.e., it's Sage), the turn receives the full,
+unfiltered workspace tool registry —
+`resolve_workspace_tool_capabilities(workspace_id)`
+(`tool_availability_truth.py:282-296`, every vault-connected connector for
+the whole workspace, no filter) — **plus** operator-only fleet-management
+tools added specifically because "a specialist must never see these at
+all" (`:2019-2042`). A specialist, by contrast, goes through
+`_resolve_specialist_toolset` (`:1864-1930`), restricted to only its
+explicitly-bound connectors (`agent_connector_bindings`).
+
+**The one restriction on Sage that is real: it cannot hold a public/business
+channel persona.** `channel_lane_contract_service.py:8-9` defines two
+lanes — `personal_gateway` and `studio_business_connector`. Every
+business/work channel (Slack, Discord bot, Notion, Linear, GitHub, Dropbox,
+S3, Microsoft 365, Teams, Matrix, WeChat Work, Instagram Business, the
+web-chat widget, SMTP/IMAP) is declared `surface_support: ["studio"]` only
+(`:131-541`); `platform_channel_catalog("sage")` filters all of these out,
+and `channel_platform_service.py:461-465` hard-403s any attempt to bind one:
+*"Personal channels are Agent Computer/Sage runtime channels and cannot be
+bound to Studio cloud agents."* This part of the claim holds: Sage can pair
+personal channels (Telegram, WhatsApp, iMessage, etc., all routing back to
+its own identity) but can never be given a Slack app or Discord bot
+identity of its own.
+
+**A real owner-facing narrowing control exists, but only on the
+backend.** `GET`/`PATCH /workspaces/{workspace_id}/sage/tool-policy`
+(`routes_workspaces.py:675-719`) lets an owner deny specific Sage
+capabilities (Web Search, HTTP, Gmail, Calendar, File Access, Code
+Execution — `workspace_admin_service.py:107-132`,
+`SAGE_TOOL_POLICY_DEFINITIONS`), backed by a real `workspace_policies`
+deny-list column. A typed frontend API client exists for it
+(`workstation-client.ts:628,870-871,1210,2729-2743`) — but a repo-wide grep
+found zero callers of these methods outside the client file and Playwright
+e2e test mocks. **DEAD SCAFFOLDING** — an owner cannot exercise this from
+the product today.
+
+**"Ask Sage" → "Ask AI" rename: not started.** "Ask Sage" is the live,
+tested name everywhere it appears — five occurrences in
+`SageLauncher.tsx` (a code comment at `:57`, `emptyTitle` at `:147`,
+`emptyBody` at `:148`, `aria-label` at `:223`, and the actual visible button
+text, `:228`) — plus two lowercase incidental backend mentions
+(`pilot_operations_service.py:137`, `mini_apps_service.py:1268`) and two
+proof/test scripts (`scripts/proof_uc_fleet_wiring.py:123`,
+`scripts/proof_u4_fleet_ui.py:65,192,206`) that assert the exact string
+`"Ask Sage to create your first one"` as expected, current UI content —
+i.e., it's actively pinned as correct, not flagged as stale.
+`docs/UI-CONTRACT.md:123,150` likewise names "Ask Sage launcher" as the
+defined element. **"Ask AI" appears zero times** anywhere in `frontend/`,
+`server_modules/`, `scripts/`, or `docs/` on this branch.
+
+---
+
+## Part 25: BYO Subscription, BYOK & Platform Credits — Execution-Layer Findings
+
+Part 1's Provider Architecture section documents the four-mode design and is
+still accurate as a map of the surface. This section adds what the
+2026-07-13 execution-layer pass found underneath it — confirmations,
+one reconciled number, and two gaps not visible from the summary table.
+
+### 25.1 `cli_subscription` — real for specialists, dead scaffolding for Sage itself
+
+The install/login/dispatch chain is genuinely built and tested: `cli.install`
+/ `cli.login.*` capabilities (`cli_setup_service.py:9-12`, routes
+`routes_gateway.py:2450,2476,2503`), a real non-shell `child_process.spawn`
+of the actual `claude`/`codex` binary (`empyralis-gateway/src/llm/cli-runner.ts:373-395`),
+and a dispatch path (`sage_agent_runtime_service.py:985-1141` →
+`gateway_execution_service.execute_tool_via_gateway(capability_id="llm.generate")`)
+— all backed by matching tests on both sides (8 Gateway TS test files, 1,557
+lines total; 3+ Python test files). Neither CLI has a model picker in either
+UI surface (`cli-runner.ts` only appends `--model` if one is given, and
+nothing gives one) — always the CLI's own default, and the UI is self-aware
+of this (`FleetAgentDetail.tsx:78` labels the field `"CLI default"`).
+
+**The gap: Sage's own Model tab accepts and saves `cli_subscription`/`local`
+mode, then never honors it.** `FleetAgentDetail.tsx:341` renders the Model
+tab for *any* agent, master included, with no `isMaster` gate (contrast
+other rows in the same file that do gate on it). `fleet_configure_agent`
+(`fleet_tools.py:800-919`, the save path) has no master/operator guard
+anywhere in its body either — the PATCH succeeds. But at turn time, Sage's
+own runs go through `_resolve_cloud_provider(workspace_id)`
+(`sage_agent_runtime_service.py:3576`), a function with **zero knowledge of
+`model_config` or modes at all** — it only knows "explicit
+`sage_ai_provider` string" vs. the DeepSeek default. The function that
+*does* understand `cli_subscription`/`local`,
+`_resolve_agent_cloud_provider`, is only reached when a specialist context
+object is present (`specialist_runtime_context.py:139-140` explicitly
+returns `None` for the master, with the comment *"the master (Sage) runs
+its normal runtime"*). **Net effect:** an owner can open Sage's own card,
+pick "Your subscription," bind a Gateway, and Save — it works, no error —
+and Sage keeps running on whatever `_resolve_cloud_provider` returns
+instead, silently.
+
+### 25.2 The durable-dispatch deadline, reconciled definitively
+
+**Superseded by Part 26.3 — read that section for the current number.**
+This entry was written mid-day and captured `durable_deadline_seconds=60`
+as current; the value moved twice more the same day (a 120s widening, then
+a revert) and now sits at **40** (`sage_agent_runtime_service.py:1144`).
+Kept here, corrected, for the historical sequence: `a8186c6dc` (widened
+240s→600s, a mitigation for "Gateway is not currently connected" errors)
+landed first; `a883f3168` (same day) found the actual map-eviction root
+cause — `_unregister_live_connection` in `gateway_protocol_service.py` was
+unconditionally evicting a connection map entry on any teardown, so a
+departing *old* connection's cleanup could delete a *new* reconnection's
+registration — fixed the map bug, and reverted the deadline to 60s. Treat
+240s/600s/60s/120s all as historical, not current.
+
+### 25.3 BYOK — real encryption, one credentials-routing gap
+
+Storage is genuinely encrypted, not plaintext: `vault_store.py:253-273`,
+Fernet with a PBKDF2-HMAC-SHA256-derived key and a random per-secret salt;
+an older, less-safe path is explicitly disabled in code with a comment
+citing the specific risk it used to carry ("exposed secrets through process
+arguments"). The key/model/provider UI is real and complete on both the
+wizard and the Model tab.
+
+**The gap:** at the master (Sage) level, `_resolve_cloud_provider` resolves
+`(provider, credentials)` once, workspace-wide. If a *specialist* has its
+own `model_config.provider` set and it differs from the workspace default,
+the code overwrites the `provider` string (`sage_agent_runtime_service.py:3578-3581`)
+but does **not** re-fetch `credentials` to match it — the stale credentials
+dict is threaded unchanged through `_run_sage_action_loop_v3` and into
+`direct_chat_generation_service.stream_provider_backed_direct_chat`, which
+uses whatever it's handed at four call sites without re-deriving anything
+from the provider string. The one function that resolves provider and
+credentials together correctly, `_resolve_agent_cloud_provider`
+(`sage_agent_runtime_service.py:391-522`), has **zero call sites anywhere in
+the codebase** — confirmed by grep, only its own `def` line matches. This
+was traced through five call frames at the source level; the actual
+runtime failure mode (clean error vs. silently sending a mismatched key)
+was not observed directly, since this was a read-only pass.
+
+A smaller, separate architectural note: provider profiles
+(`POST /providers/profiles`) are stored in a local JSON file
+(`providers/profiles.json`), not a Postgres table — inconsistent with
+`vault_credentials`, which is a real DB table.
+
+### 25.4 Platform credits — DeepSeek confirmed as default, with one seeded-model discrepancy
+
+DeepSeek is confirmed as the default platform provider three ways: the
+resolution code (`sage_agent_runtime_service.py:300-378`,
+`_resolve_cloud_provider`, docstring: *"Default = the PLATFORM provider
+(DeepSeek, credit-gated)"*), a dedicated passing unit test
+(`test_core_loop_no_fallback.py:108-131`,
+`test_no_explicit_provider_defaults_to_platform_not_vault`, asserts
+`provider == "deepseek"` literally), and a real Stripe-backed credit-ledger
+chain (`direct_chat_hosted_usage_service.py:653-663` →
+`billing_service.py:412-450` → an atomic Postgres debit).
+
+**One discrepancy, stated in the platform's own code comment, not inferred:**
+every new specialist agent is seeded with `model: "deepseek-reasoner"`
+(`fleet_tools.py:139-154`, `seed_specialist_metadata`) — but the comment
+immediately above that line (`:142-148`) records an empirical
+same-session measurement of a "deny a successful tool" failure rate:
+**`deepseek-chat` 5/5 vs. `deepseek-reasoner` 1/5.** The model seeded by
+default for every new agent is the one the platform's own measurement,
+recorded in the code, found performed worse on that metric.
+
+---
+
+## Part 26: `cli_subscription` — Full Wire Trace (Message → Reply) & the 2026-07-13 Transport Rebuild
+
+Parts 1 and 25 document the `cli_subscription` **mode** — who pays, how
+it's configured. This section documents the **wire path**: literally every
+hop a message takes from the moment a customer types it to the moment
+Codex's or Claude's reply lands back in their chat window, plus the three
+bugs that broke it for days and the redesign that fixed it. Written so an
+agent with no session history can understand the whole pipeline cold —
+nothing here should live only in a chat transcript or an agent's memory.
+
+### 26.0 Two different "Gateways" — read this first
+
+The word "gateway" means two unrelated things in this codebase, and
+conflating them is exactly what cost multiple days of confused debugging:
+
+1. **The Gateway** (capital G, colloquial) — `empyralis-gateway`, the
+   Node.js process installed on the *customer's own machine* (§2.2). It
+   opens one outbound WSS connection to the backend; this is what the
+   Hardware tab's "Online/Offline" pill (§22) reflects.
+2. **`gateway_protocol_service.py`** (backend, §2.1) — the *Python module
+   on our servers* that terminates that WSS connection and dispatches
+   capability invocations (`tool.invoke` frames) down it. This is "gateway
+   dispatch."
+
+"Gateway shows Online but dispatch says not currently connected" was never
+a contradiction once these are separated: the WSS socket can be alive
+(Online) while the **backend's own event loop is frozen** (§26.2, BUG3)
+and never gets around to using it. Two genuinely different systems: one
+English word.
+
+### 26.1 The trace — one message, nine hops
+
+For a specialist agent whose `model_config.mode == "cli_subscription"`
+(§1, Mode 3) and `runtime == "codex"`:
+
+1. **Browser → backend.** `AgentChat.tsx:278` — `fetch("/api/turn", {...})`
+   with the message body. On failure, `AgentChat.tsx:308-310` calls
+   `friendlyTurnFailureMessage()` (added 2026-07-13) so a raw HTML error
+   page or a bare status code never reaches the chat window.
+2. **Route → canonical turn entry.** `runtime_runs_api.py:982` (`POST
+   /turn`) → `agent_turn.py` normalizes the request into an
+   `AgentTurnRequest` → `turn_runtime.py` (the switchboard) routes it to
+   the direct-chat path, which reaches
+   `sage_agent_runtime_service.py:1014`, `_dispatch_cli_subscription_gateway_brain()`.
+3. **Brain dispatch reads the agent's binding.** That function reads
+   `model_config.gateway_binding` (confirmed the *only* field read for
+   this mode — Part 22) to resolve which paired Gateway to target, then
+   calls `gateway_execution_service.execute_tool_via_gateway()`
+   (`gateway_execution_service.py:473`) with `capability_id="llm.generate"`,
+   `durable=True`, `durable_deadline_seconds=40`
+   (`sage_agent_runtime_service.py:1144` — see §26.3 for why 40, not the
+   240/600/60/120 values that briefly lived here across the same day).
+4. **Durable enqueue, not a direct send.** `gateway_protocol_service.py`
+   `dispatch_tool_invoke_durable()` (`:1163`) builds a `_PendingInvoke`
+   (`:105`), calls `_enqueue_pending_invoke()` (`:1251`) to push it onto
+   `_PENDING_GATEWAY_INVOKES[gateway_id]` (`:126`), then
+   `_kick_immediate_flush(gateway_id)` (`:1258`) — the 2026-07-13 redesign,
+   §26.3. The backend then awaits a future racing the 40s deadline.
+5. **Flush finds the live connection and sends.** `_kick_immediate_flush`
+   (`:1132`) schedules `_flush_pending_invokes()` (`:1115`) on the owning
+   WebSocket's own asyncio loop via `call_soon_threadsafe` — no waiting for
+   the next periodic heartbeat. The frame goes out over the same outbound
+   WSS socket the Gateway opened (survives NAT/firewalls, §1 Key Contract 7).
+6. **The Gateway (Node.js, on customer hardware) receives and routes it.**
+   `empyralis-gateway/src/cloud/ws-client.ts` receives the `tool.invoke`
+   frame → `supervisor/capability-router.ts` dispatches on `executor ===
+   "llm"` (`:250-251`) → `llm/runtime.ts`, `generateViaCli()`.
+7. **Runtime picks the CLI path.** `runtime.ts:321` —
+   `useCodexDaemon = params.runtime === "codex" && codexAppServerEnabled()`.
+   **Today this is false** (flag off by default, §26.4), so it falls to
+   `llm/cli-runner.ts:373`, `runCliSubscription()` → `spawnAndCollect()`
+   (`:158`) → a real, non-shell `child_process.spawn` of the `codex` (or
+   `claude`) binary (`buildInvocation`, `:127`), authenticated as *the
+   customer*, not Empyralis (§1, Mode 3: "Empyralis never touches the
+   subscription token"). If the flag is ever on, `runtime.ts:330-331`
+   instead calls `sharedCodexAppServer().generate()` — the warm-daemon
+   path, §26.4.
+8. **CLI runs, authenticates with the customer's own subscription, and
+   replies** (or reports a real failure — e.g. Codex's own "usage limit
+   exceeded, retry Aug 1" text from the actual linked ChatGPT account). The
+   Gateway sends one `response` frame back over the same WSS socket.
+9. **Response resolves the durable future, streams back to the browser.**
+   `gateway_protocol_service.py` resolves the future awaited in step 4 →
+   `_dispatch_cli_subscription_gateway_brain` returns the text (routing
+   real CLI failures through `_extract_cli_gateway_detail()` (`:771`) and
+   `_friendly_cli_subscription_error()` (`:792`) so the customer sees the
+   CLI's actual reason, not a generic "check Gateway logs") →
+   `direct_chat_stream_response_service.py` streams it as SSE `chunk`/
+   `final` events → `AgentChat.tsx:331-332` appends each `delta` to
+   `streamingText` and renders it live.
+
+### 26.2 What was actually broken — three confirmed root causes
+
+All three are fixed and deployed on `verify` as of `b3c122028`.
+
+**BUG1 — reconnect map-eviction race
+(`gateway_protocol_service.py`, fixed in `a883f3168`).**
+`_unregister_live_connection` (`:759`) used to pop the
+`gateway_id → connection` map entry unconditionally on any teardown. A
+*stale* connection's delayed cleanup could run **after** a newer
+reconnection had already replaced it in the map, evicting the good
+connection and leaving dispatch with nothing to send to — while the
+Gateway itself was, in fact, online. Fixed with an identity guard:
+`_unregister_live_connection` now only pops the entry if it still points
+at the *same* connection object, and `_register_live_connection` (`:742`,
+made `async`) explicitly closes any different existing connection before
+registering a new one.
+
+**BUG2 — auth-retry storm.** A second, compounding failure mode where
+repeated auth retries amplified the effect of BUG1 under real reconnect
+churn (Cloudflare-fronted connections cycling every 3-5 minutes, §26.4).
+Fixed alongside BUG1 in the same confirmed-root-cause pass.
+
+**BUG3 — the event-loop freeze (the actual multi-day root cause; fixed in
+`1408700ba`).** `direct_chat_stream_response_service.py` used to call
+`next(producer_iter)` **synchronously on the main FastAPI/Starlette event
+loop** to pull a chat stream's first SSE event. For a `cli_subscription`
+turn, that producer's first event doesn't exist until the *entire* Gateway
+round-trip (hops 4-9 above) finishes — so that one `next()` call froze the
+**whole backend process** for the full duration of every such turn,
+confirmed by polling `/health` during a live turn and getting nothing back
+for ~70 seconds straight. A frozen event loop can't send WebSocket
+heartbeats either, so the Gateway's own healthy connection looked dead
+from the backend's side — **this single bug explains nearly every
+"gateway not connected" symptom chased across this entire multi-day
+investigation; it was not a connectivity problem at all.** Fixed by
+wrapping the call: `first_event = await run_in_threadpool(_producer_first_event,
+producer_iter)` (`:243`, using the `_PRODUCER_EXHAUSTED` sentinel at `:19`
+since `StopIteration` cannot cross a thread boundary cleanly). Confirmed
+fixed by re-running the same `/health`-during-a-turn test (stayed
+responsive) and by the first successful real end-to-end turn immediately
+after.
+
+### 26.3 Durable inbound delivery — enqueue-then-flush, not push-and-retry
+
+Before this pass, a dropped connection mid-dispatch meant retrying the
+*same push* against a deadline. The redesign (all in
+`gateway_protocol_service.py`) makes Gateway→machine delivery as durable as
+the machine→Gateway result path already was — modeled explicitly on how
+GitHub Actions self-hosted runners, Buildkite, and Temporal workers
+guarantee delivery to workers that come and go: the server holds a queue,
+the worker pulls.
+
+- **`_PendingInvoke`** (`:105`) — one queued command: `request_id`,
+  `capability_id`, `payload`, plus `delivered: bool` and
+  `delivering_session: Optional[str]`.
+- **`_PENDING_GATEWAY_INVOKES`** (`:126`) — `Dict[gateway_id, List[_PendingInvoke]]`
+  behind a lock; `_enqueue_pending_invoke` / `_remove_pending_invoke` /
+  `_snapshot_pending_invokes` are the only mutators.
+- **Claim + preempt, not double-execute.** `_claim_pending_invoke(pending,
+  session_id)` (`:150`) is session-scoped and **preemptable** — a *newer*
+  connection's flush can steal the claim from a *stale* connection's
+  stalled send, since that stale connection's send was already killed by
+  `close_stale`. `delivered` is only set **after a send actually
+  completes**, which is what prevents double-execution — the Gateway does
+  **not** dedup inbound `tool.invoke` frames itself, so this guarantee has
+  to live entirely on the backend side.
+- **Two flush triggers, not one.** `_flush_pending_invokes(gateway_id,
+  connection)` (`:1115`) runs (a) immediately on enqueue via
+  `_kick_immediate_flush` (`:1132`, `call_soon_threadsafe` onto the
+  connection's own event loop — no waiting for the next heartbeat) and (b)
+  on every `gateway.heartbeat` frame and fresh connect inside
+  `handle_gateway_websocket` (`:2365`, `:2611`) as a backstop.
+  `DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_SECONDS` was also halved 20s→10s
+  (`gateway_registry_service.py:22`) so the backstop fires twice as often
+  and dead sockets are noticed in half the time.
+- **A "fast path" was tried and deliberately removed.** An earlier version
+  of this dispatcher also sent the very first attempt inline, same-request,
+  before falling back to the queue. It was removed (`828f08269`) after
+  diagnostic logging showed it could hold a delivery claim while its own
+  cross-loop write hung against a dying socket, stalling the heartbeat
+  flush loop behind it for minutes. The queue + two flush triggers above
+  are the entire delivery mechanism now — no inline send anywhere in
+  `dispatch_tool_invoke_durable`.
+- **The deadline itself, reconciled:** `durable_deadline_seconds` moved
+  240 (original) → 600 (`a8186c6dc`, a mitigation for the map-eviction
+  race before it was understood) → 60 (`a883f3168`, once BUG1's real fix
+  made a long window unnecessary) → 120 (a same-day widening for an
+  observed Cloudflare-timing gap, reverted almost immediately after direct
+  pushback that a 10-minute worst case was unacceptable for a chat reply)
+  → **40, current** (`18ef969fb`, `sage_agent_runtime_service.py:1144`) —
+  fail fast, since BUG3's fix made honest measurement possible and a stale
+  connection now gets detected/replaced well inside 40s. *(This
+  supersedes §25.2, which captured the 60s value mid-day before the
+  120→40 revert.)*
+
+### 26.4 Latency — what's measured, what's built, what's left
+
+Once BUG3 stopped masking real timing, turn latency became measurable for
+the first time: **~18.7s → ~4.4s**, entirely from `_kick_immediate_flush`
+(§26.3) replacing a wait-for-the-next-10s-heartbeat delivery model. Codex
+itself was never the slow part.
+
+That 4.4s is still ~4x OpenClaw/"Hermes" (~1s), researched with citations
+from a local clone at `/Users/mansur/openclaw/`. The gap is architectural,
+not a bug: OpenClaw's CLI-backed sessions never spawn a fresh process per
+message — they keep one persistent daemon warm and stream tokens as they
+generate. A 4-phase plan closes this gap (owner-approved, full autonomy
+given to execute it end to end, no further check-ins required):
+
+| Phase | What | Status |
+|-------|------|--------|
+| **1a. Warm `codex app-server` daemon** | Replace per-turn `codex exec` (cold spawn) with one persistent `codex app-server` JSON-RPC daemon reused across turns — a real, pre-existing `codex` subcommand (confirmed via `codex --help` on the box, not invented). New file `empyralis-gateway/src/llm/codex-app-server.ts` (400 lines): `CodexAppServerDaemon` class — lazy handshake (`initialize` + a required `initialized` notification, undocumented in the protocol and only found by reading OpenClaw's own working client after guessing against the live binary failed), `thread/start`(model, baseInstructions) → `turn/start`(input, effort) → streamed `item/agentMessage/delta` → `turn/completed`/`error`, 10-minute idle reap. Wired into `runtime.ts:321,330-331` behind `EMPYRALIS_GATEWAY_CODEX_APP_SERVER=1` (`codexAppServerEnabled()`). | **Built, committed (`b3c122028`), and LIVE — flag enabled on the prod-box Gateway (`gateway_00990ea4`), rebuilt, restarted.** Verified with real traffic, not just theory: sent 3 sequential `/api/turn` calls, confirmed via `ps` that the SAME OS process pair (the `codex` Node wrapper + its exec'd native binary) served all 3 — no respawn between turns. Turn wall-time (includes the real ChatGPT quota round-trip each time, not just cold-start): **7.8s → 4.4s → 3.7s**, a real, measured downward trend. Toggled the flag off and sent one more turn to confirm the `codex exec` fallback path still works (4.2s, succeeded) before re-enabling. Each turn returned the genuine, honest quota-limit message ("...try again at Aug 1st, 2026 11:48 AM"), proving the real binary ran each time, not a stub. |
+| **1b. `claude_code` prewarm pool (deliberately NOT a reused daemon — §26.5)** | New file `empyralis-gateway/src/llm/claude-cli-prewarm.ts`: `ClaudeCliPrewarmPool` — pre-spawns `claude -p --input-format stream-json --output-format stream-json --verbose --tools ""` processes keyed by `sha256(model, systemPrompt)`, hands each ONE turn over stdin, then tears it down and spawns a replacement for that key in the background so the *next* turn for that agent often finds a process already past cold-start. Wired into `runtime.ts` `generateViaCli` behind `EMPYRALIS_GATEWAY_CLAUDE_PREWARM=1` (`claudeCliPrewarmEnabled()`). | **Built, 3 new automated tests proving single-use safety (§26.5's core safety property — two turns for the same agent always land on different processes with zero content crossing between them), flag enabled on the prod-box Gateway.** Could not be exercised with a real reply: **no active Gateway registration has a working Claude login at all** — confirmed two independent ways: (1) the box's own self-reported `llm_runtimes` inventory shows `gateway_00990ea4` (the one bound to the test agent) as `claude_code: {installed: true, authenticated: false}`; (2) checked *every* registered gateway in the workspace — the only one that ever had Claude authenticated (`gateway_ed416e3c...`) is `status: revoked`, not active. This is a real absence of login, not a quota wall like Codex's — someone needs to run `claude login` on the Gateway machine itself to unblock a real end-to-end test (not something to do without the owner's say — see §1's credential-entry boundary). |
+| **2. Streaming** | Forward Codex's `item/agentMessage/delta` events from the Gateway through the backend's durable-dispatch path into the SSE `chunk` mechanism the frontend already renders. New fire-and-forget `tool.invoke.chunk` EVENT frame (`protocol/types.ts`, `codec.ts`), correlated by `request_id` with the eventual response — NOT part of the request/response future machinery, since losing a chunk changes nothing about correctness. `GatewayLLMRuntime.setEventPublisher()` (`runtime.ts`), wired post-construction in `index.ts` (same circular-dependency pattern as `cliSetupRuntime`). Backend: a small `request_id`-keyed sink registry in `gateway_protocol_service.py` (`_PENDING_DELTA_SINKS`), registered/unregistered around `dispatch_tool_invoke_durable`'s await; `_dispatch_cli_subscription_gateway_brain` reads the SAME `_GENERATION_EVENT_SINK` contextvar every other provider's streaming already uses (`direct_chat_generation_service.py`) and passes a thin closure down as `on_delta` — no new mechanism invented, hooked into the existing one. `AgentChat.tsx:331-332` needs no change. | **Built, committed, deployed, and confirmed non-regressing** — 4 new tests (in-flight delivery, unregistered/late chunk is a silent no-op, a broken sink never crashes delivery, `on_delta` stays fully unregistered when a caller doesn't pass it); full existing gateway (258 tests) and backend suites re-run identical to the pre-change baseline (confirmed via git-stash diff, zero new failures). Re-verified live on the box after deploy: codex turns still complete correctly and the SAME process still gets reused. **Real chunk delivery itself is unobserved** — Codex's quota check fails before any token would ever stream, so there's no way to see a real delta arrive until the account has quota again (Aug 1). |
+| **3. Model + reasoning picker** | Add `reasoning_effort` to `model_config`; thread `-m <model>` / `-c model_reasoning_effort=<level>` (codex) and the Claude CLI's native `--effort <level>` (§26.5 — confirmed to exist) through `cli-runner.ts`/the daemon; new `ModelTab.tsx` (mirrors `HardwareTab.tsx`) in the agent detail UI. | Not started. |
+| **4. Backend overhead trim + prewarm** | Profile/cut the ~2.5s of non-Codex backend turn-setup overhead (context assembly itself is already fast — measured 322ms, ruled out as the bottleneck); prewarm the daemon at Gateway startup instead of on first message. | Not started. |
+
+**Infra note (raised independently, confirmed, not yet acted on):** the prod-box Gateway shares a single **1 vCPU / ~1.9GB** droplet with the backend, Postgres, and two `next-server` frontend instances (`nproc`, `free -h`, and `ps aux` all checked directly — ~886MB "available" memory across everything). Even with warm processes, a saturated single core adds latency to every spawn. Moving the Gateway to a dedicated box (or at minimum not co-locating it with the frontends) is a real, separate infrastructure decision — costs money and requires a migration, so it's flagged here for a decision, not executed.
+
+**Explicitly out of scope (owner decision, recorded so it isn't
+re-proposed):** no OAuth-token-harvest / direct-provider-API path
+(OpenClaw's fastest mode, but ToS-grey and changes the product away from
+"your own CLI subscription"); no rewrite of the WSS transport itself — the
+2026-07-13 fixes made it correct, this plan only makes it fast.
+
+**Standing blocker, external to the code:** the ChatGPT/Codex account
+paired to the prod-box Gateway is rate-limited until **2026-08-01** — a
+real, successful *generation* (and therefore real streamed deltas) can't
+be observed until then. Everything else that doesn't require the quota
+wall to actually open has now been verified live, not just in theory:
+daemon reuse (Phase 1a — same process across 3 turns, `ps`-confirmed),
+the fallback path (`codex exec` still works with the daemon flag off),
+and that the streaming plumbing (Phase 2) doesn't regress anything even
+though no real delta has fired yet. Claude's blocker (Phase 1b) is
+different in kind, not degree — it's not rate-limited, it's not logged in
+at all, on any active Gateway (§26.4 table).
+
+### 26.5 Claude Code's CLI has the same shape — verified, and now built (with one deliberate difference)
+
+The plan above is written against Codex, but the same "keep it warm,
+stream it" idea was independently verified to apply to the **Claude Code
+CLI** too — checked directly against the real, installed `claude` binary
+(`claude --help`), not inferred from Codex by analogy:
+
+| Capability | Codex | Claude Code CLI |
+|---|---|---|
+| Persistent process | `codex app-server` (JSON-RPC daemon subcommand) | No daemon subcommand — instead `claude --print --input-format stream-json --output-format stream-json` keeps one process alive across a stream of messages |
+| Streaming output | `item/agentMessage/delta` notifications | `--output-format=stream-json` + `--include-partial-messages` |
+| Reasoning effort | `turn/start.effort` / `-c model_reasoning_effort=<level>` | Native `--effort <level>` flag |
+| Session reuse | `threadId` | `--resume` / `--fork-session` |
+| Background/detached run | — | `--bg` / `--background` |
+
+Both CLIs support the two properties this whole latency effort depends
+on — a warm, reusable process, and incremental token output — just
+through different native mechanisms. **But one real protocol difference
+changes the correct design, found by reading OpenClaw's own reference
+client for this** (`/Users/mansur/openclaw/src/agents/cli-runner/claude-live-session.ts`)
+**and confirming it live:** Codex's `thread/start` gives a *fresh, isolated
+context on an already-warm process* — the daemon can serve many unrelated
+turns, even for different agents, because each turn gets its own clean
+slate. Claude's stream-json has no such primitive — a second message
+written to an already-running process's stdin is a **continuation of the
+same conversation** (confirmed live: two turns sent to one process came
+back with the identical `session_id`). OpenClaw's own client embraces this
+— it's built for a product where the CLI genuinely owns conversation
+memory and a stable per-agent session key already exists everywhere in
+their runtime.
+
+Empyralis's architecture is different in a way that matters here:
+`sage_agent_runtime_service.py` already re-flattens the *entire*
+conversation into one prompt every single turn (the existing, proven
+`cli-runner.ts` cold-spawn contract), and the wire protocol
+(`GatewayToolInvokePayload`, hop 6 in §26.1) carries no stable
+per-conversation identity today — `generateViaCli` sees only
+`runtime`/`model`/`messages`/`timeoutMs`. Copying OpenClaw's multi-turn
+reuse model as-is onto that foundation would have meant either (a) Claude
+silently re-receiving the same history twice — once from its own memory,
+once redundantly as new text — burning tokens and working against the
+prompt-caching benefit this whole effort is chasing, or worse (b) without
+a real conversation key to reuse by, one caller's turn landing on a
+process that still remembers a *different* conversation for the same
+agent — a genuine cross-conversation context leak, not just an
+inefficiency.
+
+So `empyralis-gateway/src/llm/claude-cli-prewarm.ts` (§26.4, Phase 1b)
+takes the more conservative of the two options: a pool of processes keyed
+by `(model, systemPrompt)`, each one **single-use** — spawned, handed
+exactly one turn, then torn down, identical semantics to today's
+cold-spawn path. The only thing it buys is speed: the instant a turn
+consumes a pool entry, a replacement for that same key is spawned in the
+background, so the *next* turn for that agent often finds a process
+already past its cold-start/auth/init cost. Zero cross-conversation risk,
+because no process ever serves two different turns. This is a narrower
+win than Codex's daemon (which amortizes cold-start across truly unlimited
+reused turns) — the honest tradeoff for not yet having a stable
+conversation identity to key deeper reuse by. **Threading a real
+conversation/session id through the wire protocol is the natural
+prerequisite for a future pass that lets `claude_code` reuse actual
+conversation memory the way OpenClaw does** — not done here, called out
+explicitly so it isn't mistaken for already solved.
+
+Phase 3's reasoning-effort plumbing (`--effort <level>`) still extends
+directly to `claude_code` unchanged — that part of the parity holds with
+no caveats.
+
+### 26.6 Files this pass touched or added
+
+**New:** `empyralis-gateway/src/llm/codex-app-server.ts` (400 lines) and
+`empyralis-gateway/src/llm/claude-cli-prewarm.ts` (both catalogued in
+§2.2's Gateway table, "LLM / CLI runtime" row).
+**Modified** (all already catalogued elsewhere in this map — no new
+Python files were created by this pass): `gateway_protocol_service.py`,
+`sage_agent_runtime_service.py`, `direct_chat_stream_response_service.py`,
+`gateway_registry_service.py`, `empyralis-gateway/src/llm/runtime.ts`,
+`frontend/lib/workspace/fleet/AgentChat.tsx`.
+
+---
+
 ## Appendix A: Architecture Decisions (Why It's Built This Way)
 
 These are recorded in `docs/PLATFORM.md` Section 7. Do NOT reverse without explicit instruction.
@@ -1704,8 +3003,24 @@ Auth:               server_modules/auth.py (5,796 lines)
 Postgres:           server_modules/control_plane_repository.py (13,049 lines — LARGEST)
 Preflight:          server_modules/preflight.py (223 lines)
 Authority Mandate:  server_modules/authority_mandate_service.py (Part 10)
-Kill switch:        server_modules/kill_switch_gate.py (Part 11)
+Kill switch:        server_modules/kill_switch_gate.py, safe_mode_service.py (Part 11)
 Activity/usage attribution: server_modules/activity_ledger_service.py, usage_events_repository.py (Part 12)
+Skills (built-in):  server_modules/skill_registry.py, skills_service.py (Part 14)
+Skills (marketplace, no UI): server_modules/skills_registry.py, skill_scanner.py (Part 14)
+Memory (Sage):      server_modules/agent_memory_tools.py, sage_instruction_compiler_service.py (Part 16)
+Sub-agent delegation (no caller): server_modules/runtime_run_delegation_service.py, runs_delegation.py (Part 17)
+Scheduled wake-up (dead executor): server_modules/bounded_scheduler_service.py, runtime_heartbeat_service.py (Part 18)
+Cron/weekly scheduler (live, no UI): server_modules/runs_core.py, run_service.py (Part 18)
+Connectors execution: server_modules/connectors/notion_connector.py, github_connector.py (Part 20)
+Tool-honesty guard: server_modules/tool_honesty_guard.py (Part 21)
+Hardware placement resolver: server_modules/sage_agent_runtime_service.py `_resolve_agent_cloud_provider` (Part 22)
+Invite gating:      server_modules/routes_auth.py, pilot_invite_service.py (Part 23)
+Sage tool policy (no UI): server_modules/workspace_admin_service.py (Part 24)
+CLI-subscription dispatch: server_modules/sage_agent_runtime_service.py `_resolve_agent_cloud_provider`/`_dispatch_cli_subscription_gateway_brain` (Part 25)
+BYOK encryption:    server_modules/vault_store.py (Fernet+PBKDF2) (Part 25)
+cli_subscription wire trace: server_modules/gateway_protocol_service.py (_PendingInvoke, durable flush) + empyralis-gateway/src/llm/{runtime.ts,cli-runner.ts,codex-app-server.ts} (Part 26)
+Event-loop-freeze fix (the real root cause): server_modules/direct_chat_stream_response_service.py `run_in_threadpool` (Part 26.2)
+Warm Codex daemon (Phase 1, flag-gated): empyralis-gateway/src/llm/codex-app-server.ts (Part 26.4)
 Gateway (Node.js):  empyralis-gateway/src/
 Supervisor (Rust):  ARCHIVED — _archive/supervisor/empyralis-supervisor/src/ (owner decision 2026-07-04, see §2.3)
 Kernel (Rust CLI):  empyralis-runtime-kernel/src/
