@@ -18,6 +18,7 @@ from server_modules.sage_agent_runtime_service import (
     SAGE_AI_LIMIT_MESSAGE,
     SAGE_AI_NEEDS_ATTENTION_MESSAGE,
     _SAGE_AI_SETUP_PATH,
+    _resolve_agent_cloud_provider,
     _resolve_cloud_provider,
 )
 
@@ -260,6 +261,182 @@ class NoFallbackProviderResolutionTests(unittest.TestCase):
                 asyncio.run(_resolve_cloud_provider(workspace_id))
 
             self.assertIn("No cloud provider", str(ctx.exception))
+
+
+class MasterModelConfigHonestBlockTests(unittest.TestCase):
+    """_resolve_cloud_provider is Sage's OWN resolver, but it is ALSO called
+    on behalf of any other agent's "platform_credits" mode (that branch
+    delegates to the shared workspace default). Before this fix, Sage's
+    Model tab could save cli_subscription/local mode and the save would
+    succeed — but Sage's turns never actually used it, silently continuing
+    on the platform/DeepSeek default with no error anywhere. The fix is
+    OPT-IN (check_master_model_config, default False) specifically so a
+    completely unrelated specialist agent's platform_credits turn can never
+    fail because of a stale/wrong setting on Sage's own card — that would
+    be a cross-agent coupling bug of exactly the kind this platform works
+    hard to avoid elsewhere (the memory-isolation audit). These tests cover
+    both halves: the check fires and is honest when explicitly requested,
+    and is a complete no-op (byte-for-byte today's behavior) when not."""
+
+    def setUp(self):
+        self._original_deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+        os.environ["DEEPSEEK_API_KEY"] = "sk-platform-deepseek-key"
+
+    def tearDown(self):
+        if self._original_deepseek_key:
+            os.environ["DEEPSEEK_API_KEY"] = self._original_deepseek_key
+        elif "DEEPSEEK_API_KEY" in os.environ:
+            del os.environ["DEEPSEEK_API_KEY"]
+
+    @staticmethod
+    def _patch_master_lookup(model_config=None, raise_error=False):
+        """Patches the master-install lookup _resolve_cloud_provider now does
+        to check Sage's own model_config before resolving anything."""
+        tenant_patch = patch(
+            "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+            AsyncMock(return_value="tenant-1"),
+        )
+        if raise_error:
+            install_patch = patch(
+                "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+                AsyncMock(side_effect=RuntimeError("db unavailable")),
+            )
+        else:
+            install_patch = patch(
+                "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+                AsyncMock(return_value={"metadata": {"model_config": dict(model_config or {})}}),
+            )
+        return tenant_patch, install_patch
+
+    @staticmethod
+    def _patch_normal_resolution():
+        """The happy-path mocks NoFallbackProviderResolutionTests uses,
+        reused here so tests that expect resolution to PROCEED (not be
+        blocked) have a working platform-credits path underneath."""
+        ws_p = patch(
+            "server_modules.control_plane_repository.get_workspace_by_id",
+            AsyncMock(return_value={"metadata": {}}),
+        )
+        adm_p = patch(
+            "server_modules.workspace_config_schema.workspace_admin_defaults_from_metadata",
+            return_value=MagicMock(sage_ai_provider=""),
+        )
+        creds_p = patch(
+            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            return_value={"api_key": "sk-platform-deepseek-key"},
+        )
+        supp_p = patch(
+            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            return_value=True,
+        )
+        ent_p = patch(
+            "server_modules.entitlements_service.hosted_sage_ai_access_state_for_workspace_id",
+            return_value={"allowed": True},
+        )
+        return ws_p, adm_p, creds_p, supp_p, ent_p
+
+    # ── check_master_model_config=True: the check is active and honest ──
+
+    def test_master_cli_subscription_mode_is_blocked_with_a_clear_reason(self):
+        tenant_p, install_p = self._patch_master_lookup({"mode": "cli_subscription", "runtime": "codex"})
+        with tenant_p, install_p:
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(_resolve_cloud_provider("ws_master_cli_sub", check_master_model_config=True))
+            msg = str(ctx.exception)
+            self.assertIn("cli_subscription", msg)
+            self.assertIn("Sage", msg)
+            self.assertNotIn("No cloud provider", msg, "must be the specific honest-block message, not the generic fallback")
+
+    def test_master_local_mode_is_blocked_with_a_clear_reason(self):
+        tenant_p, install_p = self._patch_master_lookup({"mode": "local", "runtime": "ollama"})
+        with tenant_p, install_p:
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(_resolve_cloud_provider("ws_master_local", check_master_model_config=True))
+            self.assertIn("local", str(ctx.exception))
+
+    def test_master_platform_credits_mode_resolves_normally(self):
+        """The overwhelming common case — mode absent or explicitly
+        platform_credits — must be completely unaffected even WITH the
+        check turned on: no new error, normal DeepSeek resolution."""
+        tenant_p, install_p = self._patch_master_lookup({"mode": "platform_credits"})
+        ws_p, adm_p, creds_p, supp_p, ent_p = self._patch_normal_resolution()
+        with tenant_p, install_p, ws_p, adm_p, creds_p, supp_p, ent_p:
+            provider, _ = asyncio.run(_resolve_cloud_provider("ws_master_platform_credits", check_master_model_config=True))
+            self.assertEqual(provider, "deepseek")
+
+    def test_master_with_no_model_config_at_all_resolves_normally(self):
+        """Most workspaces: the master install exists but has never had its
+        model_config touched at all — empty dict, not an error."""
+        tenant_p, install_p = self._patch_master_lookup({})
+        ws_p, adm_p, creds_p, supp_p, ent_p = self._patch_normal_resolution()
+        with tenant_p, install_p, ws_p, adm_p, creds_p, supp_p, ent_p:
+            provider, _ = asyncio.run(_resolve_cloud_provider("ws_master_no_model_config", check_master_model_config=True))
+            self.assertEqual(provider, "deepseek")
+
+    def test_master_lookup_failure_never_blocks_normal_resolution(self):
+        """Best-effort: if the master-install lookup itself fails (DB hiccup,
+        workspace mid-migration, whatever), Sage's turn must still be able
+        to resolve normally — this check must never be a NEW single point
+        of failure for the common case."""
+        tenant_p, install_p = self._patch_master_lookup(raise_error=True)
+        ws_p, adm_p, creds_p, supp_p, ent_p = self._patch_normal_resolution()
+        with tenant_p, install_p, ws_p, adm_p, creds_p, supp_p, ent_p:
+            provider, _ = asyncio.run(_resolve_cloud_provider("ws_master_lookup_fails", check_master_model_config=True))
+            self.assertEqual(provider, "deepseek")
+
+    def test_master_byok_mode_resolves_normally_not_blocked(self):
+        """Only cli_subscription/local are blocked — byok_api is a real,
+        working mode for Sage's own card and must not be affected."""
+        tenant_p, install_p = self._patch_master_lookup({"mode": "byok_api", "provider": "anthropic"})
+        ws_p, adm_p, creds_p, supp_p, ent_p = self._patch_normal_resolution()
+        with tenant_p, install_p, ws_p, adm_p, creds_p, supp_p, ent_p:
+            provider, _ = asyncio.run(_resolve_cloud_provider("ws_master_byok", check_master_model_config=True))
+            self.assertEqual(provider, "deepseek")
+
+    # ── default (check_master_model_config=False): complete no-op, proves
+    # a specialist's platform_credits delegation can NEVER be cross-
+    # contaminated by an unrelated mismatch on Sage's own card ──────────
+
+    def test_default_never_looks_up_the_master_install_at_all(self):
+        """The strongest possible proof of "zero behavior change by
+        default": patch the master lookup to explode if it's ever called,
+        and confirm normal resolution still succeeds without touching it."""
+        tenant_p = patch(
+            "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+            AsyncMock(side_effect=AssertionError("must not be called when check_master_model_config=False")),
+        )
+        install_p = patch(
+            "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+            AsyncMock(side_effect=AssertionError("must not be called when check_master_model_config=False")),
+        )
+        ws_p, adm_p, creds_p, supp_p, ent_p = self._patch_normal_resolution()
+        with tenant_p, install_p, ws_p, adm_p, creds_p, supp_p, ent_p:
+            provider, _ = asyncio.run(_resolve_cloud_provider("ws_default_no_lookup"))
+            self.assertEqual(provider, "deepseek")
+
+    def test_default_does_not_block_even_when_master_is_misconfigured(self):
+        """The cross-agent-coupling proof: even if Sage's OWN card is stuck
+        on cli_subscription (the exact case that raises above), a caller
+        that does NOT opt in (e.g. a specialist's platform_credits
+        delegation) must still resolve normally, not inherit Sage's error."""
+        tenant_p, install_p = self._patch_master_lookup({"mode": "cli_subscription", "runtime": "codex"})
+        ws_p, adm_p, creds_p, supp_p, ent_p = self._patch_normal_resolution()
+        with tenant_p, install_p, ws_p, adm_p, creds_p, supp_p, ent_p:
+            provider, _ = asyncio.run(_resolve_cloud_provider("ws_default_ignores_bad_master"))
+            self.assertEqual(provider, "deepseek")
+
+    def test_resolve_agent_cloud_provider_platform_credits_branch_opts_out_explicitly(self):
+        """Integration-level proof for the actual in-scope caller:
+        _resolve_agent_cloud_provider's platform_credits branch must not
+        be blocked by a bad master config either."""
+        tenant_p, install_p = self._patch_master_lookup({"mode": "local", "runtime": "ollama"})
+        ws_p, adm_p, creds_p, supp_p, ent_p = self._patch_normal_resolution()
+        with tenant_p, install_p, ws_p, adm_p, creds_p, supp_p, ent_p:
+            provider, credentials, billing_mode = asyncio.run(
+                _resolve_agent_cloud_provider("ws_specialist_platform_credits", {"mode": "platform_credits"}, "specialist-1")
+            )
+            self.assertEqual(provider, "deepseek")
+            self.assertEqual(billing_mode, "platform_credits")
 
 
 class SignupCreditGrantTests(unittest.TestCase):

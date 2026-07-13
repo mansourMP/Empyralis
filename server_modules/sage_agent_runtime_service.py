@@ -297,7 +297,11 @@ from server_modules.sage_command_dispatcher import (
 )
 
 
-async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
+async def _resolve_cloud_provider(
+    workspace_id: str,
+    *,
+    check_master_model_config: bool = False,
+) -> tuple[str, dict]:
     """Resolve the Sage cloud provider — ONE AI ROAD, NO FALLBACK.
 
     INVARIANT: Each workspace has exactly ONE active AI provider.
@@ -316,12 +320,61 @@ async def _resolve_cloud_provider(workspace_id: str) -> tuple[str, dict]:
 
     There is NO tier that scans vault keys as a fallback.  A vault key
     is only used when it IS the explicit ``sage_ai_provider``.
+
+    check_master_model_config (default False — OFF, zero behavior change):
+    when True, ALSO checks the workspace's master (Sage) install's own
+    model_config.mode before doing anything else, and hard-stops with an
+    honest reason if it's "cli_subscription"/"local" — see the block below
+    for why. Defaults OFF because this function is ALSO called on behalf of
+    a non-master agent whose OWN mode is "platform_credits"
+    (_resolve_agent_cloud_provider's platform_credits branch delegates
+    here for the shared workspace default) — that call must never fail
+    because of a UNRELATED misconfiguration on Sage's own card, which
+    would be a cross-agent coupling bug of exactly the kind this platform
+    works hard to avoid elsewhere (see the memory-isolation audit).
+    Callers resolving Sage's OWN turn should pass True explicitly.
     """
     print(f"[TRACE_PROVIDER] _resolve_cloud_provider called ws={workspace_id}", flush=True)
     from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
     from server_modules.control_plane_repository import get_workspace_by_id as _load_workspace
 
     normalized_ws = str(workspace_id or "default").strip() or "default"
+
+    # ── HONEST BLOCK (opt-in — see check_master_model_config above): Sage's
+    # own Model tab can save cli_subscription/local mode
+    # (fleet_configure_agent has no master/operator guard, so the PATCH
+    # succeeds with no error), but this function — Sage's actual turn-time
+    # resolver — has never been wired to honor it: Sage's turns always run
+    # here, never through the Gateway dispatch specialist agents use
+    # (specialist_runtime_context.py returns None for the master by design).
+    # Before this fix, that mismatch was invisible: the setting "saved" and
+    # Sage kept silently running on DeepSeek/platform credits regardless.
+    # Fail loudly instead — the owner needs to know the setting isn't
+    # taking effect, not discover it by wondering why Sage never used their
+    # subscription. See docs/PLATFORM-MAP.md's provider-resolution audit.
+    if check_master_model_config:
+        try:
+            from server_modules.control_plane_repository import resolve_tenant_id_for_workspace as _resolve_tenant
+            from server_modules import agent_registry_repository as _agent_repo
+
+            _master_tenant_id = await _resolve_tenant(normalized_ws, default="default")
+            _master_install = await _agent_repo.get_workspace_master_agent_install(
+                tenant_id=_master_tenant_id, workspace_id=normalized_ws,
+            )
+            _master_metadata = dict((_master_install or {}).get("metadata") or {})
+            _master_model_config = dict(_master_metadata.get("model_config") or {})
+            _master_mode = str(_master_model_config.get("mode") or "").strip().lower()
+        except Exception:
+            _master_mode = ""  # lookup failure must never block Sage's normal path
+        if _master_mode in ("cli_subscription", "local"):
+            raise RuntimeError(
+                f"Sage's Model tab is set to \"{_master_mode}\", but Sage itself doesn't run "
+                "on a Gateway yet — only specialist agents do. That setting is saved but NOT "
+                "being used; Sage is still answering on the platform default. Switch Sage's "
+                "Model tab back to platform credits or your own API key (BYOK) to keep Sage "
+                "responding, or leave it as-is and treat this as a heads-up that cli_subscription/"
+                "local isn't supported for Sage yet."
+            )
 
     # ── Resolve the active provider ──
     active_provider: str = ""
@@ -415,7 +468,11 @@ async def _resolve_agent_cloud_provider(
 
     # ── platform_credits: use default workspace resolution ──────────
     if mode == "platform_credits":
-        prov, creds = await _resolve_cloud_provider(workspace_id)
+        # check_master_model_config=False, explicitly: this call resolves
+        # THIS agent's own platform_credits mode via the shared workspace
+        # default — it must never fail because of an unrelated mismatch on
+        # Sage's own card (see _resolve_cloud_provider's docstring).
+        prov, creds = await _resolve_cloud_provider(workspace_id, check_master_model_config=False)
         return prov, creds, "platform_credits"
 
     # ── byok_api: agent's own key ──────────────────────────────────
