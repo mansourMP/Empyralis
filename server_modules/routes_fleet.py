@@ -642,12 +642,27 @@ async def fleet_agent_channels(
     working workspace-wide Channels page) actually uses; it also carries
     live connected/requires_gateway/gateway_count fields the old code had
     to hand-roll from a bare vault-id set.
+
+    selected_gateway_id is this agent's OWN preferred_gateway_id (same field
+    PersonalChannelConnectPanel.tsx's agentGatewayId already uses) — without
+    it, connection_catalog_service._selected_gateway() resolves nothing and
+    every personal-channel item's `connected` stays hardcoded False
+    regardless of real state.
     """
     from server_modules.connection_catalog_service import agent_status_items
     from server_modules.sage_telegram_hosted_service import is_configured as hosted_configured
 
     try:
-        items = await agent_status_items(workspace_id=workspace_id, agent_id=agent_id, surface="sage")
+        tenant_id = await _resolve_tenant(workspace_id)
+        from server_modules import agent_registry_repository as _reg
+        bundle = await _reg.get_workspace_agent_install_bundle(agent_id, tenant_id=tenant_id, workspace_id=workspace_id)
+        bundle_metadata = (bundle or {}).get("metadata") if isinstance((bundle or {}).get("metadata"), dict) else {}
+        selected_gateway_id = str((bundle_metadata or {}).get("preferred_gateway_id") or "").strip() or None
+
+        items = await agent_status_items(
+            workspace_id=workspace_id, agent_id=agent_id, tenant_id=tenant_id,
+            surface="sage", selected_gateway_id=selected_gateway_id,
+        )
         enriched: List[Dict[str, Any]] = []
         for item in items:
             if item.get("lane") not in ("sage_personal_channel", "studio_business_channel"):

@@ -659,6 +659,123 @@ def _boolish(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _ensure_agent_channel_binding_enabled(
+    *,
+    agent_id: str,
+    channel_key: str,
+    registration: Dict[str, Any],
+) -> None:
+    """The Channels-tab pill's own gate (connection_catalog_service.
+    agent_status_items) requires BOTH the underlying session state AND an
+    ENABLED agent_channel_bindings row before it will ever show "connected"
+    for a specific agent — that binding is how the UI distinguishes "this
+    agent's channel" from "some other agent's, on the same catalog item."
+    Other channel types (OAuth-based connectors) create that binding as
+    part of their own connect flow; the full-account personal-channel wizard
+    never did. Fire-and-forget from here, the moment a real (non-legacy)
+    agent's session reaches "connected" — pairing an account for an agent
+    should be sufficient to enable it for that agent, no separate manual
+    toggle. Best-effort: a failure here must never break the state sync
+    that's actually reporting the real session status."""
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return
+    try:
+        loop = __import__("asyncio").get_running_loop()
+    except RuntimeError:
+        return  # no running loop — nothing to schedule onto (shouldn't happen; all callers are async)
+
+    async def _enable() -> None:
+        try:
+            from server_modules import agent_bindings_repository as bindings
+            await bindings.upsert_channel_binding(
+                tenant_id=str(registration.get("tenant_id") or "").strip() or "default",
+                workspace_id=str(registration.get("workspace_id") or "").strip() or "default",
+                agent_install_id=normalized_agent_id,
+                channel_key=channel_key,
+                enabled=True,
+            )
+        except Exception:
+            pass  # best-effort — see docstring
+
+    loop.create_task(_enable())
+
+
+def _claim_agent_channel_state(
+    *,
+    gateway_id: str,
+    channel_key: str,
+    agent_id: str,
+    registration: Dict[str, Any],
+) -> None:
+    """Called at the START of configure_*_personal_gateway, before the
+    Gateway is ever dispatched to. Seeds a row under the REAL agent_id if
+    one doesn't already exist for this (gateway_id, channel_key, agent_id) —
+    a no-op if this agent already has a row (don't clobber a connected
+    session's status back to "connecting" on a retry/refresh call). This is
+    what makes _resolve_agent_id_for_inbound correct even for a mid-pairing
+    status (code_required, qr_required, ...): by the time ANY response
+    comes back from the Gateway, the row already exists under the right
+    agent_id, not the legacy/unscoped sentinel."""
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return  # nothing to claim — caller is using the pre-existing unscoped path
+    if channel_key == WHATSAPP_PERSONAL_CHANNEL_KEY:
+        existing = personal_channels_repository.get_whatsapp_state(
+            str(gateway_id or "").strip(), channel_key=channel_key, agent_id=normalized_agent_id,
+        )
+        if existing is not None:
+            return
+        personal_channels_repository.upsert_whatsapp_state(
+            gateway_id=str(gateway_id or "").strip(),
+            tenant_id=str(registration.get("tenant_id") or "").strip(),
+            workspace_id=str(registration.get("workspace_id") or "").strip(),
+            user_id=str(registration.get("user_id") or "").strip(),
+            channel_key=channel_key,
+            agent_id=normalized_agent_id,
+            provider=WHATSAPP_PERSONAL_PROVIDER,
+            status="connecting",
+        )
+    elif channel_key == TELEGRAM_PERSONAL_CHANNEL_KEY:
+        existing = personal_channels_repository.get_telegram_state(
+            str(gateway_id or "").strip(), channel_key=channel_key, agent_id=normalized_agent_id,
+        )
+        if existing is not None:
+            return
+        personal_channels_repository.upsert_telegram_state(
+            gateway_id=str(gateway_id or "").strip(),
+            tenant_id=str(registration.get("tenant_id") or "").strip(),
+            workspace_id=str(registration.get("workspace_id") or "").strip(),
+            user_id=str(registration.get("user_id") or "").strip(),
+            channel_key=channel_key,
+            agent_id=normalized_agent_id,
+            provider=TELEGRAM_PERSONAL_PROVIDER,
+            status="connecting",
+        )
+
+
+def _resolve_agent_id_for_inbound(gateway_id: str, channel_key: str) -> str:
+    """Which agent's session an inbound event belongs to. The Gateway's
+    session runtime doesn't know about Empyralis agent ids (see
+    personal_channels_repository.find_agent_id_for_telegram_session's
+    docstring) so this is a reverse lookup by gateway_id+channel_key against
+    whichever agent has a currently-connected session there. Returns
+    LEGACY_UNSCOPED_AGENT_ID (empty string) when that's ambiguous or there
+    is none — execute_sage_turn_for_channel already treats that as "run as
+    Sage," the pre-existing behavior, so an ambiguous lookup never breaks a
+    turn, it just doesn't get specialist-scoped."""
+    normalized_gateway_id = str(gateway_id or "").strip()
+    if channel_key == WHATSAPP_PERSONAL_CHANNEL_KEY:
+        return personal_channels_repository.find_agent_id_for_whatsapp_session(
+            normalized_gateway_id, channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        )
+    if channel_key == TELEGRAM_PERSONAL_CHANNEL_KEY:
+        return personal_channels_repository.find_agent_id_for_telegram_session(
+            normalized_gateway_id, channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        )
+    return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
+
+
 def _personal_channel_state(gateway_id: str, channel_key: str) -> Optional[Dict[str, Any]]:
     normalized_gateway_id = str(gateway_id or "").strip()
     if channel_key == WHATSAPP_PERSONAL_CHANNEL_KEY:
@@ -819,7 +936,17 @@ def sync_gateway_personal_channel_state(
     gateway_id: str,
     registration: Dict[str, Any],
     payload: Dict[str, Any],
+    agent_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
+    """agent_id: pass it explicitly when the caller already knows it (the
+    inbound-message handlers below, which resolve it from the message
+    itself). Leave it None for the raw gateway.state.update push (no
+    message to resolve from) — this falls back to "whoever most recently
+    touched this gateway+channel" via the repository's reverse lookup,
+    which configure_telegram_personal_gateway/configure_whatsapp_personal_gateway
+    keep correct by claiming a row up front, before the Gateway ever
+    reports back (see personal_channels_repository.find_agent_id_for_telegram_session's
+    docstring)."""
     personal_channels = payload.get("personal_channels") if isinstance(payload.get("personal_channels"), dict) else {}
     synced_state: Optional[Dict[str, Any]] = None
     whatsapp_state = (
@@ -832,12 +959,17 @@ def sync_gateway_personal_channel_state(
             WHATSAPP_PERSONAL_CHANNEL_KEY,
             str(whatsapp_state.get("provider") or WHATSAPP_PERSONAL_PROVIDER).strip() or WHATSAPP_PERSONAL_PROVIDER,
         )
+        resolved_whatsapp_agent_id = (
+            str(agent_id).strip() if agent_id is not None
+            else _resolve_agent_id_for_inbound(gateway_id, WHATSAPP_PERSONAL_CHANNEL_KEY)
+        )
         synced_state = personal_channels_repository.upsert_whatsapp_state(
             gateway_id=str(gateway_id or "").strip(),
             tenant_id=str(registration.get("tenant_id") or "").strip(),
             workspace_id=str(registration.get("workspace_id") or "").strip(),
             user_id=str(registration.get("user_id") or "").strip(),
             channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            agent_id=resolved_whatsapp_agent_id,
             provider=whatsapp_spec["provider"],
             status=str(whatsapp_state.get("status") or "idle").strip() or "idle",
             qr_code=str(whatsapp_state.get("qr_code") or "").strip() or None,
@@ -857,6 +989,12 @@ def sync_gateway_personal_channel_state(
                 "updated_at": whatsapp_state.get("updated_at"),
             },
         )
+        if str((synced_state or {}).get("status") or "").strip() == "connected":
+            _ensure_agent_channel_binding_enabled(
+                agent_id=resolved_whatsapp_agent_id,
+                channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+                registration=registration,
+            )
     telegram_state = (
         personal_channels.get(TELEGRAM_PERSONAL_CHANNEL_KEY)
         if isinstance(personal_channels.get(TELEGRAM_PERSONAL_CHANNEL_KEY), dict)
@@ -867,12 +1005,17 @@ def sync_gateway_personal_channel_state(
             TELEGRAM_PERSONAL_CHANNEL_KEY,
             str(telegram_state.get("provider") or TELEGRAM_PERSONAL_PROVIDER).strip() or TELEGRAM_PERSONAL_PROVIDER,
         )
+        resolved_telegram_agent_id = (
+            str(agent_id).strip() if agent_id is not None
+            else _resolve_agent_id_for_inbound(gateway_id, TELEGRAM_PERSONAL_CHANNEL_KEY)
+        )
         synced_state = personal_channels_repository.upsert_telegram_state(
             gateway_id=str(gateway_id or "").strip(),
             tenant_id=str(registration.get("tenant_id") or "").strip(),
             workspace_id=str(registration.get("workspace_id") or "").strip(),
             user_id=str(registration.get("user_id") or "").strip(),
             channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+            agent_id=resolved_telegram_agent_id,
             provider=telegram_spec["provider"],
             status=str(telegram_state.get("status") or "idle").strip() or "idle",
             login_hint=str(telegram_state.get("login_hint") or "").strip() or None,
@@ -889,6 +1032,12 @@ def sync_gateway_personal_channel_state(
                 "updated_at": telegram_state.get("updated_at"),
             },
         )
+        if str((synced_state or {}).get("status") or "").strip() == "connected":
+            _ensure_agent_channel_binding_enabled(
+                agent_id=resolved_telegram_agent_id,
+                channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+                registration=registration,
+            )
     return synced_state
 
 
@@ -1055,6 +1204,7 @@ async def _deliver_whatsapp_personal_reply(
     push_name: Optional[str],
     duplicate: bool,
     trace_id: str = "",
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
     if reply_idempotency_key and reply_idempotency_key.startswith(WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX):
@@ -1066,12 +1216,14 @@ async def _deliver_whatsapp_personal_reply(
         outbound = personal_channels_repository.get_outbound_message(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
             idempotency_key=reply_idempotency_key,
         )
     if outbound and str(outbound.get("status") or "").strip() == "delivered":
         personal_channels_repository.mark_inbound_processed(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
             external_message_id=external_message_id,
             reply_idempotency_key=idempotency_key,
         )
@@ -1097,6 +1249,7 @@ async def _deliver_whatsapp_personal_reply(
         _wa_state = personal_channels_repository.get_whatsapp_state(
             str(gateway_id or "").strip(),
             channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
         )
         linked_user_name = str((_wa_state or {}).get("linked_name") or "").strip() or None
         # ── Shared command dispatcher ──
@@ -1114,6 +1267,7 @@ async def _deliver_whatsapp_personal_reply(
             outbound_cmd, _ = personal_channels_repository.create_or_get_outbound_message(
                 gateway_id=str(gateway_id or "").strip(),
                 channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+                agent_id=agent_id,
                 idempotency_key=_cmd_key,
                 remote_jid=remote_jid,
                 text=_cmd_reply,
@@ -1122,6 +1276,7 @@ async def _deliver_whatsapp_personal_reply(
             personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
                 channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+                agent_id=agent_id,
                 external_message_id=external_message_id,
                 reply_idempotency_key=_cmd_key,
             )
@@ -1135,12 +1290,14 @@ async def _deliver_whatsapp_personal_reply(
             push_name=push_name,
             source_event_id=external_message_id,
             linked_user_name=linked_user_name,
+            agent_id=agent_id,
         )
         if not reply or not str(reply.get("text") or "").strip():
             no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
                 channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+                agent_id=agent_id,
                 external_message_id=external_message_id,
                 reply_idempotency_key=no_reply_idempotency_key,
             )
@@ -1161,6 +1318,7 @@ async def _deliver_whatsapp_personal_reply(
         outbound, _ = personal_channels_repository.create_or_get_outbound_message(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
             idempotency_key=idempotency_key,
             remote_jid=remote_jid,
             text=str(reply.get("text") or "").strip(),
@@ -1172,6 +1330,7 @@ async def _deliver_whatsapp_personal_reply(
         personal_channels_repository.mark_inbound_processed(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
             external_message_id=external_message_id,
             reply_idempotency_key=idempotency_key,
         )
@@ -1195,6 +1354,7 @@ async def _deliver_whatsapp_personal_reply(
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         idempotency_key=idempotency_key,
         external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
         metadata={"dispatch_result": dispatch_result},
@@ -1202,6 +1362,7 @@ async def _deliver_whatsapp_personal_reply(
     personal_channels_repository.mark_inbound_processed(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         reply_idempotency_key=idempotency_key,
     )
@@ -1256,9 +1417,15 @@ async def _handle_whatsapp_gateway_channel_inbound(
                 "reason": "group_no_mention",
                 "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY,
             }
+    # Resolved BEFORE the sync below (not after): this reflects whichever
+    # agent's configure() call (or a prior message) already owns this
+    # gateway+channel, and the sync then updates THAT SAME row to
+    # "connected" rather than risking a second, wrongly-scoped row.
+    agent_id = _resolve_agent_id_for_inbound(gateway_id, WHATSAPP_PERSONAL_CHANNEL_KEY)
     sync_gateway_personal_channel_state(
         gateway_id=gateway_id,
         registration=registration,
+        agent_id=agent_id,
         payload={
             "personal_channels": {
                 WHATSAPP_PERSONAL_CHANNEL_KEY: {
@@ -1272,6 +1439,7 @@ async def _handle_whatsapp_gateway_channel_inbound(
     inbound, created = personal_channels_repository.record_inbound_message(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         remote_jid=remote_jid,
         sender_jid=str(message.get("sender_jid") or "").strip() or None,
@@ -1309,6 +1477,7 @@ async def _handle_whatsapp_gateway_channel_inbound(
         push_name=str(message.get("push_name") or "").strip() or None,
         duplicate=not created,
         trace_id=trace_id,
+        agent_id=agent_id,
     )
 
 
@@ -1332,9 +1501,13 @@ async def _handle_telegram_gateway_channel_inbound(
         raise ValueError("channel.inbound requires external_message_id, remote_jid, and text.")
     if bool(message.get("from_me")):
         return {"ignored": True, "reason": "from_me", "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY}
+    # Resolved BEFORE the sync below — see the WhatsApp handler's identical
+    # comment above for why the ordering matters.
+    agent_id = _resolve_agent_id_for_inbound(gateway_id, TELEGRAM_PERSONAL_CHANNEL_KEY)
     sync_gateway_personal_channel_state(
         gateway_id=gateway_id,
         registration=registration,
+        agent_id=agent_id,
         payload={
             "personal_channels": {
                 TELEGRAM_PERSONAL_CHANNEL_KEY: {
@@ -1349,6 +1522,7 @@ async def _handle_telegram_gateway_channel_inbound(
     inbound, created = personal_channels_repository.record_inbound_message(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         remote_jid=remote_jid,
         sender_jid=str(message.get("sender_jid") or "").strip() or None,
@@ -1386,12 +1560,14 @@ async def _handle_telegram_gateway_channel_inbound(
         outbound = personal_channels_repository.get_outbound_message(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
             idempotency_key=reply_idempotency_key,
         )
     if outbound and str(outbound.get("status") or "").strip() == "delivered":
         personal_channels_repository.mark_inbound_processed(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
             external_message_id=external_message_id,
             reply_idempotency_key=idempotency_key,
         )
@@ -1405,12 +1581,14 @@ async def _handle_telegram_gateway_channel_inbound(
             text=text,
             push_name=str(message.get("push_name") or "").strip() or None,
             source_event_id=external_message_id,
+            agent_id=agent_id,
         )
         if not reply or not str(reply.get("text") or "").strip():
             no_reply_idempotency_key = f"{TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
                 channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+                agent_id=agent_id,
                 external_message_id=external_message_id,
                 reply_idempotency_key=no_reply_idempotency_key,
             )
@@ -1431,6 +1609,7 @@ async def _handle_telegram_gateway_channel_inbound(
         outbound, _ = personal_channels_repository.create_or_get_outbound_message(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
             idempotency_key=idempotency_key,
             remote_jid=remote_jid,
             text=str(reply.get("text") or "").strip(),
@@ -1442,6 +1621,7 @@ async def _handle_telegram_gateway_channel_inbound(
         personal_channels_repository.mark_inbound_processed(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
             external_message_id=external_message_id,
             reply_idempotency_key=idempotency_key,
         )
@@ -1465,6 +1645,7 @@ async def _handle_telegram_gateway_channel_inbound(
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         idempotency_key=idempotency_key,
         external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
         metadata={"dispatch_result": dispatch_result},
@@ -1472,6 +1653,7 @@ async def _handle_telegram_gateway_channel_inbound(
     personal_channels_repository.mark_inbound_processed(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         reply_idempotency_key=idempotency_key,
     )
@@ -1762,6 +1944,7 @@ async def send_whatsapp_personal_message(
     text: str,
     idempotency_key: str,
     reply_to_external_message_id: Optional[str] = None,
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(
@@ -1771,6 +1954,7 @@ async def send_whatsapp_personal_message(
     outbound, _ = personal_channels_repository.create_or_get_outbound_message(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         idempotency_key=str(idempotency_key or "").strip(),
         remote_jid=str(remote_jid or "").strip(),
         text=str(text or "").strip(),
@@ -1798,6 +1982,7 @@ async def send_whatsapp_personal_message(
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         idempotency_key=str(idempotency_key or "").strip(),
         external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
         metadata={"dispatch_result": dispatch_result},
@@ -1805,14 +1990,16 @@ async def send_whatsapp_personal_message(
     return delivered or outbound
 
 
-def get_whatsapp_gateway_view(gateway_id: str) -> Dict[str, Any]:
+def get_whatsapp_gateway_view(gateway_id: str, *, agent_id: str = "") -> Dict[str, Any]:
     state = personal_channels_repository.get_whatsapp_state(
         str(gateway_id or "").strip(),
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
     )
     recent = personal_channels_repository.list_recent_gateway_messages(
         str(gateway_id or "").strip(),
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
     )
     return {
         "gateway_id": str(gateway_id or "").strip(),
@@ -1828,11 +2015,16 @@ async def configure_whatsapp_personal_gateway(
     registration: Dict[str, Any],
     phone_number: Optional[str] = None,
     custom_pairing_code: Optional[str] = None,
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(
         WHATSAPP_PERSONAL_CHANNEL_KEY,
         WHATSAPP_PERSONAL_PROVIDER,
+    )
+    _claim_agent_channel_state(
+        gateway_id=gateway_id, channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id, registration=registration,
     )
     arguments: Dict[str, Any] = {}
     if str(phone_number or "").strip():
@@ -1872,11 +2064,19 @@ async def disconnect_whatsapp_personal_gateway(
     *,
     gateway_id: str,
     registration: Dict[str, Any],
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     """Full reset: tears down any live/stuck session and clears the entire
     persisted config (phone number, pairing state) so a subsequent setup
     call starts genuinely fresh rather than inheriting a stuck pending
-    login — see WhatsAppPersonalRuntime.handleDisconnect()'s doc comment."""
+    login — see WhatsAppPersonalRuntime.handleDisconnect()'s doc comment.
+
+    agent_id: accepted for the route contract (see routes_personal_channels.py)
+    even though the Gateway itself has exactly one session to tear down
+    today, regardless of which agent owns it — the subsequent
+    gateway.state.update ("disconnected"/"idle") is picked up by
+    sync_gateway_personal_channel_state's own reverse lookup, which
+    resolves to this same agent (the most recently touched row)."""
     channel_lane_contract_service.assert_personal_gateway_channel(
         WHATSAPP_PERSONAL_CHANNEL_KEY,
         WHATSAPP_PERSONAL_PROVIDER,
@@ -1991,6 +2191,7 @@ async def send_telegram_personal_message(
     text: str,
     idempotency_key: str,
     reply_to_external_message_id: Optional[str] = None,
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(
@@ -2000,6 +2201,7 @@ async def send_telegram_personal_message(
     outbound, _ = personal_channels_repository.create_or_get_outbound_message(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         idempotency_key=str(idempotency_key or "").strip(),
         remote_jid=str(remote_jid or "").strip(),
         text=str(text or "").strip(),
@@ -2027,6 +2229,7 @@ async def send_telegram_personal_message(
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
         idempotency_key=str(idempotency_key or "").strip(),
         external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
         metadata={"dispatch_result": dispatch_result},
@@ -2034,14 +2237,16 @@ async def send_telegram_personal_message(
     return delivered or outbound
 
 
-def get_telegram_gateway_view(gateway_id: str) -> Dict[str, Any]:
+def get_telegram_gateway_view(gateway_id: str, *, agent_id: str = "") -> Dict[str, Any]:
     state = personal_channels_repository.get_telegram_state(
         str(gateway_id or "").strip(),
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
     )
     recent = personal_channels_repository.list_recent_gateway_messages(
         str(gateway_id or "").strip(),
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
     )
     return {
         "gateway_id": str(gateway_id or "").strip(),
@@ -2128,11 +2333,16 @@ async def configure_telegram_personal_gateway(
     phone_number: Optional[str] = None,
     login_code: Optional[str] = None,
     password: Optional[str] = None,
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(
         TELEGRAM_PERSONAL_CHANNEL_KEY,
         TELEGRAM_PERSONAL_PROVIDER,
+    )
+    _claim_agent_channel_state(
+        gateway_id=gateway_id, channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id, registration=registration,
     )
     pool_api_id, pool_api_hash = _platform_telegram_credentials_for_workspace(
         str(registration.get("workspace_id") or "").strip()
@@ -2182,9 +2392,12 @@ async def disconnect_telegram_personal_gateway(
     *,
     gateway_id: str,
     registration: Dict[str, Any],
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     """Full reset — see disconnect_whatsapp_personal_gateway()'s doc comment
-    and TelegramPersonalRuntime.handleDisconnect() for why this exists."""
+    (including its note on why agent_id is accepted but not load-bearing
+    here yet) and TelegramPersonalRuntime.handleDisconnect() for why this
+    exists."""
     channel_lane_contract_service.assert_personal_gateway_channel(
         TELEGRAM_PERSONAL_CHANNEL_KEY,
         TELEGRAM_PERSONAL_PROVIDER,

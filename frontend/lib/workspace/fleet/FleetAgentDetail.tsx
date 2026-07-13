@@ -1339,6 +1339,7 @@ export function ChannelsTab({
                     channelKey="telegram_personal"
                     label="Telegram"
                     agentGatewayId={agentGatewayId}
+                    agentId={agentId}
                   />
                 </div>
               )}
@@ -1349,6 +1350,7 @@ export function ChannelsTab({
                     channelKey="whatsapp_personal"
                     label="WhatsApp"
                     agentGatewayId={agentGatewayId}
+                    agentId={agentId}
                   />
                 </div>
               )}

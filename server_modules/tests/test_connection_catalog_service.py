@@ -1,4 +1,5 @@
 from server_modules import connection_catalog_service as service
+from server_modules import personal_channels_repository as repo
 
 
 def test_catalog_promotes_supported_work_app_connectors() -> None:
@@ -47,3 +48,53 @@ def test_catalog_exposes_channel_certification_truth() -> None:
     assert by_id["apple_messages_business"]["requires_external_account"] is True
     assert by_id["sage_telegram_hosted"]["readiness_status"] == "live_when_configured"
     assert by_id["sage_telegram_hosted"]["requires_gateway"] is False
+
+
+class TestPersonalChannelPillAgentScoping:
+    """Item 3 pill fix: connection_catalog_service._personal_channel_state
+    must read whichever agent asked, not "any session on this gateway."
+    Uses a real temp SQLite DB (personal_channels_repository's own schema)
+    rather than mocking — this is a data-isolation property, best proven
+    against the real read path, not a mock of it."""
+
+    def _use_temp_db(self, monkeypatch, tmp_path) -> None:
+        db_path = str(tmp_path / "personal-channels-test.sqlite3")
+        monkeypatch.setattr(repo, "PERSONAL_CHANNELS_DB_FILE", db_path)
+
+    def test_two_agents_same_gateway_do_not_see_each_others_pill(self, monkeypatch, tmp_path) -> None:
+        self._use_temp_db(monkeypatch, tmp_path)
+        repo.upsert_telegram_state(
+            gateway_id="gw-shared", tenant_id="t1", workspace_id="w1", user_id="u1",
+            channel_key="telegram_personal", agent_id="agent_A",
+            provider="telegram", status="connected", linked_username="alice",
+        )
+
+        state_for_owner = service._personal_channel_state("telegram_personal", "gw-shared", "agent_A")
+        state_for_other_agent = service._personal_channel_state("telegram_personal", "gw-shared", "agent_B")
+        state_unscoped_legacy_read = service._personal_channel_state("telegram_personal", "gw-shared", "")
+
+        assert state_for_owner is not None
+        assert state_for_owner["status"] == "connected"
+        assert state_for_other_agent is None, "a different agent on the SAME gateway must not see agent_A's session"
+        assert state_unscoped_legacy_read is None, "the old unscoped read must not surface a real agent's session either"
+
+    def test_a_disconnected_agent_shows_disconnected_even_if_another_agent_on_the_box_is_connected(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        self._use_temp_db(monkeypatch, tmp_path)
+        repo.upsert_telegram_state(
+            gateway_id="gw-shared", tenant_id="t1", workspace_id="w1", user_id="u1",
+            channel_key="telegram_personal", agent_id="agent_connected",
+            provider="telegram", status="connected", linked_username="connected_one",
+        )
+        repo.upsert_telegram_state(
+            gateway_id="gw-shared", tenant_id="t1", workspace_id="w1", user_id="u1",
+            channel_key="telegram_personal", agent_id="agent_idle",
+            provider="telegram", status="code_required", login_hint="+1555",
+        )
+
+        connected_view = service._personal_channel_state("telegram_personal", "gw-shared", "agent_connected")
+        idle_view = service._personal_channel_state("telegram_personal", "gw-shared", "agent_idle")
+
+        assert connected_view["status"] == "connected"
+        assert idle_view["status"] == "code_required", "agent_idle's own mid-pairing status must not be masked by agent_connected's"

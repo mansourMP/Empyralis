@@ -22,10 +22,19 @@ PERSONAL_CHANNELS_DB_FILE = (
 ).expanduser()
 _DB_LOCK = threading.Lock()
 
+# Sentinel agent_id for rows that predate per-agent scoping, or that were
+# deliberately paired workspace-wide (Sage's own legacy Connect tab still
+# does this — PersonalChannelConnectPanel.tsx's `agentGatewayId === undefined`
+# path). NOT NULL so it can sit in a composite PRIMARY KEY/UNIQUE constraint
+# without SQLite's NULL-is-never-equal-to-NULL semantics silently allowing
+# duplicate "unscoped" rows.
+LEGACY_UNSCOPED_AGENT_ID = ""
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS personal_channel_whatsapp_states (
     gateway_id TEXT NOT NULL,
     channel_key TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT '',
     tenant_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
@@ -39,12 +48,13 @@ CREATE TABLE IF NOT EXISTS personal_channel_whatsapp_states (
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (gateway_id, channel_key)
+    PRIMARY KEY (gateway_id, channel_key, agent_id)
 );
 
 CREATE TABLE IF NOT EXISTS personal_channel_telegram_states (
     gateway_id TEXT NOT NULL,
     channel_key TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT '',
     tenant_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
@@ -60,13 +70,14 @@ CREATE TABLE IF NOT EXISTS personal_channel_telegram_states (
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (gateway_id, channel_key)
+    PRIMARY KEY (gateway_id, channel_key, agent_id)
 );
 
 CREATE TABLE IF NOT EXISTS personal_channel_inbound_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gateway_id TEXT NOT NULL,
     channel_key TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT '',
     external_message_id TEXT NOT NULL,
     remote_jid TEXT NOT NULL,
     sender_jid TEXT NULL,
@@ -77,13 +88,14 @@ CREATE TABLE IF NOT EXISTS personal_channel_inbound_messages (
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE (gateway_id, channel_key, external_message_id)
+    UNIQUE (gateway_id, channel_key, agent_id, external_message_id)
 );
 
 CREATE TABLE IF NOT EXISTS personal_channel_outbound_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gateway_id TEXT NOT NULL,
     channel_key TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT '',
     idempotency_key TEXT NOT NULL,
     remote_jid TEXT NOT NULL,
     text TEXT NOT NULL,
@@ -94,9 +106,83 @@ CREATE TABLE IF NOT EXISTS personal_channel_outbound_messages (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     delivered_at TEXT NULL,
-    UNIQUE (gateway_id, channel_key, idempotency_key)
+    UNIQUE (gateway_id, channel_key, agent_id, idempotency_key)
 );
 """
+
+# Tables that predate per-agent scoping and need a real migration (SQLite
+# can't ALTER a PRIMARY KEY in place) rather than just CREATE TABLE IF NOT
+# EXISTS, which only handles a fresh install. Each entry is
+# (table_name, create_sql_for_the_NEW_shape, columns_to_copy_in_order).
+# Pre-existing rows land under LEGACY_UNSCOPED_AGENT_ID — that's exactly the
+# workspace-wide state the old (gateway_id, channel_key)-only schema always
+# meant, so nothing about their behavior changes; new per-agent rows simply
+# become possible alongside them.
+_LEGACY_MIGRATIONS: List[Tuple[str, List[str]]] = [
+    (
+        "personal_channel_whatsapp_states",
+        [
+            "gateway_id", "channel_key", "tenant_id", "workspace_id", "user_id", "provider",
+            "status", "qr_code", "linked_jid", "linked_name", "connected_at", "last_event_at",
+            "metadata", "created_at", "updated_at",
+        ],
+    ),
+    (
+        "personal_channel_telegram_states",
+        [
+            "gateway_id", "channel_key", "tenant_id", "workspace_id", "user_id", "provider",
+            "status", "login_hint", "linked_user_id", "linked_username", "linked_phone",
+            "linked_name", "connected_at", "last_event_at", "metadata", "created_at", "updated_at",
+        ],
+    ),
+    (
+        "personal_channel_inbound_messages",
+        [
+            "gateway_id", "channel_key", "external_message_id", "remote_jid", "sender_jid",
+            "push_name", "text", "reply_idempotency_key", "processed_at", "metadata",
+            "created_at", "updated_at",
+        ],
+    ),
+    (
+        "personal_channel_outbound_messages",
+        [
+            "gateway_id", "channel_key", "idempotency_key", "remote_jid", "text",
+            "reply_to_external_message_id", "external_message_id", "status", "metadata",
+            "created_at", "updated_at", "delivered_at",
+        ],
+    ),
+]
+
+
+def _table_has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(str(row[1]) == column for row in rows)
+
+
+def _migrate_legacy_tables_to_agent_scoped(connection: sqlite3.Connection) -> None:
+    """One-time, idempotent upgrade for DBs created before agent_id existed.
+    CREATE TABLE IF NOT EXISTS above only covers a fresh install; an existing
+    table keeps its old (gateway_id, channel_key) PRIMARY KEY forever unless
+    rebuilt, since SQLite has no ALTER TABLE ... ADD/CHANGE PRIMARY KEY.
+    Standard SQLite migration shape: rename old -> _legacy, CREATE the new
+    schema (already agent-scoped, from SCHEMA_SQL), copy every existing row
+    in under LEGACY_UNSCOPED_AGENT_ID, drop the renamed table."""
+    for table, columns in _LEGACY_MIGRATIONS:
+        if _table_has_column(connection, table, "agent_id"):
+            continue  # already migrated (or freshly created with the new schema)
+        legacy_table = f"{table}__pre_agent_scope"
+        connection.execute(f"ALTER TABLE {table} RENAME TO {legacy_table}")
+        connection.executescript(SCHEMA_SQL)  # recreates `table` in its new, agent-scoped shape
+        column_list = ", ".join(columns)
+        connection.execute(
+            f"""
+            INSERT INTO {table} (agent_id, {column_list})
+            SELECT ?, {column_list} FROM {legacy_table}
+            """,
+            (LEGACY_UNSCOPED_AGENT_ID,),
+        )
+        connection.execute(f"DROP TABLE {legacy_table}")
+        connection.commit()
 
 
 def _utc_now_iso() -> str:
@@ -111,6 +197,7 @@ def _connect(db_path: Optional[Path | str] = None) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode=WAL")
     connection.executescript(SCHEMA_SQL)
     connection.commit()
+    _migrate_legacy_tables_to_agent_scoped(connection)
     return connection
 
 
@@ -125,6 +212,10 @@ def _json_loads(value: Any, *, default: Any) -> Any:
         return json.loads(value)
     except Exception:
         return default
+
+
+def _norm_agent_id(agent_id: Optional[str]) -> str:
+    return str(agent_id or "").strip()
 
 
 def init_personal_channels_db(db_path: Optional[Path | str] = None) -> Path:
@@ -142,6 +233,7 @@ def upsert_whatsapp_state(
     workspace_id: str,
     user_id: str,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     provider: str,
     status: str,
     qr_code: Optional[str] = None,
@@ -152,15 +244,16 @@ def upsert_whatsapp_state(
     db_path: Optional[Path | str] = None,
 ) -> Dict[str, Any]:
     now_iso = _utc_now_iso()
+    normalized_agent_id = _norm_agent_id(agent_id)
     with _DB_LOCK:
         connection = _connect(db_path)
         try:
             existing_row = connection.execute(
                 """
                 SELECT * FROM personal_channel_whatsapp_states
-                WHERE gateway_id = ? AND channel_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
                 """,
-                (str(gateway_id or "").strip(), str(channel_key or "").strip()),
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), normalized_agent_id),
             ).fetchone()
             existing_metadata = (
                 _json_loads(existing_row["metadata"], default={})
@@ -172,11 +265,11 @@ def upsert_whatsapp_state(
             connection.execute(
                 """
                 INSERT INTO personal_channel_whatsapp_states (
-                    gateway_id, channel_key, tenant_id, workspace_id, user_id, provider,
+                    gateway_id, channel_key, agent_id, tenant_id, workspace_id, user_id, provider,
                     status, qr_code, linked_jid, linked_name, connected_at, last_event_at,
                     metadata, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(gateway_id, channel_key) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gateway_id, channel_key, agent_id) DO UPDATE SET
                     tenant_id=excluded.tenant_id,
                     workspace_id=excluded.workspace_id,
                     user_id=excluded.user_id,
@@ -193,6 +286,7 @@ def upsert_whatsapp_state(
                 (
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(tenant_id or "").strip(),
                     str(workspace_id or "").strip(),
                     str(user_id or "").strip(),
@@ -212,9 +306,9 @@ def upsert_whatsapp_state(
             row = connection.execute(
                 """
                 SELECT * FROM personal_channel_whatsapp_states
-                WHERE gateway_id = ? AND channel_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
                 """,
-                (str(gateway_id or "").strip(), str(channel_key or "").strip()),
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), normalized_agent_id),
             ).fetchone()
         finally:
             connection.close()
@@ -225,6 +319,7 @@ def get_whatsapp_state(
     gateway_id: str,
     *,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     db_path: Optional[Path | str] = None,
 ) -> Optional[Dict[str, Any]]:
     with _DB_LOCK:
@@ -233,13 +328,36 @@ def get_whatsapp_state(
             row = connection.execute(
                 """
                 SELECT * FROM personal_channel_whatsapp_states
-                WHERE gateway_id = ? AND channel_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
                 """,
-                (str(gateway_id or "").strip(), str(channel_key or "").strip()),
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), _norm_agent_id(agent_id)),
             ).fetchone()
         finally:
             connection.close()
     return _whatsapp_state_from_row(row)
+
+
+def list_whatsapp_states_for_gateway(
+    gateway_id: str,
+    *,
+    channel_key: str,
+    db_path: Optional[Path | str] = None,
+) -> List[Dict[str, Any]]:
+    """Every agent's WhatsApp session on this gateway — used for the
+    Channels-tab pill fix (per-agent, not "any session on this box")."""
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT * FROM personal_channel_whatsapp_states
+                WHERE gateway_id = ? AND channel_key = ?
+                """,
+                (str(gateway_id or "").strip(), str(channel_key or "").strip()),
+            ).fetchall()
+        finally:
+            connection.close()
+    return [state for state in (_whatsapp_state_from_row(row) for row in rows) if state]
 
 
 def upsert_telegram_state(
@@ -249,6 +367,7 @@ def upsert_telegram_state(
     workspace_id: str,
     user_id: str,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     provider: str,
     status: str,
     login_hint: Optional[str] = None,
@@ -261,15 +380,16 @@ def upsert_telegram_state(
     db_path: Optional[Path | str] = None,
 ) -> Dict[str, Any]:
     now_iso = _utc_now_iso()
+    normalized_agent_id = _norm_agent_id(agent_id)
     with _DB_LOCK:
         connection = _connect(db_path)
         try:
             existing_row = connection.execute(
                 """
                 SELECT * FROM personal_channel_telegram_states
-                WHERE gateway_id = ? AND channel_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
                 """,
-                (str(gateway_id or "").strip(), str(channel_key or "").strip()),
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), normalized_agent_id),
             ).fetchone()
             existing_metadata = (
                 _json_loads(existing_row["metadata"], default={})
@@ -281,11 +401,11 @@ def upsert_telegram_state(
             connection.execute(
                 """
                 INSERT INTO personal_channel_telegram_states (
-                    gateway_id, channel_key, tenant_id, workspace_id, user_id, provider,
+                    gateway_id, channel_key, agent_id, tenant_id, workspace_id, user_id, provider,
                     status, login_hint, linked_user_id, linked_username, linked_phone,
                     linked_name, connected_at, last_event_at, metadata, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(gateway_id, channel_key) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gateway_id, channel_key, agent_id) DO UPDATE SET
                     tenant_id=excluded.tenant_id,
                     workspace_id=excluded.workspace_id,
                     user_id=excluded.user_id,
@@ -304,6 +424,7 @@ def upsert_telegram_state(
                 (
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(tenant_id or "").strip(),
                     str(workspace_id or "").strip(),
                     str(user_id or "").strip(),
@@ -325,9 +446,9 @@ def upsert_telegram_state(
             row = connection.execute(
                 """
                 SELECT * FROM personal_channel_telegram_states
-                WHERE gateway_id = ? AND channel_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
                 """,
-                (str(gateway_id or "").strip(), str(channel_key or "").strip()),
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), normalized_agent_id),
             ).fetchone()
         finally:
             connection.close()
@@ -338,6 +459,7 @@ def get_telegram_state(
     gateway_id: str,
     *,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     db_path: Optional[Path | str] = None,
 ) -> Optional[Dict[str, Any]]:
     with _DB_LOCK:
@@ -346,19 +468,145 @@ def get_telegram_state(
             row = connection.execute(
                 """
                 SELECT * FROM personal_channel_telegram_states
-                WHERE gateway_id = ? AND channel_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
                 """,
-                (str(gateway_id or "").strip(), str(channel_key or "").strip()),
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), _norm_agent_id(agent_id)),
             ).fetchone()
         finally:
             connection.close()
     return _telegram_state_from_row(row)
 
 
+def list_telegram_states_for_gateway(
+    gateway_id: str,
+    *,
+    channel_key: str,
+    db_path: Optional[Path | str] = None,
+) -> List[Dict[str, Any]]:
+    """Every agent's Telegram session on this gateway — same purpose as
+    list_whatsapp_states_for_gateway."""
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT * FROM personal_channel_telegram_states
+                WHERE gateway_id = ? AND channel_key = ?
+                """,
+                (str(gateway_id or "").strip(), str(channel_key or "").strip()),
+            ).fetchall()
+        finally:
+            connection.close()
+    return [state for state in (_telegram_state_from_row(row) for row in rows) if state]
+
+
+def find_telegram_state_by_agent_across_gateways(
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
+    *,
+    channel_key: str,
+    db_path: Optional[Path | str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Used by inbound routing: given only a gateway_id + channel_key from an
+    inbound event, find WHICH agent (if any) owns that session. See
+    find_agent_id_for_telegram_session below — this is its lower-level twin
+    for the (rare) case a caller already knows the agent and wants their
+    current session regardless of which gateway it's on."""
+    normalized_agent_id = _norm_agent_id(agent_id)
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM personal_channel_telegram_states
+                WHERE agent_id = ? AND channel_key = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (normalized_agent_id, str(channel_key or "").strip()),
+            ).fetchone()
+        finally:
+            connection.close()
+    return _telegram_state_from_row(row)
+
+
+def find_agent_id_for_telegram_session(
+    gateway_id: str,
+    *,
+    channel_key: str,
+    remote_jid: Optional[str] = None,
+    db_path: Optional[Path | str] = None,
+) -> str:
+    """Inbound/state-sync routing needs to go the OTHER direction from every
+    other function here: an inbound Telegram event or a gateway.state.update
+    push names a gateway_id (whose Gateway process this is), not an
+    agent_id — the Gateway runs one singleton session per process today and
+    has no concept of Empyralis agents at all (see telegram/runtime.ts).
+
+    CURRENT (single-agent) design: return whichever agent_id most recently
+    touched this gateway+channel — i.e. whoever's configure() call (or
+    inbound message) last claimed it. This is well-defined as long as only
+    one agent's session is live per gateway+channel, which is true until
+    the Gateway itself pools multiple concurrent sessions (not built yet —
+    see docs/PLATFORM-MAP.md's cli_subscription/channels sections for the
+    multi-agent-per-box plan). Deliberately NOT restricted to
+    status='connected': configure_telegram_personal_gateway seeds a row
+    under the real agent_id immediately, before the Gateway ever reports
+    back, specifically so a mid-pairing status (code_required,
+    password_required, ...) already resolves to the right agent — an
+    unauthenticated attempt is still THIS agent's attempt.
+
+    remote_jid is accepted but unused today — reserved for the multi-agent
+    case, where disambiguating by which session's own linked identity most
+    recently talked to that counterparty becomes necessary. Returns
+    LEGACY_UNSCOPED_AGENT_ID (empty) if the gateway+channel has no rows at
+    all, or genuinely ambiguous ones (a future multi-agent state this
+    function doesn't try to resolve on its own)."""
+    normalized_channel_key = str(channel_key or "").strip()
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT agent_id FROM personal_channel_telegram_states
+                WHERE gateway_id = ? AND channel_key = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (str(gateway_id or "").strip(), normalized_channel_key),
+            ).fetchone()
+        finally:
+            connection.close()
+    return str(row["agent_id"] or "") if row is not None else LEGACY_UNSCOPED_AGENT_ID
+
+
+def find_agent_id_for_whatsapp_session(
+    gateway_id: str,
+    *,
+    channel_key: str,
+    db_path: Optional[Path | str] = None,
+) -> str:
+    """WhatsApp twin of find_agent_id_for_telegram_session — see its
+    docstring for the full "most recently touched row" contract."""
+    normalized_channel_key = str(channel_key or "").strip()
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT agent_id FROM personal_channel_whatsapp_states
+                WHERE gateway_id = ? AND channel_key = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (str(gateway_id or "").strip(), normalized_channel_key),
+            ).fetchone()
+        finally:
+            connection.close()
+    return str(row["agent_id"] or "") if row is not None else LEGACY_UNSCOPED_AGENT_ID
+
+
 def record_inbound_message(
     *,
     gateway_id: str,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     external_message_id: str,
     remote_jid: str,
     sender_jid: Optional[str],
@@ -368,6 +616,7 @@ def record_inbound_message(
     db_path: Optional[Path | str] = None,
 ) -> Tuple[Dict[str, Any], bool]:
     now_iso = _utc_now_iso()
+    normalized_agent_id = _norm_agent_id(agent_id)
     created = False
     with _DB_LOCK:
         connection = _connect(db_path)
@@ -375,11 +624,12 @@ def record_inbound_message(
             existing_row = connection.execute(
                 """
                 SELECT * FROM personal_channel_inbound_messages
-                WHERE gateway_id = ? AND channel_key = ? AND external_message_id = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND external_message_id = ?
                 """,
                 (
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(external_message_id or "").strip(),
                 ),
             ).fetchone()
@@ -388,14 +638,15 @@ def record_inbound_message(
                 connection.execute(
                     """
                     INSERT INTO personal_channel_inbound_messages (
-                        gateway_id, channel_key, external_message_id, remote_jid, sender_jid,
+                        gateway_id, channel_key, agent_id, external_message_id, remote_jid, sender_jid,
                         push_name, text, reply_idempotency_key, processed_at, metadata,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
                     """,
                     (
                         str(gateway_id or "").strip(),
                         str(channel_key or "").strip(),
+                        normalized_agent_id,
                         str(external_message_id or "").strip(),
                         str(remote_jid or "").strip(),
                         str(sender_jid or "").strip() or None,
@@ -410,11 +661,12 @@ def record_inbound_message(
                 row = connection.execute(
                     """
                     SELECT * FROM personal_channel_inbound_messages
-                    WHERE gateway_id = ? AND channel_key = ? AND external_message_id = ?
+                    WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND external_message_id = ?
                     """,
                     (
                         str(gateway_id or "").strip(),
                         str(channel_key or "").strip(),
+                        normalized_agent_id,
                         str(external_message_id or "").strip(),
                     ),
                 ).fetchone()
@@ -429,11 +681,13 @@ def mark_inbound_processed(
     *,
     gateway_id: str,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     external_message_id: str,
     reply_idempotency_key: str,
     db_path: Optional[Path | str] = None,
 ) -> Optional[Dict[str, Any]]:
     now_iso = _utc_now_iso()
+    normalized_agent_id = _norm_agent_id(agent_id)
     with _DB_LOCK:
         connection = _connect(db_path)
         try:
@@ -441,7 +695,7 @@ def mark_inbound_processed(
                 """
                 UPDATE personal_channel_inbound_messages
                 SET reply_idempotency_key = ?, processed_at = ?, updated_at = ?
-                WHERE gateway_id = ? AND channel_key = ? AND external_message_id = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND external_message_id = ?
                 """,
                 (
                     str(reply_idempotency_key or "").strip(),
@@ -449,6 +703,7 @@ def mark_inbound_processed(
                     now_iso,
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(external_message_id or "").strip(),
                 ),
             )
@@ -456,11 +711,12 @@ def mark_inbound_processed(
             row = connection.execute(
                 """
                 SELECT * FROM personal_channel_inbound_messages
-                WHERE gateway_id = ? AND channel_key = ? AND external_message_id = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND external_message_id = ?
                 """,
                 (
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(external_message_id or "").strip(),
                 ),
             ).fetchone()
@@ -473,6 +729,7 @@ def create_or_get_outbound_message(
     *,
     gateway_id: str,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     idempotency_key: str,
     remote_jid: str,
     text: str,
@@ -481,6 +738,7 @@ def create_or_get_outbound_message(
     db_path: Optional[Path | str] = None,
 ) -> Tuple[Dict[str, Any], bool]:
     now_iso = _utc_now_iso()
+    normalized_agent_id = _norm_agent_id(agent_id)
     created = False
     with _DB_LOCK:
         connection = _connect(db_path)
@@ -488,11 +746,12 @@ def create_or_get_outbound_message(
             existing_row = connection.execute(
                 """
                 SELECT * FROM personal_channel_outbound_messages
-                WHERE gateway_id = ? AND channel_key = ? AND idempotency_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND idempotency_key = ?
                 """,
                 (
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(idempotency_key or "").strip(),
                 ),
             ).fetchone()
@@ -501,14 +760,15 @@ def create_or_get_outbound_message(
                 connection.execute(
                     """
                     INSERT INTO personal_channel_outbound_messages (
-                        gateway_id, channel_key, idempotency_key, remote_jid, text,
+                        gateway_id, channel_key, agent_id, idempotency_key, remote_jid, text,
                         reply_to_external_message_id, external_message_id, status,
                         metadata, created_at, updated_at, delivered_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?, ?, NULL)
                     """,
                     (
                         str(gateway_id or "").strip(),
                         str(channel_key or "").strip(),
+                        normalized_agent_id,
                         str(idempotency_key or "").strip(),
                         str(remote_jid or "").strip(),
                         str(text or "").strip(),
@@ -522,11 +782,12 @@ def create_or_get_outbound_message(
                 row = connection.execute(
                     """
                     SELECT * FROM personal_channel_outbound_messages
-                    WHERE gateway_id = ? AND channel_key = ? AND idempotency_key = ?
+                    WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND idempotency_key = ?
                     """,
                     (
                         str(gateway_id or "").strip(),
                         str(channel_key or "").strip(),
+                        normalized_agent_id,
                         str(idempotency_key or "").strip(),
                     ),
                 ).fetchone()
@@ -541,6 +802,7 @@ def get_outbound_message(
     *,
     gateway_id: str,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     idempotency_key: str,
     db_path: Optional[Path | str] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -550,11 +812,12 @@ def get_outbound_message(
             row = connection.execute(
                 """
                 SELECT * FROM personal_channel_outbound_messages
-                WHERE gateway_id = ? AND channel_key = ? AND idempotency_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND idempotency_key = ?
                 """,
                 (
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    _norm_agent_id(agent_id),
                     str(idempotency_key or "").strip(),
                 ),
             ).fetchone()
@@ -567,23 +830,26 @@ def mark_outbound_delivered(
     *,
     gateway_id: str,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     idempotency_key: str,
     external_message_id: Optional[str],
     metadata: Optional[Dict[str, Any]] = None,
     db_path: Optional[Path | str] = None,
 ) -> Optional[Dict[str, Any]]:
     now_iso = _utc_now_iso()
+    normalized_agent_id = _norm_agent_id(agent_id)
     with _DB_LOCK:
         connection = _connect(db_path)
         try:
             existing_row = connection.execute(
                 """
                 SELECT * FROM personal_channel_outbound_messages
-                WHERE gateway_id = ? AND channel_key = ? AND idempotency_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND idempotency_key = ?
                 """,
                 (
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(idempotency_key or "").strip(),
                 ),
             ).fetchone()
@@ -602,7 +868,7 @@ def mark_outbound_delivered(
                     metadata = ?,
                     updated_at = ?,
                     delivered_at = ?
-                WHERE gateway_id = ? AND channel_key = ? AND idempotency_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND idempotency_key = ?
                 """,
                 (
                     str(external_message_id or "").strip() or None,
@@ -611,6 +877,7 @@ def mark_outbound_delivered(
                     now_iso,
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(idempotency_key or "").strip(),
                 ),
             )
@@ -618,11 +885,12 @@ def mark_outbound_delivered(
             row = connection.execute(
                 """
                 SELECT * FROM personal_channel_outbound_messages
-                WHERE gateway_id = ? AND channel_key = ? AND idempotency_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ? AND idempotency_key = ?
                 """,
                 (
                     str(gateway_id or "").strip(),
                     str(channel_key or "").strip(),
+                    normalized_agent_id,
                     str(idempotency_key or "").strip(),
                 ),
             ).fetchone()
@@ -635,29 +903,31 @@ def list_recent_gateway_messages(
     gateway_id: str,
     *,
     channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
     limit: int = 20,
     db_path: Optional[Path | str] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
+    normalized_agent_id = _norm_agent_id(agent_id)
     with _DB_LOCK:
         connection = _connect(db_path)
         try:
             inbound_rows = connection.execute(
                 """
                 SELECT * FROM personal_channel_inbound_messages
-                WHERE gateway_id = ? AND channel_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (str(gateway_id or "").strip(), str(channel_key or "").strip(), max(int(limit or 0), 1)),
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), normalized_agent_id, max(int(limit or 0), 1)),
             ).fetchall()
             outbound_rows = connection.execute(
                 """
                 SELECT * FROM personal_channel_outbound_messages
-                WHERE gateway_id = ? AND channel_key = ?
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (str(gateway_id or "").strip(), str(channel_key or "").strip(), max(int(limit or 0), 1)),
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), normalized_agent_id, max(int(limit or 0), 1)),
             ).fetchall()
         finally:
             connection.close()
@@ -673,6 +943,7 @@ def _whatsapp_state_from_row(row: sqlite3.Row | None) -> Optional[Dict[str, Any]
     return {
         "gateway_id": str(row["gateway_id"] or ""),
         "channel_key": str(row["channel_key"] or ""),
+        "agent_id": str(row["agent_id"] or "") or None,
         "tenant_id": str(row["tenant_id"] or ""),
         "workspace_id": str(row["workspace_id"] or ""),
         "user_id": str(row["user_id"] or ""),
@@ -695,6 +966,7 @@ def _telegram_state_from_row(row: sqlite3.Row | None) -> Optional[Dict[str, Any]
     return {
         "gateway_id": str(row["gateway_id"] or ""),
         "channel_key": str(row["channel_key"] or ""),
+        "agent_id": str(row["agent_id"] or "") or None,
         "tenant_id": str(row["tenant_id"] or ""),
         "workspace_id": str(row["workspace_id"] or ""),
         "user_id": str(row["user_id"] or ""),
@@ -719,6 +991,7 @@ def _inbound_message_from_row(row: sqlite3.Row | None) -> Optional[Dict[str, Any
     return {
         "gateway_id": str(row["gateway_id"] or ""),
         "channel_key": str(row["channel_key"] or ""),
+        "agent_id": str(row["agent_id"] or "") or None,
         "external_message_id": str(row["external_message_id"] or ""),
         "remote_jid": str(row["remote_jid"] or ""),
         "sender_jid": str(row["sender_jid"] or "").strip() or None,
@@ -738,6 +1011,7 @@ def _outbound_message_from_row(row: sqlite3.Row | None) -> Optional[Dict[str, An
     return {
         "gateway_id": str(row["gateway_id"] or ""),
         "channel_key": str(row["channel_key"] or ""),
+        "agent_id": str(row["agent_id"] or "") or None,
         "idempotency_key": str(row["idempotency_key"] or ""),
         "remote_jid": str(row["remote_jid"] or ""),
         "text": str(row["text"] or ""),
