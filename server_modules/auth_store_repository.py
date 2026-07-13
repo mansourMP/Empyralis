@@ -306,11 +306,12 @@ async def create_auth_session(*, row: Dict[str, Any]) -> Any:
         return await _upsert(conn, "auth_sessions", row)
 
 
-async def touch_auth_session(session_id: str) -> Any:
+async def touch_auth_session(session_id: str, *, ttl_seconds: Optional[int] = None) -> Any:
     pool = await _pool()
     if pool is None:
         return PG_NA
     ts = _now()
+    new_expires_at = ts + max(int(ttl_seconds), 60) if ttl_seconds is not None else None
     async with _cpr._scoped_connection(bypass_rls=True) as conn:
         if conn is None:
             return PG_NA
@@ -318,8 +319,13 @@ async def touch_auth_session(session_id: str) -> Any:
         if existing is None:
             return None
         row = await conn.fetchrow(
-            "UPDATE auth_sessions SET updated_at = $2, last_seen_at = $2 WHERE session_id = $1 RETURNING *",
-            session_id, ts,
+            """
+            UPDATE auth_sessions
+            SET updated_at = $2, last_seen_at = $2, expires_at = COALESCE($3, expires_at)
+            WHERE session_id = $1
+            RETURNING *
+            """,
+            session_id, ts, new_expires_at,
         )
     return dict(row) if row is not None else None
 

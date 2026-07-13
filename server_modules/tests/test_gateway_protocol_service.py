@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -455,6 +456,58 @@ class GatewayProtocolServiceTests(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_wait_for_recent_inbound_frame_picks_up_reconnect_mid_wait(self) -> None:
+        # Regression test for the confirmed 2026-07-13 root cause (FIX 2):
+        # this used to watch a single captured connection object for its
+        # whole wait, so a reconnect landing a fresh connection in the map
+        # mid-wait went unnoticed until its own timeout expired. It must
+        # instead re-read the map each tick and return as soon as whatever
+        # is CURRENTLY live there is fresh.
+        import asyncio
+
+        class FakeWebSocket:
+            async def send_text(self, frame: str) -> None:
+                return None
+
+            async def close(self, code: int = 1000, reason: str = "") -> None:
+                return None
+
+        async def run_test() -> None:
+            stale_connection = gateway_protocol_service._LiveGatewayConnection(
+                websocket=FakeWebSocket(),
+                gateway_id="gateway-1",
+                session_id="session-stale",
+                scope={"tenant_id": "tenant-1", "workspace_id": "workspace-1"},
+            )
+            stale_connection._last_inbound_monotonic -= 999  # force "no recent inbound frame"
+            try:
+                await gateway_protocol_service._register_live_connection(stale_connection)
+
+                wait_task = asyncio.create_task(
+                    gateway_protocol_service._wait_for_recent_inbound_frame(
+                        "gateway-1", deadline=time.monotonic() + 5,
+                    )
+                )
+                await asyncio.sleep(0.3)  # let it tick at least once against the stale connection
+                self.assertFalse(wait_task.done(), "should still be waiting on the stale connection")
+
+                fresh_connection = gateway_protocol_service._LiveGatewayConnection(
+                    websocket=FakeWebSocket(),
+                    gateway_id="gateway-1",
+                    session_id="session-fresh",
+                    scope={"tenant_id": "tenant-1", "workspace_id": "workspace-1"},
+                )
+                await gateway_protocol_service._register_live_connection(fresh_connection)
+
+                result = await asyncio.wait_for(wait_task, timeout=2)
+                self.assertIs(result, fresh_connection)
+            finally:
+                with gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_LOCK:
+                    gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY.pop("gateway-1", None)
+                    gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_BY_SESSION.pop("session-stale", None)
+                    gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_BY_SESSION.pop("session-fresh", None)
+
+        asyncio.run(run_test())
 
     def test_live_connection_send_frame_same_loop_direct_write(self) -> None:
         """Verify send_frame takes the direct-write branch when caller_loop is owner_loop.

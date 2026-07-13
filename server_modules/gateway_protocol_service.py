@@ -715,17 +715,20 @@ async def _fresh_live_connection(
     gateway_id: str,
     *,
     require_recent_inbound: bool = False,
+    deadline: Optional[float] = None,
 ) -> _LiveGatewayConnection:
     connection = _get_live_connection(gateway_id)
     if connection is None:
         raise ValueError("Gateway is not currently connected.")
     if require_recent_inbound:
-        if await _wait_for_recent_inbound_frame(connection):
-            return connection
+        fresh = await _wait_for_recent_inbound_frame(gateway_id, deadline=deadline)
+        if fresh is not None:
+            return fresh
         return await _close_and_wait_for_fresh_connection(
             gateway_id=gateway_id,
-            connection=connection,
+            connection=_get_live_connection(gateway_id) or connection,
             reason="gateway heartbeat not recent before dispatch",
+            deadline=deadline,
         )
     if not _connection_is_stale(connection):
         return connection
@@ -733,16 +736,35 @@ async def _fresh_live_connection(
         gateway_id=gateway_id,
         connection=connection,
         reason="gateway heartbeat stale before dispatch",
+        deadline=deadline,
     )
 
 
-async def _wait_for_recent_inbound_frame(connection: _LiveGatewayConnection) -> bool:
-    deadline = time.monotonic() + _LIVE_GATEWAY_FRESH_INBOUND_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        if _connection_has_recent_inbound_frame(connection):
-            return True
+async def _wait_for_recent_inbound_frame(
+    gateway_id: str,
+    *,
+    deadline: Optional[float] = None,
+) -> Optional[_LiveGatewayConnection]:
+    # Root cause confirmed 2026-07-13: this used to watch a single captured
+    # connection object for its whole wait, so a reconnect that landed a
+    # fresh connection in the map mid-wait went unnoticed — this kept
+    # polling the old, now-replaced object until its own timeout, even
+    # though a fresh one was already sitting in _get_live_connection.
+    # Re-read the map each tick instead, and cap the wait at whatever
+    # budget the caller's outer deadline has left, not a fixed ceiling that
+    # can alone exceed the whole dispatch's durable_deadline_seconds.
+    effective_deadline = time.monotonic() + _LIVE_GATEWAY_FRESH_INBOUND_WAIT_SECONDS
+    if deadline is not None:
+        effective_deadline = min(effective_deadline, deadline)
+    while time.monotonic() < effective_deadline:
+        current = _get_live_connection(gateway_id)
+        if current is not None and _connection_has_recent_inbound_frame(current):
+            return current
         await asyncio.sleep(0.2)
-    return _connection_has_recent_inbound_frame(connection)
+    current = _get_live_connection(gateway_id)
+    if current is not None and _connection_has_recent_inbound_frame(current):
+        return current
+    return None
 
 
 async def _close_and_wait_for_fresh_connection(
@@ -750,6 +772,7 @@ async def _close_and_wait_for_fresh_connection(
     gateway_id: str,
     connection: _LiveGatewayConnection,
     reason: str,
+    deadline: Optional[float] = None,
 ) -> _LiveGatewayConnection:
     previous_session_id = connection.session_id
     await connection.close_stale(reason)
@@ -758,8 +781,10 @@ async def _close_and_wait_for_fresh_connection(
         session_id=previous_session_id,
         reason=reason,
     )
-    deadline = time.monotonic() + _LIVE_GATEWAY_RECONNECT_WAIT_SECONDS
-    while time.monotonic() < deadline:
+    effective_deadline = time.monotonic() + _LIVE_GATEWAY_RECONNECT_WAIT_SECONDS
+    if deadline is not None:
+        effective_deadline = min(effective_deadline, deadline)
+    while time.monotonic() < effective_deadline:
         candidate = _get_live_connection(gateway_id)
         if (
             candidate is not None
@@ -871,12 +896,19 @@ async def dispatch_tool_invoke(
         payload=payload,
         tool_name=str(capability_id or "").strip(),
     )
-    response = await connection.send_request(
-        message_type="tool.invoke",
-        payload=payload,
-        timeout_seconds=timeout_seconds,
-        request_id=request_id,
-    )
+    try:
+        response = await connection.send_request(
+            message_type="tool.invoke",
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            request_id=request_id,
+        )
+    except RuntimeError as exc:
+        # The connection can die between _fresh_live_connection returning it
+        # and the send actually going out (e.g. the socket closes mid-call).
+        # Routes already turn a plain ValueError with this text into a clean
+        # 409 (routes_gateway.py) instead of an unhandled 500.
+        raise ValueError("Gateway is not currently connected.") from exc
     if not bool(response.get("ok")):
         error = dict(response.get("error") or {})
         raise ValueError(str(error.get("message") or "Gateway tool invocation failed.").strip() or "Gateway tool invocation failed.")
@@ -988,7 +1020,9 @@ async def dispatch_tool_invoke_durable(
                 break
             if not delivered:
                 try:
-                    connection = await _fresh_live_connection(gateway_id, require_recent_inbound=True)
+                    connection = await _fresh_live_connection(
+                        gateway_id, require_recent_inbound=True, deadline=deadline,
+                    )
                     registration = gateway_state_repository.get_gateway_registration(gateway_id) or {}
                     _enforce_gateway_quota_check(
                         gateway_id=str(gateway_id or "").strip(),
@@ -1151,12 +1185,15 @@ async def dispatch_tool_interrupt(
         payload=payload,
         tool_name="tool.interrupt",
     )
-    response = await connection.send_request(
-        message_type="tool.interrupt",
-        payload=payload,
-        timeout_seconds=timeout_seconds,
-        request_id=request_id,
-    )
+    try:
+        response = await connection.send_request(
+            message_type="tool.interrupt",
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            request_id=request_id,
+        )
+    except RuntimeError as exc:
+        raise ValueError("Gateway is not currently connected.") from exc
     if not bool(response.get("ok")):
         error = dict(response.get("error") or {})
         raise ValueError(str(error.get("message") or "Gateway tool interrupt failed.").strip() or "Gateway tool interrupt failed.")
@@ -2306,6 +2343,11 @@ async def handle_gateway_websocket(
                     session=session,
                     operation="touch_session",
                 )
+                # Root cause confirmed 2026-07-13: expires_at on all three
+                # session records was set once at connect and never renewed,
+                # so a live, heartbeating WS still expired at its original
+                # ~15-minute TTL. A heartbeat is proof of life — renew all
+                # three here, every time one arrives.
                 gateway_state_repository.touch_gateway_session(
                     session_id=session_id,
                     gateway_id=gateway_id,
@@ -2322,7 +2364,13 @@ async def handle_gateway_websocket(
                         "device_trust_state": str(binding["device_link"].get("trust_state") or "verified").strip()
                         or "verified",
                     },
+                    ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
                 )
+                auth.touch_auth_session(
+                    session_id,
+                    ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
+                )
+                await session_service.extend_session(session_id)
                 heartbeat_response = _response_frame(
                     str(frame.get("id") or "heartbeat"),
                     ok=True,

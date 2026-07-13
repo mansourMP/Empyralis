@@ -1713,8 +1713,15 @@ def touch_gateway_session(
     checkpoint_cursor: Optional[int] = None,
     metadata: Optional[Dict[str, Any]] = None,
     db_path: Optional[Path | str] = None,
+    ttl_seconds: Optional[int] = None,
 ) -> None:
     now_iso = _utc_now_iso()
+    # Root cause confirmed 2026-07-13: the session's expires_at was set once
+    # at connect and never renewed, so a live, heartbeating WS still expired
+    # at its original TTL (~15 min). Callers that know a heartbeat proves the
+    # connection is genuinely alive (see gateway_protocol_service.py's
+    # gateway.heartbeat branch) pass ttl_seconds to push expiry forward.
+    new_expires_at = _expires_at_iso(ttl_seconds) if ttl_seconds is not None else None
     with _DB_LOCK:
         conn = _connect(db_path)
         try:
@@ -1752,7 +1759,8 @@ def touch_gateway_session(
                 """
                 UPDATE gateway_sessions
                 SET status = CASE WHEN status = 'pending' THEN 'connected' ELSE status END,
-                    updated_at = ?, last_heartbeat_at = ?, last_seq = ?, last_ack = ?, metadata = ?
+                    updated_at = ?, last_heartbeat_at = ?, last_seq = ?, last_ack = ?, metadata = ?,
+                    expires_at = COALESCE(?, expires_at)
                 WHERE session_id = ?
                 """,
                 (
@@ -1761,6 +1769,7 @@ def touch_gateway_session(
                     max(int(seq or 0), int(session.get("last_seq") or 0)),
                     max(int(ack or 0), int(session.get("last_ack") or 0)),
                     _json_dumps(session_metadata),
+                    new_expires_at,
                     str(session_id or "").strip(),
                 ),
             )

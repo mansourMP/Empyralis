@@ -2178,11 +2178,11 @@ def get_auth_session(session_id: str) -> dict[str, Any]:
     return _auth_session_from_row(row)
 
 
-def touch_auth_session(session_id: str) -> dict[str, Any]:
+def touch_auth_session(session_id: str, *, ttl_seconds: Optional[int] = None) -> dict[str, Any]:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return {}
-    pg = _auth_store_pg(auth_store_repository.touch_auth_session(clean_session_id))
+    pg = _auth_store_pg(auth_store_repository.touch_auth_session(clean_session_id, ttl_seconds=ttl_seconds))
     if pg is not _PG_NA:
         return _auth_session_from_row(pg) if pg else {}
     with AUTH_LOCK:
@@ -2194,9 +2194,10 @@ def touch_auth_session(session_id: str) -> dict[str, Any]:
             if existing is None:
                 return {}
             ts = int(time.time())
+            new_expires_at = ts + max(int(ttl_seconds), 60) if ttl_seconds is not None else None
             connection.execute(
-                "UPDATE auth_sessions SET updated_at = ?, last_seen_at = ? WHERE session_id = ?",
-                (ts, ts, clean_session_id),
+                "UPDATE auth_sessions SET updated_at = ?, last_seen_at = ?, expires_at = COALESCE(?, expires_at) WHERE session_id = ?",
+                (ts, ts, new_expires_at, clean_session_id),
             )
             row = connection.execute(
                 "SELECT * FROM auth_sessions WHERE session_id = ? LIMIT 1",
