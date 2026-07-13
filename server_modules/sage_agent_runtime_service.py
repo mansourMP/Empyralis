@@ -1065,15 +1065,23 @@ async def _dispatch_cli_subscription_gateway_brain(
     # The Gateway's WS link to this backend can drop and auto-reconnect in
     # the background, driven by the paired box's own network path (e.g. a
     # flaky VPN hop or a sleeping consumer Mac) — not by anything this
-    # process controls. A hand-rolled sleep-and-retry loop used to live here,
-    # widened three times across one night chasing successively worse
-    # observed outages (30s, then 55s) and still not enough — a symptom that
-    # retry-budget tuning was solving the wrong layer. durable=True moves
-    # that responsibility down into execute_tool_via_gateway /
-    # dispatch_tool_invoke_durable, which survives the connection dying and
-    # reconnecting for up to durable_deadline_seconds by construction (not by
-    # guessing a bigger number), including the case where the Gateway
-    # finishes the CLI call after the original connection is already gone.
+    # process controls. durable=True moves that responsibility down into
+    # execute_tool_via_gateway / dispatch_tool_invoke_durable, which survives
+    # the connection dying and reconnecting, including the case where the
+    # Gateway finishes the CLI call after the original connection is already
+    # gone.
+    #
+    # Root cause confirmed 2026-07-13: this used to be widened repeatedly
+    # (up to 600s) chasing "not currently connected" failures that were
+    # never actually about how long to wait. _unregister_live_connection in
+    # gateway_protocol_service.py unconditionally popped the gateway_id map
+    # entry on teardown — a departing OLD connection's cleanup was deleting
+    # the NEW connection's registration that had just replaced it on
+    # reconnect, so the live socket kept heartbeating (Gateway shows Online)
+    # while dispatch's own connection map went empty. Fixed with an identity
+    # guard on unregister plus eviction of any stale connection on register.
+    # A healthy connection now answers in seconds — the deadline below is
+    # back to a real timeout, not a workaround.
     try:
         response = await gateway_execution_service.execute_tool_via_gateway(
             gateway_id=gateway_id,
@@ -1096,16 +1104,7 @@ async def _dispatch_cli_subscription_gateway_brain(
             agent_scope="specialist",
             emit_hardware_activity=False,
             durable=True,
-            # Live evidence 2026-07-12: 5 consecutive real attempts on a
-            # gateway with a healthy reconnect cycle all failed at exactly
-            # 240s, one missing a fresh reconnect by 3 seconds. The gateway's
-            # actual disconnect-to-reconnect gaps run longer than 240s on
-            # this box's WS path (root cause not yet found — see the
-            # matching gap on an unrelated test gateway the same day, which
-            # points at something shared/edge-side, not this specific box).
-            # Widened as an immediate mitigation, not a fix for the
-            # underlying cycle; revisit once that's diagnosed.
-            durable_deadline_seconds=600,
+            durable_deadline_seconds=60,
         )
     except Exception as exc:
         _reason = str(exc)

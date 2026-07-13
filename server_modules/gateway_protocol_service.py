@@ -649,18 +649,35 @@ class _LiveGatewayConnection:
         self._pending_requests.clear()
 
 
-def _register_live_connection(connection: _LiveGatewayConnection) -> None:
+async def _register_live_connection(connection: _LiveGatewayConnection) -> None:
+    stale: Optional[_LiveGatewayConnection] = None
     with _LIVE_GATEWAY_CONNECTIONS_LOCK:
+        existing = _LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY.get(connection.gateway_id)
+        if existing is not None and existing is not connection:
+            stale = existing
+            _LIVE_GATEWAY_CONNECTIONS_BY_SESSION.pop(existing.session_id, None)
         _LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY[connection.gateway_id] = connection
         _LIVE_GATEWAY_CONNECTIONS_BY_SESSION[connection.session_id] = connection
+    if stale is not None:
+        # Evict the old socket outright so exactly one live connection can
+        # ever answer for this gateway_id — otherwise the old connection's
+        # own eventual teardown could pop the map entry this new connection
+        # just wrote (see _unregister_live_connection's identity guard).
+        await stale.close_stale("Superseded by a newer connection for this gateway.")
 
 
 def _unregister_live_connection(*, gateway_id: str, session_id: str, reason: str) -> None:
+    gid = str(gateway_id or "").strip()
+    sid = str(session_id or "").strip()
     with _LIVE_GATEWAY_CONNECTIONS_LOCK:
-        connection = _LIVE_GATEWAY_CONNECTIONS_BY_SESSION.pop(str(session_id or "").strip(), None)
-        if connection is None:
-            connection = _LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY.get(str(gateway_id or "").strip())
-        _LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY.pop(str(gateway_id or "").strip(), None)
+        connection = _LIVE_GATEWAY_CONNECTIONS_BY_SESSION.pop(sid, None)
+        current = _LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY.get(gid)
+        # Only remove the gateway_id entry if it still points at THIS
+        # connection (or this session, if the connection object was already
+        # gone) — a stale connection tearing down after a reconnect must
+        # never pop the newer connection that already replaced it.
+        if current is not None and (current is connection or (connection is None and current.session_id == sid)):
+            _LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY.pop(gid, None)
     if connection is not None:
         connection.fail_pending(reason)
 
@@ -2048,7 +2065,7 @@ async def handle_gateway_websocket(
             scope=scope,
         )
         connection.start_writer()
-        _register_live_connection(connection)
+        await _register_live_connection(connection)
         connect_response = _response_frame(
             str(first_frame.get("id") or "connect"),
             ok=True,

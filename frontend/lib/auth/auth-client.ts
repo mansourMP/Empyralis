@@ -216,44 +216,90 @@ function sleep(delayMs: number): Promise<void> {
   });
 }
 
+// Doubles per attempt off the caller's base delay, half-jittered, capped —
+// avoids every retrying caller landing on the backend at the same instant.
+function backoffWithJitter(baseDelayMs: number, attempt: number): number {
+  const exponential = Math.min(baseDelayMs * 2 ** attempt, 8_000);
+  return exponential / 2 + Math.random() * (exponential / 2);
+}
+
+// Callers (OAuth-completion pollers on a ~500ms tick, signup/login redirects)
+// can invoke this many times a second while a session is settling. Without
+// single-flight de-dup, each tick fired its own fetch — observed as ~80
+// hits/40s against account-shell on one expired session. Keyed by path so
+// concurrent callers checking the same endpoint share one in-flight sequence.
+const browserAuthReadyInFlight = new Map<string, Promise<void>>();
+
 export async function awaitBrowserAuthReady({
   path = '/api/auth/account-shell',
   attempts = 4,
   delayMs = 250,
 }: AwaitBrowserAuthReadyOptions = {}): Promise<void> {
-  let lastStatus: number | null = null;
-
-  for (let index = 0; index < attempts; index += 1) {
-    const response = await fetch(path, {
-      method: 'GET',
-      credentials: 'include',
-      cache: 'no-store',
-      headers: buildCookieAuthHeaders('GET', {
-        accept: 'application/json',
-      }),
-    });
-
-    if (response.ok) {
-      return;
-    }
-
-    lastStatus = response.status;
-    if (response.status === 401 || response.status >= 500) {
-      await sleep(delayMs);
-      continue;
-    }
-    if (response.status === 403) {
-      throw new Error('This workspace is not accessible for this account.');
-    }
-
-    throw new Error(`Auth readiness check failed with status ${response.status}.`);
+  const existing = browserAuthReadyInFlight.get(path);
+  if (existing) {
+    return existing;
   }
 
-  throw new Error(
-    lastStatus === null
-      ? 'Auth readiness check did not complete.'
-      : `Auth readiness check did not recover from status ${lastStatus}.`,
-  );
+  const run = (async () => {
+    let lastStatus: number | null = null;
+    let consecutive401s = 0;
+
+    for (let index = 0; index < attempts; index += 1) {
+      const response = await fetch(path, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: buildCookieAuthHeaders('GET', {
+          accept: 'application/json',
+        }),
+      });
+
+      if (response.ok) {
+        return;
+      }
+
+      lastStatus = response.status;
+
+      if (response.status === 401) {
+        consecutive401s += 1;
+        // A just-created session can 401 once or twice while the cookie
+        // propagates — that's expected right after login/signup. A 401
+        // that persists past a few tries means the session is actually
+        // gone, not warming up: stop instead of burning the rest of the
+        // attempt budget (callers pass up to 12) hammering a dead session.
+        if (consecutive401s >= 3) {
+          throw new Error('Your session expired. Sign in again.');
+        }
+        await sleep(backoffWithJitter(delayMs, index));
+        continue;
+      }
+
+      if (response.status >= 500) {
+        consecutive401s = 0;
+        await sleep(backoffWithJitter(delayMs, index));
+        continue;
+      }
+
+      if (response.status === 403) {
+        throw new Error('This workspace is not accessible for this account.');
+      }
+
+      throw new Error(`Auth readiness check failed with status ${response.status}.`);
+    }
+
+    throw new Error(
+      lastStatus === null
+        ? 'Auth readiness check did not complete.'
+        : `Auth readiness check did not recover from status ${lastStatus}.`,
+    );
+  })();
+
+  browserAuthReadyInFlight.set(path, run);
+  try {
+    return await run;
+  } finally {
+    browserAuthReadyInFlight.delete(path);
+  }
 }
 
 export async function login(email: string, password: string): Promise<Record<string, unknown> | null> {

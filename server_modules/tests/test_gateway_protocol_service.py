@@ -378,7 +378,7 @@ class GatewayProtocolServiceTests(unittest.TestCase):
                 future=future,
                 loop=loop,
             )
-            gateway_protocol_service._register_live_connection(connection)
+            await gateway_protocol_service._register_live_connection(connection)
             try:
                 gateway_protocol_service._unregister_live_connection(
                     gateway_id="gateway-1",
@@ -393,6 +393,65 @@ class GatewayProtocolServiceTests(unittest.TestCase):
                 with gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_LOCK:
                     gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY.pop("gateway-1", None)
                     gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_BY_SESSION.pop("session-1", None)
+
+        asyncio.run(run_test())
+
+    def test_stale_connection_teardown_does_not_evict_newer_reconnect(self) -> None:
+        # Regression test for the confirmed 2026-07-13 root cause: on
+        # reconnect, the OLD connection's teardown used to unconditionally
+        # pop whatever was in the gateway_id map — which by then was the
+        # NEW connection — leaving dispatch's map empty while the new
+        # socket kept heartbeating fine (Gateway showed Online, dispatch
+        # said "not currently connected").
+        import asyncio
+
+        class FakeWebSocket:
+            async def send_text(self, frame: str) -> None:
+                return None
+
+            async def close(self, code: int = 1000, reason: str = "") -> None:
+                return None
+
+        async def run_test() -> None:
+            old_connection = gateway_protocol_service._LiveGatewayConnection(
+                websocket=FakeWebSocket(),
+                gateway_id="gateway-1",
+                session_id="session-old",
+                scope={"tenant_id": "tenant-1", "workspace_id": "workspace-1"},
+            )
+            new_connection = gateway_protocol_service._LiveGatewayConnection(
+                websocket=FakeWebSocket(),
+                gateway_id="gateway-1",
+                session_id="session-new",
+                scope={"tenant_id": "tenant-1", "workspace_id": "workspace-1"},
+            )
+            try:
+                await gateway_protocol_service._register_live_connection(old_connection)
+                # Reconnect: a new connection registers for the same
+                # gateway_id before the old one's teardown runs.
+                await gateway_protocol_service._register_live_connection(new_connection)
+                self.assertIs(
+                    gateway_protocol_service._get_live_connection("gateway-1"),
+                    new_connection,
+                )
+
+                # The old connection's delayed cleanup must only remove
+                # itself, never the newer connection that already replaced it.
+                gateway_protocol_service._unregister_live_connection(
+                    gateway_id="gateway-1",
+                    session_id="session-old",
+                    reason="old connection closed",
+                )
+
+                self.assertIs(
+                    gateway_protocol_service._get_live_connection("gateway-1"),
+                    new_connection,
+                )
+            finally:
+                with gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_LOCK:
+                    gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_BY_GATEWAY.pop("gateway-1", None)
+                    gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_BY_SESSION.pop("session-old", None)
+                    gateway_protocol_service._LIVE_GATEWAY_CONNECTIONS_BY_SESSION.pop("session-new", None)
 
         asyncio.run(run_test())
 
