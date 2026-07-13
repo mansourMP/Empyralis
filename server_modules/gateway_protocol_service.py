@@ -130,6 +130,10 @@ _PENDING_GATEWAY_INVOKES_LOCK = threading.Lock()
 def _enqueue_pending_invoke(pending: "_PendingInvoke") -> None:
     with _PENDING_GATEWAY_INVOKES_LOCK:
         _PENDING_GATEWAY_INVOKES.setdefault(pending.gateway_id, []).append(pending)
+    _LOGGER.info(
+        "DIAG enqueue pending invoke gateway_id=%r request_id=%s",
+        pending.gateway_id, pending.request_id,
+    )
 
 
 def _remove_pending_invoke(gateway_id: str, request_id: str) -> None:
@@ -1117,9 +1121,18 @@ async def _flush_pending_invokes(gateway_id: str, connection: _LiveGatewayConnec
     freshly-heartbeating socket. Best-effort per invoke: a failure leaves that
     invoke enqueued for the next connect/heartbeat, and the dispatcher's own
     deadline bounds how long a truly-unreachable gateway keeps one alive."""
-    for pending in _snapshot_pending_invokes(gateway_id):
+    snapshot = _snapshot_pending_invokes(gateway_id)
+    _LOGGER.info(
+        "DIAG flush gateway_id=%r pending=%d session=%s",
+        gateway_id, len(snapshot), str(getattr(connection, "session_id", "")),
+    )
+    for pending in snapshot:
         try:
-            await _deliver_pending_invoke_via(connection, pending)
+            delivered = await _deliver_pending_invoke_via(connection, pending)
+            _LOGGER.info(
+                "DIAG flush attempt request_id=%s delivered_now=%s already_delivered=%s",
+                pending.request_id, delivered, pending.delivered,
+            )
         except Exception as exc:
             _LOGGER.info(
                 "Pending tool.invoke flush deferred gateway_id=%s request_id=%s error=%s",
