@@ -37,11 +37,12 @@ class SkillsServiceTests(unittest.TestCase):
             llm_task=lambda *args, **kwargs: {"ok": True},
             web_search=lambda query: [],
             web_fetch=lambda url: f"Fetched {url}",
-            search_memory_notebook=lambda workspace_id, query, max_results=5: [{"path": "MEMORY.md", "query": query, "max_results": max_results}],
-            get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None: {
+            search_memory_notebook=lambda workspace_id, query, max_results=5, agent_install_id=None: [{"path": "MEMORY.md", "query": query, "max_results": max_results, "agent_install_id": agent_install_id}],
+            get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None, agent_install_id=None: {
                 "path": rel_path,
                 "from_line": from_line,
                 "line_count": line_count,
+                "agent_install_id": agent_install_id,
             },
             update_memory_context_file=lambda workspace_id, filename, content, agent_install_id=None, **kwargs: {
                 "workspace_id": workspace_id,
@@ -1163,10 +1164,10 @@ class AuthorityMandateGateTests(unittest.TestCase):
             llm_task=lambda *args, **kwargs: {"ok": True},
             web_search=lambda query: [],
             web_fetch=lambda url: f"Fetched {url}",
-            search_memory_notebook=lambda workspace_id, query, max_results=5: [
-                {"path": "MEMORY.md", "query": query, "max_results": max_results}
+            search_memory_notebook=lambda workspace_id, query, max_results=5, agent_install_id=None: [
+                {"path": "MEMORY.md", "query": query, "max_results": max_results, "agent_install_id": agent_install_id}
             ],
-            get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None: {},
+            get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None, agent_install_id=None: {},
         )
 
     def test_audience_tier_blocks_non_audience_safe_tool_even_when_not_visibility_filtered(self) -> None:

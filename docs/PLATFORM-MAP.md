@@ -1951,17 +1951,19 @@ routes.
 default `True` (`:182`). It's serialized into the manifest's API
 representation (`agent_specialist_repository.py:244`) — and then never
 consulted anywhere else; grepped for `.reflection_enabled` beyond its
-definition and serialization: zero hits. There's also a
-`REFLECTION.md` starter template (`workspace_context.py:128-136`) whose own
-seeded copy claims *"Sage writes here after meaningful conversations"* and
-*"Loaded every turn so Sage learns and improves over time."* Both claims are
-contradicted by the actual injection code, which has an explicit comment
-stating it loads **only** `MEMORY.md` every turn
+definition and serialization: zero hits — left as dead scaffolding rather
+than deleted (not user-facing, not displayed anywhere; removing a manifest
+field is a bigger API-contract change than this pass's scope). **The
+`REFLECTION.md` starter template's false claim is fixed as of 2026-07-14**
+(Part 27.6): it used to claim *"Sage writes here after meaningful
+conversations"* and *"Loaded every turn so Sage learns and improves over
+time"* — both contradicted by the actual injection code, which has an
+explicit comment stating it loads **only** `MEMORY.md` every turn
 (`sage_instruction_compiler_service.py:260-262`: *"inject ONLY MEMORY.md
-content ... Every other file is available on-demand"*). `REFLECTION.md` is
-just another optional note file the agent may or may not choose to write to
-— same mechanism as any other memory file, not an autonomous
-loaded-every-turn reflection loop.
+content ... Every other file is available on-demand"*). The template
+(`workspace_context.py:128-138`) now says so plainly — nothing writes here
+automatically, it is not loaded every turn, and it's just another optional
+note file surfaced on demand like any other memory file.
 
 **Correction to a plausible-sounding lead:** `agent_turn.py`, despite its
 name, is a request/data-shape contract (the `AgentTurnRequest` dataclass and
@@ -2971,6 +2973,134 @@ Python files were created by this pass): `gateway_protocol_service.py`,
 `sage_agent_runtime_service.py`, `direct_chat_stream_response_service.py`,
 `gateway_registry_service.py`, `empyralis-gateway/src/llm/runtime.ts`,
 `frontend/lib/workspace/fleet/AgentChat.tsx`.
+
+---
+
+## Part 27: Cross-Agent Memory Isolation — Security Audit (2026-07-14)
+
+Mansur flagged this as a security property, not a feature request: **prove
+agent A can never read, write, or list agent B's memory.** This section
+records the audit (all 3 attack vectors the ask specified), the one real
+leak found and fixed, and what's confirmed safe.
+
+### 27.1 The architecture, in one line
+
+Memory has two independent backends, both keyed by `agent_install_id`,
+both rooted under `agent_workspace_context_dir(workspace_id, agent_install_id)`
+(`workspace_context.py:222`): a **file/notebook layer** (markdown files —
+`MEMORY.md`, `memory/*.md` — read by `agent_memory_tools.py`'s
+`memory_read`/`memory_write`/`memory_list` and by `agent_memory.py`'s
+notebook search/excerpt functions), and a **SQLite layer** (`memory_entries`
+table, one **physically separate `.db` file per `(workspace_id,
+agent_install_id)`** — `agent_memory.py:190-197` — so isolation there is
+enforced by the filesystem itself, not by a `WHERE` clause). Critically, an
+**empty `agent_install_id` does not mean "no scope" — it resolves to the
+WORKSPACE ROOT**, which is Sage's own memory location, predating specialist
+agents (`workspace_context.py:222-226`). This is intentional and correct
+for Sage's own turns; it is dangerous for any caller acting on behalf of a
+specialist that forgets to pass the specialist's real id.
+
+### 27.2 Attack (a)+(c): confirmed real leak, fixed
+
+**`memory_search` and `memory_get`** (`skills_service.py`, the dispatcher
+behind the `memory_search`/`memory_get` tools) were the **only two of
+~12 memory tool actions** in that dispatch function that did not thread
+`agent_install_id` from `session_metadata` through to the underlying call —
+every sibling (`update`, `read`, `write`, `stage_edit`, `apply_edit`,
+`append_daily_note`, `stage_consolidation`, `consolidate_daily_notes`,
+`list_versions`, `rollback_version`) already did this correctly. Net effect,
+confirmed and reproduced before fixing: **any specialist agent's
+`memory_search`/`memory_get` tool call silently searched/read Sage's own
+root-level memory notebook instead of that specialist's own** — a real
+cross-agent (specialist → Sage) leak, reachable from an ordinary tool call
+during a turn, no special conditions required. Two specialists sharing this
+bug would also have collided with each other through that same shared root.
+
+**Fixed** (`skills_service.py`, both branches now pass
+`agent_install_id=session_metadata.get("agent_install_id") or
+session_metadata.get("active_agent_install_id") or None`, matching every
+sibling action). Verified both directions: reverting the fix and re-running
+`server_modules/tests/test_memory_cross_agent_isolation.py` makes
+`test_agent_a_search_never_surfaces_agent_bs_content` and
+`test_memory_get_scoped_to_the_calling_agent_not_another_specialists` fail
+— proving the test suite actually catches the real bug, not a strawman.
+
+### 27.3 Attack (a)+(b): path traversal — already correctly defended
+
+`agent_memory_tools.py`'s `_resolve_safe_path` rejects `..`, and the final
+`resolved.resolve()` + `str(resolved).startswith(str(memory_dir.resolve()))`
+check is the real, effective guard — confirmed to also correctly reject a
+**symlink escape** (a symlink planted inside agent A's own directory
+pointing at agent B's directory), since `Path.resolve()` follows symlinks
+before the `startswith` check runs. One **non-security** finding along the
+way: the explicit `"absolute paths not allowed"` check (`:57-58`) is
+actually **unreachable** — `clean = requested_path.lstrip("/\\")` (`:50`)
+strips the leading slash *before* that check runs, so an input like
+`/etc/passwd` is silently renormalized to the relative path `etc/passwd`
+(safely resolved inside the agent's own directory, hence "file not found",
+never a real filesystem escape) rather than rejected with that message.
+Left as-is: the actual security property already holds via the later
+resolve+startswith check regardless, and tightening the dead branch risked
+breaking a plausibly-intentional UX case (a model passing `/SOUL.md`
+meaning "SOUL.md at my root") for zero security benefit. Documented here so
+it isn't mistaken for a live gap.
+
+### 27.4 Attack (c): SQLite `memory_entries` layer — confirmed safe
+
+Per-install physical `.db` file separation (§27.1) means no SQL query run
+against one install's database can ever return another install's rows —
+proven directly: two installs' entries never appear in each other's
+`_list_memory_entries`/`_search_memory`/`_semantic_search` results, and
+deleting one install's row never touches another's, even when both use the
+identical key name (`test_memory_cross_agent_isolation.py::SqliteMemoryEntriesIsolationTests`).
+
+### 27.5 Secondary finding: a defeated-by-default check, not currently exploitable
+
+`unified_memory_service.py`'s `_enforce_specialist_memory_viewer` (backing
+`build_specialist_memory_payload`, a *different*, human-facing memory
+system — an 8-layer aggregation payload, not the tool-call surface above)
+has a real design flaw: `viewer_install_id or requested_install_id` makes
+the comparison trivially pass whenever `viewer_install_id` isn't supplied,
+so the `PermissionError` guard can never fire against an unset viewer.
+**Not currently exploitable** — its one caller
+(`specialist_service.build_specialist_service_contract`, reached only from
+`GET /agent-registry/specialists/{install_id}`, gated by
+`member_dependency` + `enforce_workspace_access(minimum_role="viewer")`) is
+a human-authorized REST route with its own separate, real authorization;
+there is no "viewing agent" in that context for the check to protect
+against. Left unfixed (changing the default risked breaking that
+legitimate route, which sits directly upstream of `FleetAgentDetail.tsx`)
+but hardened with an explicit code comment: any **future** caller that
+exposes this payload to an agent mid-turn must pass a real
+`viewer_install_id` from trusted server-side context, or the check silently
+does nothing.
+
+### 27.6 `reflection_enabled` / REFLECTION.md — the honesty half of this pass
+
+Confirms and closes the gap Part 15 already found: `reflection_enabled`
+(`agent_manifest.py:68`) is genuine dead scaffolding — serialized, never
+consulted (left as-is; not in this audit's owned files, not displayed
+anywhere, so nothing is lying about it). `REFLECTION.md`'s own seeded
+template (`workspace_context.py`) claimed *"Sage writes here after
+meaningful conversations"* and *"Loaded every turn so Sage learns and
+improves over time"* — both false; only `MEMORY.md` loads every turn
+(`sage_instruction_compiler_service.py:260-262`, Part 15). **Fixed**: the
+template now states plainly that nothing writes here automatically, it is
+NOT loaded every turn, and anything meant to actually influence future
+turns needs a link under MEMORY.md's Topic files section — the same
+on-demand mechanism as any other memory file.
+
+### 27.7 Deliverable
+
+`server_modules/tests/test_memory_cross_agent_isolation.py` — 19 tests,
+all passing, covering all 3 attack vectors: path traversal + symlink escape
+(6 tests), the real leak's regression coverage including the alias key and
+Sage's-own-root case (6 tests), and the SQLite layer's per-file isolation
+(5 tests, plus 2 directory/workspace isolation checks in the first group).
+Confirmed to fail without the fix (§27.2), confirmed to pass with it, and
+confirmed to introduce zero regressions elsewhere via git-stash diff
+against `test_skills_service.py`, `test_workspace_context_files.py`, and
+`test_unified_memory_service.py`'s pre-existing baselines.
 
 ---
 

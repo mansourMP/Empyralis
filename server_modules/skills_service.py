@@ -3939,6 +3939,13 @@ def execute_single_direct_tool_call(
             workspace_id,
             query,
             max_results=callbacks.safe_positive_int(argument_payload.get("max_results"), 5),
+            # SECURITY: every sibling memory_* action below scopes to the
+            # calling agent via session_metadata — this one and memory_get
+            # used to be the sole exceptions, silently falling back to the
+            # workspace root (Sage's own notebook) for any specialist's turn
+            # per agent_workspace_context_dir's documented fallback. Fixed
+            # 2026-07-14.
+            agent_install_id=session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id") or None,
         )
         return json.dumps({"results": results}, ensure_ascii=False)
     if connector_id == "memory" and action_id == "get":
@@ -3950,6 +3957,8 @@ def execute_single_direct_tool_call(
             rel_path,
             from_line=argument_payload.get("from"),
             line_count=argument_payload.get("lines"),
+            # SECURITY: see memory_search above — same fix, same reason.
+            agent_install_id=session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id") or None,
         )
         return json.dumps(excerpt, ensure_ascii=False)
     if connector_id == "memory" and action_id == "update":

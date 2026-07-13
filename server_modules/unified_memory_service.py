@@ -306,6 +306,19 @@ def _enforce_specialist_memory_viewer(
     viewer_role: str,
     viewer_install_id: str | None = None,
 ) -> None:
+    # SECURITY: this check is DEFEATED BY DEFAULT when viewer_install_id is
+    # omitted — `viewer_install_id or requested_install_id` makes the two
+    # sides trivially equal, so no PermissionError can ever fire. That's
+    # fine for build_specialist_memory_payload's one current caller
+    # (specialist_service.build_specialist_service_contract, reached only
+    # from a human-authenticated REST route already gated by its own
+    # workspace-membership check — there is no "viewing agent" in that
+    # context at all). It is NOT fine for any future caller that exposes
+    # this payload to an AGENT mid-turn: that caller MUST pass a real
+    # viewer_install_id derived from trusted, server-side turn context
+    # (never from model/tool-call-supplied arguments), or this check
+    # silently does nothing and one specialist could read another's
+    # payload. See docs/PLATFORM-MAP.md's memory security audit.
     normalized_viewer_role = str(viewer_role or "specialist").strip().lower() or "specialist"
     if normalized_viewer_role != "specialist":
         raise PermissionError(

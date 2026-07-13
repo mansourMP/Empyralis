@@ -127,10 +127,14 @@ DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
     ),
     "REFLECTION.md": (
         "---\n"
-        "Purpose: Sage's own reflections on past interactions — what worked,\n"
-        "what didn't, patterns noticed.  Sage writes here after meaningful\n"
-        "conversations.\n"
-        "Loaded every turn so Sage learns and improves over time.\n"
+        "Purpose: An optional place for Sage's own reflections on past\n"
+        "interactions — what worked, what didn't, patterns noticed.\n"
+        "Nothing writes here automatically; use memory_write when a\n"
+        "reflection is worth keeping.\n"
+        "NOT loaded every turn — only MEMORY.md is. Link anything here\n"
+        "that should actually influence future turns under MEMORY.md's\n"
+        "Topic files section, the same way any other memory file is\n"
+        "surfaced on demand.\n"
         "---\n\n"
         "# Reflection\n"
     ),
@@ -216,6 +220,16 @@ def workspace_scope_dir(workspace_id: str | None = None) -> Path:
 
 
 def agent_workspace_context_dir(*, workspace_id: str | None = None, agent_install_id: str | None = None) -> Path:
+    # SECURITY: an empty/missing agent_install_id does NOT mean "no scope" —
+    # it silently resolves to the WORKSPACE ROOT (historically Sage's own
+    # memory location, pre-dating specialist agents). Every caller acting on
+    # behalf of a SPECIALIST must pass its real agent_install_id, or that
+    # specialist's memory tools transparently fall through to Sage's own
+    # root-level memory instead of failing — this is exactly how a real
+    # cross-agent leak happened (skills_service.py's memory_search/memory_get
+    # dispatch, fixed 2026-07-14; see docs/PLATFORM-MAP.md's memory security
+    # audit). When adding a new caller, thread the CALLING agent's own
+    # install_id through explicitly — never assume the default is safe.
     scope_root = workspace_scope_dir(workspace_id)
     normalized_install_id = str(agent_install_id or "").strip()
     if not normalized_install_id:
