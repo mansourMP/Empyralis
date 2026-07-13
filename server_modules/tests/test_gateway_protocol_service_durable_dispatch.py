@@ -66,10 +66,14 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
                     )
                 )
 
+                # Delivery is driven only by the flush (which the WS handler
+                # runs on connect/heartbeat) — here we invoke it directly for
+                # connection_a to simulate that heartbeat-flush.
                 for _ in range(100):
-                    if sent_frames:
+                    if gateway_protocol_service._snapshot_pending_invokes("gw-1"):
                         break
                     await asyncio.sleep(0.02)
+                await gateway_protocol_service._flush_pending_invokes("gw-1", connection_a)
                 self.assertEqual(len(sent_frames), 1, "the request should have been written via connection_a")
                 self.assertEqual(sent_frames[0]["id"], "durable-req-1")
 
@@ -179,10 +183,10 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    def test_delivered_exactly_once_across_fast_path_and_flush(self) -> None:
-        """A fast-path delivery and a concurrent connect flush must never both
-        send the same invoke — the claim/release guard makes delivery
-        exactly-once even if both fire."""
+    def test_repeated_flushes_deliver_exactly_once(self) -> None:
+        """Two flushes on the same connection (e.g. back-to-back heartbeats)
+        must never both send the same invoke — the claim/delivered guard makes
+        delivery exactly-once."""
         connection = SimpleNamespace(
             session_id="sess-a",
             scope={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
@@ -203,13 +207,12 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
                         request_id="durable-req-4",
                     )
                 )
-                # Wait for the fast path to deliver.
                 for _ in range(100):
-                    if connection.send_frame.await_count:
+                    if gateway_protocol_service._snapshot_pending_invokes("gw-1"):
                         break
                     await asyncio.sleep(0.02)
-                # A redundant flush (e.g. a heartbeat right after) must NOT
-                # resend — the invoke was already claimed + dequeued.
+                # First heartbeat-flush delivers; a second must not resend.
+                await gateway_protocol_service._flush_pending_invokes("gw-1", connection)
                 await gateway_protocol_service._flush_pending_invokes("gw-1", connection)
                 self.assertEqual(connection.send_frame.await_count, 1, "must deliver exactly once")
 
@@ -242,8 +245,8 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
 
         async def run_test() -> None:
             with self._patches(connection_a):
-                with self.assertRaises(RuntimeError) as raised:
-                    await gateway_protocol_service.dispatch_tool_invoke_durable(
+                dispatch_task = asyncio.ensure_future(
+                    gateway_protocol_service.dispatch_tool_invoke_durable(
                         gateway_id="gw-1",
                         capability_id="llm.generate",
                         arguments={"prompt": "hello"},
@@ -253,6 +256,15 @@ class DispatchToolInvokeDurableTests(unittest.TestCase):
                         deadline_seconds=1,
                         request_id="durable-req-3",
                     )
+                )
+                # Deliver via the flush, but no response ever comes back.
+                for _ in range(100):
+                    if gateway_protocol_service._snapshot_pending_invokes("gw-1"):
+                        break
+                    await asyncio.sleep(0.02)
+                await gateway_protocol_service._flush_pending_invokes("gw-1", connection_a)
+                with self.assertRaises(RuntimeError) as raised:
+                    await dispatch_task
             self.assertIn("no response arrived", str(raised.exception))
             self.assertEqual(connection_a.send_frame.await_count, 1, "must not resend once delivered")
 

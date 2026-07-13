@@ -1231,35 +1231,18 @@ async def dispatch_tool_invoke_durable(
     # lost just because no socket was live at this exact moment. The response
     # half is already reconnect-proof via _DURABLE_DISPATCH_WAITERS.
     _enqueue_pending_invoke(pending)
-    fast_path_task: Optional[asyncio.Task] = None
     try:
-        # Fast path: if the gateway is already connected and fresh, deliver
-        # immediately instead of waiting for its next connect/heartbeat — but
-        # as a BACKGROUND task, never inline. A send into a socket that is
-        # dying can hang up to the 10s write timeout; awaiting it here would
-        # stall this dispatcher AND hold the delivery claim exactly when a
-        # fresh reconnect's flush should be taking over. As a detached task it
-        # can't block us: if it hangs, the connect/heartbeat flush preempts the
-        # claim (different session) and delivers on the new connection instead.
-        connection = _get_live_connection(gateway_id)
-        if (
-            connection is not None
-            and not _connection_is_stale(connection)
-            and _connection_has_recent_inbound_frame(connection)
-        ):
-            async def _fast_path_deliver(conn: _LiveGatewayConnection) -> None:
-                try:
-                    await _deliver_pending_invoke_via(conn, pending)
-                except Exception as exc:
-                    _LOGGER.info(
-                        "Fast-path invoke delivery deferred to flush gateway_id=%s request_id=%s error=%s",
-                        gateway_id,
-                        resolved_request_id,
-                        str(exc) or type(exc).__name__,
-                    )
-
-            fast_path_task = asyncio.ensure_future(_fast_path_deliver(connection))
-
+        # Delivery happens ONLY via the connect/heartbeat flush in
+        # handle_gateway_websocket, which runs on the WebSocket's own owner
+        # loop. There is deliberately no dispatcher-side "fast path" send:
+        # the turn runs on a different event loop than the WS handler, so a
+        # dispatcher-side send takes the cross-loop writer path, and a single
+        # slow/hung write there was observed to stall the WS owner loop for
+        # minutes — starving the very heartbeat-flush that is supposed to
+        # deliver this invoke (DIAG 2026-07-13: flushes ran every ~10s until a
+        # dispatcher send was attempted, then stopped for 2 min). Letting the
+        # owner loop drive every send keeps writes on the one loop that owns
+        # the socket, so a live gateway's next heartbeat (<=10s) delivers this.
         remaining = deadline - time.monotonic()
         try:
             response = await asyncio.wait_for(
@@ -1310,11 +1293,6 @@ async def dispatch_tool_invoke_durable(
     finally:
         _pop_durable_waiter(resolved_request_id)
         _remove_pending_invoke(gateway_id, resolved_request_id)
-        # Abandon a still-running fast-path send (e.g. hung against a dying
-        # socket) — delivery, if it was going to happen, already did via the
-        # flush; a lingering send would only risk a late double-execute.
-        if fast_path_task is not None and not fast_path_task.done():
-            fast_path_task.cancel()
 
 
 async def dispatch_tool_interrupt(
