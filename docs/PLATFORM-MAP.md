@@ -3401,6 +3401,124 @@ out-of-scope files that block them.
 
 ---
 
+## Part 29: Per-Agent Cloud Channels — Discord + Slack (2026-07-14)
+
+Consolidated `build/personal-channels-agent-identity` into `verify`
+(clean merge, grep-verified: agent_id threading, §28.4's BYOK wiring, and
+the memory-isolation/authority-mandate gates all survived), then closed
+two per-agent channel-binding gaps and one investigation-only finding.
+
+### 29.1 Discord: wrong mechanism, not a wiring gap
+
+The task's framing ("the per-agent OAuth button sends no agent_install_id")
+didn't match the code: `discord_bot_provisioning_service.assign_agent_discord`
+(the real, complete, zero-caller per-agent binder) needs a **bot token**,
+not OAuth — Discord's Terms forbid the generic "Add to Server" OAuth flow
+for a per-agent-owned bot. The frontend's Discord door was wired to the
+shared `startOAuth`/`/api/connections/{id}/setup/start` path, which
+creates a workspace-wide credential via a completely different mechanism
+and would never have reached `assign_agent_discord` no matter what was
+threaded through it. Fixed by switching Discord's door to a BYO-token
+input, mirroring Telegram's existing (already-correct) pattern —
+generalized `saveByoBotToken` to serve both.
+
+**Live-verified reachable in production**: `fleet_agent_channels` returns
+`setupAvailable: true, nextAction: 'connect'` for Discord on the real
+deployment (`EMPYRALIS_DISCORD_APPLICATION_ID`/`DISCORD_CLIENT_SECRET`
+are set — coincidentally satisfying the generic OAuth-configured gate
+even though the real per-agent flow no longer uses OAuth at all).
+
+### 29.2 Slack: the `pass` bug plus two deeper gaps its citation missed
+
+`agent_channel_router.py`'s `route_inbound_channel_message` resolved a
+specialist via `_resolve_agent_for_inbound` then discarded it with a
+literal `pass` — fixed, threading `specialist_context` into
+`execute_sage_turn` exactly like every other channel. But tracing the
+real call chain found the citation incomplete on two counts:
+
+1. **The real Slack webhook handler never triggered resolution at all.**
+   `connectors_actions.py::slack_events_webhook` calls
+   `route_inbound_channel_message` without `agent_installs`/`sage_agent_id`
+   — confirmed via grep that **no real caller anywhere** passes either
+   parameter, so the `if agent_installs and actor_id:` gate never fired
+   in production regardless of the `pass` fix.
+2. **`_resolve_agent_for_inbound` matched against a column with zero
+   writers.** It read `workspace_agent_installs.channel_bindings` (a
+   JSONB array) for `{channel_type, bot_token_hash}` entries — a
+   full-codebase grep for `bot_token_hash` found exactly three hits, all
+   reads, zero writes. This was Stage 4B design that predates the
+   `agent_channel_bindings` table Discord's binder now proves out; nothing
+   could ever have matched.
+
+**Fixed**: rewrote `_resolve_agent_for_inbound` to query
+`agent_bindings_repository.list_workspace_channel_bindings` (the same,
+race-guarded table Discord's binding already uses) matching
+`channel_key` + `binding.endpoint_key` — removing the dead
+`agent_installs` parameter dependency entirely (self-sufficient DB
+lookup, no caller needs to change). Added the missing writer:
+`POST/DELETE /fleet/agent-channels/slack` lets an agent claim one Slack
+channel id within the workspace's OAuth-connected app — Slack's
+connection is workspace-wide (unlike Discord's dedicated-bot-per-agent
+model), so ownership here is per-channel, a design call made in the
+absence of any pre-existing spec for it (flagged, not assumed). Wired
+`startOAuth` to send `metadata.agent_install_id` — the backend's shared
+OAuth pipeline (`routes_connections.py`/`connection_oauth_service.py`)
+already supports per-agent credential filing via this exact field, it
+just had zero callers sending it.
+
+**Not closed**: Slack's `channel_key` isn't yet in
+`uq_agent_channel_bindings_inbound_owner_v2`'s covered list
+(`control_plane_repository.py`), so two agents could both claim the same
+Slack channel with no DB-level rejection today, only last-write-wins —
+flagged in a route comment, out of scope for this pass (shared
+schema/migration file, high blast radius).
+
+**Live-verified against real Postgres**: two real agents (Beacon, Sail)
+each bound to a different Slack channel id via the new route;
+`_resolve_agent_for_inbound` resolved each to its own, correct
+`agent_install_id`, an unbound id to `""`, zero cross-contamination.
+UI reachability: Slack shows `setupAvailable: false, nextAction: 'locked'`
+on the current deployment — no real Slack OAuth app is configured here
+yet (genuinely unconfigured infrastructure, confirmed via env — not
+something to fake per `AGENT-OPERATING-RULES.md`'s secrets rule). The
+backend mechanism is proven independent of that; the UI unlocks the
+moment Slack OAuth is configured.
+
+### 29.3 Connected-pill: already fixed, as a side effect
+
+Investigated before touching anything: `connection_catalog_service.py`'s
+`agent_status_items` (what `fleet_agent_channels` already calls) already
+gates `LANE_STUDIO_BUSINESS_CHANNEL` items (`discord_bot`, `slack`) on an
+**enabled `agent_channel_bindings` row for the requesting agent** — it
+simply had no real binding data to work with until §29.1/29.2 created
+some. Telegram/WhatsApp full-account channels were already agent-scoped
+via `personal_channels_repository`'s `agent_id`-keyed state (the
+just-merged branch). No further code was needed — live-verified: Beacon
+and Sail's own bindings correctly gate their own pills, and the
+`connected = workspace_connected AND has_own_binding` logic held exactly
+as read.
+
+### 29.4 Cloud Session Manager: a real, live gap — flagged, not fixed
+
+The task asked to flag this "if trivial, else note for later." It is not
+trivial. `agent_channel_router.py::handle_cloud_channel_inbound` is dead
+code (its own docstring: "currently has no callers"). The real, live
+handler is `personal_channels_service.py::handle_cloud_channel_inbound`
+(outside this pass's declared scope) — it passes
+`gateway_id=f"cloud:{session_id}"` into the Sage bridge, a synthetic id
+that can never match a real, gateway-paired
+`personal_channels_repository` state row. Every cloud-relayed Telegram/
+WhatsApp session therefore resolves to no agent and runs as Sage,
+regardless of §1's agent-scoped repository work — the same "always
+answers as Sage" bug class as §29.2, in a third place. Fixing it requires
+either the Cloud Session Manager (a separate service — GramJS/Node,
+referenced but not in this repo) to carry an `agent_id` in its signed
+payload, or a session→agent mapping built on this side; both are
+real design work, not a wiring fix, and land in a file outside this
+pass's scope.
+
+---
+
 ## Appendix A: Architecture Decisions (Why It's Built This Way)
 
 These are recorded in `docs/PLATFORM.md` Section 7. Do NOT reverse without explicit instruction.
