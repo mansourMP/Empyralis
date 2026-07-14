@@ -35,9 +35,12 @@ Environment:
   EMPYRALIS_GATEWAY_PAIRING_TOKEN   Pairing token from Empyralis, used on first start.
   EMPYRALIS_GATEWAY_TOKEN           Existing paired-device token.
   EMPYRALIS_GATEWAY_API_URL         Control plane URL. Defaults to local dev runtime.
-  EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED=1
-                                      Start personal channel runtimes in the Gateway. Defaults to 0
-                                      so local hardware execution is isolated from channel reconnect loops.
+  EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED=0|1
+                                      Start personal channel runtimes in the Gateway. Defaults to 1
+                                      under service-install/service-run --system (a dedicated Agent
+                                      Computer box IS the channel-hosting model), and to 0 under plain
+                                      start / launchd-run (local hardware execution stays isolated from
+                                      channel reconnect loops). Set explicitly to override either way.
   EMPYRALIS_GATEWAY_EXPECTED_WORKSPACE_ID
                                       Optional workspace id used by status/start to warn when
                                       this computer is paired to a different workspace.
@@ -146,6 +149,7 @@ load_env_if_present() {
 }
 
 write_env() {
+  local install_mode="${1:-local}"
   mkdirs
   load_env_if_present
   local secret="${EMPYRALIS_SUPERVISOR_SECRET:-}"
@@ -153,7 +157,17 @@ write_env() {
     secret="$(generate_secret)"
   fi
   local state_dir="${EMPYRALIS_GATEWAY_STATE_DIR:-${STATE_DIR}/edge}"
-  local personal_channels_enabled="${EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED:-0}"
+  # A dedicated Agent Computer server/VPS box ("system" mode, via
+  # service-install/service-run --system) IS the channel-hosting model this
+  # product runs, so channels default on there. A desktop/local dev machine
+  # ("local" mode, plain start / launchd-run user-session auto-start) keeps
+  # the existing default off, per this function's own usage() text above:
+  # local hardware execution stays isolated from channel reconnect loops.
+  local personal_channels_default="0"
+  if [[ "${install_mode}" == "system" ]]; then
+    personal_channels_default="1"
+  fi
+  local personal_channels_enabled="${EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED:-${personal_channels_default}}"
   cat > "${ENV_FILE}" <<EOF
 export EMPYRALIS_SUPERVISOR_SECRET=$(shell_quote "${secret}")
 export EMPYRALIS_GATEWAY_API_URL=$(shell_quote "${CONTROL_PLANE_URL}")
@@ -223,7 +237,8 @@ dotenv_value() {
 }
 
 load_runtime_env() {
-  write_env
+  local install_mode="${1:-local}"
+  write_env "${install_mode}"
   # shellcheck disable=SC1090
   source "${ENV_FILE}"
 }
@@ -771,7 +786,7 @@ service_install_systemd() {
   require_root "service-install --system"
   ensure_installed
   mkdirs
-  write_env
+  write_env "system"
   ensure_runtime_dirs_safe_for_root_chown
   chown -R "${user}" "${STATE_DIR}" "${LOG_DIR}" "${PID_DIR}" 2>/dev/null || true
   local unit_path
@@ -816,7 +831,7 @@ service_install_launchdaemon_system() {
   require_root "macOS service-install --system --server-mac"
   ensure_installed
   mkdirs
-  write_env
+  write_env "system"
   ensure_runtime_dirs_safe_for_root_chown
   chown -R "${user}" "${STATE_DIR}" "${LOG_DIR}" "${PID_DIR}" 2>/dev/null || true
   local plist_path
@@ -987,7 +1002,7 @@ run_edge_forever() {
 service_run_system() {
   require_system_flag "$@"
   ensure_installed
-  load_runtime_env
+  load_runtime_env "system"
   configure_edge_service_mode "1" "server_vps"
   trap cleanup_service_run INT TERM EXIT
   run_edge_forever "system service mode" "server_vps" "1"

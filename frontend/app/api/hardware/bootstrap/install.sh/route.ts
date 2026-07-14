@@ -2,7 +2,7 @@ import { controlPlaneBaseUrl } from '@/lib/server/control-plane-base-url';
 
 export const dynamic = 'force-dynamic';
 
-const INSTALLER_RAW_URL = 'https://raw.githubusercontent.com/mansourMP/Multi_Agent_Orchestrator_Project/main/scripts/install-agent-computer.sh';
+const INSTALLER_RAW_URL = 'https://raw.githubusercontent.com/mansourMP/Empyralis/verify/scripts/install-agent-computer.sh';
 
 function installerResponse(script: string): Response {
   return new Response(script, {

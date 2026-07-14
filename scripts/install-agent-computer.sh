@@ -26,6 +26,12 @@ REPO_URL="${EMPYRALIS_REPO_URL:-https://github.com/mansourMP/Empyralis.git}"
 REPO_REF="${EMPYRALIS_REPO_REF:-verify}"
 REPO_TOKEN="${EMPYRALIS_REPO_TOKEN:-}"
 DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME:-$(hostname -f 2>/dev/null || hostname)}"
+# This installer only ever provisions a dedicated Agent Computer box (no
+# "local dev machine" use case exists for it, unlike agent_computer.sh) —
+# full-account Telegram/WhatsApp channels are the model this product runs,
+# so they default on here. Overridable for an operator who explicitly
+# wants a channel-free box.
+PERSONAL_CHANNELS_ENABLED="${EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED:-true}"
 REGISTRATION_TIMEOUT_SECONDS="${EMPYRALIS_REGISTRATION_TIMEOUT_SECONDS:-180}"
 
 log() {
@@ -173,6 +179,7 @@ write_env_file() {
     printf 'EMPYRALIS_GATEWAY_BROWSER_PROJECT_ROOT=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
     printf 'EMPYRALIS_GATEWAY_BROWSER_PYTHON="python3"\n'
     printf 'EMPYRALIS_AGENT_COMPUTER_INSTALL_DIR=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
+    printf 'EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED=%s\n' "$(shell_quote_env "${PERSONAL_CHANNELS_ENABLED}")"
     # BYO-brain: enable cli.install / cli.login.* by default on a
     # user-paired gateway. The flag exists for a hardening story that never
     # applied to a self-paired box; leaving it off dead-ends every user's

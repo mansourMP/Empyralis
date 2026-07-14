@@ -18,7 +18,7 @@ Confirmed by directly test-booting the app with the real production-style flags 
 | `EMPYRALIS_SECRETS_BROKER_SECRET` | new random 32+ char secret (`python3 -c "import secrets; print(secrets.token_hex(32))"`) | Currently entirely unset — nothing has a value to preserve, generate fresh. **Side effect worth knowing:** this being unset is *also* why BYOK (bring-your-own-API-key) credential storage almost certainly returns "Internal server error" for any real user who's tried it — `secrets_broker.py`'s `_signing_secret()` refuses to run without this regardless of environment. Setting it fixes that too. |
 | `EMPYRALIS_TOOL_BROKER_SECRET` | new random 32+ char secret | Same situation as above, separate secret. |
 | `EMPYRALIS_MINI_APP_SHARE_SECRET` | new random 32+ char secret | Currently entirely unset, nothing to preserve. |
-| `EMPYRALIS_PUBLIC_API_URL` | `https://empyralis.ai` | Must be a real HTTPS URL, not loopback — this is a *different* concept from the frontend's `EMPYRALIS_API_URL=http://127.0.0.1:8001` (that one's the internal same-box hop; this one's "what's the publicly reachable API URL," used for links/webhooks/callbacks external services need). |
+| `EMPYRALIS_PUBLIC_API_URL` | leave **unset**, or if set explicitly, `https://empyralis.ai/api` (**must include `/api`**) | Must be a real HTTPS URL, not loopback — this is a *different* concept from the frontend's `EMPYRALIS_API_URL=http://127.0.0.1:8001` (that one's the internal same-box hop; this one's "what's the publicly reachable API URL," used for links/webhooks/callbacks external services need, including the URL a freshly provisioned Agent Computer box registers to). `vps_provisioning_service.py`'s own default (used when this is unset) already correctly includes `/api`, and now also defensively appends `/api` if you set this explicitly without it — but the gateway's own `normalizeBaseUrl()` on the box side does *not* do that (it only strips a trailing slash), so don't rely on the backend's safety net: set this right, full stop. Getting it wrong sends every newly provisioned box to `{url}/gateway/registrations` with no `/api` prefix, which nginx routes to Next.js instead of the backend → 404 → the box never pairs. |
 
 ### Must be set correctly for production to be safe
 
@@ -50,6 +50,12 @@ Confirmed by directly test-booting the app with the real production-style flags 
 |---|---|
 | `EMPYRALIS_API_URL` | `http://127.0.0.1:8001` — same-box loopback is correct and code-supported (explicit localhost exemption from the HTTPS-required check), do not point this at the public domain. |
 | `NODE_ENV` | `production` |
+
+### Agent Computer provisioning (required for the "Connect a cloud server" flow)
+
+| Var | Value | Why |
+|---|---|---|
+| `EMPYRALIS_REPO_TOKEN` | a GitHub personal access token with **read** access to `mansourMP/Empyralis` | The Empyralis repo is private and no build-artifact publish pipeline exists yet, so `install-agent-computer.sh` clones the repo directly on a freshly provisioned box instead of downloading a prebuilt tarball. `vps_provisioning_service.py`'s `cloud_init_script()` reads this once from the backend's own environment (`os.getenv`, same pattern as `DIGITALOCEAN_CLIENT_SECRET`) and threads it into the cloud-init command every newly created Hetzner/Vultr/DigitalOcean box runs at first boot. **Without it, a freshly provisioned box can't clone the repo, can't build the gateway, and never pairs** — provisioning fails silently at the box's first-boot step, not at backend boot, so it won't show up in this box's own logs; check the new box's `cloud-init-output.log` instead. Generate at github.com → Settings → Developer settings → Personal access tokens (read-only; scope to just this repo if using a fine-grained token). Interim measure while the repo is private and unpublished — see `vps_provisioning_service.py`'s own comment on `_installer_repo_token()` for the longer-term options (a public gateway mirror, or a real CI publish pipeline). |
 
 ## 2. Deploy steps, in order
 

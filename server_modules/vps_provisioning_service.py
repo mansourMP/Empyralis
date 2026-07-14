@@ -414,11 +414,25 @@ def _installer_repo_token() -> str:
     return (os.getenv("EMPYRALIS_REPO_TOKEN") or "").strip()
 
 
+def _ensure_api_path_suffix(value: str) -> str:
+    # The box registers to f"{apiBaseUrl}/gateway/registrations" (gateway's
+    # normalizeBaseUrl only strips a trailing slash, it never appends /api).
+    # EMPYRALIS_PUBLIC_API_URL is operator-set on the backend host — a value
+    # given without /api (e.g. "https://empyralis.ai") would silently point
+    # every newly provisioned box at a URL that 404s and never pairs. Append
+    # /api when it's missing; leave an already-correct path (or one ending in
+    # a distinct /api-suffixed segment) alone rather than doubling it up.
+    normalized = str(value or "").strip().rstrip("/")
+    if not normalized or normalized.endswith("/api"):
+        return normalized
+    return f"{normalized}/api"
+
+
 def cloud_init_script(pairing_token: str, *, api_url: Optional[str] = None) -> str:
     token = str(pairing_token or "").strip()
     if not token:
         raise ValueError("pairing_token is required.")
-    resolved_api_url = str(api_url or PUBLIC_API_URL).strip().rstrip("/")
+    resolved_api_url = _ensure_api_path_suffix(str(api_url or PUBLIC_API_URL))
     if not resolved_api_url:
         raise ValueError("api_url is required.")
     repo_token = _installer_repo_token()

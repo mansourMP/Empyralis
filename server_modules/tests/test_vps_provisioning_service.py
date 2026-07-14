@@ -8,13 +8,36 @@ from server_modules import vps_provisioning_service as vps
 
 
 def test_cloud_init_script_runs_agent_computer_installer():
-    script = vps.cloud_init_script("pair_test", api_url="https://api.example.com")
+    script = vps.cloud_init_script("pair_test", api_url="https://api.example.com/api")
 
     assert script.startswith("#cloud-config")
     assert "curl -fsSL https://empyralis.ai/install/agent-computer.sh" in script
     assert "EMPYRALIS_PAIRING_TOKEN='pair_test'" in script
-    assert "EMPYRALIS_API_URL='https://api.example.com'" in script
+    assert "EMPYRALIS_API_URL='https://api.example.com/api'" in script
     assert "sudo -E bash" in script
+
+
+def test_cloud_init_script_appends_missing_api_suffix():
+    # docs/DEPLOY-RUNBOOK.md previously told operators to set
+    # EMPYRALIS_PUBLIC_API_URL without /api — the box would then register to
+    # {url}/gateway/registrations with no /api prefix and 404 forever.
+    script = vps.cloud_init_script("pair_test", api_url="https://empyralis.ai")
+
+    assert "EMPYRALIS_API_URL='https://empyralis.ai/api'" in script
+
+
+def test_cloud_init_script_does_not_double_append_api_suffix():
+    script = vps.cloud_init_script("pair_test", api_url="https://empyralis.ai/api")
+
+    assert "EMPYRALIS_API_URL='https://empyralis.ai/api'" in script
+    assert "/api/api" not in script
+
+
+def test_cloud_init_script_strips_trailing_slash_before_checking_api_suffix():
+    script = vps.cloud_init_script("pair_test", api_url="https://empyralis.ai/api/")
+
+    assert "EMPYRALIS_API_URL='https://empyralis.ai/api'" in script
+    assert "/api/api" not in script
 
 
 def test_cloud_init_script_allows_installer_url_env_override(monkeypatch):
