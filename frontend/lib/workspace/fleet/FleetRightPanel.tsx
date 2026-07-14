@@ -78,6 +78,7 @@ export function PanelRow({
   value,
   icon,
   tone = "default",
+  hint,
 }: {
   label: string;
   value: ReactNode;
@@ -85,10 +86,13 @@ export function PanelRow({
   icon?: ReactNode;
   /** Colors the value (status green/red, spend accent, empty muted). */
   tone?: PanelValueTone;
+  /** Optional native tooltip (title attribute) on the label — for a row
+   *  whose meaning isn't obvious from the label alone. */
+  hint?: string;
 }) {
   return (
     <div className="fleet-panel-row">
-      <span className="fleet-panel-row-label">
+      <span className="fleet-panel-row-label" title={hint}>
         {icon && <span className="fleet-panel-row-icon">{icon}</span>}
         <span>{label}</span>
       </span>
