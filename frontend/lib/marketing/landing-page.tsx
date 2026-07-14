@@ -10,11 +10,11 @@ const STEPS: Array<{ title: string; body: string }> = [
     body: 'Your own computer, or a VPS one click away.',
   },
   {
-    title: 'Give it a brain',
+    title: 'Connect your subscription',
     body: 'Bring your own ChatGPT or Claude subscription, or use platform credits.',
   },
   {
-    title: 'Connect it to the world',
+    title: 'Wire it into your tools',
     body: 'Real channels, or manage from Claude/ChatGPT via MCP.',
   },
 ];
@@ -188,7 +188,7 @@ function Capabilities() {
     <section className="landing-section">
       <div className="landing__container">
         <div className="landing-section__head">
-          <h2 className="landing-section__heading">What&rsquo;s already built in</h2>
+          <h2 className="landing-section__heading">What ships with every agent</h2>
         </div>
         <div className="landing-capability-groups">
           {CAPABILITY_GROUPS.map((group) => (
