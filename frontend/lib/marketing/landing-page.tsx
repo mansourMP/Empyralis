@@ -26,7 +26,7 @@ const PILLARS: Array<{ icon: LucideIcon; copy: string }> = [
   { icon: SlidersHorizontal, copy: 'You decide exactly what each agent can do.' },
 ];
 
-type LogoItem = { name: string; src: string };
+type LogoItem = { name: string; src: string; invertInDark?: boolean };
 
 const CHANNEL_LOGOS: LogoItem[] = [
   { name: 'Telegram', src: '/brand-assets/channels/telegram.svg' },
@@ -38,18 +38,21 @@ const CHANNEL_LOGOS: LogoItem[] = [
   { name: 'iMessage', src: '/brand-assets/channels/imessage.svg' },
 ];
 
+// OpenAI/xAI/GitHub/Notion's marks are hardcoded near-black fills (#111111/
+// #181717/#000000) — correct on a light background, but they nearly vanish
+// against the dark theme's #0d0d0f page. invertInDark flips just those four.
 const PROVIDER_LOGOS: LogoItem[] = [
   { name: 'Anthropic', src: '/brand-assets/providers/anthropic.svg' },
-  { name: 'OpenAI', src: '/brand-assets/providers/openai.svg' },
+  { name: 'OpenAI', src: '/brand-assets/providers/openai.svg', invertInDark: true },
   { name: 'Gemini', src: '/brand-assets/providers/gemini.svg' },
   { name: 'DeepSeek', src: '/brand-assets/providers/deepseek.svg' },
-  { name: 'xAI', src: '/brand-assets/providers/xai.svg' },
+  { name: 'xAI', src: '/brand-assets/providers/xai.svg', invertInDark: true },
   { name: 'Mistral', src: '/brand-assets/providers/mistral.svg' },
 ];
 
 const APP_LOGOS: LogoItem[] = [
-  { name: 'GitHub', src: '/brand-assets/apps/github.svg' },
-  { name: 'Notion', src: '/brand-assets/apps/notion.svg' },
+  { name: 'GitHub', src: '/brand-assets/apps/github.svg', invertInDark: true },
+  { name: 'Notion', src: '/brand-assets/apps/notion.svg', invertInDark: true },
   { name: 'Gmail', src: '/brand-assets/apps/gmail.svg' },
   { name: 'Stripe', src: '/brand-assets/apps/stripe.ico' },
   { name: 'Salesforce', src: '/brand-assets/apps/salesforce.ico' },
@@ -198,7 +201,11 @@ function Capabilities() {
                     <img
                       src={logo.src}
                       alt={logo.name}
-                      className="landing-logo-row__logo"
+                      className={
+                        logo.invertInDark
+                          ? 'landing-logo-row__logo landing-logo-row__logo--invert-dark'
+                          : 'landing-logo-row__logo'
+                      }
                       loading="lazy"
                     />
                   </span>

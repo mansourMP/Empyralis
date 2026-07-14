@@ -328,6 +328,13 @@
   transform: translateY(-1px);
 }
 
+/* OpenAI/xAI/GitHub/Notion ship hardcoded near-black fills — correct on
+   light, nearly invisible on the dark theme's #0d0d0f page. Flip just
+   these to near-white rather than adding a background chip to every logo. */
+html[data-theme="dark"] .landing-logo-row__logo--invert-dark {
+  filter: invert(1);
+}
+
 /* ── Why now ─────────────────────────────────────────────────────────── */
 
 .landing-why-now__body {
