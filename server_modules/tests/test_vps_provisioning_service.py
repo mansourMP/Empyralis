@@ -25,6 +25,25 @@ def test_cloud_init_script_allows_installer_url_env_override(monkeypatch):
     assert "curl -fsSL https://empyralis.ai/install/agent-computer.sh" in script
 
 
+def test_cloud_init_script_omits_repo_token_when_unset(monkeypatch):
+    monkeypatch.delenv("EMPYRALIS_REPO_TOKEN", raising=False)
+
+    script = vps.cloud_init_script("pair_test", api_url="https://api.example.com")
+
+    assert "EMPYRALIS_REPO_TOKEN" not in script
+
+
+def test_cloud_init_script_threads_repo_token_when_backend_has_one(monkeypatch):
+    monkeypatch.setenv("EMPYRALIS_REPO_TOKEN", "ghp_test_token")
+
+    script = vps.cloud_init_script("pair_test", api_url="https://api.example.com")
+
+    assert "EMPYRALIS_REPO_TOKEN='ghp_test_token'" in script
+    # Still precedes sudo -E so it lands in the installer's environment,
+    # same mechanism as the pairing token and API URL.
+    assert script.index("EMPYRALIS_REPO_TOKEN") < script.index("sudo -E bash")
+
+
 def test_digitalocean_oauth_start_stores_state_and_uses_registered_redirect(tmp_path, monkeypatch):
     monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
     monkeypatch.setenv("DIGITALOCEAN_CLIENT_ID", "do_client")

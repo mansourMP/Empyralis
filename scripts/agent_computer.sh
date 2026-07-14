@@ -8,12 +8,9 @@ STATE_DIR="${EMPYRALIS_AGENT_COMPUTER_STATE_DIR:-${STACK_DIR}/agent-computer}"
 LOG_DIR="${STACK_DIR}/logs"
 PID_DIR="${STACK_DIR}/pids"
 ENV_FILE="${STATE_DIR}/agent-computer.env"
-SUPERVISOR_PID_FILE="${PID_DIR}/agent-computer-supervisor.pid"
 EDGE_PID_FILE="${PID_DIR}/agent-computer-edge.pid"
-SUPERVISOR_BIN="${ROOT_DIR}/empyralis-supervisor/target/release/empyralis-supervisor"
 EDGE_ENTRY="${ROOT_DIR}/empyralis-gateway/dist/index.js"
 NODE_BIN_CANDIDATES=("/opt/homebrew/bin/node" "/usr/local/bin/node" "/usr/bin/node")
-SUPERVISOR_URL="${EMPYRALIS_SUPERVISOR_URL:-http://127.0.0.1:7788}"
 CONTROL_PLANE_URL="${EMPYRALIS_GATEWAY_API_URL:-http://127.0.0.1:8001/api}"
 DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "Agent Computer")}"
 SERVICE_NAME="${EMPYRALIS_AGENT_COMPUTER_SERVICE_NAME:-ai.empyralis.agent-computer}"
@@ -159,8 +156,6 @@ write_env() {
   local personal_channels_enabled="${EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED:-0}"
   cat > "${ENV_FILE}" <<EOF
 export EMPYRALIS_SUPERVISOR_SECRET=$(shell_quote "${secret}")
-export EMPYRALIS_SUPERVISOR_URL=$(shell_quote "${SUPERVISOR_URL}")
-export EMPYRALIS_SUPERVISOR_AUDIT_DB=$(shell_quote "${STATE_DIR}/supervisor-audit.sqlite3")
 export EMPYRALIS_GATEWAY_API_URL=$(shell_quote "${CONTROL_PLANE_URL}")
 export EMPYRALIS_GATEWAY_STATE_DIR=$(shell_quote "${state_dir}")
 export EMPYRALIS_GATEWAY_DISPLAY_NAME=$(shell_quote "${DISPLAY_NAME}")
@@ -305,20 +300,18 @@ runtime_process_secret_matches_env() {
 }
 
 runtime_secret_status() {
-  local env_hash supervisor_pid edge_pid supervisor_hash edge_hash
+  local env_hash edge_pid edge_hash
   env_hash="$(runtime_env_secret_hash 2>/dev/null || true)"
-  supervisor_pid="$(runtime_process_pid "${SUPERVISOR_PID_FILE}" "${SUPERVISOR_BIN#${ROOT_DIR}/}" "${SUPERVISOR_BIN#${ROOT_DIR}/}$" || true)"
   edge_pid="$(runtime_process_pid "${EDGE_PID_FILE}" "${EDGE_ENTRY#${ROOT_DIR}/}" "${EDGE_ENTRY#${ROOT_DIR}/}$" || true)"
-  supervisor_hash="$(runtime_process_secret_hash "${supervisor_pid}" 2>/dev/null || true)"
   edge_hash="$(runtime_process_secret_hash "${edge_pid}" 2>/dev/null || true)"
-  if [[ -z "${env_hash}" || -z "${supervisor_hash}" || -z "${edge_hash}" ]]; then
+  if [[ -z "${env_hash}" || -z "${edge_hash}" ]]; then
     echo "secret_check: unavailable"
     return 0
   fi
-  if [[ "${env_hash}" == "${supervisor_hash}" && "${env_hash}" == "${edge_hash}" ]]; then
+  if [[ "${env_hash}" == "${edge_hash}" ]]; then
     echo "secret_check: ok"
   else
-    echo "secret_check: mismatch (restart Agent Computer; gateway and supervisor must share ${ENV_FILE})"
+    echo "secret_check: mismatch (restart Agent Computer to pick up ${ENV_FILE})"
   fi
 }
 
@@ -406,7 +399,6 @@ install_runtime() {
   write_env
   echo "[Agent Computer] Installing local runtime dependencies..."
   (cd "${ROOT_DIR}/empyralis-gateway" && npm install && npm run build)
-  (cd "${ROOT_DIR}/empyralis-supervisor" && cargo build --release)
   echo "[Agent Computer] Installed."
   echo "Config: ${ENV_FILE}"
   echo "Start:  scripts/agent_computer.sh start"
@@ -414,71 +406,9 @@ install_runtime() {
 }
 
 ensure_installed() {
-  if [[ ! -f "${EDGE_ENTRY}" || ! -x "${SUPERVISOR_BIN}" ]]; then
+  if [[ ! -f "${EDGE_ENTRY}" ]]; then
     echo "[Agent Computer] Runtime is not built yet. Run:"
     echo "  scripts/agent_computer.sh install"
-    exit 1
-  fi
-}
-
-wait_for_supervisor() {
-  for _ in $(seq 1 30); do
-    if curl -fsS "${SUPERVISOR_URL}/health" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 0.2
-  done
-  return 1
-}
-
-start_supervisor() {
-  local pid
-  pid="$(pid_from_file "${SUPERVISOR_PID_FILE}")"
-  if is_pid_alive "${pid}"; then
-    if ! runtime_process_secret_matches_env "${pid}"; then
-      echo "[Agent Computer] Local runner secret differs from ${ENV_FILE}; restarting local runner."
-      kill_tree "${pid}" || true
-      rm -f "${SUPERVISOR_PID_FILE}"
-    else
-      echo "[Agent Computer] Local runner already running (pid ${pid})."
-      return 0
-    fi
-  fi
-  pid="$(runtime_process_pid "${SUPERVISOR_PID_FILE}" "${SUPERVISOR_BIN#${ROOT_DIR}/}" "${SUPERVISOR_BIN#${ROOT_DIR}/}$" || true)"
-  if is_pid_alive "${pid}"; then
-    if ! runtime_process_secret_matches_env "${pid}"; then
-      echo "[Agent Computer] Existing local runner secret differs from ${ENV_FILE}; restarting local runner."
-      kill_tree "${pid}" || true
-      rm -f "${SUPERVISOR_PID_FILE}"
-    else
-      echo "[Agent Computer] Local runner already running (pid ${pid})."
-      echo "${pid}" > "${SUPERVISOR_PID_FILE}"
-      chmod 600 "${SUPERVISOR_PID_FILE}" 2>/dev/null || true
-      return 0
-    fi
-  fi
-  pid="$(pid_from_file "${SUPERVISOR_PID_FILE}")"
-  if is_pid_alive "${pid}"; then
-    echo "[Agent Computer] Local runner already running (pid ${pid})."
-    return 0
-  fi
-  rm -f "${SUPERVISOR_PID_FILE}"
-  if wait_for_supervisor; then
-    echo "[Agent Computer] Local runner health is reachable at ${SUPERVISOR_URL}, but process ownership could not be verified."
-    echo "[Agent Computer] Stop the existing process or start with the matching ${ENV_FILE} before launching the cloud connection."
-    return 1
-  fi
-  echo "[Agent Computer] Starting local runner..."
-  nohup env \
-    EMPYRALIS_SUPERVISOR_SECRET="${EMPYRALIS_SUPERVISOR_SECRET}" \
-    EMPYRALIS_SUPERVISOR_AUDIT_DB="${EMPYRALIS_SUPERVISOR_AUDIT_DB}" \
-    "${SUPERVISOR_BIN}" \
-    > "${LOG_DIR}/agent-computer-supervisor.log" 2>&1 &
-  echo "$!" > "${SUPERVISOR_PID_FILE}"
-  chmod 600 "${SUPERVISOR_PID_FILE}" 2>/dev/null || true
-  if ! wait_for_supervisor; then
-    echo "[Agent Computer] Local runner failed to become healthy."
-    echo "Log: ${LOG_DIR}/agent-computer-supervisor.log"
     exit 1
   fi
 }
@@ -582,7 +512,6 @@ start_edge() {
   echo "[Agent Computer] Starting cloud connection..."
   nohup env \
     EMPYRALIS_SUPERVISOR_SECRET="${EMPYRALIS_SUPERVISOR_SECRET}" \
-    EMPYRALIS_SUPERVISOR_URL="${EMPYRALIS_SUPERVISOR_URL}" \
     EMPYRALIS_GATEWAY_API_URL="${EMPYRALIS_GATEWAY_API_URL}" \
     EMPYRALIS_GATEWAY_STATE_DIR="${EMPYRALIS_GATEWAY_STATE_DIR}" \
     EMPYRALIS_GATEWAY_DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME}" \
@@ -599,7 +528,6 @@ start_edge() {
 start_runtime() {
   ensure_installed
   load_runtime_env
-  start_supervisor
   if ! start_edge; then
     status_runtime || true
     exit 2
@@ -621,9 +549,7 @@ stop_pid_file() {
 
 stop_runtime() {
   stop_pid_file "cloud connection" "${EDGE_PID_FILE}"
-  stop_pid_file "local runner" "${SUPERVISOR_PID_FILE}"
   stop_unmanaged_processes "cloud connection" "${EDGE_ENTRY#${ROOT_DIR}/}" "${EDGE_PID_FILE}" "${EDGE_ENTRY#${ROOT_DIR}/}$"
-  stop_unmanaged_processes "local runner" "${SUPERVISOR_BIN#${ROOT_DIR}/}" "${SUPERVISOR_PID_FILE}" "${SUPERVISOR_BIN#${ROOT_DIR}/}$"
   echo "[Agent Computer] Stopped."
 }
 
@@ -754,17 +680,11 @@ PY
 status_runtime() {
   load_env_if_present
   echo "== Agent Computer status =="
-  status_line "local_runner" "${SUPERVISOR_PID_FILE}" "${SUPERVISOR_BIN#${ROOT_DIR}/}" "${SUPERVISOR_BIN#${ROOT_DIR}/}$"
   status_line "cloud_connection" "${EDGE_PID_FILE}" "${EDGE_ENTRY#${ROOT_DIR}/}" "${EDGE_ENTRY#${ROOT_DIR}/}$"
   gateway_scope_status
-  if curl -fsS "${SUPERVISOR_URL}/health" >/dev/null 2>&1; then
-    echo "health: local runner ok (${SUPERVISOR_URL})"
-  else
-    echo "health: local runner unavailable (${SUPERVISOR_URL})"
-  fi
   runtime_secret_status
   echo "config: ${ENV_FILE}"
-  echo "logs: ${LOG_DIR}/agent-computer-supervisor.log, ${LOG_DIR}/agent-computer-edge.log"
+  echo "logs: ${LOG_DIR}/agent-computer-edge.log"
 }
 
 render_systemd_unit() {
@@ -982,51 +902,11 @@ service_status() {
   status_runtime
 }
 
-service_supervisor_pid=""
 service_edge_pid=""
 
 cleanup_service_run() {
-  local pid
-  for pid in "${service_edge_pid:-}" "${service_supervisor_pid:-}"; do
-    if is_pid_alive "${pid}"; then
-      kill_tree "${pid}"
-    fi
-  done
-}
-
-start_supervisor_for_service() {
-  local mode_label="${1:-service mode}"
-  local pid
-  pid="$(runtime_process_pid "${SUPERVISOR_PID_FILE}" "${SUPERVISOR_BIN#${ROOT_DIR}/}" "${SUPERVISOR_BIN#${ROOT_DIR}/}$" || true)"
-  if is_pid_alive "${pid}"; then
-    if ! runtime_process_secret_matches_env "${pid}"; then
-      echo "[Agent Computer] Existing local runner secret differs from ${ENV_FILE}; restarting local runner in ${mode_label}."
-      kill_tree "${pid}" || true
-      rm -f "${SUPERVISOR_PID_FILE}"
-    else
-      echo "[Agent Computer] Local runner already running (pid ${pid})."
-      echo "${pid}" > "${SUPERVISOR_PID_FILE}"
-      chmod 600 "${SUPERVISOR_PID_FILE}" 2>/dev/null || true
-      return 0
-    fi
-  fi
-  if wait_for_supervisor; then
-    echo "[Agent Computer] Local runner health is reachable at ${SUPERVISOR_URL}, but process ownership could not be verified."
-    echo "[Agent Computer] Stop the existing process or start with the matching ${ENV_FILE} before launching the cloud connection."
-    return 1
-  fi
-  echo "[Agent Computer] Starting local runner in ${mode_label}..."
-  env \
-    EMPYRALIS_SUPERVISOR_SECRET="${EMPYRALIS_SUPERVISOR_SECRET}" \
-    EMPYRALIS_SUPERVISOR_AUDIT_DB="${EMPYRALIS_SUPERVISOR_AUDIT_DB}" \
-    "${SUPERVISOR_BIN}" \
-    >> "${LOG_DIR}/agent-computer-supervisor.log" 2>&1 &
-  service_supervisor_pid="$!"
-  echo "${service_supervisor_pid}" > "${SUPERVISOR_PID_FILE}"
-  chmod 600 "${SUPERVISOR_PID_FILE}" 2>/dev/null || true
-  if ! wait_for_supervisor; then
-    echo "[Agent Computer] Local runner failed to become healthy."
-    return 1
+  if is_pid_alive "${service_edge_pid:-}"; then
+    kill_tree "${service_edge_pid}"
   fi
 }
 
@@ -1084,7 +964,6 @@ run_edge_forever() {
     env \
       EMPYRALIS_AGENT_COMPUTER_SERVICE_TARGET="${EMPYRALIS_AGENT_COMPUTER_SERVICE_TARGET:-${default_target}}" \
       EMPYRALIS_SUPERVISOR_SECRET="${EMPYRALIS_SUPERVISOR_SECRET}" \
-      EMPYRALIS_SUPERVISOR_URL="${EMPYRALIS_SUPERVISOR_URL}" \
       EMPYRALIS_GATEWAY_API_URL="${EMPYRALIS_GATEWAY_API_URL}" \
       EMPYRALIS_GATEWAY_STATE_DIR="${EMPYRALIS_GATEWAY_STATE_DIR}" \
       EMPYRALIS_GATEWAY_DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME}" \
@@ -1111,7 +990,6 @@ service_run_system() {
   load_runtime_env
   configure_edge_service_mode "1" "server_vps"
   trap cleanup_service_run INT TERM EXIT
-  start_supervisor_for_service "system service mode"
   run_edge_forever "system service mode" "server_vps" "1"
 }
 
@@ -1195,7 +1073,6 @@ launchd_run() {
   load_runtime_env
   configure_edge_service_mode "" "this_device"
   trap cleanup_service_run INT TERM EXIT
-  start_supervisor_for_service "user-session launchd mode"
   run_edge_forever "user-session launchd mode" "this_device" ""
 }
 
