@@ -187,6 +187,26 @@ def classify_error(
 
 # ── Active thread resolution ──
 
+def agent_sender_thread_id(agent_install_id: str, sender_id: str) -> str:
+    """Deterministic per-(agent, sender) thread id for a resolved specialist turn.
+
+    Every distinct sender gets its own thread per agent — including the
+    owner's own identity when it reaches this path — so different customers,
+    and different agents on the same channel type, never interleave into one
+    context. Deterministic and unstored, unlike get_active_thread's DB
+    pointer: the same (agent, sender) pair always names the same thread, no
+    lookup required.
+
+    sender_id empty is the one edge case (a channel wrapper that didn't
+    resolve one) — falls back to a per-agent-only bucket rather than
+    collapsing into the shared legacy "sage-main" pointer, which would
+    reintroduce cross-sender bleed for exactly the callers this exists to fix.
+    """
+    agent_token = str(agent_install_id or "").strip()
+    sender_token = str(sender_id or "").strip() or "unscoped"
+    return f"agent:{agent_token}:{sender_token}"
+
+
 async def get_active_thread(
     workspace_id: str,
     channel_origin: str,
@@ -195,6 +215,13 @@ async def get_active_thread(
 
     Reads workspace.channel_active_threads JSONB via the tenant-scoped
     control-plane repository. Returns "sage-main" if no active task thread set.
+
+    LEGACY_UNSCOPED path: only reached today when no specialist agent is
+    resolved for the turn (running as Sage/master) — see
+    sage_turn_adapter.execute_sage_turn's thread-resolution branch, which
+    routes specialist turns through agent_sender_thread_id() instead so
+    different agents (and different senders) on the same channel type don't
+    share this one workspace+channel-type pointer.
     """
     if not channel_origin:
         return "sage-main"
