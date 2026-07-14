@@ -109,8 +109,8 @@ export const CLOUD_VPS_PROVIDERS: Record<VpsProviderId, VpsProviderCard> = {
     id: 'digitalocean',
     label: 'DigitalOcean',
     tagline: 'Simplest setup',
-    accountMethod: 'OAuth login',
-    tokenUrl: 'https://cloud.digitalocean.com/account/api/oauth_apps',
+    accountMethod: 'OAuth or API token',
+    tokenUrl: 'https://cloud.digitalocean.com/account/api/tokens',
     logoSrc: '/brand-assets/infrastructure/digitalocean.svg',
     features: ['OAuth', 'Ubuntu 24.04', 'Global'],
   },
@@ -738,30 +738,32 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
               <h2>{`Connect your ${provider.label} account`}</h2>
             </div>
             {provider.id === 'digitalocean' ? (
-              <AppButton tone="primary" type="button" onClick={() => void startDigitalOceanOAuth()} disabled={busy}>
-                {busy ? 'Opening DigitalOcean' : 'Log in with DigitalOcean'}
-              </AppButton>
-            ) : (
-              <div className="cloud-vps-access-form">
-                <label className="app-form-field">
-                  <span className="app-form-field__label">API Token</span>
-                  <input
-                    className="app-field"
-                    type="password"
-                    value={apiToken}
-                    onChange={(event) => setApiToken(event.target.value)}
-                    placeholder="Paste API token"
-                  />
-                </label>
-                <a className="cloud-vps-token-link" href={provider.tokenUrl} target="_blank" rel="noreferrer">
-                  <span>{`Create token at ${provider.label}`}</span>
-                  <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
-                </a>
-                <AppButton tone="primary" type="button" onClick={() => void verifyApiToken()} disabled={busy || loadingPlans}>
-                  {busy || loadingPlans ? 'Verifying token' : 'Verify token →'}
+              <>
+                <AppButton tone="primary" type="button" onClick={() => void startDigitalOceanOAuth()} disabled={busy}>
+                  {busy ? 'Opening DigitalOcean' : 'Log in with DigitalOcean'}
                 </AppButton>
-              </div>
-            )}
+                <p className="cloud-vps-panel__note">Or connect with a personal access token:</p>
+              </>
+            ) : null}
+            <div className="cloud-vps-access-form">
+              <label className="app-form-field">
+                <span className="app-form-field__label">API Token</span>
+                <input
+                  className="app-field"
+                  type="password"
+                  value={apiToken}
+                  onChange={(event) => setApiToken(event.target.value)}
+                  placeholder="Paste API token"
+                />
+              </label>
+              <a className="cloud-vps-token-link" href={provider.tokenUrl} target="_blank" rel="noreferrer">
+                <span>{`Create token at ${provider.label}`}</span>
+                <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
+              </a>
+              <AppButton tone="primary" type="button" onClick={() => void verifyApiToken()} disabled={busy || loadingPlans}>
+                {busy || loadingPlans ? 'Verifying token' : 'Verify token →'}
+              </AppButton>
+            </div>
             {error ? <p className="cloud-vps-panel__error">{error}</p> : null}
           </section>
         ) : null}

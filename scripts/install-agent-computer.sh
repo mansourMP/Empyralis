@@ -10,7 +10,6 @@ RUN_DIR="${EMPYRALIS_RUN_DIR:-/run/empyralis}"
 ENV_FILE="${CONFIG_DIR}/agent-computer.env"
 BIN_DIR="${INSTALL_ROOT}/bin"
 CURRENT_DIR="${INSTALL_ROOT}/current"
-SUPERVISOR_SERVICE="empyralis-supervisor.service"
 GATEWAY_SERVICE="empyralis-gateway.service"
 
 DEFAULT_API_URL="https://empyralis.ai/api"
@@ -19,10 +18,7 @@ PAIRING_TOKEN="${EMPYRALIS_PAIRING_TOKEN:-${EMPYRALIS_GATEWAY_PAIRING_TOKEN:-}}"
 AGENT_COMPUTER_VERSION="${EMPYRALIS_AGENT_COMPUTER_VERSION:-latest}"
 ARTIFACT_BASE_URL="${EMPYRALIS_ARTIFACT_BASE_URL:-https://empyralis.ai/releases/agent-computer/${AGENT_COMPUTER_VERSION}}"
 GATEWAY_ARTIFACT_URL="${EMPYRALIS_GATEWAY_ARTIFACT_URL:-${ARTIFACT_BASE_URL}/empyralis-gateway-linux-x64.tar.gz}"
-SUPERVISOR_ARTIFACT_URL="${EMPYRALIS_SUPERVISOR_ARTIFACT_URL:-${ARTIFACT_BASE_URL}/empyralis-supervisor-linux-x64.tar.gz}"
 DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME:-$(hostname -f 2>/dev/null || hostname)}"
-SUPERVISOR_URL="${EMPYRALIS_SUPERVISOR_URL:-http://127.0.0.1:7788}"
-SYSTEMD_START_TIMEOUT_SECONDS="${EMPYRALIS_SYSTEMD_START_TIMEOUT_SECONDS:-120}"
 REGISTRATION_TIMEOUT_SECONDS="${EMPYRALIS_REGISTRATION_TIMEOUT_SECONDS:-180}"
 
 log() {
@@ -100,28 +96,6 @@ install_node20() {
   fi
 }
 
-install_rust_toolchain() {
-  if [[ "${EMPYRALIS_INSTALL_SKIP_RUST:-0}" == "1" ]]; then
-    log "skipping Rust install because EMPYRALIS_INSTALL_SKIP_RUST=1"
-    return
-  fi
-  if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
-    log "Rust toolchain already installed"
-    return
-  fi
-  log "installing Rust toolchain"
-  curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
-  if [[ -x /root/.cargo/bin/cargo ]]; then
-    ln -sf /root/.cargo/bin/cargo /usr/local/bin/cargo
-  fi
-  if [[ -x /root/.cargo/bin/rustc ]]; then
-    ln -sf /root/.cargo/bin/rustc /usr/local/bin/rustc
-  fi
-  if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
-    fail "Rust toolchain install failed"
-  fi
-}
-
 create_service_user() {
   if id "${SERVICE_USER}" >/dev/null 2>&1; then
     log "service user ${SERVICE_USER} already exists"
@@ -136,7 +110,7 @@ create_service_user() {
 }
 
 prepare_directories() {
-  mkdir -p "${INSTALL_ROOT}" "${BIN_DIR}" "${STATE_ROOT}/gateway" "${STATE_ROOT}/supervisor" "${CONFIG_DIR}" "${LOG_DIR}" "${RUN_DIR}"
+  mkdir -p "${INSTALL_ROOT}" "${BIN_DIR}" "${STATE_ROOT}/gateway" "${CONFIG_DIR}" "${LOG_DIR}" "${RUN_DIR}"
   # BYO-brain: writable npm global prefix for cli.install (@openai/codex etc.).
   # /usr/lib/node_modules is EACCES under this service's strict sandbox
   # (ProtectSystem=strict). This dir sits under INSTALL_ROOT which is already
@@ -165,25 +139,16 @@ existing_env_value() {
   ' "${ENV_FILE}"
 }
 
-generate_secret() {
-  openssl rand -hex 32
-}
-
 shell_quote_env() {
   local value="$1"
   printf '"%s"' "${value//\"/\\\"}"
 }
 
 write_env_file() {
-  local existing_secret existing_gateway_token existing_gateway_id existing_device_id supervisor_secret previous_umask
-  existing_secret="$(existing_env_value EMPYRALIS_SUPERVISOR_SECRET || true)"
+  local existing_gateway_token existing_gateway_id existing_device_id previous_umask
   existing_gateway_token="$(existing_env_value EMPYRALIS_GATEWAY_TOKEN || true)"
   existing_gateway_id="$(existing_env_value EMPYRALIS_GATEWAY_ID || true)"
   existing_device_id="$(existing_env_value EMPYRALIS_GATEWAY_DEVICE_ID || true)"
-  supervisor_secret="${EMPYRALIS_SUPERVISOR_SECRET:-${existing_secret:-}}"
-  if [[ -z "${supervisor_secret}" ]]; then
-    supervisor_secret="$(generate_secret)"
-  fi
 
   log "writing ${ENV_FILE}"
   previous_umask="$(umask)"
@@ -195,10 +160,7 @@ write_env_file() {
     printf 'EMPYRALIS_GATEWAY_API_URL=%s\n' "$(shell_quote_env "${API_URL}")"
     printf 'NODE_ENV="production"\n'
     printf 'EMPYRALIS_DEPLOY_ENV="agent-computer"\n'
-    printf 'EMPYRALIS_SUPERVISOR_URL=%s\n' "$(shell_quote_env "${SUPERVISOR_URL}")"
-    printf 'EMPYRALIS_SUPERVISOR_SECRET=%s\n' "$(shell_quote_env "${supervisor_secret}")"
     printf 'EMPYRALIS_GATEWAY_STATE_DIR=%s\n' "$(shell_quote_env "${STATE_ROOT}/gateway")"
-    printf 'EMPYRALIS_SUPERVISOR_AUDIT_DB=%s\n' "$(shell_quote_env "${STATE_ROOT}/supervisor/audit.sqlite3")"
     printf 'EMPYRALIS_STATE_HOME=%s\n' "$(shell_quote_env "${STATE_ROOT}/.empyralis/state")"
     printf 'EMPYRALIS_GATEWAY_DISPLAY_NAME=%s\n' "$(shell_quote_env "${DISPLAY_NAME}")"
     printf 'EMPYRALIS_GATEWAY_BROWSER_PROJECT_ROOT=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
@@ -258,19 +220,16 @@ extract_artifact() {
 }
 
 install_release_artifacts() {
-  local tmp_dir release_dir gateway_archive supervisor_archive
+  local tmp_dir release_dir gateway_archive
   tmp_dir="$(mktemp -d)"
   release_dir="${INSTALL_ROOT}/releases/${AGENT_COMPUTER_VERSION}"
   gateway_archive="${tmp_dir}/gateway.tar.gz"
-  supervisor_archive="${tmp_dir}/supervisor.tar.gz"
 
   rm -rf "${release_dir}.tmp"
-  mkdir -p "${release_dir}.tmp/gateway" "${release_dir}.tmp/supervisor"
+  mkdir -p "${release_dir}.tmp/gateway"
 
   download_artifact "${GATEWAY_ARTIFACT_URL}" "${gateway_archive}"
-  download_artifact "${SUPERVISOR_ARTIFACT_URL}" "${supervisor_archive}"
   extract_artifact "${gateway_archive}" "${release_dir}.tmp/gateway"
-  extract_artifact "${supervisor_archive}" "${release_dir}.tmp/supervisor"
 
   rm -rf "${release_dir}"
   mv "${release_dir}.tmp" "${release_dir}"
@@ -278,36 +237,10 @@ install_release_artifacts() {
   chown -R root:root "${INSTALL_ROOT}/releases" "${CURRENT_DIR}"
   find "${release_dir}" -type d -exec chmod 0755 {} +
   find "${release_dir}" -type f -exec chmod u=rw,go=r {} +
-  find "${release_dir}/supervisor" -type f -exec chmod 0755 {} +
   rm -rf "${tmp_dir}"
 }
 
 write_launcher_scripts() {
-  cat > "${BIN_DIR}/run-supervisor" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-ENV_FILE="${EMPYRALIS_ENV_FILE:-/etc/empyralis/agent-computer.env}"
-if [[ -r "${ENV_FILE}" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "${ENV_FILE}"
-  set +a
-fi
-INSTALL_DIR="${EMPYRALIS_AGENT_COMPUTER_INSTALL_DIR:-/opt/empyralis/agent-computer/current}"
-candidate="${INSTALL_DIR}/supervisor/empyralis-supervisor"
-if [[ ! -x "${candidate}" ]]; then
-  candidate="$(find "${INSTALL_DIR}/supervisor" -type f -name 'empyralis-supervisor' -perm -111 2>/dev/null | head -n 1 || true)"
-fi
-if [[ -z "${candidate}" || ! -x "${candidate}" ]]; then
-  candidate="$(find "${INSTALL_DIR}" -type f -name 'empyralis-supervisor' -perm -111 2>/dev/null | head -n 1 || true)"
-fi
-if [[ -z "${candidate}" || ! -x "${candidate}" ]]; then
-  echo "empyralis-supervisor binary not found under ${INSTALL_DIR}" >&2
-  exit 127
-fi
-exec "${candidate}"
-EOF
-
   cat > "${BIN_DIR}/run-gateway" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -346,62 +279,17 @@ cd "$(dirname "${entry}")"
 exec node "${entry}"
 EOF
 
-  chmod 0755 "${BIN_DIR}/run-supervisor" "${BIN_DIR}/run-gateway"
+  chmod 0755 "${BIN_DIR}/run-gateway"
 }
 
 write_systemd_units() {
   log "writing systemd units"
-  cat > "/etc/systemd/system/${SUPERVISOR_SERVICE}" <<SYSEOF
-[Unit]
-Description=Empyralis Agent Computer Supervisor
-Documentation=https://empyralis.ai
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-Group=${SERVICE_USER}
-EnvironmentFile=${ENV_FILE}
-WorkingDirectory=${CURRENT_DIR}
-ExecStart=${BIN_DIR}/run-supervisor
-Restart=always
-RestartSec=5
-KillSignal=SIGTERM
-TimeoutStopSec=30
-
-# ── OS CONFINEMENT ────────────────────────────────────────────────────────
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-PrivateDevices=true
-ProtectProc=invisible
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-MemoryDenyWriteExecute=true
-RestrictRealtime=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=
-AmbientCapabilities=
-
-# Only these paths are writable.  Protected paths (~/.ssh, ~/.empyralis/state/vault,
-# /etc/empyralis) are NOT in this list and are physically unreachable.
-ReadWritePaths=${STATE_ROOT} ${INSTALL_ROOT} ${LOG_DIR} ${RUN_DIR}
-ReadOnlyPaths=${CONFIG_DIR}
-
-[Install]
-WantedBy=multi-user.target
-SYSEOF
-
   cat > "/etc/systemd/system/${GATEWAY_SERVICE}" <<SYSEOF
 [Unit]
 Description=Empyralis Agent Computer Gateway
 Documentation=https://empyralis.ai
-After=network-online.target ${SUPERVISOR_SERVICE}
+After=network-online.target
 Wants=network-online.target
-Requires=${SUPERVISOR_SERVICE}
 
 [Service]
 Type=simple
@@ -447,8 +335,7 @@ systemd_available() {
 start_with_systemd() {
   log "starting services with systemd"
   systemctl daemon-reload
-  systemctl enable "${SUPERVISOR_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null
-  systemctl restart "${SUPERVISOR_SERVICE}"
+  systemctl enable "${GATEWAY_SERVICE}" >/dev/null
   systemctl restart "${GATEWAY_SERVICE}"
 }
 
@@ -486,12 +373,8 @@ start_without_systemd() {
   log "When running outside systemd, ProtectSystem, ProtectHome, PrivateDevices,"
   log "MemoryDenyWriteExecute, CapabilityBoundingSet, and all other systemd-level"
   log "protections are UNAVAILABLE.  The agent has full filesystem access."
-  log "The blocklist in the supervisor/kernel still applies, but it is"
-  log "defense-in-depth — the OS confinement is the real 100% guarantee."
   log "For production deployments, systemd is REQUIRED."
   log ""
-  start_direct_service "empyralis-supervisor" "${BIN_DIR}/run-supervisor"
-  sleep 1
   start_direct_service "empyralis-gateway" "${BIN_DIR}/run-gateway"
 }
 
@@ -505,23 +388,10 @@ start_services() {
 
 print_recent_logs() {
   if systemd_available; then
-    journalctl -u "${SUPERVISOR_SERVICE}" -u "${GATEWAY_SERVICE}" -n 80 --no-pager || true
+    journalctl -u "${GATEWAY_SERVICE}" -n 80 --no-pager || true
   else
-    tail -n 80 "${LOG_DIR}/empyralis-supervisor.log" "${LOG_DIR}/empyralis-gateway.log" 2>/dev/null || true
+    tail -n 80 "${LOG_DIR}/empyralis-gateway.log" 2>/dev/null || true
   fi
-}
-
-wait_for_supervisor() {
-  local deadline now
-  deadline=$((SECONDS + SYSTEMD_START_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    if curl -fsS "${SUPERVISOR_URL}/health" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 2
-  done
-  print_recent_logs
-  fail "Supervisor did not become healthy at ${SUPERVISOR_URL}/health"
 }
 
 registration_file_present() {
@@ -542,7 +412,6 @@ wait_for_registration() {
 }
 
 final_status() {
-  wait_for_supervisor
   wait_for_registration
   log "Agent Computer connected"
 }
@@ -553,7 +422,6 @@ main() {
   require_pairing_token
   apt_install_system_deps
   install_node20
-  install_rust_toolchain
   create_service_user
   prepare_directories
   write_env_file

@@ -11,23 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     build-essential \
-    pkg-config \
-    libssl-dev \
     python3 \
     && rm -rf /var/lib/apt/lists/*
-
-RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-    | sh -s -- -y --profile minimal
-
-ENV PATH="/root/.cargo/bin:${PATH}"
 
 COPY . .
 
 RUN cd empyralis-gateway \
     && npm install \
-    && npm run build \
-    && cd ../empyralis-supervisor \
-    && cargo build --release
+    && npm run build
 
 VOLUME ["/app/.orion-stack/agent-computer", "/app/.orion-stack/logs"]
 
