@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from server_modules import sage_agent_runtime_service
+from server_modules.specialist_runtime_context import SpecialistRuntimeContext
 
 
 def _run(coro):
@@ -1906,6 +1907,217 @@ class FriendlyCliSubscriptionErrorTests(unittest.TestCase):
         message = sage_agent_runtime_service._friendly_cli_subscription_error("some_never_seen_reason", runtime="claude_code")
         self.assertIn("Heads up:", message)
         self.assertIn("some_never_seen_reason", message)
+
+
+class SageAgentRuntimeSpecialistProviderResolutionTests(unittest.TestCase):
+    """§25.3/§28.2 — a specialist with its OWN provider/model_config binding
+    must resolve provider AND credentials TOGETHER via
+    _resolve_agent_cloud_provider, not have only the provider LABEL swapped
+    onto the workspace's default credentials (the exact bug that made a BYOK
+    specialist's turn silently run under the workspace's/another agent's
+    key, mislabeled as its own provider). Opt-in per agent: a specialist
+    with nothing configured, and Sage's own turn (specialist_context=None),
+    must take the exact unchanged workspace-default path -- proven below by
+    making the per-agent resolver explode if it's ever called for them, not
+    just by checking a return value."""
+
+    @staticmethod
+    def _spec(**overrides):
+        base = dict(
+            agent_install_id="agent-byok-1",
+            agent_label="Research Agent",
+            agent_kind="specialist",
+            persona="You are a research specialist.",
+        )
+        base.update(overrides)
+        return SpecialistRuntimeContext(**base)
+
+    @staticmethod
+    def _run_chat(specialist_context=None, mock_agent_provider=None, mock_workspace_provider=None):
+        """Full handle_sage_chat harness for a specialist turn. Specialists
+        (unlike Sage's own plain-chat path) run through
+        _run_sage_action_loop_v3 -> direct_chat_generation_service.
+        stream_provider_backed_direct_chat -- a different, tool-capable
+        generation entry point than generate_chat_reply_with_provider_fallback,
+        confirmed by tracing the actual call chain (handle_sage_chat:4180's
+        _run_sage_action_loop_v3 call passes the SAME provider/credentials
+        variables this fix resolves straight through to that stream call's
+        context/metadata kwargs). Mocked here exactly like the existing
+        test_activity_event_emitted_as_failed_on_provider_error does, so
+        the resolved provider/credentials can be inspected without a real
+        network call."""
+        mock_agent_provider = mock_agent_provider or AsyncMock(
+            return_value=("anthropic", {"api_key": "sk-agent-own-key"}, "byok_api")
+        )
+        mock_workspace_provider = mock_workspace_provider or AsyncMock(
+            return_value=("deepseek", {"api_key": "sk-workspace-default"})
+        )
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=mock_workspace_provider),
+            patch("server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider", new=mock_agent_provider),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=specialist_context,
+            ))
+        return mock_agent_provider, mock_workspace_provider, mock_stream
+
+    def test_byok_specialist_resolves_provider_and_credentials_together(self):
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api")
+        mock_agent_provider, _mock_ws, mock_stream = self._run_chat(specialist_context=spec)
+
+        mock_agent_provider.assert_awaited_once()
+        call_args = mock_agent_provider.await_args
+        self.assertEqual(call_args.args[0], "ws-1")
+        self.assertEqual(call_args.args[1]["mode"], "byok_api")
+        self.assertEqual(call_args.args[1]["provider"], "anthropic")
+        self.assertEqual(call_args.args[2], "agent-byok-1")
+
+        # The actual generation call must receive THIS agent's own resolved
+        # credentials, not the workspace default.
+        gen_kwargs = mock_stream.call_args.kwargs
+        self.assertEqual(gen_kwargs["context"]["provider"], "anthropic")
+        self.assertEqual(gen_kwargs["metadata"]["credentials"], {"api_key": "sk-agent-own-key"})
+        self.assertNotEqual(gen_kwargs["metadata"]["credentials"], {"api_key": "sk-workspace-default"})
+
+    def test_two_specialists_two_keys_each_turn_uses_its_own(self):
+        """The task's literal VERIFY ask: two agents, two different keys,
+        each turn proven to use the right one."""
+        anthropic_spec = self._spec(
+            agent_install_id="agent-anthropic-1", provider="anthropic", mode="byok_api",
+        )
+        openai_spec = self._spec(
+            agent_install_id="agent-openai-1", provider="openai", mode="byok_api",
+        )
+
+        anthropic_resolver = AsyncMock(return_value=("anthropic", {"api_key": "sk-anthropic-key"}, "byok_api"))
+        _, _, stream_1 = self._run_chat(specialist_context=anthropic_spec, mock_agent_provider=anthropic_resolver)
+        self.assertEqual(stream_1.call_args.kwargs["metadata"]["credentials"], {"api_key": "sk-anthropic-key"})
+        self.assertEqual(anthropic_resolver.await_args.args[2], "agent-anthropic-1")
+
+        openai_resolver = AsyncMock(return_value=("openai", {"api_key": "sk-openai-key"}, "byok_api"))
+        _, _, stream_2 = self._run_chat(specialist_context=openai_spec, mock_agent_provider=openai_resolver)
+        self.assertEqual(stream_2.call_args.kwargs["metadata"]["credentials"], {"api_key": "sk-openai-key"})
+        self.assertEqual(openai_resolver.await_args.args[2], "agent-openai-1")
+
+        # Neither turn's credentials leaked into the other's.
+        self.assertNotEqual(
+            stream_1.call_args.kwargs["metadata"]["credentials"],
+            stream_2.call_args.kwargs["metadata"]["credentials"],
+        )
+
+    def test_legacy_specialist_with_only_provider_set_defaults_to_byok(self):
+        """Pre-model_config specialists only ever had `.provider` set, no
+        `.mode` -- must still be treated as byok_api (a provider override
+        with no mode is meaningless as anything else), not silently
+        swallowed into platform_credits, which would drop the provider
+        override entirely and use the workspace's key under a foreign
+        label -- the exact regression risk of naively defaulting empty
+        mode to "platform_credits"."""
+        spec = self._spec(provider="openai", mode="")
+        mock_agent_provider, _mock_ws, _mock_stream = self._run_chat(specialist_context=spec)
+
+        mock_agent_provider.assert_awaited_once()
+        self.assertEqual(mock_agent_provider.await_args.args[1]["mode"], "byok_api")
+        self.assertEqual(mock_agent_provider.await_args.args[1]["provider"], "openai")
+
+    def test_specialist_with_nothing_configured_uses_unchanged_workspace_default(self):
+        """The common-path guarantee: an agent with no model_config override
+        at all must NEVER touch _resolve_agent_cloud_provider -- proven by
+        making it explode if called, not just by checking it wasn't called
+        (the difference matters: a call that happens to return harmlessly
+        would still hide a real regression)."""
+        spec = self._spec(provider="", model="", mode="")
+        exploding = AsyncMock(side_effect=AssertionError("must not be called for an unconfigured specialist"))
+        _mock_agent, mock_workspace_provider, mock_stream = self._run_chat(
+            specialist_context=spec, mock_agent_provider=exploding,
+        )
+
+        mock_workspace_provider.assert_awaited_once()
+        self.assertEqual(mock_stream.call_args.kwargs["context"]["provider"], "deepseek")
+
+    def test_sage_own_turn_unaffected_specialist_context_none(self):
+        """Sage's own turn (specialist_context=None) is the other half of
+        the common path -- must also never touch the per-agent resolver."""
+        exploding = AsyncMock(side_effect=AssertionError("must not be called for Sage's own turn"))
+        _mock_agent, mock_workspace_provider, mock_stream = self._run_chat(
+            specialist_context=None, mock_agent_provider=exploding,
+        )
+
+        mock_workspace_provider.assert_awaited_once()
+        self.assertEqual(mock_stream.call_args.kwargs["context"]["provider"], "deepseek")
+
+    def test_platform_credits_specialist_uses_shared_resolver_but_workspace_result(self):
+        """An agent explicitly set to platform_credits mode opts into the
+        new resolver (it has SOMETHING configured), but
+        _resolve_agent_cloud_provider's platform_credits branch is a pure
+        passthrough to the same workspace resolution -- so the end result
+        must be identical to the unconfigured-agent path, not some third
+        behavior."""
+        spec = self._spec(provider="", model="", mode="platform_credits")
+        mock_agent_provider = AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}, "platform_credits"))
+        _mock_agent, _mock_ws, mock_stream = self._run_chat(
+            specialist_context=spec, mock_agent_provider=mock_agent_provider,
+        )
+
+        mock_agent_provider.assert_awaited_once()
+        self.assertEqual(mock_agent_provider.await_args.args[1]["mode"], "platform_credits")
+        self.assertEqual(mock_stream.call_args.kwargs["context"]["provider"], "deepseek")
+
+    def test_local_mode_specialist_never_touches_cloud_resolver(self):
+        """local/cli_subscription specialists dispatch entirely separately
+        (gateway WSS rail) and must never reach _resolve_agent_cloud_provider
+        at the cloud-provider-resolution point -- that resolver returns a
+        differently-shaped tuple for these modes ((runtime,
+        {gateway_binding}, mode), not (provider, credentials)) and calling
+        it here would be both wrong and pointless, since the dedicated
+        gateway-dispatch branch below returns before either value is read."""
+        spec = self._spec(provider="", model="llama3", mode="local", gateway_binding="gw-1", runtime="ollama")
+        exploding = AsyncMock(side_effect=AssertionError("must not be called for local mode"))
+        with (
+            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))),
+            patch("server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider", new=exploding),
+            patch(
+                "server_modules.sage_agent_runtime_service._dispatch_local_gateway_brain",
+                new=AsyncMock(return_value=("local reply", {}, "llama3")),
+            ),
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+        ):
+            result = _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello", specialist_context=spec,
+            ))
+        self.assertEqual(result["message"], "local reply")
 
 
 if __name__ == "__main__":

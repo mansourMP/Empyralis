@@ -3696,11 +3696,36 @@ async def handle_sage_chat(
 
     # --- Call provider ---
     provider, credentials = await _resolve_cloud_provider(normalized_workspace_id)
-    # Phase 4: specialist provider binding override (falls back to workspace provider).
-    if _spec is not None:
-        _spec_provider = str(getattr(_spec, "provider", "") or "").strip()
-        if _spec_provider and _spec_provider != provider:
-            provider = _spec_provider
+    # Phase 4: specialist provider binding override. Opt-in per agent: only a
+    # specialist with its OWN model_config override (mode and/or provider
+    # set) takes this branch -- one with nothing configured falls straight
+    # through on the workspace-default resolution above, byte-for-byte
+    # unchanged. local/cli_subscription are excluded on purpose: they never
+    # reach the cloud-call path below at all (dedicated gateway-dispatch
+    # branches further down return before `provider`/`credentials` here are
+    # ever read), and _resolve_agent_cloud_provider returns a differently-
+    # shaped (runtime, {gateway_binding}, mode) tuple for them -- assigning
+    # that into (provider, credentials) would be simply wrong.
+    _spec_mode = str(getattr(_spec, "mode", "") or "").strip().lower() if _spec is not None else ""
+    _spec_provider = str(getattr(_spec, "provider", "") or "").strip() if _spec is not None else ""
+    if _spec is not None and _spec_mode not in ("local", "cli_subscription") and (_spec_provider or _spec_mode):
+        # §25.3/§28.2: this used to swap only the provider LABEL, leaving
+        # `credentials` pointed at the workspace's default key -- a
+        # specialist's turn would silently run under another agent's/the
+        # workspace's credentials, mislabeled as its own provider. Resolve
+        # provider AND credentials TOGETHER instead, via the same resolver
+        # a cli_subscription/BYOK-bound agent's turn needs. No explicit
+        # mode with a provider set is the legacy shape (pre-dates
+        # model_config.mode) -- treated as byok_api, the closest real
+        # meaning of "this agent has its own provider".
+        _agent_model_config = {
+            "mode": _spec_mode or "byok_api",
+            "provider": _spec_provider,
+            "model": str(getattr(_spec, "model", "") or "").strip(),
+        }
+        provider, credentials, _ = await _resolve_agent_cloud_provider(
+            normalized_workspace_id, _agent_model_config, _spec_install_id,
+        )
 
     context: dict = {
         "workspace_id": normalized_workspace_id,
