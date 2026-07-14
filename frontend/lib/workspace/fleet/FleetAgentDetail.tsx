@@ -246,6 +246,7 @@ export function FleetAgentDetail({
           label="Customer access"
           value={`${customerAccessCount} ${customerAccessCount === 1 ? "tool" : "tools"}`}
           tone={customerAccessCount > 0 ? "default" : "muted"}
+          hint="Everyone who messages this agent is a customer at support-tier — they can request, not command. You, the owner, keep full access."
         />
       )}
       <PanelRow label="Model" value={resolvedModel} />
@@ -1679,6 +1680,32 @@ function ToolsTab({
 
   return (
     <div className="fleet-config">
+      {/* Legibility primer (frontend-only, no logic change): the model
+          itself is unconditional and per-message (see
+          authority_mandate_service.py / triage_service.py) — every sender
+          who isn't positively the owner is "audience", regardless of which
+          agent they messaged. Shown above both branches below since the
+          badges on every tool row (Safe by default / Granted by you /
+          Owner only) apply the same way whether this is Sage or a
+          specialist. */}
+      <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+        Everyone who messages this agent is a customer at support-tier — they can request, not command.
+        You, the owner, keep full access.
+      </p>
+      <div
+        className="fleet-subtitle"
+        style={{ marginTop: 0, marginBottom: 12, display: "flex", flexWrap: "wrap", gap: "6px 16px", alignItems: "center" }}
+      >
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span className="fleet-badge" style={{ marginLeft: 0 }}>Safe by default</span> anyone can use it
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span className="fleet-badge fleet-badge--lock" style={{ marginLeft: 0 }}>Granted by you</span> you opened it up
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span className="fleet-badge" style={{ marginLeft: 0 }}>Owner only</span> the default — click to grant
+        </span>
+      </div>
       {isMaster ? (
         <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
           This is the operator agent — it has unrestricted tool access, not gated by these toggles.
@@ -1689,7 +1716,7 @@ function ToolsTab({
             {enabledCount} of {tools.length} tools enabled
           </div>
           <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-            People who message this agent can request these. Everything else requires you.
+            By default customers can only use read/support tools; everything else is owner-only until you grant it.
           </p>
         </>
       )}

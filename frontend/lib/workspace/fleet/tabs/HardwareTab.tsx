@@ -134,6 +134,15 @@ export function HardwareTab({
       </div>
 
       <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Hardware access</div>
+      {/* Read-only — surfaces the existing audience_safe=False truth
+          (authority_mandate_service.py / triage_service.py), adds no new
+          enforcement. Whatever's picked below, it's reachable by the owner
+          only: a customer's message is always classified support-tier and
+          can never reach shell/hardware/command tools, regardless of this
+          agent's hardware_access setting. */}
+      <p className="fleet-hw-note" style={{ marginTop: 0 }}>
+        Owner only — customers can&apos;t trigger hardware, shell, or commands, no matter what they message.
+      </p>
       {locked ? (
         <p className="fleet-hw-note" style={{ marginTop: 0 }}>
           This is a <strong>Knowledge</strong> agent — hardware access is off and policy-locked. To

@@ -28,6 +28,18 @@ type Placement = "cloud" | "vps" | "gateway";
 
 const STEP_LABELS = ["Placement", "Brain", "Channels", "Connections"];
 
+// Server field: purpose_preset (customer_facing | internal_assistant |
+// operator) — seeds this agent's DEFAULT instructions only (skipped
+// entirely if the owner later types their own). It is not a security mode:
+// nothing in authority enforcement reads it. Who may do what is decided
+// per-message by sender identity (see the Tools tab / Properties "Customer
+// access" hint), the same way for every agent regardless of this pick.
+const PURPOSE_PRESETS: { value: string; label: string; body: string }[] = [
+  { value: "customer_facing", label: "Customer Support", body: "Talks to your customers directly — professional, accurate, careful with what it promises." },
+  { value: "internal_assistant", label: "Personal Assistant", body: "Helps you and your team — concise, assumes shared context." },
+  { value: "operator", label: "Operator", body: "Helps manage and coordinate your other agents." },
+];
+
 // ── Hardware nodes (VPS + paired Gateways) — same /api/gateway/registrations
 // endpoint the Hardware page reads, partitioned by hardware_kind. A local,
 // self-contained fetch (not gateway-box-picker's useWorkspaceGateways) because
@@ -115,7 +127,8 @@ export function FleetCreateAgentWizard({
   const [resolvedProjectId, setResolvedProjectId] = useState("");
   const [createdAgent, setCreatedAgent] = useState<FleetAgent | null>(null);
 
-  // Step 1 — Placement
+  // Step 1 — Placement (+ purpose preset, sent in the same create call)
+  const [purposePreset, setPurposePreset] = useState<string>("internal_assistant");
   const [placement, setPlacement] = useState<Placement>("cloud");
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const { nodes, loading: nodesLoading, refresh: refreshNodes } = useWorkspaceHardwareNodes(workspaceId);
@@ -194,7 +207,7 @@ export function FleetCreateAgentWizard({
           method: "POST",
           credentials: "include",
           headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-          body: JSON.stringify({ capability_preset: "standard", project_id: initialProjectId || "" }),
+          body: JSON.stringify({ capability_preset: "standard", project_id: initialProjectId || "", purpose_preset: purposePreset }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
@@ -357,7 +370,27 @@ export function FleetCreateAgentWizard({
         <div className="fleet-wizard-body">
           {step === 1 && (
             <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">Where does it work?</div>
+              <div className="fleet-detail-section-title">What's it for?</div>
+              <div className="fleet-wizard-options">
+                {PURPOSE_PRESETS.map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    className={`fleet-wizard-option${purposePreset === p.value ? " is-selected" : ""}`}
+                    onClick={() => setPurposePreset(p.value)}
+                  >
+                    <span className="fleet-wizard-option-label">{p.label}</span>
+                    <span className="fleet-wizard-option-body">{p.body}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="fleet-wizard-hint" style={{ marginTop: 8 }}>
+                Just a starting point for its instructions — edit them anytime from Overview. Who it's
+                allowed to do things for is decided per-message, the same way for every agent, not by
+                this pick.
+              </p>
+
+              <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Where does it work?</div>
               <div className="fleet-wizard-options">
                 <button type="button" className={`fleet-wizard-option${placement === "cloud" ? " is-selected" : ""}`} onClick={() => setPlacement("cloud")}>
                   <span className="fleet-wizard-option-label">Cloud <span className="fleet-wizard-option-tag">Recommended</span></span>
