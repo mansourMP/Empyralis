@@ -142,9 +142,22 @@ async def execute_sage_turn(
             pass
 
     # ── Thread resolution ──
+    # Per-(agent, sender) keying (additive): a resolved specialist turn gets
+    # a deterministic thread scoped to that agent + sender, so different
+    # agents and different senders on the same channel type never interleave
+    # (see agent_sender_thread_id's docstring). LEGACY_UNSCOPED — no
+    # specialist resolved, i.e. this turn runs as Sage/master — is
+    # completely unchanged: it keeps going through get_active_thread, which
+    # preserves "sage-main" and any existing per-channel active-thread
+    # override for every existing conversation.
     if not resolved_thread_id and resolved_channel_origin:
-        from server_modules.sage_command_dispatcher import get_active_thread as _gat
-        resolved_thread_id = await _gat(resolved_workspace_id, resolved_channel_origin)
+        _spec_agent_id = str(getattr(specialist_context, "agent_install_id", "") or "").strip()
+        if _spec_agent_id:
+            from server_modules.sage_command_dispatcher import agent_sender_thread_id as _astid
+            resolved_thread_id = _astid(_spec_agent_id, resolved_sender_id)
+        else:
+            from server_modules.sage_command_dispatcher import get_active_thread as _gat
+            resolved_thread_id = await _gat(resolved_workspace_id, resolved_channel_origin)
     if not resolved_thread_id:
         resolved_thread_id = "sage-main"
 

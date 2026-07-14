@@ -3513,7 +3513,20 @@ async def handle_sage_chat(
     # install/project; master (Sage) → the workspace master install/project.
     # Phase 5C: also resolve the acting install's context policy (threshold +
     # action on hit).
-    _ctx_policy_max = 0
+    # Sane default when no per-agent max_context_tokens is configured — reuses
+    # compaction_service's own "unknown model" fallback (128K) so an agent
+    # with no explicit context_policy runs on a reliable working window
+    # instead of silently inheriting the model's raw context window (up to
+    # 1M+ on some providers — a reliability concern, not a feature). An
+    # explicit per-agent value always wins; this only fills the unset gap.
+    # Set as the initial value (not just inside the try below) so a failure
+    # anywhere in resolution below — before an explicit value is ever read —
+    # also lands on the sane default rather than silently falling through to
+    # "no clamp". The two enforcement sites (proactive pre-flight check and
+    # the background auto-compact job) are unchanged by this.
+    from server_modules.compaction_service import DEFAULT_CONTEXT_WINDOW as _DEFAULT_CTX_POLICY_MAX
+
+    _ctx_policy_max = _DEFAULT_CTX_POLICY_MAX
     _ctx_policy_action = "compact"
     try:
         from server_modules import usage_events_repository as _usage_repo
@@ -3533,9 +3546,9 @@ async def handle_sage_chat(
             if isinstance(_mm.get("context_policy"), dict):
                 _acting_ctx_policy = dict(_mm["context_policy"])
         try:
-            _ctx_policy_max = max(0, int(_acting_ctx_policy.get("max_context_tokens") or 0))
+            _ctx_policy_max = max(0, int(_acting_ctx_policy.get("max_context_tokens") or _DEFAULT_CTX_POLICY_MAX))
         except (TypeError, ValueError):
-            _ctx_policy_max = 0
+            _ctx_policy_max = _DEFAULT_CTX_POLICY_MAX
         _act = str(_acting_ctx_policy.get("on_context_full") or "compact").strip().lower()
         _ctx_policy_action = _act if _act in {"compact", "fresh_session"} else "compact"
         _usage_repo.set_usage_attribution(

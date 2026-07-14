@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -258,6 +259,135 @@ class SageTurnAdapterAgentIdRoutingTests(unittest.TestCase):
 
         self.assertIsNone(handle_mock.call_args.kwargs["specialist_context"])
         self.assertEqual(result["message"], "Hello")
+
+
+class SageTurnAdapterThreadKeyingTests(unittest.TestCase):
+    """Per-(agent, sender) thread keying: a resolved specialist turn must get
+    a thread scoped to that agent + sender, so different agents and
+    different senders on the same channel type never interleave into one
+    "sage-main" bucket. LEGACY_UNSCOPED (no specialist resolved) must stay
+    byte-for-byte on the pre-existing get_active_thread path."""
+
+    def _mock_sage_chat(self, **overrides):
+        base = {
+            "message": "Hello",
+            "used_context": [],
+            "tool_calls": [],
+            "available_tools": [],
+            "blocked_tools": [],
+            "approvals_required": [],
+            "memory_updates": [],
+            "trace_id": "trace-1",
+        }
+        base.update(overrides)
+        return base
+
+    def _fake_specialist_context(self, agent_install_id: str):
+        return types.SimpleNamespace(agent_install_id=agent_install_id)
+
+    def _capture_thread_id(self, *, agent_id: str, sender_id: str, channel: str = "whatsapp_personal"):
+        with (
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(return_value=self._fake_specialist_context(agent_id)),
+            ),
+            patch(
+                "server_modules.sage_command_dispatcher.get_active_thread",
+                new=AsyncMock(side_effect=AssertionError(
+                    "get_active_thread must not be called for a resolved specialist turn"
+                )),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                new=AsyncMock(return_value=self._mock_sage_chat()),
+            ) as handle_mock,
+        ):
+            _run(execute_sage_turn_for_channel(
+                workspace_id="ws-1",
+                message="hello",
+                surface_channel=channel,
+                remote_jid=sender_id,
+                agent_id=agent_id,
+            ))
+        return handle_mock.call_args.kwargs["thread_id"]
+
+    def test_two_different_agents_get_separate_threads(self):
+        """Same sender, two different specialist agents on the same channel
+        type — today both would share one "sage-main"-per-channel bucket."""
+        thread_a = self._capture_thread_id(agent_id="ainstall_agent_a", sender_id="same-sender")
+        thread_b = self._capture_thread_id(agent_id="ainstall_agent_b", sender_id="same-sender")
+        self.assertNotEqual(thread_a, thread_b)
+
+    def test_two_different_senders_get_separate_threads(self):
+        """Same agent, two different senders — customer isolation."""
+        thread_customer_1 = self._capture_thread_id(agent_id="ainstall_agent_a", sender_id="customer-1")
+        thread_customer_2 = self._capture_thread_id(agent_id="ainstall_agent_a", sender_id="customer-2")
+        self.assertNotEqual(thread_customer_1, thread_customer_2)
+
+    def test_same_agent_and_sender_is_deterministic_and_stable(self):
+        """The same (agent, sender) pair always resolves to the same thread
+        — no DB lookup, no drift between messages."""
+        first = self._capture_thread_id(agent_id="ainstall_agent_a", sender_id="same-sender")
+        second = self._capture_thread_id(agent_id="ainstall_agent_a", sender_id="same-sender")
+        self.assertEqual(first, second)
+
+    def test_owner_gets_a_stable_thread_same_as_any_other_sender(self):
+        """An owner's self-chat sender_id is just another sender_id at this
+        layer (see STEP 0 report — owner/audience isn't a resolved field
+        here) — it still gets its own stable, isolated thread per agent."""
+        first = self._capture_thread_id(agent_id="ainstall_agent_a", sender_id="owner-self-chat-jid")
+        second = self._capture_thread_id(agent_id="ainstall_agent_a", sender_id="owner-self-chat-jid")
+        self.assertEqual(first, second)
+        customer_thread = self._capture_thread_id(agent_id="ainstall_agent_a", sender_id="customer-1")
+        self.assertNotEqual(first, customer_thread)
+
+    def test_legacy_unscoped_still_uses_get_active_thread(self):
+        """No specialist resolved (running as Sage/master) — completely
+        unchanged: still goes through get_active_thread, preserving
+        "sage-main" and any existing per-channel override."""
+        with (
+            patch(
+                "server_modules.sage_command_dispatcher.get_active_thread",
+                new=AsyncMock(return_value="sage-main"),
+            ) as get_active_mock,
+            patch(
+                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                new=AsyncMock(return_value=self._mock_sage_chat()),
+            ) as handle_mock,
+        ):
+            _run(execute_sage_turn_for_channel(
+                workspace_id="ws-1",
+                message="hello",
+                surface_channel="whatsapp_personal",
+                remote_jid="123",
+                # No agent_id — the pre-existing default, runs as Sage.
+            ))
+
+        get_active_mock.assert_awaited_once_with("ws-1", "whatsapp_personal")
+        self.assertEqual(handle_mock.call_args.kwargs["thread_id"], "sage-main")
+
+    def test_legacy_unscoped_preserves_an_existing_stored_override(self):
+        """A workspace that already ran /new on this channel (a stored
+        channel_active_threads override) must keep resolving to that exact
+        thread — no regression for an existing conversation."""
+        with (
+            patch(
+                "server_modules.sage_command_dispatcher.get_active_thread",
+                new=AsyncMock(return_value="thread_prior_conversation_abc123"),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                new=AsyncMock(return_value=self._mock_sage_chat()),
+            ) as handle_mock,
+        ):
+            _run(execute_sage_turn_for_channel(
+                workspace_id="ws-1",
+                message="hello",
+                surface_channel="whatsapp_personal",
+                remote_jid="123",
+            ))
+
+        self.assertEqual(handle_mock.call_args.kwargs["thread_id"], "thread_prior_conversation_abc123")
 
 
 if __name__ == "__main__":
