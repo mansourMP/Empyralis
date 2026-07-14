@@ -67,12 +67,6 @@ test("password_required is unaffected by the new branches", () => {
 });
 
 test("session revoked / logged out is unaffected by the new branches", () => {
-  // NOTE: deliberately "session revoked", not the real Telegram RPC token
-  // AUTH_KEY_UNREGISTERED — the existing branch below matches on "auth key
-  // unregistered" (a space), which a real underscore-separated
-  // AUTH_KEY_UNREGISTERED error never satisfies. That's a distinct,
-  // pre-existing bug outside FIX 1's scope (phone_code_invalid/expired
-  // only) — flagged separately rather than silently patched here.
   const state = resolveTelegramReconnectState({ message: "session revoked" });
   assert.equal(state.shouldReconnect, false);
   assert.equal(state.status, "logged_out");
@@ -82,4 +76,37 @@ test("authorization_required (missing credentials) is unaffected by the new bran
   const state = resolveTelegramReconnectState({ message: "api_credentials_required" });
   assert.equal(state.shouldReconnect, false);
   assert.equal(state.status, "authorization_required");
+});
+
+// FIX 2: Telegram's real RPC token for a revoked/kicked session is
+// underscore-separated (AUTH_KEY_UNREGISTERED). The logged_out branch only
+// matched the space-form "auth key unregistered", so a session Telegram
+// actually logged out never got recognized — it fell through to the generic
+// disconnected+shouldReconnect:true default, which could leave a dead
+// session appearing to still be "connected" instead of prompting re-auth.
+
+test("AUTH_KEY_UNREGISTERED is recognized as logged_out and stops reconnecting", () => {
+  const state = resolveTelegramReconnectState({ message: "AUTH_KEY_UNREGISTERED" });
+  assert.equal(state.shouldReconnect, false, "must not keep retrying a session Telegram already revoked");
+  assert.equal(state.status, "logged_out");
+});
+
+test("AUTH_KEY_UNREGISTERED matches case-insensitively and inside a wrapped RPC message", () => {
+  const state = resolveTelegramReconnectState({ message: "401: AUTH_KEY_UNREGISTERED (caused by auth.SignIn)" });
+  assert.equal(state.shouldReconnect, false);
+  assert.equal(state.status, "logged_out");
+});
+
+test("AUTH_KEY_UNREGISTERED as a plain Error object is handled the same way", () => {
+  const state = resolveTelegramReconnectState(new Error("AUTH_KEY_UNREGISTERED"));
+  assert.equal(state.shouldReconnect, false);
+  assert.equal(state.status, "logged_out");
+});
+
+test("AUTH_KEY_UNREGISTERED does not fall into an unrelated earlier branch", () => {
+  const state = resolveTelegramReconnectState({ message: "AUTH_KEY_UNREGISTERED" });
+  assert.notEqual(state.status, "code_required");
+  assert.notEqual(state.status, "password_required");
+  assert.notEqual(state.status, "authorization_required");
+  assert.notEqual(state.status, "disconnected");
 });

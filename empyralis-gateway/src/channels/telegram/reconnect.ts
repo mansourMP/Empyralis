@@ -95,8 +95,13 @@ export function resolveTelegramReconnectState(error: unknown): TelegramReconnect
   if (
     normalized.includes("session revoked")
     || normalized.includes("auth key unregistered")
+    || normalized.includes("auth_key_unregistered")
     || normalized.includes("logged out")
   ) {
+    // Telegram's real RPC token is underscore-separated (AUTH_KEY_UNREGISTERED),
+    // which the space-form check above never matched — a session Telegram
+    // revoked on its side fell through to the generic disconnected+
+    // shouldReconnect:true default instead of being recognized as logged_out.
     return {
       shouldReconnect: false,
       status: "logged_out",
