@@ -1,0 +1,416 @@
+/* Landing page — marketing surface only. Reuses the shared --app-* tokens
+   (theme, spacing, radius, motion) from lib/ui/theme-tokens.css + chrome.css
+   so light/dark and the rest of the product stay in lockstep. The larger
+   display sizes below are local to this file — UI-CONTRACT.md's type scale
+   governs product chrome, not marketing/auth headings (explicit carve-out). */
+
+.landing {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--app-bg-page);
+  color: var(--app-text-primary);
+}
+
+.landing__container {
+  width: 100%;
+  max-width: 1120px;
+  margin-inline: auto;
+  padding-inline: var(--app-space-6);
+}
+
+@media (min-width: 768px) {
+  .landing__container {
+    padding-inline: var(--app-space-8);
+  }
+}
+
+/* ── Nav ─────────────────────────────────────────────────────────────── */
+
+.landing-nav {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky, 30);
+  border-bottom: 1px solid var(--app-border-subtle);
+  background: color-mix(in srgb, var(--app-bg-page) 90%, transparent 10%);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.landing-nav__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 64px;
+}
+
+.landing-nav__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  font-size: var(--app-font-14);
+  font-weight: var(--app-weight-semibold);
+  color: var(--app-text-primary);
+}
+
+.landing-nav__mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  flex: none;
+}
+
+.landing-nav__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-5);
+}
+
+.landing-nav__login {
+  font-size: var(--app-font-13);
+  font-weight: var(--app-weight-medium);
+  color: var(--app-text-secondary);
+  transition: color var(--app-motion-fast) ease-out;
+}
+
+.landing-nav__login:hover {
+  color: var(--app-text-primary);
+}
+
+/* ── Hero ────────────────────────────────────────────────────────────── */
+
+.landing-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--app-space-6);
+  padding-block: clamp(3rem, 8vw, 6.5rem);
+}
+
+.landing-hero__kicker {
+  margin: 0;
+  font-size: var(--app-font-13);
+  font-weight: var(--app-weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--app-accent);
+}
+
+.landing-hero__title {
+  margin: 0;
+  max-width: 860px;
+  font-size: clamp(2rem, 1.2rem + 4vw, 3.75rem);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+
+.landing-hero__subtitle {
+  margin: 0;
+  max-width: 640px;
+  font-size: var(--app-font-16);
+  line-height: var(--line-height-relaxed);
+  color: var(--app-text-secondary);
+}
+
+.landing-hero__cta {
+  margin-top: var(--app-space-2);
+}
+
+/* Hero/footer CTAs are the two real conversion moments on the page — the
+   shared .app-button--primary is a quiet, chrome-colored button (correct
+   for in-app toolbars, too quiet here). Same token family, just applying
+   the accent instead of the panel color — no new colors introduced. */
+.landing-cta--primary {
+  border-color: transparent;
+  background: var(--app-accent);
+  color: var(--app-accent-text);
+}
+
+.landing-cta--primary:hover:not(:disabled) {
+  background: var(--app-accent-strong);
+}
+
+/* ── Generic section shell ──────────────────────────────────────────── */
+
+.landing-section {
+  padding-block: clamp(2.5rem, 6vw, 4.5rem);
+  border-top: 1px solid var(--app-border-subtle);
+}
+
+.landing-section__head {
+  max-width: 640px;
+  margin-bottom: var(--app-space-8);
+}
+
+.landing-section--centered .landing-section__head {
+  margin-inline: auto;
+  text-align: center;
+}
+
+.landing-section__heading {
+  margin: 0 0 var(--app-space-3);
+  font-size: clamp(1.5rem, 1.1rem + 1.4vw, 2.125rem);
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  font-weight: 700;
+}
+
+.landing-section__body {
+  margin: 0;
+  font-size: var(--app-font-16);
+  line-height: var(--line-height-relaxed);
+  color: var(--app-text-secondary);
+}
+
+/* ── How it works ────────────────────────────────────────────────────── */
+
+/* A vertical connected timeline, not a 3-up card grid — this is a real
+   ordered sequence (pair hardware, then connect a subscription, then wire
+   it up), and a thread running through the numbered badges says "process"
+   far more clearly than three isolated boxes floating side by side. Stays
+   single-column at every width, capped so the thread doesn't stretch thin
+   across a wide desktop viewport. */
+.landing-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-8);
+  max-width: 640px;
+}
+
+.landing-step {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  column-gap: var(--app-space-5);
+  row-gap: var(--app-space-2);
+}
+
+.landing-step__badge {
+  grid-column: 1;
+  grid-row: 1;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: var(--app-radius-md);
+  font-size: var(--app-font-14);
+  font-weight: var(--app-weight-semibold);
+  color: var(--app-text-primary);
+}
+
+/* The thread: a stub running from each badge's bottom edge down through
+   the gap to the top edge of the next one — never the last badge. */
+.landing-step:not(:last-child) .landing-step__badge::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1px;
+  height: var(--app-space-8);
+  background: var(--app-border-subtle);
+}
+
+.landing-step__title {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
+  margin: 0;
+  font-size: var(--app-font-16);
+  font-weight: var(--app-weight-semibold);
+  letter-spacing: -0.01em;
+}
+
+.landing-step__body {
+  grid-column: 2;
+  grid-row: 2;
+  margin: 0;
+  font-size: var(--app-font-14);
+  line-height: var(--line-height-normal);
+  color: var(--app-text-secondary);
+}
+
+/* ── Pillars ─────────────────────────────────────────────────────────── */
+
+/* Flat divided list, not a card grid — a colored-icon-chip-in-a-bordered-
+   card is the single most common generic-SaaS tell, and a 4-up grid of
+   them here would repeat the same shape as the steps/capabilities grids
+   above and below it. A quiet list reads more considered and varies the
+   page's rhythm. */
+.landing-pillars {
+  display: flex;
+  flex-direction: column;
+  max-width: 640px;
+  border-top: 1px solid var(--app-border-subtle);
+}
+
+.landing-pillar {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-4);
+  padding-block: var(--app-space-5);
+  border-bottom: 1px solid var(--app-border-subtle);
+}
+
+.landing-pillar__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--app-text-tertiary);
+}
+
+.landing-pillar__copy {
+  margin: 0;
+  font-size: var(--app-font-16);
+  line-height: var(--line-height-normal);
+  color: var(--app-text-primary);
+}
+
+/* ── Capabilities (channels / BYO subscription / MCP + apps) ───────────── */
+
+.landing-capability-groups {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--app-space-8);
+}
+
+@media (min-width: 768px) {
+  .landing-capability-groups {
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--app-space-6);
+  }
+}
+
+.landing-capability-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+}
+
+.landing-capability-group__title {
+  margin: 0;
+  font-size: var(--app-font-16);
+  font-weight: var(--app-weight-semibold);
+  letter-spacing: -0.01em;
+}
+
+.landing-capability-group__body {
+  margin: 0;
+  font-size: var(--app-font-14);
+  line-height: var(--line-height-normal);
+  color: var(--app-text-secondary);
+}
+
+/* space-between (not a fixed gap) so a 7-logo row and a 6-logo row both
+   span the full column width instead of one trailing off short. */
+.landing-logo-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3) var(--app-space-4);
+  margin-top: var(--app-space-2);
+}
+
+/* Fixed, centered bounding box per logo — raw brand SVGs carry wildly
+   different internal padding (a tight glyph like the X mark vs. a
+   full-bleed circle like Slack's), so sizing the <img> alone left some
+   logos reading visibly bigger than others at the same width/height. */
+.landing-logo-row__item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+
+.landing-logo-row__logo {
+  max-width: 24px;
+  max-height: 24px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  opacity: 0.88;
+  transition: opacity var(--app-motion-fast) ease-out, transform var(--app-motion-fast) ease-out;
+}
+
+.landing-logo-row__logo:hover {
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+/* OpenAI/xAI/GitHub/Notion ship hardcoded near-black fills — correct on
+   light, nearly invisible on the dark theme's #0d0d0f page. Flip just
+   these to near-white rather than adding a background chip to every logo. */
+html[data-theme="dark"] .landing-logo-row__logo--invert-dark {
+  filter: invert(1);
+}
+
+/* ── Why now ─────────────────────────────────────────────────────────── */
+
+.landing-why-now__body {
+  margin: 0;
+  font-size: clamp(1.0625rem, 0.95rem + 0.6vw, 1.25rem);
+  line-height: var(--line-height-relaxed);
+  color: var(--app-text-primary);
+}
+
+/* ── Footer ──────────────────────────────────────────────────────────── */
+
+.landing-footer {
+  margin-top: auto;
+  border-top: 1px solid var(--app-border-subtle);
+  padding-block: clamp(2.5rem, 6vw, 4rem);
+}
+
+.landing-footer__cta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--app-space-5);
+  text-align: center;
+  padding-bottom: clamp(2rem, 5vw, 3rem);
+}
+
+.landing-footer__heading {
+  margin: 0;
+  font-size: clamp(1.375rem, 1.1rem + 1vw, 1.75rem);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.landing-footer__bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--app-space-3);
+  padding-top: var(--app-space-6);
+  border-top: 1px solid var(--app-border-subtle);
+  font-size: var(--app-font-13);
+  color: var(--app-text-tertiary);
+}
+
+@media (min-width: 640px) {
+  .landing-footer__bottom {
+    flex-direction: row;
+    justify-content: space-between;
+  }
+}
+
+.landing-footer__links {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-5);
+}
+
+.landing-footer__links a:hover {
+  color: var(--app-text-secondary);
+}
