@@ -3326,6 +3326,79 @@ brain (task point 1) needs upstream scheduler work (gap 1) *and*
 gateway-dispatch wiring inside the durable-run engine (gap 2), both
 outside a `runs_execution.py`-scoped pass.
 
+### 28.4 Per-agent BYOK wired: provider + credentials resolved together (2026-07-14)
+
+Closes §28.2/§25.3's second flagged gap. `handle_sage_chat`'s specialist
+override (`sage_agent_runtime_service.py`, just above where `context`/
+`metadata` get built for the turn) used to swap only the provider
+**label**: `_resolve_cloud_provider(workspace_id)` fetched the
+workspace's default credentials once, unconditionally, and if the acting
+specialist had its own `.provider` set, the code overwrote the `provider`
+string but never re-fetched credentials for it — a BYOK specialist's
+turn would silently run under the workspace's (or, transitively, another
+agent's) key, mislabeled as its own provider.
+
+**Fixed**: wired in `_resolve_agent_cloud_provider` (§25.3's correct,
+complete, zero-caller resolver) as an **opt-in per-agent override** —
+only a specialist with its own `mode`/`provider` set takes the new path;
+one with nothing configured, and Sage's own turn
+(`specialist_context=None`), fall straight through on the unchanged
+workspace-default resolution. `local`/`cli_subscription` are excluded on
+purpose: those dispatch entirely separately via the gateway WSS rail
+further down in the same function and never reach the cloud-call path
+this touches — `_resolve_agent_cloud_provider` returns a
+differently-shaped tuple for them (`(runtime, {gateway_binding}, mode)`,
+not `(provider, credentials)`), so routing them through here would be
+both wrong and (since their dedicated branch already returns first)
+pointless. A legacy specialist with only `.provider` set (pre-dates
+`model_config.mode`) defaults to `byok_api` rather than being silently
+absorbed into `platform_credits`, which would drop its override
+entirely — the same class of regression the opt-in itself exists to
+prevent.
+
+7 new tests trace the **real, unmodified** call chain end to end
+(`handle_sage_chat` → `_run_sage_action_loop_v3` →
+`stream_provider_backed_direct_chat`, discovered by tracing actual debug
+trace output — specialists use this tool-capable path, not
+`generate_chat_reply_with_provider_fallback`, which only Sage's plain-chat
+path uses) — mocking only the two outermost boundaries (the resolver's
+return value, the final network-bound generation call). Two specialists
+with two different keys are proven to each reach the generation call with
+their *own* resolved credentials, zero cross-contamination; the
+common/default/local paths are proven untouched by making the per-agent
+resolver raise `AssertionError` if it's ever called for them — not just
+by checking a return value. Confirmed to fail without the fix. Confirmed
+22 pre-existing failures in this file and its neighbors (`test_sage_turn_adapter.py`,
+`test_sage_chat_api.py`, `test_core_loop_no_fallback.py` — all a
+pre-existing "Rust control-plane service returned unexpected next_action"
+test-environment gap, unrelated) are identical with and without this
+change (stash-diff against clean baseline).
+
+**Live-verified against the real deployed function and real production
+data** (`ws_c4601e47c95a`, zero new state written): calling
+`_resolve_agent_cloud_provider` directly for `byok_api`/`anthropic`
+returned `SUCCESS provider='anthropic' billing_mode='byok_api'` (this
+workspace already has a real Anthropic provider profile from earlier
+session work); the *same call* for `byok_api`/`openai` returned a
+distinct, honest `RuntimeError`: *"This agent is bound to the openai
+provider (BYOK), but the required API key is not configured."* — proving
+the resolution is genuinely per-provider (not a canned/identical result),
+and proving the exact pre-fix failure mode is closed: Agent B does NOT
+silently inherit Agent A's Anthropic key or the workspace's DeepSeek
+default under an "openai" label — it fails honestly instead.
+`platform_credits` (nothing configured) still correctly resolves to the
+workspace default (`provider='deepseek'`), confirming the common path is
+unaffected live, not just in tests.
+
+`provider_catalog_service.py` (also in this task's declared scope) was
+read but not touched — nothing in the fix required changing it.
+
+**Bottom line**: §28.2/§25.3's per-agent BYOK gap is closed. Combined with
+§28.1 (Sage's own subscription setting) and §28.3 (honest failure for
+scheduled runs), all three provider-resolution gaps from the original
+2026-07-14 audit are now either fixed or precisely scoped to the specific
+out-of-scope files that block them.
+
 ---
 
 ## Appendix A: Architecture Decisions (Why It's Built This Way)
