@@ -679,12 +679,12 @@ def test_personal_channel_status_does_not_advertise_dead_generic_test(monkeypatc
     monkeypatch.setattr(
         connection_catalog_service.personal_channels_repository,
         "get_telegram_state",
-        lambda gateway_id, channel_key="telegram_personal": {"status": "disconnected"},
+        lambda gateway_id, channel_key="telegram_personal", agent_id="": {"status": "disconnected"},
     )
     monkeypatch.setattr(
         connection_catalog_service.personal_channels_repository,
         "get_whatsapp_state",
-        lambda gateway_id, channel_key="whatsapp_personal": {"status": "disconnected"},
+        lambda gateway_id, channel_key="whatsapp_personal", agent_id="": {"status": "disconnected"},
     )
 
     payload = connection_catalog_service.list_status_payload(
@@ -791,12 +791,12 @@ def test_local_bridge_health_promotes_status_to_connected(monkeypatch):
     monkeypatch.setattr(
         connection_catalog_service.personal_channels_repository,
         "get_telegram_state",
-        lambda gateway_id, channel_key="telegram_personal": None,
+        lambda gateway_id, channel_key="telegram_personal", agent_id="": None,
     )
     monkeypatch.setattr(
         connection_catalog_service.personal_channels_repository,
         "get_whatsapp_state",
-        lambda gateway_id, channel_key="whatsapp_personal": None,
+        lambda gateway_id, channel_key="whatsapp_personal", agent_id="": None,
     )
 
     payload = connection_catalog_service.list_status_payload(

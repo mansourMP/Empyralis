@@ -195,6 +195,7 @@ async def _build_unified_sage_personal_reply_async(
     push_name: Optional[str] = None,
     fallback_label: str,
     source_event_id: Optional[str] = None,
+    agent_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     """
     Route personal channel messages through the unified Sage turn adapter.
@@ -202,6 +203,10 @@ async def _build_unified_sage_personal_reply_async(
     This ensures channel-originated Sage turns use the same execution path,
     safety rules, context loading, persistence, and audit as /api/sage/chat.
     Falls back to the legacy path on any error.
+
+    agent_id: which specialist install this full-account session is bound
+    to — empty means the pre-existing behavior (run as Sage). See
+    sage_turn_adapter.execute_sage_turn_for_channel's own docstring.
     """
     from server_modules.sage_turn_adapter import execute_sage_turn_for_channel
 
@@ -224,6 +229,7 @@ async def _build_unified_sage_personal_reply_async(
             message=guarded.text,
             push_name=push_name,
             source_event_id=source_event_id,
+            agent_id=str(agent_id or "").strip(),
         )
         reply = str((result or {}).get("message") or "").strip()
         if reply:
@@ -253,6 +259,7 @@ def _build_unified_sage_personal_reply(
     push_name: Optional[str] = None,
     fallback_label: str,
     source_event_id: Optional[str] = None,
+    agent_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     import asyncio
     import threading
@@ -270,6 +277,7 @@ def _build_unified_sage_personal_reply(
                 push_name=push_name,
                 fallback_label=fallback_label,
                 source_event_id=source_event_id,
+                agent_id=agent_id,
             )
         )
 
@@ -287,6 +295,7 @@ def _build_unified_sage_personal_reply(
                     push_name=push_name,
                     fallback_label=fallback_label,
                     source_event_id=source_event_id,
+                    agent_id=agent_id,
                 )
             )
         except Exception as exc:
@@ -459,8 +468,11 @@ def build_whatsapp_personal_reply(
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
     linked_user_name: Optional[str] = None,
+    agent_id: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Build a Sage reply for a WhatsApp personal DM.
+    """Build a reply for a WhatsApp personal DM — as the specialist agent_id
+    names (see execute_sage_turn_for_channel), or as Sage when agent_id is
+    empty (pre-existing behavior).
 
     linked_user_name is accepted for future identity-context injection but
     not yet threaded into _build_unified_sage_personal_reply (same as
@@ -475,6 +487,7 @@ def build_whatsapp_personal_reply(
         push_name=push_name,
         fallback_label="WhatsApp",
         source_event_id=source_event_id,
+        agent_id=agent_id,
     )
     if unified is not None:
         return unified
@@ -498,7 +511,10 @@ def build_telegram_personal_reply(
     text: str,
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
+    agent_id: str = "",
 ) -> Optional[Dict[str, Any]]:
+    """Build a reply for a Telegram personal DM — see build_whatsapp_personal_reply's
+    docstring for the agent_id contract."""
     unified = _build_unified_sage_personal_reply(
         surface_channel="telegram_personal",
         workspace_id=workspace_id,
@@ -508,6 +524,7 @@ def build_telegram_personal_reply(
         push_name=push_name,
         fallback_label="Telegram",
         source_event_id=source_event_id,
+        agent_id=agent_id,
     )
     if unified is not None:
         return unified

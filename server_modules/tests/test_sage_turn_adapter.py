@@ -163,5 +163,102 @@ class SageTurnAdapterParityTests(unittest.TestCase):
         self.assertIn(SAGE_MODE, memory_context_log)
 
 
+class SageTurnAdapterAgentIdRoutingTests(unittest.TestCase):
+    """Item 3: a personal-channel session bound to a specialist agent must
+    run turns AS that agent, not always Sage — reusing the SAME
+    specialist_context mechanism Discord/Slack/hosted-Telegram already use
+    (specialist_runtime_context.resolve_specialist_runtime_context)."""
+
+    def _mock_sage_chat(self, **overrides):
+        base = {
+            "message": "Hello",
+            "used_context": [],
+            "tool_calls": [],
+            "available_tools": [],
+            "blocked_tools": [],
+            "approvals_required": [],
+            "memory_updates": [],
+            "trace_id": "trace-1",
+        }
+        base.update(overrides)
+        return base
+
+    def test_agent_id_resolves_and_passes_a_real_specialist_context(self):
+        fake_context = object()  # identity check is enough — we're testing plumbing, not the resolver
+        with (
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(return_value=fake_context),
+            ) as resolve_mock,
+            patch(
+                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                new=AsyncMock(return_value=self._mock_sage_chat()),
+            ) as handle_mock,
+        ):
+            _run(execute_sage_turn_for_channel(
+                workspace_id="ws-1",
+                tenant_id="tenant-1",
+                message="hello",
+                surface_channel="telegram_personal",
+                remote_jid="tg-user-1",
+                gateway_id="gw-1",
+                agent_id="ainstall_specialist_1",
+            ))
+
+        resolve_kwargs = resolve_mock.call_args.kwargs
+        self.assertEqual(resolve_kwargs["active_agent_install_id"], "ainstall_specialist_1")
+        self.assertEqual(resolve_kwargs["workspace_id"], "ws-1")
+        self.assertEqual(resolve_kwargs["tenant_id"], "tenant-1")
+        self.assertIs(handle_mock.call_args.kwargs["specialist_context"], fake_context)
+
+    def test_empty_agent_id_stays_sage_exactly_as_before(self):
+        """The pre-existing, still-default behavior: no agent_id means no
+        resolver call at all and specialist_context=None reaches
+        handle_sage_chat — byte-for-byte the old behavior."""
+        with (
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(side_effect=AssertionError("must not be called when agent_id is empty")),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                new=AsyncMock(return_value=self._mock_sage_chat()),
+            ) as handle_mock,
+        ):
+            _run(execute_sage_turn_for_channel(
+                workspace_id="ws-1",
+                message="hello",
+                surface_channel="whatsapp_personal",
+                remote_jid="123",
+            ))
+
+        self.assertIsNone(handle_mock.call_args.kwargs["specialist_context"])
+
+    def test_resolver_failure_fails_safe_to_sage_not_an_exception(self):
+        """A specialist lookup that throws must never take the turn down
+        with it — the pre-existing Sage behavior is always the safe
+        fallback."""
+        with (
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(side_effect=RuntimeError("registry unavailable")),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                new=AsyncMock(return_value=self._mock_sage_chat()),
+            ) as handle_mock,
+        ):
+            result = _run(execute_sage_turn_for_channel(
+                workspace_id="ws-1",
+                message="hello",
+                surface_channel="telegram_personal",
+                remote_jid="123",
+                agent_id="ainstall_broken",
+            ))
+
+        self.assertIsNone(handle_mock.call_args.kwargs["specialist_context"])
+        self.assertEqual(result["message"], "Hello")
+
+
 if __name__ == "__main__":
     unittest.main()

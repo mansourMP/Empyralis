@@ -191,6 +191,7 @@ async def get_whatsapp_personal_gateway_status(
     request: Request,
     gateway_id: str,
     current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
 ):
     channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
     registration = _require_accessible_gateway_registration(
@@ -198,7 +199,7 @@ async def get_whatsapp_personal_gateway_status(
         current_user,
         minimum_role="viewer",
     )
-    return personal_channels_service.get_whatsapp_gateway_view(gateway_id)
+    return personal_channels_service.get_whatsapp_gateway_view(gateway_id, agent_id=str(agent_id or "").strip())
 
 
 @router.post("/personal-channels/whatsapp/gateways/{gateway_id}/setup")
@@ -207,6 +208,7 @@ async def configure_whatsapp_personal_gateway(
     gateway_id: str,
     body: WhatsAppPersonalSetupRequest,
     current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
 ):
     channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
     registration = _require_accessible_gateway_registration(
@@ -220,6 +222,7 @@ async def configure_whatsapp_personal_gateway(
             registration=registration,
             phone_number=body.phone_number,
             custom_pairing_code=body.custom_pairing_code,
+            agent_id=str(agent_id or "").strip(),
         )
         _emit_personal_channel_audit(
             action="personal_channel.whatsapp.configure",
@@ -280,6 +283,7 @@ async def disconnect_whatsapp_personal_gateway(
     request: Request,
     gateway_id: str,
     current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
 ):
     """Full reset — see disconnect_telegram_personal_gateway()'s doc comment
     and WhatsAppPersonalRuntime.handleDisconnect() for why this exists."""
@@ -293,6 +297,7 @@ async def disconnect_whatsapp_personal_gateway(
         result = await personal_channels_service.disconnect_whatsapp_personal_gateway(
             gateway_id=gateway_id,
             registration=registration,
+            agent_id=str(agent_id or "").strip(),
         )
         _emit_personal_channel_audit(
             action="personal_channel.whatsapp.disconnect",
@@ -327,6 +332,7 @@ async def send_whatsapp_personal_message(
     gateway_id: str,
     body: PersonalOutboundRequest,
     current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
 ):
     channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
     registration = _require_accessible_gateway_registration(
@@ -342,6 +348,7 @@ async def send_whatsapp_personal_message(
             text=body.text,
             idempotency_key=body.idempotency_key,
             reply_to_external_message_id=body.reply_to_external_message_id,
+            agent_id=str(agent_id or "").strip(),
         )
         _emit_personal_channel_audit(
             action="personal_channel.whatsapp.send",
@@ -408,6 +415,7 @@ async def get_telegram_personal_gateway_status(
     request: Request,
     gateway_id: str,
     current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
 ):
     channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
     registration = _require_accessible_gateway_registration(
@@ -415,7 +423,7 @@ async def get_telegram_personal_gateway_status(
         current_user,
         minimum_role="viewer",
     )
-    return personal_channels_service.get_telegram_gateway_view(gateway_id)
+    return personal_channels_service.get_telegram_gateway_view(gateway_id, agent_id=str(agent_id or "").strip())
 
 
 @router.post("/personal-channels/telegram/gateways/{gateway_id}/setup")
@@ -424,6 +432,7 @@ async def configure_telegram_personal_gateway(
     gateway_id: str,
     body: TelegramPersonalSetupRequest,
     current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
 ):
     channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
     registration = _require_accessible_gateway_registration(
@@ -440,6 +449,7 @@ async def configure_telegram_personal_gateway(
             phone_number=body.phone_number,
             login_code=body.login_code,
             password=body.password,
+            agent_id=str(agent_id or "").strip(),
         )
         _emit_personal_channel_audit(
             action="personal_channel.telegram.configure",
@@ -509,6 +519,7 @@ async def disconnect_telegram_personal_gateway(
     request: Request,
     gateway_id: str,
     current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
 ):
     """Full reset: tears down any live/stuck Telegram session and clears
     every persisted trace of the previous attempt (session, pending login,
@@ -526,6 +537,7 @@ async def disconnect_telegram_personal_gateway(
         result = await personal_channels_service.disconnect_telegram_personal_gateway(
             gateway_id=gateway_id,
             registration=registration,
+            agent_id=str(agent_id or "").strip(),
         )
         _emit_personal_channel_audit(
             action="personal_channel.telegram.disconnect",
@@ -560,6 +572,7 @@ async def send_telegram_personal_message(
     gateway_id: str,
     body: PersonalOutboundRequest,
     current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
 ):
     channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
     registration = _require_accessible_gateway_registration(
@@ -575,6 +588,7 @@ async def send_telegram_personal_message(
             text=body.text,
             idempotency_key=body.idempotency_key,
             reply_to_external_message_id=body.reply_to_external_message_id,
+            agent_id=str(agent_id or "").strip(),
         )
         _emit_personal_channel_audit(
             action="personal_channel.telegram.send",

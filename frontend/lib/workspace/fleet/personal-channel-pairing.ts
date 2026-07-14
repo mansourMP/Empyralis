@@ -82,6 +82,17 @@ function channelPath(channelKey: PersonalChannelKey): "telegram" | "whatsapp" {
   return channelKey === "telegram_personal" ? "telegram" : "whatsapp";
 }
 
+// Every call below accepts an optional agentId, appended as ?agent_id=... —
+// which agent this full-account session belongs to. Omitted = the
+// pre-existing legacy/unscoped behavior (routes_personal_channels.py
+// defaults an absent agent_id the same way). Sage's own Connect tab still
+// calls these without one; a Fleet specialist's ChannelsTab always passes
+// its own agentId — see PersonalChannelConnectPanel.tsx.
+function withAgentId(path: string, agentId?: string | null): string {
+  const trimmed = (agentId || "").trim();
+  return trimmed ? `${path}?agent_id=${encodeURIComponent(trimmed)}` : path;
+}
+
 async function parseJsonResponse(res: Response): Promise<any> {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -102,6 +113,7 @@ export function usePersonalChannelStatus(
   workspaceId: string,
   channelKey: PersonalChannelKey,
   gatewayId: string | null,
+  agentId?: string | null,
 ) {
   const [view, setView] = useState<PersonalChannelView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -115,7 +127,7 @@ export function usePersonalChannelStatus(
     }
     try {
       const res = await fetch(
-        `/api/personal-channels/${channelPath(channelKey)}/gateways/${encodeURIComponent(gatewayId)}`,
+        withAgentId(`/api/personal-channels/${channelPath(channelKey)}/gateways/${encodeURIComponent(gatewayId)}`, agentId),
         { credentials: "include" },
       );
       const data = await parseJsonResponse(res);
@@ -128,7 +140,7 @@ export function usePersonalChannelStatus(
     } finally {
       setLoading(false);
     }
-  }, [workspaceId, channelKey, gatewayId]);
+  }, [workspaceId, channelKey, gatewayId, agentId]);
 
   useEffect(() => {
     setLoading(true);
@@ -156,26 +168,34 @@ export function usePersonalChannelStatus(
 export async function setupTelegramPersonalChannel(
   gatewayId: string,
   body: { phone_number?: string; login_code?: string; password?: string },
+  agentId?: string | null,
 ): Promise<PersonalChannelView> {
-  const res = await fetch(`/api/personal-channels/telegram/gateways/${encodeURIComponent(gatewayId)}/setup`, {
-    method: "POST",
-    credentials: "include",
-    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
-  });
+  const res = await fetch(
+    withAgentId(`/api/personal-channels/telegram/gateways/${encodeURIComponent(gatewayId)}/setup`, agentId),
+    {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    },
+  );
   return parseJsonResponse(res);
 }
 
 export async function setupWhatsAppPersonalChannel(
   gatewayId: string,
   body: { phone_number?: string },
+  agentId?: string | null,
 ): Promise<PersonalChannelView> {
-  const res = await fetch(`/api/personal-channels/whatsapp/gateways/${encodeURIComponent(gatewayId)}/setup`, {
-    method: "POST",
-    credentials: "include",
-    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
-  });
+  const res = await fetch(
+    withAgentId(`/api/personal-channels/whatsapp/gateways/${encodeURIComponent(gatewayId)}/setup`, agentId),
+    {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    },
+  );
   return parseJsonResponse(res);
 }
 
@@ -245,9 +265,13 @@ export function useGatewayPersonalChannelSurfaces(gatewayId: string | null) {
 export async function disconnectPersonalChannel(
   channelKey: PersonalChannelKey,
   gatewayId: string,
+  agentId?: string | null,
 ): Promise<{ gateway_id: string; channel_key: string; status: string }> {
   const res = await fetch(
-    `/api/personal-channels/${channelPath(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/disconnect`,
+    withAgentId(
+      `/api/personal-channels/${channelPath(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/disconnect`,
+      agentId,
+    ),
     {
       method: "POST",
       credentials: "include",

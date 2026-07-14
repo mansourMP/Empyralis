@@ -1248,11 +1248,14 @@ def _connector_aliases(item: Dict[str, Any]) -> set[str]:
     return aliases
 
 
-def _personal_channel_state(connection_id: str, gateway_id: str) -> Optional[Dict[str, Any]]:
+def _personal_channel_state(connection_id: str, gateway_id: str, agent_id: str = "") -> Optional[Dict[str, Any]]:
+    """agent_id empty = the pre-existing (legacy-scoped) read; a real agent_id
+    reads THAT agent's own paired session specifically — see
+    personal_channels_repository's agent-scoped schema."""
     if connection_id == "telegram_personal":
-        return personal_channels_repository.get_telegram_state(gateway_id, channel_key="telegram_personal")
+        return personal_channels_repository.get_telegram_state(gateway_id, channel_key="telegram_personal", agent_id=agent_id)
     if connection_id == "whatsapp_personal":
-        return personal_channels_repository.get_whatsapp_state(gateway_id, channel_key="whatsapp_personal")
+        return personal_channels_repository.get_whatsapp_state(gateway_id, channel_key="whatsapp_personal", agent_id=agent_id)
     return None
 
 
@@ -1365,7 +1368,9 @@ def status_items(
     user_id: Optional[str] = None,
     surface: Optional[str] = None,
     selected_gateway_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> list[Dict[str, Any]]:
+    resolved_agent_id = str(agent_id or "").strip()
     selected_gateway_result = _selected_gateway(
         workspace_id=workspace_id,
         tenant_id=tenant_id,
@@ -1406,7 +1411,7 @@ def status_items(
             configured = bool(selected_gateway_id_value)
             health_status = "gateway_missing" if not selected_gateway_id_value or selected_gateway_missing else "not_configured"
             if selected_gateway_id_value and not selected_gateway_missing:
-                state = _personal_channel_state(item_id, selected_gateway_id_value)
+                state = _personal_channel_state(item_id, selected_gateway_id_value, resolved_agent_id)
                 if state is None:
                     state = _selected_gateway_local_bridge_state(item_id, selected_gateway)
                 state_status = _token((state or {}).get("status"))
@@ -1424,6 +1429,14 @@ def status_items(
             # First-party bot pairing (e.g. hosted Telegram) — check in-memory
             # pairing state rather than vault entries.
             if not connected and item.get("setup_kind") == "first_party_bot_pairing":
+                # Two independent doors under one tile (see
+                # PersonalChannelConnectPanel.tsx's byo_bot vs full_account):
+                # the hosted bot (workspace-wide, no agent concept — a real,
+                # separate gap, not fixed here) OR this agent's own paired
+                # full-account session. Show connected if EITHER is true —
+                # don't let the hosted-bot's workspace-wide truth hide a
+                # real per-agent full-account connection, which is what a
+                # bare is_workspace_paired() check used to do.
                 try:
                     from server_modules.sage_telegram_hosted_service import is_workspace_paired
                     if is_workspace_paired(workspace_id):
@@ -1432,6 +1445,14 @@ def status_items(
                         health_status = "healthy"
                 except Exception:
                     pass
+                if not connected and selected_gateway_id_value and not selected_gateway_missing:
+                    full_account_state = _personal_channel_state(
+                        "telegram_personal", selected_gateway_id_value, resolved_agent_id,
+                    )
+                    if _token((full_account_state or {}).get("status")) == "connected":
+                        connected = True
+                        configured = True
+                        health_status = "healthy"
             if not connected and _oauth_setup_unconfigured(item):
                 effective_item["setup_available"] = False
                 health_status = "setup_missing"
@@ -1507,13 +1528,17 @@ async def agent_status_items(
         raise ValueError("agent_id is required for agent-scoped connection status.")
     resolved_tenant = str(tenant_id or "").strip() or "default"
 
-    # Base items carry the catalog + gateway/display state (workspace view).
+    # Base items carry the catalog + gateway/display state (workspace view) —
+    # agent_id threaded through so the LANE_SAGE_PERSONAL_CHANNEL branch
+    # (telegram_personal/whatsapp_personal) reads THIS agent's own paired
+    # session, not whichever agent happens to have the legacy-scoped row.
     base = status_items(
         workspace_id=workspace_id,
         tenant_id=tenant_id,
         user_id=user_id,
         surface=surface,
         selected_gateway_id=selected_gateway_id,
+        agent_id=resolved_agent,
     )
 
     # Every vault credential that actually exists in the workspace, by id —

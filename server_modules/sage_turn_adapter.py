@@ -288,14 +288,39 @@ async def execute_sage_turn_for_channel(
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
     current_user: Optional[dict] = None,
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     """
     Channel-originated Sage turn (used by Path B: gateway personal channels).
 
     Maps gateway channel metadata to the unified execute_sage_turn() call.
     Returns a channel-compatible result dict.
+
+    agent_id: the specialist install this personal-channel session is bound
+    to (empty = the pre-existing behavior, run as Sage). Reuses the SAME
+    specialist_context resolution every other channel (Discord/Slack/hosted
+    Telegram) already runs turns through — see
+    specialist_runtime_context.resolve_specialist_runtime_context's own
+    docstring for the two guarantees this carries: the turn's memory scope
+    becomes the specialist's own install id, and it never receives
+    fleet_tools/operator powers. Resolution failures fail safe to Sage
+    (unchanged pre-existing behavior), never to an error.
     """
     normalized_channel = _coerce_text(surface_channel)
+    normalized_agent_id = _coerce_text(agent_id)
+
+    specialist_context = None
+    if normalized_agent_id:
+        from server_modules.specialist_runtime_context import resolve_specialist_runtime_context
+
+        try:
+            specialist_context = await resolve_specialist_runtime_context(
+                workspace_id=workspace_id,
+                tenant_id=tenant_id or "default",
+                active_agent_install_id=normalized_agent_id,
+            )
+        except Exception:
+            specialist_context = None  # fail safe to Sage, exactly like the resolver's own None cases
 
     sage_result = await execute_sage_turn(
         workspace_id=workspace_id,
@@ -307,6 +332,7 @@ async def execute_sage_turn_for_channel(
         channel_origin=normalized_channel,
         channel_sender_id=_coerce_text(remote_jid),
         channel_sender_name=_coerce_text(push_name),
+        specialist_context=specialist_context,
     )
 
     return sage_result.as_dict()

@@ -43,17 +43,25 @@ function maskedIdentity(state: { linked_phone?: string | null; linked_username?:
  *     at Hardware setup instead of a generic "pair a computer" panel, since
  *     pairing a NEW computer here wouldn't make it THIS agent's gateway.
  *   - a gateway id          -> pair/poll status against exactly that gateway.
+ *
+ * `agentId` (a DIFFERENT id — the agent install, not its gateway) is passed
+ * alongside a real `agentGatewayId` so the paired session is tagged as THIS
+ * agent's, not a legacy/unscoped one another agent sharing the same box
+ * could also read. Omitted for Sage's own (still workspace-wide) usage,
+ * matching `agentGatewayId`'s own omitted case.
  */
 export function PersonalChannelConnectPanel({
   workspaceId,
   channelKey,
   label,
   agentGatewayId,
+  agentId,
 }: {
   workspaceId: string;
   channelKey: PersonalChannelKey;
   label: string;
   agentGatewayId?: string | null;
+  agentId?: string | null;
 }) {
   const scoped = agentGatewayId !== undefined;
   // Fetched unconditionally either way (hooks can't be conditional); when
@@ -71,7 +79,7 @@ export function PersonalChannelConnectPanel({
     setGatewayId(first ? String(first.gateway_id || "") || null : null);
   }, [scoped, agentGatewayId, gateways, gatewayId]);
 
-  const { view, loading: statusLoading, refresh } = usePersonalChannelStatus(workspaceId, channelKey, gatewayId);
+  const { view, loading: statusLoading, refresh } = usePersonalChannelStatus(workspaceId, channelKey, gatewayId, agentId);
 
   if (scoped && !gatewayId) {
     return (
@@ -118,6 +126,7 @@ export function PersonalChannelConnectPanel({
           status={status}
           view={view}
           onRefresh={refresh}
+          agentId={agentId}
         />
       ) : (
         <WhatsAppConnectBody
@@ -126,6 +135,7 @@ export function PersonalChannelConnectPanel({
           status={status}
           view={view}
           onRefresh={refresh}
+          agentId={agentId}
         />
       )}
     </div>
@@ -135,10 +145,12 @@ export function PersonalChannelConnectPanel({
 function DisconnectControl({
   channelKey,
   gatewayId,
+  agentId,
   onDone,
 }: {
   channelKey: PersonalChannelKey;
   gatewayId: string;
+  agentId?: string | null;
   onDone: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -148,14 +160,14 @@ function DisconnectControl({
     setBusy(true);
     setError(null);
     try {
-      await disconnectPersonalChannel(channelKey, gatewayId);
+      await disconnectPersonalChannel(channelKey, gatewayId, agentId);
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not disconnect.");
     } finally {
       setBusy(false);
     }
-  }, [channelKey, gatewayId, onDone]);
+  }, [channelKey, gatewayId, agentId, onDone]);
 
   return (
     <div className="pc-connect-disconnect">
@@ -174,12 +186,14 @@ function TelegramConnectBody({
   status,
   view,
   onRefresh,
+  agentId,
 }: {
   label: string;
   gatewayId: string;
   status: string;
   view: ReturnType<typeof usePersonalChannelStatus>["view"];
   onRefresh: () => void;
+  agentId?: string | null;
 }) {
   const [phoneNumber, setPhoneNumber] = useState("");
   const [code, setCode] = useState("");
@@ -195,14 +209,14 @@ function TelegramConnectBody({
     setBusy(true);
     setError(null);
     try {
-      await setupTelegramPersonalChannel(gatewayId, { phone_number: phoneNumber.trim() });
+      await setupTelegramPersonalChannel(gatewayId, { phone_number: phoneNumber.trim() }, agentId);
       onRefresh();
     } catch (e) {
       setError(friendlyPersonalChannelError(e instanceof Error ? e.message : String(e), label));
     } finally {
       setBusy(false);
     }
-  }, [gatewayId, phoneNumber, label, onRefresh]);
+  }, [gatewayId, phoneNumber, label, onRefresh, agentId]);
 
   const submitCode = useCallback(async () => {
     if (!code.trim()) {
@@ -212,7 +226,7 @@ function TelegramConnectBody({
     setBusy(true);
     setError(null);
     try {
-      await setupTelegramPersonalChannel(gatewayId, { login_code: code.trim() });
+      await setupTelegramPersonalChannel(gatewayId, { login_code: code.trim() }, agentId);
       setCode("");
       onRefresh();
     } catch (e) {
@@ -220,7 +234,7 @@ function TelegramConnectBody({
     } finally {
       setBusy(false);
     }
-  }, [gatewayId, code, label, onRefresh]);
+  }, [gatewayId, code, label, onRefresh, agentId]);
 
   const submitPassword = useCallback(async () => {
     if (!password.trim()) {
@@ -230,7 +244,7 @@ function TelegramConnectBody({
     setBusy(true);
     setError(null);
     try {
-      await setupTelegramPersonalChannel(gatewayId, { password: password.trim() });
+      await setupTelegramPersonalChannel(gatewayId, { password: password.trim() }, agentId);
       setPassword("");
       onRefresh();
     } catch (e) {
@@ -238,7 +252,7 @@ function TelegramConnectBody({
     } finally {
       setBusy(false);
     }
-  }, [gatewayId, password, label, onRefresh]);
+  }, [gatewayId, password, label, onRefresh, agentId]);
 
   if (status === "connected") {
     return (
@@ -246,7 +260,7 @@ function TelegramConnectBody({
         <div className="fleet-channel-expand-success">
           <Check size={16} strokeWidth={2} /> Connected as {maskedIdentity(view?.state)}
         </div>
-        <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} onDone={onRefresh} />
+        <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
       </div>
     );
   }
@@ -266,7 +280,7 @@ function TelegramConnectBody({
           {busy ? "Verifying…" : "Verify code"}
         </button>
         {error && <p className="fleet-channel-expand-error">{error}</p>}
-        <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} onDone={onRefresh} />
+        <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
       </div>
     );
   }
@@ -284,7 +298,7 @@ function TelegramConnectBody({
           {busy ? "Verifying…" : "Verify password"}
         </button>
         {error && <p className="fleet-channel-expand-error">{error}</p>}
-        <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} onDone={onRefresh} />
+        <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
       </div>
     );
   }
@@ -321,12 +335,14 @@ function WhatsAppConnectBody({
   status,
   view,
   onRefresh,
+  agentId,
 }: {
   label: string;
   gatewayId: string;
   status: string;
   view: ReturnType<typeof usePersonalChannelStatus>["view"];
   onRefresh: () => void;
+  agentId?: string | null;
 }) {
   const [usePhone, setUsePhone] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -343,14 +359,14 @@ function WhatsAppConnectBody({
     setBusy(true);
     setError(null);
     try {
-      await setupWhatsAppPersonalChannel(gatewayId, {});
+      await setupWhatsAppPersonalChannel(gatewayId, {}, agentId);
       onRefresh();
     } catch (e) {
       setError(friendlyPersonalChannelError(e instanceof Error ? e.message : String(e), label));
     } finally {
       setBusy(false);
     }
-  }, [gatewayId, label, onRefresh]);
+  }, [gatewayId, label, onRefresh, agentId]);
 
   // The gap this closes: after disconnect(), the runtime sits in idle
   // forever -- previously a QR only ever appeared because the whole Gateway
@@ -393,14 +409,14 @@ function WhatsAppConnectBody({
     setBusy(true);
     setError(null);
     try {
-      await setupWhatsAppPersonalChannel(gatewayId, { phone_number: phoneNumber.trim() });
+      await setupWhatsAppPersonalChannel(gatewayId, { phone_number: phoneNumber.trim() }, agentId);
       onRefresh();
     } catch (e) {
       setError(friendlyPersonalChannelError(e instanceof Error ? e.message : String(e), label));
     } finally {
       setBusy(false);
     }
-  }, [gatewayId, phoneNumber, label, onRefresh]);
+  }, [gatewayId, phoneNumber, label, onRefresh, agentId]);
 
   if (status === "connected") {
     return (
@@ -408,7 +424,7 @@ function WhatsAppConnectBody({
         <div className="fleet-channel-expand-success">
           <Check size={16} strokeWidth={2} /> Connected as {maskedIdentity(view?.state)}
         </div>
-        <DisconnectControl channelKey="whatsapp_personal" gatewayId={gatewayId} onDone={onRefresh} />
+        <DisconnectControl channelKey="whatsapp_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
       </div>
     );
   }
@@ -418,7 +434,7 @@ function WhatsAppConnectBody({
       <div className="pc-connect-step">
         <p className="fleet-channel-expand-hint">Open WhatsApp on your phone → Linked Devices → Link with phone number, then enter:</p>
         <div className="pc-connect-pairing-code">{view.state.metadata.pairing_code}</div>
-        <DisconnectControl channelKey="whatsapp_personal" gatewayId={gatewayId} onDone={onRefresh} />
+        <DisconnectControl channelKey="whatsapp_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
       </div>
     );
   }
