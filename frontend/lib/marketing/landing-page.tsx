@@ -194,15 +194,14 @@ function Capabilities() {
               <p className="landing-capability-group__body">{group.body}</p>
               <div className="landing-logo-row">
                 {group.logos.map((logo) => (
-                  <img
-                    key={logo.name}
-                    src={logo.src}
-                    alt={logo.name}
-                    width={24}
-                    height={24}
-                    className="landing-logo-row__logo"
-                    loading="lazy"
-                  />
+                  <span key={logo.name} className="landing-logo-row__item">
+                    <img
+                      src={logo.src}
+                      alt={logo.name}
+                      className="landing-logo-row__logo"
+                      loading="lazy"
+                    />
+                  </span>
                 ))}
               </div>
             </div>

@@ -289,29 +289,43 @@
   color: var(--app-text-secondary);
 }
 
+/* space-between (not a fixed gap) so a 7-logo row and a 6-logo row both
+   span the full column width instead of one trailing off short. */
 .landing-logo-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--app-space-4);
+  justify-content: space-between;
+  gap: var(--app-space-3) var(--app-space-4);
   margin-top: var(--app-space-2);
 }
 
-/* Desaturated + slightly dimmed by default so seven-plus brand marks don't
-   read as a wall of color against the rest of the page — restored to full
-   color on hover as a small, low-cost reward for looking closer. */
+/* Fixed, centered bounding box per logo — raw brand SVGs carry wildly
+   different internal padding (a tight glyph like the X mark vs. a
+   full-bleed circle like Slack's), so sizing the <img> alone left some
+   logos reading visibly bigger than others at the same width/height. */
+.landing-logo-row__item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+
 .landing-logo-row__logo {
-  width: 24px;
-  height: 24px;
+  max-width: 24px;
+  max-height: 24px;
+  width: auto;
+  height: auto;
   object-fit: contain;
-  filter: grayscale(1);
-  opacity: 0.72;
-  transition: opacity var(--app-motion-fast) ease-out, filter var(--app-motion-fast) ease-out;
+  opacity: 0.88;
+  transition: opacity var(--app-motion-fast) ease-out, transform var(--app-motion-fast) ease-out;
 }
 
 .landing-logo-row__logo:hover {
-  filter: grayscale(0);
   opacity: 1;
+  transform: translateY(-1px);
 }
 
 /* ── Why now ─────────────────────────────────────────────────────────── */
