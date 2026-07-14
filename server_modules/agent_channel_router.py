@@ -68,43 +68,56 @@ LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
 
 # ── Stage 4B: multi-agent channel binding resolution ─────────────────────
 
-def _resolve_agent_for_inbound(
+async def _resolve_agent_for_inbound(
+    *,
     channel_type: str,
-    bot_identifier: str,
+    endpoint_key: str,
+    tenant_id: str,
     workspace_id: str,
-    agent_installs: list | None = None,
-    sage_agent_id: str = "",
 ) -> str:
-    """Resolve which agent handles an inbound channel message.
+    """Resolve which agent owns an inbound channel message.
 
-    Matches channel_type + bot_identifier against each agent's
-    channel_bindings (jsonb array on workspace_agent_installs).
+    Matches channel_type + endpoint_key against each agent's real,
+    persisted channel binding (the ``agent_channel_bindings`` table via
+    agent_bindings_repository) — the same table Discord's BYO bot binding
+    already writes and validates against
+    (discord_bot_provisioning_service.assign_agent_discord). Replaces an
+    earlier (Stage 4B) design that matched against a ``channel_bindings``
+    JSONB column on workspace_agent_installs — confirmed via a full-
+    codebase grep to have zero writers anywhere for the shape it expected
+    (`{channel_type, bot_token_hash}`), so it could never actually match a
+    real agent no matter what called it.
 
     Returns:
-        agent_install_id if matched, sage_agent_id if unmatched,
-        or "" if no Sage fallback is available.
-
-    One router — no per-channel forks. Unmatched always falls back
-    to Sage, never to another specialist.
+        agent_install_id if a matching, enabled binding exists, else "".
+        "" means: fall through to Sage, exactly like the pre-existing
+        no-match behavior — one router, no per-channel forks, unmatched
+        never falls back to another specialist.
     """
-    if agent_installs is None:
-        agent_installs = []
+    channel_type = str(channel_type or "").strip().lower()
+    endpoint_key = str(endpoint_key or "").strip()
+    if not channel_type or not endpoint_key:
+        return ""
 
-    for install in agent_installs:
-        bindings = install.get("channel_bindings") or []
-        if not isinstance(bindings, list):
+    from server_modules import agent_bindings_repository as bindings
+
+    try:
+        rows = await bindings.list_workspace_channel_bindings(
+            tenant_id=str(tenant_id or "default").strip() or "default",
+            workspace_id=str(workspace_id or "").strip(),
+            enabled_only=True,
+        )
+    except Exception:
+        return ""  # fail safe to Sage, never block the turn on a lookup error
+
+    for row in rows:
+        if str(row.get("key") or "").strip().lower() != channel_type:
             continue
-        for binding in bindings:
-            if not isinstance(binding, dict):
-                continue
-            if (
-                str(binding.get("channel_type") or "").strip() == channel_type
-                and str(binding.get("bot_token_hash") or "").strip() == bot_identifier
-            ):
-                return str(install.get("id") or "").strip()
+        binding = row.get("binding") if isinstance(row.get("binding"), dict) else {}
+        if str(binding.get("endpoint_key") or "").strip().lower() == endpoint_key.lower():
+            return str(row.get("agent_install_id") or "").strip()
 
-    # No match — fall back to Sage
-    return str(sage_agent_id or "").strip()
+    return ""
 
 
 def _enforce_personal_gateway_config_decision(
@@ -2274,28 +2287,47 @@ async def route_inbound_channel_message(
     other channel.  Remaining channels return ``channel_unavailable``
     until their specialist routing is built.
 
-    Stage 4B: when agent_installs is provided, resolves the target agent
-    via channel_bindings before falling back to Sage.
+    Stage 4B: resolves the target agent via its real, persisted channel
+    binding (endpoint_key) before falling back to Sage. `agent_installs`/
+    `sage_agent_id` are accepted for backward compatibility but unused —
+    no real caller ever passed them (confirmed by grep), and the earlier
+    resolution they fed had zero writers for the shape it matched on, so
+    it could never have worked regardless.
     """
     resolved_workspace_id = str(workspace_id or "").strip()
     resolved_channel_key = str(channel_key or "").strip().lower()
 
-    # ── Stage 4B: resolve agent via channel bindings ──────────────────
+    # ── Stage 4B: resolve agent via its real, persisted channel binding ──
     resolved_agent_id = ""
-    if agent_installs and actor_id:
-        resolved_agent_id = _resolve_agent_for_inbound(
+    specialist_context = None
+    if endpoint_key:
+        resolved_agent_id = await _resolve_agent_for_inbound(
             channel_type=resolved_channel_key,
-            bot_identifier=str(actor_id or "").strip(),
+            endpoint_key=str(endpoint_key or "").strip(),
+            tenant_id=tenant_id or "default",
             workspace_id=resolved_workspace_id,
-            agent_installs=agent_installs,
-            sage_agent_id=sage_agent_id,
         )
-        if resolved_agent_id and resolved_agent_id != sage_agent_id:
-            # A specialist agent matched — log the routing decision.
-            # Currently all execution still goes through execute_sage_turn;
-            # specialist dispatch will be added when per-agent run loops
-            # are built (Stage 5).
-            pass
+        if resolved_agent_id:
+            # A specialist agent matched its own channel binding (e.g. a
+            # bound Slack/Discord bot) -- resolve its runtime identity so
+            # the turn below actually runs AS that agent (its persona,
+            # model/provider binding, memory namespace), not as Sage with
+            # the reply merely attributed to it. Same resolution every
+            # other channel funnels through -- see
+            # specialist_runtime_context.resolve_specialist_runtime_context's
+            # docstring for the two guarantees this carries. Resolution
+            # failures fail safe to Sage (unchanged pre-existing behavior),
+            # never to an error.
+            try:
+                from server_modules.specialist_runtime_context import resolve_specialist_runtime_context
+
+                specialist_context = await resolve_specialist_runtime_context(
+                    workspace_id=resolved_workspace_id,
+                    tenant_id=tenant_id or "default",
+                    active_agent_install_id=resolved_agent_id,
+                )
+            except Exception:
+                specialist_context = None
 
     # ── Sage-routed channels ───────────────────────────────────────────
     channel_origin = _SAGE_CHANNEL_ORIGIN_MAP.get(resolved_channel_key)
@@ -2329,6 +2361,7 @@ async def route_inbound_channel_message(
                 channel_sender_id=str(actor_id or ""),
                 channel_sender_name=str(actor_display_name or ""),
                 request_id=message_id or run_id,
+                specialist_context=specialist_context,
             )
 
             reply_text = str(sage_result.message or "")

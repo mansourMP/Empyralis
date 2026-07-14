@@ -971,6 +971,77 @@ async def fleet_release_agent_discord(
         return {"ok": False, "error": str(exc)}
 
 
+class FleetSlackChannelBindRequest(BaseModel):
+    slack_channel_id: str = Field(..., description="The Slack channel id (e.g. C0123ABC456) this agent owns.")
+
+
+@router.post("/api/w/{workspace_id}/fleet/agent-channels/slack")
+async def fleet_assign_agent_slack(
+    request: Request,
+    workspace_id: str,
+    body: FleetSlackChannelBindRequest,
+    agent_id: str = Query(..., description="Agent install ID"),
+) -> Dict[str, Any]:
+    """Bind this agent to one Slack channel within the workspace's already-
+    connected Slack app. Slack's OAuth connection is workspace-wide (one
+    app install can serve many agents, unlike Discord's dedicated-bot-per-
+    agent model), so per-agent ownership here is per-CHANNEL: inbound
+    messages in that channel route to THIS agent instead of Sage
+    (agent_channel_router._resolve_agent_for_inbound matches on this exact
+    endpoint_key).
+
+    NOTE: unlike Discord/Telegram, this channel_key ("slack") is not yet
+    in uq_agent_channel_bindings_inbound_owner_v2's covered list
+    (control_plane_repository.py) -- two agents in the same workspace
+    could both claim the same Slack channel today with no DB-level
+    rejection, only last-write-wins. is_inbound_owner is still set to
+    match the existing convention so enabling that guarantee later is a
+    pure index change, not a data migration. Out of scope here (that
+    file is shared, high-blast-radius schema/migration code)."""
+    from server_modules import agent_bindings_repository as bindings
+
+    channel_id = str(body.slack_channel_id or "").strip()
+    if not channel_id:
+        return {"ok": False, "error": "slack_channel_id is required."}
+
+    tenant_id = await _resolve_tenant(workspace_id)
+    try:
+        result = await bindings.upsert_channel_binding(
+            tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_id,
+            channel_key="slack", enabled=True,
+            binding={
+                "endpoint_key": channel_id,
+                "is_inbound_owner": True,
+                "source": "fleet_agent_channels",
+            },
+        )
+        if result is None:
+            return {"ok": False, "error": "Channel binding could not be saved."}
+        return {"ok": True, "channel": {"channel_key": "slack", "endpoint_key": channel_id}}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/agent-channels/slack")
+async def fleet_release_agent_slack(
+    request: Request,
+    workspace_id: str,
+    agent_id: str = Query(..., description="Agent install ID"),
+) -> Dict[str, Any]:
+    """Release this agent's Slack channel binding."""
+    from server_modules import agent_bindings_repository as bindings
+
+    tenant_id = await _resolve_tenant(workspace_id)
+    try:
+        deleted = await bindings.delete_channel_binding(
+            tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_id,
+            channel_key="slack",
+        )
+        return {"ok": True, "deleted": bool(deleted)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/api/w/{workspace_id}/fleet/agent-tools")
 async def fleet_agent_tools(
     request: Request,

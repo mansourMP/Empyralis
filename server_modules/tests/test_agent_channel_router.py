@@ -230,6 +230,177 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "channel_unavailable")
         self.assertIn("whatsapp_business", result["error"])
 
+    # ── Stage 4B: per-agent channel binding resolution ──────────────────
+    #
+    # agent_channel_router.py:2251-2298 used to resolve a specialist via
+    # _resolve_agent_for_inbound and then discard the result with a literal
+    # `pass` — every Slack/Discord-guild message answered as Sage no matter
+    # what was bound. That resolver also read a channel_bindings JSONB
+    # column with zero writers anywhere in the codebase, so even with the
+    # `pass` fixed nothing could ever have matched. These tests cover the
+    # real, rewired path: _resolve_agent_for_inbound now queries the same
+    # agent_channel_bindings table Discord's BYO bot binding already writes
+    # and validates against.
+
+    def _binding_row(self, *, agent_install_id: str, channel_key: str, endpoint_key: str):
+        return {
+            "id": "achbind_1",
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+            "agent_install_id": agent_install_id,
+            "key": channel_key,
+            "enabled": True,
+            "binding": {"endpoint_key": endpoint_key, "is_inbound_owner": True},
+        }
+
+    async def test_resolve_agent_for_inbound_matches_channel_key_and_endpoint(self):
+        with patch(
+            "server_modules.agent_bindings_repository.list_workspace_channel_bindings",
+            new=AsyncMock(return_value=[
+                self._binding_row(agent_install_id="agent-slack-1", channel_key="slack", endpoint_key="C123456"),
+            ]),
+        ):
+            resolved = await agent_channel_router._resolve_agent_for_inbound(
+                channel_type="slack", endpoint_key="C123456", tenant_id="tenant-1", workspace_id="workspace-1",
+            )
+        self.assertEqual(resolved, "agent-slack-1")
+
+    async def test_resolve_agent_for_inbound_no_match_returns_empty(self):
+        with patch(
+            "server_modules.agent_bindings_repository.list_workspace_channel_bindings",
+            new=AsyncMock(return_value=[
+                self._binding_row(agent_install_id="agent-slack-1", channel_key="slack", endpoint_key="C_OTHER"),
+            ]),
+        ):
+            resolved = await agent_channel_router._resolve_agent_for_inbound(
+                channel_type="slack", endpoint_key="C123456", tenant_id="tenant-1", workspace_id="workspace-1",
+            )
+        self.assertEqual(resolved, "")
+
+    async def test_resolve_agent_for_inbound_ignores_other_channel_keys(self):
+        """A discord_bot binding for the same endpoint_key string must not
+        leak into a slack lookup -- channel_key is part of the match, not
+        just endpoint_key."""
+        with patch(
+            "server_modules.agent_bindings_repository.list_workspace_channel_bindings",
+            new=AsyncMock(return_value=[
+                self._binding_row(agent_install_id="agent-discord-1", channel_key="discord_bot", endpoint_key="C123456"),
+            ]),
+        ):
+            resolved = await agent_channel_router._resolve_agent_for_inbound(
+                channel_type="slack", endpoint_key="C123456", tenant_id="tenant-1", workspace_id="workspace-1",
+            )
+        self.assertEqual(resolved, "")
+
+    async def test_resolve_agent_for_inbound_lookup_failure_fails_safe_to_empty(self):
+        """A DB hiccup must never block or crash the turn -- it falls
+        through to Sage exactly like a genuine no-match, never an error."""
+        with patch(
+            "server_modules.agent_bindings_repository.list_workspace_channel_bindings",
+            new=AsyncMock(side_effect=RuntimeError("db unavailable")),
+        ):
+            resolved = await agent_channel_router._resolve_agent_for_inbound(
+                channel_type="slack", endpoint_key="C123456", tenant_id="tenant-1", workspace_id="workspace-1",
+            )
+        self.assertEqual(resolved, "")
+
+    async def test_bound_specialist_runs_the_turn_not_sage(self):
+        """End-to-end: a Slack message in a bound channel must run AS that
+        specialist (specialist_context threaded into execute_sage_turn),
+        not as Sage with the reply merely attributed to it -- the exact
+        'every Slack workspace answers as Sage' bug this step fixes."""
+        specialist_ctx = object()  # identity is all that matters here
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_workspace_channel_bindings",
+                new=AsyncMock(return_value=[
+                    self._binding_row(agent_install_id="agent-slack-1", channel_key="slack", endpoint_key="C123456"),
+                ]),
+            ),
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(return_value=specialist_ctx),
+            ) as resolve_mock,
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(
+                    message="Reply as the specialist.",
+                    trace_id="trace-1",
+                    provider="anthropic",
+                    model="claude-sonnet-4-6",
+                )),
+            ) as execute_mock,
+        ):
+            result = await agent_channel_router.route_inbound_channel_message(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                channel_key="slack",
+                endpoint_key="C123456",
+                customer_message="Where's my order?",
+                actor_id="U789",
+                message_id="slack-msg-2",
+            )
+
+        self.assertTrue(result["ok"])
+        resolve_mock.assert_awaited_once()
+        self.assertEqual(resolve_mock.await_args.kwargs["active_agent_install_id"], "agent-slack-1")
+        execute_mock.assert_awaited_once()
+        self.assertIs(execute_mock.call_args.kwargs["specialist_context"], specialist_ctx)
+
+    async def test_unbound_channel_runs_as_sage_specialist_context_none(self):
+        """A channel with no matching binding is unaffected -- runs as Sage
+        with specialist_context=None, exactly like before this step."""
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_workspace_channel_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(
+                    message="Reply as Sage.",
+                    trace_id="trace-2",
+                    provider="deepseek",
+                    model="deepseek-chat",
+                )),
+            ) as execute_mock,
+        ):
+            result = await agent_channel_router.route_inbound_channel_message(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                channel_key="slack",
+                endpoint_key="C_UNBOUND",
+                customer_message="Hello",
+                actor_id="U789",
+            )
+
+        self.assertTrue(result["ok"])
+        execute_mock.assert_awaited_once()
+        self.assertIsNone(execute_mock.call_args.kwargs["specialist_context"])
+
+    async def test_two_agents_two_channels_each_gets_its_own(self):
+        """The task's literal spirit for this step: two specialists bound to
+        two different Slack channels in the SAME workspace, proven to each
+        receive their own specialist_context -- no cross-agent leakage."""
+        rows = [
+            self._binding_row(agent_install_id="agent-support-1", channel_key="slack", endpoint_key="C_SUPPORT"),
+            self._binding_row(agent_install_id="agent-sales-1", channel_key="slack", endpoint_key="C_SALES"),
+        ]
+        with patch(
+            "server_modules.agent_bindings_repository.list_workspace_channel_bindings",
+            new=AsyncMock(return_value=rows),
+        ):
+            resolved_support = await agent_channel_router._resolve_agent_for_inbound(
+                channel_type="slack", endpoint_key="C_SUPPORT", tenant_id="tenant-1", workspace_id="workspace-1",
+            )
+            resolved_sales = await agent_channel_router._resolve_agent_for_inbound(
+                channel_type="slack", endpoint_key="C_SALES", tenant_id="tenant-1", workspace_id="workspace-1",
+            )
+
+        self.assertEqual(resolved_support, "agent-support-1")
+        self.assertEqual(resolved_sales, "agent-sales-1")
+        self.assertNotEqual(resolved_support, resolved_sales)
+
 
 if __name__ == "__main__":
     unittest.main()

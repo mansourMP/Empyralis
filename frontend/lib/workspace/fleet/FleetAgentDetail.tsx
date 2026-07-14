@@ -971,7 +971,7 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
     { key: "oauth", label: "App", body: "Connect a Slack workspace — signed mentions and DMs route to Sage.", real: true },
   ],
   discord_bot: [
-    { key: "oauth", label: "Bot", body: "Install the Discord bot app — signed messages route to Sage. Discord's Terms forbid automating a real user account, so this is the only path.", real: true },
+    { key: "byo_bot", label: "Bot", body: "Give this agent its own Discord bot — paste the token from Discord's developer portal. Discord's Terms forbid automating a real user account, so this is the only path.", real: true },
   ],
   whatsapp_personal: [
     { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number — scan a QR code or use a pairing code — running on this agent's own gateway. There is no chatbot/business-API mode.", real: true },
@@ -1052,6 +1052,10 @@ export function ChannelsTab({
   const [byoBotBusy, setByoBotBusy] = useState(false);
   const [byoBotError, setByoBotError] = useState<string | null>(null);
   const [byoBotSaved, setByoBotSaved] = useState(false);
+  const [slackChannelId, setSlackChannelId] = useState("");
+  const [slackBindBusy, setSlackBindBusy] = useState(false);
+  const [slackBindError, setSlackBindError] = useState<string | null>(null);
+  const [slackBindSaved, setSlackBindSaved] = useState(false);
   const [firstContactReply, setFirstContactReply] = useState(!!agent?.telegram_first_contact_reply);
   const [firstContactSaving, setFirstContactSaving] = useState(false);
   // agent starts null and loads async — resync once the real value arrives
@@ -1061,16 +1065,16 @@ export function ChannelsTab({
     if (agent) setFirstContactReply(!!agent.telegram_first_contact_reply);
   }, [agent?.telegram_first_contact_reply]);
 
-  const saveByoBotToken = useCallback(async () => {
+  const saveByoBotToken = useCallback(async (channel: "telegram" | "discord") => {
     if (!byoToken.trim()) {
-      setByoBotError("Paste the token BotFather gave you.");
+      setByoBotError(channel === "discord" ? "Paste the bot token from Discord's developer portal." : "Paste the token BotFather gave you.");
       return;
     }
     setByoBotBusy(true);
     setByoBotError(null);
     try {
       const res = await fetch(
-        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/telegram?agent_id=${encodeURIComponent(agentId)}`,
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/${channel}?agent_id=${encodeURIComponent(agentId)}`,
         {
           method: "POST",
           credentials: "include",
@@ -1113,7 +1117,13 @@ export function ChannelsTab({
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ workspace_id: workspaceId, surface: "sage" }),
+        // metadata.agent_install_id: the backend's shared OAuth pipeline
+        // (routes_connections.py) already threads this through the redirect
+        // round-trip and files the resulting credential + binding at THIS
+        // agent's scope instead of a bare workspace-wide one — it just needs
+        // a caller to actually send it. Every other caller of this endpoint
+        // is unaffected (it's optional there).
+        body: JSON.stringify({ workspace_id: workspaceId, surface: "sage", metadata: { agent_install_id: agentId } }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1129,7 +1139,34 @@ export function ChannelsTab({
     } finally {
       setOauthBusy(null);
     }
-  }, [workspaceId]);
+  }, [workspaceId, agentId]);
+
+  const saveSlackChannelBinding = useCallback(async () => {
+    if (!slackChannelId.trim()) {
+      setSlackBindError("Paste the Slack channel ID (visible in the channel's details).");
+      return;
+    }
+    setSlackBindBusy(true);
+    setSlackBindError(null);
+    try {
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/slack?agent_id=${encodeURIComponent(agentId)}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify({ slack_channel_id: slackChannelId.trim() }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      setSlackBindSaved(true);
+    } catch (e) {
+      setSlackBindError(e instanceof Error ? e.message : "Could not save the channel binding.");
+    } finally {
+      setSlackBindBusy(false);
+    }
+  }, [workspaceId, agentId, slackChannelId]);
 
   if (loading) {
     return <div className="fleet-activity-skeleton" aria-label="Loading channels"><div className="fleet-skeleton-bar" style={{ width: "80%" }} /></div>;
@@ -1144,6 +1181,9 @@ export function ChannelsTab({
     setByoBotError(null);
     setByoBotSaved(false);
     setOauthError(null);
+    setSlackChannelId("");
+    setSlackBindError(null);
+    setSlackBindSaved(false);
   }
 
   function handleCardClick(platform: typeof CHANNEL_GRID_PLATFORMS[number], pill: { tone: string }) {
@@ -1162,6 +1202,9 @@ export function ChannelsTab({
     setByoBotError(null);
     setByoBotSaved(false);
     setOauthError(null);
+    setSlackChannelId("");
+    setSlackBindError(null);
+    setSlackBindSaved(false);
   }
 
   const activePlatform = CHANNEL_GRID_PLATFORMS.find((p) => p.id === expanded) || null;
@@ -1282,7 +1325,7 @@ export function ChannelsTab({
                           onChange={(e) => { setByoToken(e.currentTarget.value); setByoBotError(null); }}
                         />
                       </label>
-                      <button type="button" className="fleet-btn fleet-btn--accent" onClick={saveByoBotToken} disabled={byoBotBusy}>
+                      <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => void saveByoBotToken("telegram")} disabled={byoBotBusy}>
                         {byoBotBusy ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save token"}
                       </button>
                     </>
@@ -1313,8 +1356,45 @@ export function ChannelsTab({
                 </div>
               )}
 
-              {/* Slack / Discord: single-path OAuth */}
-              {(activePlatform.id === "slack" || activePlatform.id === "discord_bot") && activeDoor && (
+              {/* Discord: BYO bot token — one bot binds to exactly one agent
+                   (discord_bot_provisioning_service.py), never a workspace-wide
+                   credential. No OAuth path exists (or is needed): Discord's
+                   Terms forbid automating a real user account, so a bot token
+                   pasted from the developer portal is the only path. */}
+              {activePlatform.id === "discord_bot" && activeDoor?.key === "byo_bot" && (
+                <div style={{ marginTop: 12 }}>
+                  {byoBotSaved ? (
+                    <div className="fleet-channel-expand-success">
+                      <Check size={16} strokeWidth={2} /> Bot token saved — this agent's own bot is live.
+                    </div>
+                  ) : (
+                    <>
+                      <p className="fleet-channel-expand-hint">Paste the bot token from Discord's developer portal (Bot tab).</p>
+                      <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                        <span>Bot Token</span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={byoToken}
+                          onChange={(e) => { setByoToken(e.currentTarget.value); setByoBotError(null); }}
+                        />
+                      </label>
+                      <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => void saveByoBotToken("discord")} disabled={byoBotBusy}>
+                        {byoBotBusy ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save token"}
+                      </button>
+                    </>
+                  )}
+                  {byoBotError && <p className="fleet-channel-expand-error">{byoBotError}</p>}
+                </div>
+              )}
+
+              {/* Slack: OAuth connects the workspace's Slack app (now agent-
+                   scoped via metadata.agent_install_id — see startOAuth),
+                   then this agent claims one channel within it. Slack's app
+                   install is workspace-wide and can serve many agents,
+                   unlike Discord's dedicated-bot-per-agent model, so
+                   ownership here is per-channel, not per-connection. */}
+              {activePlatform.id === "slack" && activeDoor && (
                 <div style={{ marginTop: 12 }}>
                   <button
                     type="button"
@@ -1326,6 +1406,32 @@ export function ChannelsTab({
                     {oauthBusy === activePlatform.id ? "Starting…" : `Connect ${activePlatform.label}`}
                   </button>
                   {oauthError && <p className="fleet-channel-expand-error">{oauthError}</p>}
+
+                  <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                    {slackBindSaved ? (
+                      <div className="fleet-channel-expand-success">
+                        <Check size={16} strokeWidth={2} /> Channel bound — this agent owns it.
+                      </div>
+                    ) : (
+                      <>
+                        <p className="fleet-channel-expand-hint">Give this agent one Slack channel to own (paste the channel ID from the channel&apos;s details).</p>
+                        <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                          <span>Slack Channel ID</span>
+                          <input
+                            type="text"
+                            autoComplete="off"
+                            placeholder="C0123ABC456"
+                            value={slackChannelId}
+                            onChange={(e) => { setSlackChannelId(e.currentTarget.value); setSlackBindError(null); }}
+                          />
+                        </label>
+                        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => void saveSlackChannelBinding()} disabled={slackBindBusy}>
+                          {slackBindBusy ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Bind channel"}
+                        </button>
+                      </>
+                    )}
+                    {slackBindError && <p className="fleet-channel-expand-error">{slackBindError}</p>}
+                  </div>
                 </div>
               )}
 
