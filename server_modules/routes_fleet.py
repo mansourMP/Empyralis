@@ -664,11 +664,20 @@ async def fleet_agent_channels(
             surface="sage", selected_gateway_id=selected_gateway_id,
         )
         enriched: List[Dict[str, Any]] = []
+        telegram_bot_connected = False
         for item in items:
+            if item.get("id") == "telegram_bot":
+                # BYO-bot path, not part of the curated grid (it's a door
+                # inside the "Telegram" card, not its own card) — but its
+                # connected state is a distinct catalog item from
+                # sage_telegram_hosted's (separate provider/vault_provider,
+                # see connection_catalog_service.py), so the grid pill above
+                # can't tell the ChannelsTab byo_bot door whether ITS token
+                # is already saved. Surfaced below instead of silently lost.
+                telegram_bot_connected = bool(item.get("connected"))
+                continue
             if item.get("lane") not in ("sage_personal_channel", "studio_business_channel"):
                 continue
-            if item.get("id") == "telegram_bot":
-                continue  # BYO-bot path, not part of the curated grid
             enriched.append({
                 "id": item.get("id"),
                 "label": item.get("display_name") or item.get("id"),
@@ -682,10 +691,31 @@ async def fleet_agent_channels(
                 "setupAvailable": bool(item.get("setup_available")),
             })
 
+        # Slack's per-agent binding is a specific channel id within the
+        # workspace's shared OAuth connection (see fleet_assign_agent_slack's
+        # own docstring) — "connected" above only says the OAuth app is
+        # installed, not which channel THIS agent owns. Read the same table
+        # POST /agent-channels/slack writes to, so the Slack-bind door can
+        # show "already bound to X" instead of a blank field on reopen.
+        slack_channel_binding: Optional[str] = None
+        try:
+            from server_modules import agent_bindings_repository as _bindings
+            agent_bindings = await _bindings.list_agent_channel_bindings(
+                tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_id,
+            )
+            slack_binding = next((b for b in agent_bindings if b.get("channel_key") == "slack"), None)
+            if slack_binding:
+                endpoint_key = str((slack_binding.get("binding") or {}).get("endpoint_key") or "").strip()
+                slack_channel_binding = endpoint_key or None
+        except Exception:
+            slack_channel_binding = None
+
         return {
             "ok": True,
             "channels": enriched,
             "hosted_telegram_configured": hosted_configured(),
+            "telegram_bot_connected": telegram_bot_connected,
+            "slack_channel_binding": slack_channel_binding,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "channels": []}

@@ -371,30 +371,36 @@ export type FleetTool = {
 export function useFleetAgentChannels(workspaceId: string, agentId: string | null) {
   const [channels, setChannels] = useState<FleetChannel[]>([]);
   const [hostedTelegramConfigured, setHostedTelegramConfigured] = useState(false);
+  // Doors that don't have their own "connected" grid card (Telegram's BYO
+  // bot token, Slack's per-agent channel bind) — see routes_fleet.py's
+  // fleet_agent_channels docstring for why these ride along on this same
+  // response instead of a separate endpoint.
+  const [telegramBotConnected, setTelegramBotConnected] = useState(false);
+  const [slackChannelBinding, setSlackChannelBinding] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
+  const refresh = useCallback(async () => {
     if (!agentId) { setChannels([]); return; }
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const res = await fetch(
-          `/api/w/${workspaceId}/fleet/agent-channels?agent_id=${encodeURIComponent(agentId)}`
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) {
-          setChannels(data.channels || []);
-          setHostedTelegramConfigured(data.hosted_telegram_configured || false);
-        }
-      } catch { if (!cancelled) setChannels([]); }
-      finally { if (!cancelled) setLoading(false); }
-    })();
-    return () => { cancelled = true; };
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/w/${workspaceId}/fleet/agent-channels?agent_id=${encodeURIComponent(agentId)}`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setChannels(data.channels || []);
+      setHostedTelegramConfigured(data.hosted_telegram_configured || false);
+      setTelegramBotConnected(Boolean(data.telegram_bot_connected));
+      setSlackChannelBinding(typeof data.slack_channel_binding === "string" ? data.slack_channel_binding : null);
+    } catch { setChannels([]); }
+    finally { setLoading(false); }
   }, [workspaceId, agentId]);
 
-  return { channels, hostedTelegramConfigured, loading };
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { channels, hostedTelegramConfigured, telegramBotConnected, slackChannelBinding, loading, refresh };
 }
 
 export function useFleetAgentConnectors(workspaceId: string, agentId: string | null) {

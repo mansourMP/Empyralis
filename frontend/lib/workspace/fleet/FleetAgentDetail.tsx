@@ -1032,7 +1032,7 @@ function channelStatePill(channel: FleetChannel | undefined): { label: string; t
 export function ChannelsTab({
   workspaceId, agentId, agent,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
-  const { channels, loading } = useFleetAgentChannels(workspaceId, agentId);
+  const { channels, loading, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [oauthBusy, setOauthBusy] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
@@ -1085,12 +1085,13 @@ export function ChannelsTab({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
       setByoBotSaved(true);
+      void refreshChannels();
     } catch (e) {
       setByoBotError(e instanceof Error ? e.message : "Could not save the bot token.");
     } finally {
       setByoBotBusy(false);
     }
-  }, [workspaceId, agentId, byoToken]);
+  }, [workspaceId, agentId, byoToken, refreshChannels]);
 
   const saveFirstContactReply = useCallback(async (next: boolean) => {
     setFirstContactReply(next);
@@ -1161,12 +1162,13 @@ export function ChannelsTab({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
       setSlackBindSaved(true);
+      void refreshChannels();
     } catch (e) {
       setSlackBindError(e instanceof Error ? e.message : "Could not save the channel binding.");
     } finally {
       setSlackBindBusy(false);
     }
-  }, [workspaceId, agentId, slackChannelId]);
+  }, [workspaceId, agentId, slackChannelId, refreshChannels]);
 
   if (loading) {
     return <div className="fleet-activity-skeleton" aria-label="Loading channels"><div className="fleet-skeleton-bar" style={{ width: "80%" }} /></div>;
@@ -1200,11 +1202,23 @@ export function ChannelsTab({
     setSelectedDoor(null);
     setByoToken("");
     setByoBotError(null);
-    setByoBotSaved(false);
+    // Initialize from the real backend state instead of always blank — a
+    // door that's already connected (from a previous session, or another
+    // tab) should say so on open, not show an empty form that looks like
+    // nothing was ever saved. Discord has exactly one real door, so its
+    // grid-level `connected` already means "byo bot token saved"; Telegram's
+    // byo_bot door is a separate catalog item from the grid pill's own
+    // sage_telegram_hosted status, so it rides in on telegramBotConnected
+    // instead (see routes_fleet.py's fleet_agent_channels).
+    setByoBotSaved(
+      platform.id === "discord_bot" ? Boolean(byId.get("discord_bot")?.connected)
+        : platform.id === "sage_telegram_hosted" ? telegramBotConnected
+        : false,
+    );
     setOauthError(null);
     setSlackChannelId("");
     setSlackBindError(null);
-    setSlackBindSaved(false);
+    setSlackBindSaved(platform.id === "slack" ? Boolean(slackChannelBinding) : false);
   }
 
   const activePlatform = CHANNEL_GRID_PLATFORMS.find((p) => p.id === expanded) || null;
@@ -1446,6 +1460,7 @@ export function ChannelsTab({
                     label="Telegram"
                     agentGatewayId={agentGatewayId}
                     agentId={agentId}
+                    onConnected={refreshChannels}
                   />
                 </div>
               )}
@@ -1457,6 +1472,7 @@ export function ChannelsTab({
                     label="WhatsApp"
                     agentGatewayId={agentGatewayId}
                     agentId={agentId}
+                    onConnected={refreshChannels}
                   />
                 </div>
               )}

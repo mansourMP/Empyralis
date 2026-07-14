@@ -487,6 +487,16 @@ export class TelegramPersonalRuntime {
       if (!reconnectState.shouldReconnect) {
         await this.sessionStore.clearSessionString();
       }
+      const isRejectedCode = reconnectState.loginHint === "phone_code_invalid" || reconnectState.loginHint === "phone_code_expired";
+      if (isRejectedCode) {
+        // The code (and the phoneCodeHash it was checked against) is done —
+        // clear both so the NEXT connectClientInternal() pass falls through
+        // to "no code on file" and requests a fresh one, instead of
+        // resolvedConfig picking the same rejected loginCode back up from
+        // configStore and failing identically forever (the original bug).
+        await this.sessionStore.clearPendingLogin();
+        await this.configStore.clearTelegramSecrets();
+      }
       await this.sessionStore.save({
         status: reconnectState.status,
         loginHint: reconnectState.loginHint,

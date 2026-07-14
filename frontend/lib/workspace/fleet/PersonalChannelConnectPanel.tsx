@@ -56,12 +56,18 @@ export function PersonalChannelConnectPanel({
   label,
   agentGatewayId,
   agentId,
+  onConnected,
 }: {
   workspaceId: string;
   channelKey: PersonalChannelKey;
   label: string;
   agentGatewayId?: string | null;
   agentId?: string | null;
+  /** Fired once, on the transition INTO "connected" — not on every render
+   *  while already connected. Lets a caller (e.g. ChannelsTab's grid pill)
+   *  refresh its own separate channel list in place instead of staying
+   *  stale until a tab-switch/reload happens to remount and refetch it. */
+  onConnected?: () => void;
 }) {
   const scoped = agentGatewayId !== undefined;
   // Fetched unconditionally either way (hooks can't be conditional); when
@@ -80,6 +86,18 @@ export function PersonalChannelConnectPanel({
   }, [scoped, agentGatewayId, gateways, gatewayId]);
 
   const { view, loading: statusLoading, refresh } = usePersonalChannelStatus(workspaceId, channelKey, gatewayId, agentId);
+
+  // Placed before the early returns below (rules of hooks) — status is
+  // read straight off `view` since the `status` const further down isn't
+  // computed until after those returns.
+  const wasConnectedRef = useRef(false);
+  useEffect(() => {
+    const connectedNow = view?.state?.status === "connected";
+    if (connectedNow && !wasConnectedRef.current) {
+      onConnected?.();
+    }
+    wasConnectedRef.current = connectedNow;
+  }, [view?.state?.status, onConnected]);
 
   if (scoped && !gatewayId) {
     return (
@@ -200,6 +218,22 @@ function TelegramConnectBody({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The /setup call for a login_code returns 200 immediately (the Gateway
+  // signs in asynchronously) — a wrong or expired code never rejects that
+  // fetch, so submitCode's own catch below never fires for it. The failure
+  // only shows up here, in the polled status (last_disconnect_reason set by
+  // resolveTelegramReconnectState's phone_code_invalid/expired branches).
+  // Synced into the same `error` state submitCode's catch uses, once per
+  // new reason, so it renders through the existing {error && ...} below.
+  const lastSeenReasonRef = useRef<string | null>(null);
+  useEffect(() => {
+    const reason = view?.state?.metadata?.last_disconnect_reason || null;
+    if (reason && reason !== lastSeenReasonRef.current) {
+      setError(friendlyPersonalChannelError(reason, label));
+    }
+    lastSeenReasonRef.current = reason;
+  }, [view?.state?.metadata?.last_disconnect_reason, label]);
 
   const submitPhone = useCallback(async () => {
     if (!phoneNumber.trim()) {
@@ -354,6 +388,19 @@ function WhatsAppConnectBody({
   const qrCode = view?.state?.qr_code || null;
   const pairingCode = view?.state?.metadata?.pairing_code || null;
   const isRestIdle = status === "idle" || status === "disconnected" || status === "logged_out" || status === "authorization_required";
+
+  // maybeRequestPairingCode's failure (a rejected phone number, etc.) surfaces
+  // asynchronously through polled status, not through any fetch this
+  // component makes directly — same reasoning as TelegramConnectBody's own
+  // last_disconnect_reason sync just above it in this file.
+  const lastSeenReasonRef = useRef<string | null>(null);
+  useEffect(() => {
+    const reason = view?.state?.metadata?.last_disconnect_reason || null;
+    if (reason && reason !== lastSeenReasonRef.current) {
+      setError(friendlyPersonalChannelError(reason, label));
+    }
+    lastSeenReasonRef.current = reason;
+  }, [view?.state?.metadata?.last_disconnect_reason, label]);
 
   const beginOrRetry = useCallback(async () => {
     setBusy(true);

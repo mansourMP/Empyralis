@@ -48,6 +48,28 @@ export function resolveTelegramReconnectState(error: unknown): TelegramReconnect
       statusCode,
     };
   }
+  if (normalized.includes("phone_code_invalid")) {
+    // The submitted code was wrong. shouldReconnect:false stops the
+    // reconnect loop from silently resubmitting the SAME rejected code —
+    // connectClientInternal's catch clears it instead so the next attempt
+    // asks for a fresh one.
+    return {
+      shouldReconnect: false,
+      status: "code_required",
+      reason: message,
+      loginHint: "phone_code_invalid",
+      statusCode,
+    };
+  }
+  if (normalized.includes("phone_code_expired")) {
+    return {
+      shouldReconnect: false,
+      status: "code_required",
+      reason: message,
+      loginHint: "phone_code_expired",
+      statusCode,
+    };
+  }
   if (
     normalized.includes("login_code_required")
     || normalized.includes("phone code")

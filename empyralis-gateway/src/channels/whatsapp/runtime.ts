@@ -646,8 +646,20 @@ export class WhatsAppPersonalRuntime {
       );
       await this.sessionStore.save(buildWhatsAppPairingCodeState(loginConfig, pairingCode));
       await this.flushState();
-    } catch {
+    } catch (error) {
       this.pairingCodeRequested = false;
+      // Previously silent — status stayed wherever it was (typically still
+      // "connecting"), so the UI spun forever with no indication the
+      // request had actually failed (e.g. a phone number WhatsApp rejects).
+      // "disconnected" + retryable:true lands on the same idle/retry view
+      // PersonalChannelConnectPanel already shows for any other rest state.
+      const reason = error instanceof Error ? error.message : String(error ?? "pairing_code_request_failed");
+      await this.sessionStore.save({
+        status: "disconnected",
+        retryable: true,
+        lastDisconnectReason: reason,
+      });
+      await this.flushState();
     }
   }
 
