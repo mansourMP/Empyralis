@@ -166,26 +166,30 @@
 
 /* ── How it works ────────────────────────────────────────────────────── */
 
+/* A vertical connected timeline, not a 3-up card grid — this is a real
+   ordered sequence (pair hardware, then connect a subscription, then wire
+   it up), and a thread running through the numbered badges says "process"
+   far more clearly than three isolated boxes floating side by side. Stays
+   single-column at every width, capped so the thread doesn't stretch thin
+   across a wide desktop viewport. */
 .landing-steps {
-  display: grid;
-  grid-template-columns: 1fr;
+  display: flex;
+  flex-direction: column;
   gap: var(--app-space-8);
-}
-
-@media (min-width: 768px) {
-  .landing-steps {
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--app-space-6);
-  }
+  max-width: 640px;
 }
 
 .landing-step {
-  display: flex;
-  flex-direction: column;
-  gap: var(--app-space-3);
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  column-gap: var(--app-space-5);
+  row-gap: var(--app-space-2);
 }
 
 .landing-step__badge {
+  grid-column: 1;
+  grid-row: 1;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -198,7 +202,23 @@
   color: var(--app-text-primary);
 }
 
+/* The thread: a stub running from each badge's bottom edge down through
+   the gap to the top edge of the next one — never the last badge. */
+.landing-step:not(:last-child) .landing-step__badge::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1px;
+  height: var(--app-space-8);
+  background: var(--app-border-subtle);
+}
+
 .landing-step__title {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
   margin: 0;
   font-size: var(--app-font-16);
   font-weight: var(--app-weight-semibold);
@@ -206,6 +226,8 @@
 }
 
 .landing-step__body {
+  grid-column: 2;
+  grid-row: 2;
   margin: 0;
   font-size: var(--app-font-14);
   line-height: var(--line-height-normal);
