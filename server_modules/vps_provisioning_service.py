@@ -403,6 +403,17 @@ def resolve_provider_options(
     }
 
 
+def _installer_repo_token() -> str:
+    # Interim measure while the Empyralis repo is private and no artifact
+    # publish pipeline exists: install-agent-computer.sh builds the gateway
+    # from a git clone rather than a prebuilt download, so it needs read
+    # access to that private repo. This is an operator credential — set once
+    # on the backend host, never generated or stored by this service — not
+    # something an end user provides. See install-agent-computer.sh's own
+    # EMPYRALIS_REPO_TOKEN handling for the client side of this.
+    return (os.getenv("EMPYRALIS_REPO_TOKEN") or "").strip()
+
+
 def cloud_init_script(pairing_token: str, *, api_url: Optional[str] = None) -> str:
     token = str(pairing_token or "").strip()
     if not token:
@@ -410,13 +421,15 @@ def cloud_init_script(pairing_token: str, *, api_url: Optional[str] = None) -> s
     resolved_api_url = str(api_url or PUBLIC_API_URL).strip().rstrip("/")
     if not resolved_api_url:
         raise ValueError("api_url is required.")
+    repo_token = _installer_repo_token()
+    repo_token_env = f" EMPYRALIS_REPO_TOKEN='{_shell_single_quote(repo_token)}'" if repo_token else ""
     return "\n".join(
         [
             "#cloud-config",
             "package_update: true",
             "runcmd:",
             "  - |",
-            f"    curl -fsSL {agent_installer_url()} | EMPYRALIS_PAIRING_TOKEN='{_shell_single_quote(token)}' EMPYRALIS_API_URL='{_shell_single_quote(resolved_api_url)}' sudo -E bash",
+            f"    curl -fsSL {agent_installer_url()} | EMPYRALIS_PAIRING_TOKEN='{_shell_single_quote(token)}' EMPYRALIS_API_URL='{_shell_single_quote(resolved_api_url)}'{repo_token_env} sudo -E bash",
             "",
         ]
     )

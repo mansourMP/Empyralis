@@ -16,8 +16,15 @@ DEFAULT_API_URL="https://empyralis.ai/api"
 API_URL="${EMPYRALIS_API_URL:-${EMPYRALIS_GATEWAY_API_URL:-${DEFAULT_API_URL}}}"
 PAIRING_TOKEN="${EMPYRALIS_PAIRING_TOKEN:-${EMPYRALIS_GATEWAY_PAIRING_TOKEN:-}}"
 AGENT_COMPUTER_VERSION="${EMPYRALIS_AGENT_COMPUTER_VERSION:-latest}"
-ARTIFACT_BASE_URL="${EMPYRALIS_ARTIFACT_BASE_URL:-https://empyralis.ai/releases/agent-computer/${AGENT_COMPUTER_VERSION}}"
-GATEWAY_ARTIFACT_URL="${EMPYRALIS_GATEWAY_ARTIFACT_URL:-${ARTIFACT_BASE_URL}/empyralis-gateway-linux-x64.tar.gz}"
+# No publish pipeline exists yet, so the gateway is built from source on
+# the box at install time rather than downloaded as a prebuilt artifact.
+# The repo is private — REPO_TOKEN is an operator-supplied credential
+# (same shape as PAIRING_TOKEN above), not something this script invents.
+# Interim measure: only works for boxes an Empyralis-repo collaborator is
+# personally installing, not yet a true zero-credential public installer.
+REPO_URL="${EMPYRALIS_REPO_URL:-https://github.com/mansourMP/Empyralis.git}"
+REPO_REF="${EMPYRALIS_REPO_REF:-verify}"
+REPO_TOKEN="${EMPYRALIS_REPO_TOKEN:-}"
 DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME:-$(hostname -f 2>/dev/null || hostname)}"
 REGISTRATION_TIMEOUT_SECONDS="${EMPYRALIS_REGISTRATION_TIMEOUT_SECONDS:-180}"
 
@@ -195,49 +202,50 @@ write_env_file() {
   chmod 0640 "${ENV_FILE}"
 }
 
-download_artifact() {
-  local url="$1"
-  local destination="$2"
-  log "downloading ${url}"
-  case "${url}" in
-    file://*)
-      cp "${url#file://}" "${destination}"
-      ;;
-    http://*|https://*)
-      curl -fsSL "${url}" -o "${destination}"
-      ;;
-    *)
-      cp "${url}" "${destination}"
-      ;;
-  esac
-}
-
-extract_artifact() {
-  local archive="$1"
-  local destination="$2"
-  mkdir -p "${destination}"
-  tar -xzf "${archive}" -C "${destination}"
+clone_gateway_source() {
+  local clone_dir="$1"
+  log "cloning ${REPO_URL} (ref ${REPO_REF})"
+  if [[ -n "${REPO_TOKEN}" ]]; then
+    # Token travels as an HTTP header, never in the remote URL — a URL-
+    # embedded credential gets written verbatim into .git/config, which
+    # would leave it sitting in cleartext on disk indefinitely.
+    if ! git -c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "${REPO_TOKEN}" | base64 | tr -d '\n')" \
+      clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" "${clone_dir}"; then
+      fail "could not clone ${REPO_URL} — check EMPYRALIS_REPO_TOKEN has read access and EMPYRALIS_REPO_REF (${REPO_REF}) exists"
+    fi
+  else
+    if ! git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" "${clone_dir}"; then
+      fail "could not clone ${REPO_URL} — if this repo is private, set EMPYRALIS_REPO_TOKEN"
+    fi
+  fi
 }
 
 install_release_artifacts() {
-  local tmp_dir release_dir gateway_archive
-  tmp_dir="$(mktemp -d)"
+  local release_dir clone_dir
   release_dir="${INSTALL_ROOT}/releases/${AGENT_COMPUTER_VERSION}"
-  gateway_archive="${tmp_dir}/gateway.tar.gz"
+  clone_dir="${release_dir}.tmp"
 
-  rm -rf "${release_dir}.tmp"
-  mkdir -p "${release_dir}.tmp/gateway"
+  rm -rf "${clone_dir}"
+  clone_gateway_source "${clone_dir}"
 
-  download_artifact "${GATEWAY_ARTIFACT_URL}" "${gateway_archive}"
-  extract_artifact "${gateway_archive}" "${release_dir}.tmp/gateway"
+  log "building the gateway from source"
+  ( cd "${clone_dir}/empyralis-gateway" && npm install && npm run build ) \
+    || fail "gateway build failed"
+
+  # The running gateway has no use for git history, and .git/config can
+  # carry credential material (e.g. a credential-helper cache) — drop it
+  # rather than leave it sitting under the gateway's own ReadWritePaths.
+  rm -rf "${clone_dir}/.git"
 
   rm -rf "${release_dir}"
-  mv "${release_dir}.tmp" "${release_dir}"
+  mv "${clone_dir}" "${release_dir}"
+  # Convenience alias so run-gateway's `${INSTALL_DIR}/gateway/...` fast
+  # path resolves directly, matching the layout callers already expect.
+  ln -sfn empyralis-gateway "${release_dir}/gateway"
   ln -sfn "${release_dir}" "${CURRENT_DIR}"
   chown -R root:root "${INSTALL_ROOT}/releases" "${CURRENT_DIR}"
   find "${release_dir}" -type d -exec chmod 0755 {} +
   find "${release_dir}" -type f -exec chmod u=rw,go=r {} +
-  rm -rf "${tmp_dir}"
 }
 
 write_launcher_scripts() {
