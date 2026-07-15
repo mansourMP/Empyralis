@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 
 import { WhatsAppPersonalRuntime } from "../channels/whatsapp/runtime";
 import { GatewayStateDb } from "../state/db";
+import { readFileRaw, resolveCredsPath } from "../channels/whatsapp/auth-persistence";
 
 // FIX: creds.update had no equivalent to connection.update's staleness guard
 // (see whatsapp-disconnect-race.test.ts for that one) — Baileys keeps
@@ -14,19 +15,30 @@ import { GatewayStateDb } from "../state/db";
 // this.socket and reconnected), so a late creds.update from the OLD socket
 // could overwrite the on-disk auth state with stale creds, clobbering
 // whatever the current, live socket had already advanced past.
+//
+// creds.update's handler now persists through WhatsAppAuthPersistence (see
+// ../channels/whatsapp/auth-persistence.ts) instead of calling Baileys' own
+// bundled saveCreds() directly, so this test asserts on the real,
+// authoritative signal -- what actually landed in creds.json on disk --
+// rather than counting calls to a mock function that's intentionally never
+// invoked anymore.
 
 function buildMockAdapter() {
   const credsUpdateHandlers: Array<() => void | Promise<void>> = [];
-  const saveCredsCallCounts: number[] = [];
   let socketIndex = -1;
   const adapter = {
     loadAuthState: async () => {
-      const idx = saveCredsCallCounts.push(0) - 1;
+      // loadAuthState always runs immediately before createSocket within the
+      // same connectSocketInternal() pass, so socketIndex + 1 correctly
+      // predicts the index createSocket is about to assign.
+      const idx = socketIndex + 1;
       return {
-        state: { creds: { registered: false } },
-        saveCreds: async () => {
-          saveCredsCallCounts[idx] += 1;
-        },
+        state: { creds: { registered: false, me: { id: `socket-${idx}@s.whatsapp.net` } } },
+        // Baileys' own bundled saveCreds is intentionally never called by
+        // runtime.ts anymore -- that bare non-atomic writeFile is exactly
+        // what WhatsAppAuthPersistence replaces. Kept here only because the
+        // BaileysAuthBundle shape requires it.
+        saveCreds: async () => undefined,
       };
     },
     createSocket: () => {
@@ -49,13 +61,13 @@ function buildMockAdapter() {
     browserDescriptor: () => ["Empyralis", "Chrome", "1.0"],
     fetchWaWebVersion: async () => undefined,
   };
-  return { adapter, credsUpdateHandlers, saveCredsCallCounts };
+  return { adapter, credsUpdateHandlers };
 }
 
 test("a stale creds.update event from an abandoned socket cannot clobber the current socket's auth state", async () => {
   const rootDir = await mkdtemp(path.join(tmpdir(), "empyralis-whatsapp-creds-update-race-"));
   try {
-    const { adapter, credsUpdateHandlers, saveCredsCallCounts } = buildMockAdapter();
+    const { adapter, credsUpdateHandlers } = buildMockAdapter();
     const runtime = new WhatsAppPersonalRuntime(new GatewayStateDb(rootDir), { adapter: adapter as any });
 
     // Drive two real connect passes so the real closures under test (the
@@ -66,14 +78,26 @@ test("a stale creds.update event from an abandoned socket cannot clobber the cur
     await (runtime as any).connectSocketInternal();
     assert.equal(credsUpdateHandlers.length, 2, "both connect passes should have registered a creds.update handler");
 
+    const credsPath = resolveCredsPath((runtime as any).sessionStore.authStateDir());
+
     // Fire the STALE (socket 0) creds.update handler — mirrors Baileys
     // still emitting on an abandoned socket after we've moved on.
     await credsUpdateHandlers[0]();
-    assert.equal(saveCredsCallCounts[0], 0, "a stale socket's creds.update must not persist its auth bundle");
+    assert.equal(
+      await readFileRaw(credsPath),
+      null,
+      "a stale socket's creds.update must not persist its auth bundle to disk at all",
+    );
 
     // Fire the CURRENT (socket 1) creds.update handler — must still work.
     await credsUpdateHandlers[1]();
-    assert.equal(saveCredsCallCounts[1], 1, "the live socket's creds.update should persist normally");
+    const raw = await readFileRaw(credsPath);
+    assert.ok(raw, "the live socket's creds.update should persist normally");
+    assert.equal(
+      (JSON.parse(raw!) as { me: { id: string } }).me.id,
+      "socket-1@s.whatsapp.net",
+      "the persisted content must be the LIVE socket's creds, never the stale one's",
+    );
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

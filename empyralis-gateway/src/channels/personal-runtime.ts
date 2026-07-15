@@ -19,7 +19,12 @@ export type PersonalChannelStatus =
   | "connected"
   | "disconnected"
   | "unavailable"
-  | "reserved";
+  | "reserved"
+  // Transitional: a durable-state write (e.g. WhatsApp creds.json) is
+  // in flight, so connected/disconnected can't be reported with
+  // confidence yet -- the file on disk may not match reality until the
+  // write settles. See WhatsAppPersonalRuntime.getHealthSnapshot().
+  | "unstable";
 
 export interface PersonalChannelCapabilityManifest {
   channelKey: string;

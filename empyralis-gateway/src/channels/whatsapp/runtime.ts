@@ -40,6 +40,13 @@ import {
   WHATSAPP_PERSONAL_CHANNEL_KEY,
   WHATSAPP_PERSONAL_PROVIDER,
 } from "./session-store";
+import {
+  DEFAULT_CREDS_CODEC,
+  hasPendingAuthWrite,
+  waitForAuthWriteIdle,
+  WhatsAppAuthPersistence,
+  type WhatsAppCredsCodec,
+} from "./auth-persistence";
 import { PersonalChannelConfigStore } from "../personal-config-store";
 import type {
   PersonalChannelCapabilityManifest,
@@ -53,6 +60,11 @@ interface BaileysAuthBundle {
   state: {
     creds?: {
       registered?: boolean;
+      // Baileys creds carry a lot more than `registered` (noise key,
+      // signed identity key, account signature, etc) -- our own atomic
+      // writer needs the whole object, not just the field the pairing-code
+      // check below cares about.
+      [key: string]: unknown;
     };
   };
   saveCreds: () => Promise<void> | void;
@@ -90,6 +102,10 @@ interface WhatsAppBaileysAdapter {
    *  undefined on fetch failure so the caller can fall back to Baileys'
    *  own default rather than fail the whole connection over this. */
   fetchWaWebVersion: () => Promise<[number, number, number] | undefined>;
+  /** Baileys' own Buffer<->base64 (de)serializer for creds.json, sourced
+   *  from the SAME loaded module so our atomic writer's output is
+   *  byte-for-byte what Baileys' own reader expects. */
+  credsCodec: WhatsAppCredsCodec;
 }
 
 export interface WhatsAppGatewayPublisher {
@@ -137,6 +153,11 @@ export class WhatsAppPersonalRuntime {
   private adapter?: WhatsAppBaileysAdapter;
   private socket: BaileysSocketLike | null = null;
   private authBundle: BaileysAuthBundle | null = null;
+  /** Owns atomic/backed-up persistence of creds.json for the CURRENT
+   *  connect cycle -- (re)created at the top of connectSocketInternal()
+   *  alongside authBundle/socket, so the staleness guard on this.socket
+   *  already protects it from a late event off an abandoned socket. */
+  private authPersistence: WhatsAppAuthPersistence | null = null;
   private started = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pairingCodeRequested = false;
@@ -224,6 +245,13 @@ export class WhatsAppPersonalRuntime {
     }
     this.socket = null;
     this.authBundle = null;
+    // Let any in-flight creds write finish before recursively deleting the
+    // directory it's writing into -- avoids a write's rename racing the
+    // delete. Harmless either way (we're wiping everything regardless) but
+    // keeps the sequence clean rather than relying on the write's own
+    // best-effort error handling to absorb an ENOENT from a deleted parent.
+    await waitForAuthWriteIdle(this.sessionStore.authStateDir());
+    this.authPersistence = null;
     await this.sessionStore.clearAuthStateDir();
     await this.configStore.clearWhatsAppConfig();
     await this.sessionStore.save({
@@ -274,16 +302,31 @@ export class WhatsAppPersonalRuntime {
 
   async getHealthSnapshot(): Promise<PersonalChannelHealthSnapshot> {
     const snapshot = await this.sessionStore.load();
+    // A creds.json write landing right now means the file on disk doesn't
+    // necessarily reflect `snapshot.status` yet -- report the transitional
+    // "unstable" state rather than confidently asserting connected/
+    // disconnected. Checked via the standalone path-keyed lookup (not
+    // this.authPersistence) so this is correct even before any connect
+    // attempt has ever constructed an instance, and immune to that field
+    // being nulled out mid-teardown elsewhere.
+    const authWriteInFlight = hasPendingAuthWrite(this.sessionStore.authStateDir());
+    const status: PersonalChannelHealthSnapshot["status"] = authWriteInFlight
+      ? "unstable"
+      : snapshot.status;
     return {
       channelKey: WHATSAPP_PERSONAL_CHANNEL_KEY,
       provider: WHATSAPP_PERSONAL_PROVIDER,
-      status: snapshot.status,
+      status,
       running: this.started,
-      connected: Boolean(this.socket) && snapshot.status === "connected",
+      connected: !authWriteInFlight && Boolean(this.socket) && snapshot.status === "connected",
       reconnectAttempts: this.reconnectAttempts,
       lastEventAt: snapshot.updatedAt,
       lastError: snapshot.lastDisconnectReason,
-      issues: snapshot.status === "connected" ? [] : ["whatsapp_personal_not_connected"],
+      issues: authWriteInFlight
+        ? ["whatsapp_personal_auth_write_in_flight"]
+        : snapshot.status === "connected"
+          ? []
+          : ["whatsapp_personal_not_connected"],
     };
   }
 
@@ -477,6 +520,21 @@ export class WhatsAppPersonalRuntime {
     }
     const adapter = await this.getAdapter();
     const authDir = await this.sessionStore.ensureAuthStateDir();
+    // Barrier: if a previous connect cycle's creds write is still draining
+    // (e.g. a fast reconnect right on the heels of a creds.update), wait
+    // for it before handing the directory to Baileys, so
+    // useMultiFileAuthState() can never read creds.json mid-write.
+    await waitForAuthWriteIdle(authDir);
+    this.authPersistence = new WhatsAppAuthPersistence(authDir, {
+      codec: adapter.credsCodec ?? DEFAULT_CREDS_CODEC,
+    });
+    // Repair a corrupted/truncated creds.json from creds.json.bak BEFORE
+    // Baileys ever reads it -- useMultiFileAuthState() has no knowledge of
+    // our backup and would otherwise silently treat unparseable JSON as "no
+    // creds" (Baileys' own readData() returns null on any parse error),
+    // generating a brand-new identity -- i.e. forcing a fresh QR/pairing
+    // scan even though the account never actually logged out.
+    await this.authPersistence.restoreFromBackupIfNeeded();
     this.authBundle = await adapter.loadAuthState(authDir);
     this.pairingCodeRequested = false;
     await this.sessionStore.save({
@@ -518,7 +576,14 @@ export class WhatsAppPersonalRuntime {
       if (this.socket !== socket) {
         return;
       }
-      await Promise.resolve(this.authBundle?.saveCreds?.());
+      // Bypasses Baileys' own bundled saveCreds() (a bare non-atomic
+      // writeFile with no backup -- the exact gap this module exists to
+      // close) in favor of our atomic-write-with-backup path. getCreds is a
+      // getter so the enqueued write always reads whatever the CURRENT live
+      // creds object is when it actually runs, not a snapshot captured at
+      // enqueue time -- Baileys mutates state.creds in place across rapid
+      // updates.
+      await this.authPersistence?.saveCreds(() => this.authBundle?.state?.creds);
     });
     socket.ev.on("connection.update", (update) => {
       // Baileys keeps emitting on this socket's own event emitter even
@@ -585,6 +650,17 @@ export class WhatsAppPersonalRuntime {
       this.authBundle = null;
       this.pairingCodeRequested = false;
       if (!reconnectState.shouldReconnect) {
+        // Genuine logout only -- shouldReconnect is false exclusively for
+        // Baileys' loggedOut/401 code (see resolveWhatsAppReconnectState in
+        // ./reconnect.ts), matching what OpenClaw treats as "must relink"
+        // (extensions/whatsapp/src/connection-controller.ts). Every other
+        // disconnect code (badSession, restartRequired, connectionClosed,
+        // etc) reconnects with the existing creds intact -- this branch was
+        // already scoped correctly; what was missing was safety on the
+        // delete itself, which clearAuthStateDir() now provides. Drain any
+        // in-flight write first so the delete isn't racing a rename.
+        await waitForAuthWriteIdle(this.sessionStore.authStateDir());
+        this.authPersistence = null;
         await this.sessionStore.clearAuthStateDir();
       }
       await this.sessionStore.save({
@@ -794,6 +870,26 @@ export class WhatsAppPersonalRuntime {
     }
     const Browsers = baileysModule.Browsers ?? {};
     const fetchLatestWaWebVersion = baileysModule.fetchLatestWaWebVersion;
+    // Baileys serializes creds.json with its own Buffer<->base64 replacer/
+    // reviver (BufferJSON: {type:"Buffer",data:"<base64>"}) -- plain
+    // JSON.stringify/parse would silently mangle Buffer-typed key material
+    // (noiseKey, signedIdentityKey, etc -- Node's default Buffer#toJSON()
+    // produces a numeric-array shape Baileys' own reviver does not revive
+    // back into a Buffer). Sourcing it from this SAME loaded module
+    // guarantees our atomic writer's output is byte-for-byte what Baileys'
+    // own reader expects. Falls back to plain JSON only in the
+    // (theoretical) case a future Baileys release drops the export --
+    // better a loud parse failure than silently skipping persistence.
+    const bufferJson = baileysModule.BufferJSON as
+      | { replacer: (key: string, value: unknown) => unknown; reviver: (key: string, value: unknown) => unknown }
+      | undefined;
+    const credsCodec: WhatsAppCredsCodec =
+      bufferJson && typeof bufferJson.replacer === "function" && typeof bufferJson.reviver === "function"
+        ? {
+            stringify: (value: unknown) => JSON.stringify(value, bufferJson.replacer),
+            parse: (raw: string) => JSON.parse(raw, bufferJson.reviver),
+          }
+        : DEFAULT_CREDS_CODEC;
     this.adapter = {
       loadAuthState: async (folder: string) => useMultiFileAuthState(path.resolve(folder)),
       createSocket: (config: Record<string, unknown>) => makeWASocket(config),
@@ -811,6 +907,7 @@ export class WhatsAppPersonalRuntime {
           return undefined;
         }
       },
+      credsCodec,
     };
     return this.adapter;
   }
