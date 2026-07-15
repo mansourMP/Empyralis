@@ -3,8 +3,12 @@
 Verifies that every core channel catalog card is honest about its launch
 status, that setup-readiness detection works, that inbound context wiring
 is correct, that outbound sends require approval, and that idempotency is
-enforced. Also confirms that Signal, iMessage, and WeChat remain planned until
-concrete selected-Agent-Computer local bridge certification exists.
+enforced. Also confirms that iMessage and WeChat are first-class,
+owner-connectable gateway channels (live_when_configured, like Telegram/
+WhatsApp) backed by a concrete local-bridge runtime contract, while Signal
+remains planned until its own bridge runtime is certified — and that none of
+the three ever reports "connected" without a real, live bridge health
+snapshot saying so.
 """
 
 import asyncio
@@ -894,20 +898,36 @@ class LocalBridgePersonalChannelsCertification(unittest.TestCase):
         self.assertEqual(item["provider"], "signal_local_bridge")
         self.assertEqual(item["setup_kind"], "local_bridge")
 
-    def test_imessage_marked_planned_until_bridge_certified(self):
+    def test_imessage_is_live_when_configured_with_bluebubbles_bridge(self):
+        """iMessage is a first-class, owner-connectable gateway channel (like
+        Telegram/WhatsApp) because it has a concrete runtime contract: a real
+        BlueBubbles bridge adapter (empyralis-gateway/src/bridges/bluebubbles-bridge.ts)
+        and a generic Agent Computer local-bridge client that talks to it.
+        It stays live_when_configured (not unconditionally "live") because a
+        real Mac + BlueBubbles Server must still be connected and certified
+        per-instance before it's actually usable."""
         item = _catalog_item("imessage_personal")
-        self.assertEqual(item["launch_status"], "planned")
-        self.assertFalse(item["setup_available"])
-        self.assertFalse(item["runtime_usable"])
+        self.assertEqual(item["launch_status"], "live_when_configured")
+        self.assertTrue(item["setup_available"])
+        self.assertTrue(item["runtime_usable"])
         self.assertEqual(item["lane"], connection_catalog_service.LANE_SAGE_PERSONAL_CHANNEL)
         self.assertEqual(item["provider"], "bluebubbles_local_bridge")
         self.assertEqual(item["setup_kind"], "mac_bridge")
 
-    def test_wechat_marked_planned_until_bridge_certified(self):
+    def test_wechat_is_live_when_configured_with_local_bridge_runtime(self):
+        """WeChat is a first-class, owner-connectable gateway channel (like
+        Telegram/WhatsApp) because it has a concrete runtime contract: the
+        generic Agent Computer local-bridge client/protocol
+        (empyralis-gateway/src/channels/local-bridge-runtime.ts) that any
+        owner-run WeChat bridge process can speak. WeChat has no official
+        API, so — unlike iMessage's BlueBubbles adapter — Empyralis does not
+        ship a ready-made WeChat bridge process; the owner supplies one. It
+        stays live_when_configured, never unconditionally "live", because a
+        real bridge must be connected and certified per-instance."""
         item = _catalog_item("wechat_personal")
-        self.assertEqual(item["launch_status"], "planned")
-        self.assertFalse(item["setup_available"])
-        self.assertFalse(item["runtime_usable"])
+        self.assertEqual(item["launch_status"], "live_when_configured")
+        self.assertTrue(item["setup_available"])
+        self.assertTrue(item["runtime_usable"])
         self.assertEqual(item["lane"], connection_catalog_service.LANE_SAGE_PERSONAL_CHANNEL)
         self.assertEqual(item["provider"], "wechat_local_bridge")
         self.assertEqual(item["setup_kind"], "local_bridge")
@@ -961,7 +981,9 @@ class LocalBridgePersonalChannelsCertification(unittest.TestCase):
             self.assertTrue(wechat["connected"])
             self.assertTrue(wechat["configured"])
             self.assertEqual(wechat["health_status"], "healthy")
-            self.assertEqual(wechat["next_action"], "locked")
+            # Shipped, not locked: a genuinely connected+healthy bridge routes
+            # the owner to "manage" it, same as Signal/iMessage.
+            self.assertEqual(wechat["next_action"], "manage")
 
     def test_wechat_status_reports_bridge_unavailable_without_claiming_connected(self):
         with patch.object(
@@ -994,7 +1016,10 @@ class LocalBridgePersonalChannelsCertification(unittest.TestCase):
             self.assertTrue(wechat["configured"])
             self.assertEqual(wechat["health_status"], "unavailable")
             self.assertEqual(wechat["last_error"], "bridge refused connection")
-            self.assertEqual(wechat["next_action"], "locked")
+            # Shipped, not locked: an unreachable bridge still offers a
+            # "connect" CTA rather than presenting as fake-connected or as a
+            # feature that doesn't exist.
+            self.assertEqual(wechat["next_action"], "connect")
 
     def test_no_channel_card_claims_supported_without_runtime(self):
         """Every catalog item with a usable launch status must have a real
