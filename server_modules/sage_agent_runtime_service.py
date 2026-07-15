@@ -1339,8 +1339,10 @@ def _load_context_files(*, workspace_id: str) -> str:
     return "\n\n".join(sections)
 
 
-def _read_context_files_payload(*, workspace_id: str) -> dict[str, Any]:
-    files = workspace_context.read_workspace_context_files(workspace_id=workspace_id)
+def _read_context_files_payload(*, workspace_id: str, agent_install_id: str | None = None) -> dict[str, Any]:
+    files = workspace_context.read_workspace_context_files(
+        workspace_id=workspace_id, agent_install_id=agent_install_id,
+    )
     return files if isinstance(files, dict) else {}
 
 
@@ -3679,11 +3681,26 @@ async def handle_sage_chat(
     context_files_payload = _read_context_files_payload(workspace_id=normalized_workspace_id)
 
     if _spec_install_id:
-        # Specialist turn: load the memory brief from THIS install's isolated
-        # namespace (agent_memory keys by install id), never Sage's/workspace-wide.
+        # Specialist turn: load THIS install's own MEMORY.md index the SAME
+        # way Sage loads its root index below (build_root_memory_brief_sections
+        # over workspace_context's per-install namespace) — never Sage's or
+        # another specialist's. This used to call memory_service.get_memory,
+        # which reads agent_memory.py's SQLite `memory_entries` table — a
+        # legacy structured-facts side table that no live turn ever writes to
+        # with a real agent_install_id, so it was always empty and every
+        # specialist ran with no memory index, every turn. MEMORY.md itself
+        # was never read for a specialist turn at all. Fixed 2026-07-15.
         try:
-            from server_modules import memory_service as _mem_spec
-            memory_context = _mem_spec.get_memory(normalized_workspace_id, agent_install_id=_spec_install_id)
+            _spec_context_files_payload = _read_context_files_payload(
+                workspace_id=normalized_workspace_id,
+                agent_install_id=_spec_install_id,
+            )
+            _spec_memory_sections, _spec_memory_diagnostics = (
+                sage_instruction_compiler_service.build_root_memory_brief_sections(
+                    _spec_context_files_payload
+                )
+            )
+            memory_context = "\n\n".join(_spec_memory_sections)
         except Exception:
             memory_context = ""
     else:
@@ -4043,6 +4060,9 @@ async def handle_sage_chat(
             "3. Never fabricate: don't claim a lookup happened when it "
             "didn't, and don't invent facts dressed up as a real result."
         )
+        # memory_context here is this install's own MEMORY.md brief (see the
+        # "Specialist turn" branch above) — empty when the agent's MEMORY.md
+        # is still the untouched default scaffold, never fabricated.
         _spec_memory_block = f"\n\n## Your memory\n{memory_context}" if memory_context else ""
         _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(

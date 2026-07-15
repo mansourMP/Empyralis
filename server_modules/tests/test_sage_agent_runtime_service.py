@@ -2195,5 +2195,177 @@ class SageAgentRuntimeReasoningEffortResolutionTests(unittest.TestCase):
         self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
 
 
+class SageAgentRuntimeSpecialistMemoryLoadTests(unittest.TestCase):
+    """The core fix under test: a specialist's turn must load ITS OWN
+    MEMORY.md index into its system prompt every turn, the same way Sage
+    loads its own root MEMORY.md (via build_root_memory_brief_sections) —
+    and never Sage's or another specialist's.
+
+    Before this fix, the specialist branch built its "## Your memory" block
+    from memory_service.get_memory(agent_install_id=...) — agent_memory.py's
+    SQLite `memory_entries` table. Nothing on any live turn ever wrote to
+    that table with a real agent_install_id (save_memory/delete_memory's
+    only live callers are workspace-root-scoped: the /forget slash command,
+    store_direct_chat_memory_fact, handle_no_provider_memory_request), so
+    the read was always empty and every specialist turn ran with no memory
+    index at all — MEMORY.md itself was never read for a specialist turn.
+    """
+
+    @staticmethod
+    def _spec(agent_install_id="agent-a", **overrides):
+        base = dict(
+            agent_install_id=agent_install_id,
+            agent_label="Research Agent",
+            agent_kind="specialist",
+            persona="You are a research specialist.",
+        )
+        base.update(overrides)
+        return SpecialistRuntimeContext(**base)
+
+    @staticmethod
+    def _run_chat(*, specialist_context, files_by_install):
+        """files_by_install maps agent_install_id (or None for Sage's own
+        root-level call) to the context-files dict
+        workspace_context.read_workspace_context_files should return for
+        that install — proving the specialist branch requests ITS OWN
+        install's namespace, never the workspace root's or a sibling's."""
+        def _fake_read_workspace_context_files(*, workspace_id=None, agent_install_id=None):
+            return dict(files_by_install.get(agent_install_id, {}))
+
+        mock_agent_provider = AsyncMock(
+            return_value=("anthropic", {"api_key": "sk-agent-own-key"}, "byok_api")
+        )
+        mock_workspace_provider = AsyncMock(
+            return_value=("deepseek", {"api_key": "sk-workspace-default"})
+        )
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+                side_effect=_fake_read_workspace_context_files,
+            ),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            # The dead SQLite read this fix removes from the specialist
+            # branch — proven gone by making it explode if ever called,
+            # not just by checking a return value.
+            patch(
+                "server_modules.memory_service.get_memory",
+                side_effect=AssertionError(
+                    "dead SQLite memory_entries read must not be called for a specialist turn"
+                ),
+            ),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=mock_workspace_provider),
+            patch("server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider", new=mock_agent_provider),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=specialist_context,
+            ))
+        return mock_stream
+
+    def test_specialist_turn_includes_its_own_memory_md_index(self):
+        spec = self._spec(agent_install_id="agent-a")
+        files_by_install = {
+            "agent-a": {"MEMORY.md": "## Summary\n\nAgent A tracks the apollo-project deadline (Friday).\n"},
+        }
+        mock_stream = self._run_chat(specialist_context=spec, files_by_install=files_by_install)
+
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertIn("apollo-project", system_prompt)
+        self.assertIn("MEMORY.md (Agent Memory Index)", system_prompt)
+        self.assertIn("## Your memory", system_prompt)
+
+    def test_specialist_turn_never_sees_sages_root_memory(self):
+        spec = self._spec(agent_install_id="agent-a")
+        files_by_install = {
+            "agent-a": {"MEMORY.md": "## Summary\n\nAgent A's own fact: nightingale.\n"},
+            # None == Sage's own root-level call (no agent_install_id).
+            None: {"MEMORY.md": "## Summary\n\nSage's own root fact: workspace owner is Mansur, firefly.\n"},
+        }
+        mock_stream = self._run_chat(specialist_context=spec, files_by_install=files_by_install)
+
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertIn("nightingale", system_prompt)
+        self.assertNotIn("firefly", system_prompt)
+        self.assertNotIn("workspace owner is Mansur", system_prompt)
+
+    def test_specialist_turn_never_sees_another_specialists_memory(self):
+        spec = self._spec(agent_install_id="agent-a")
+        files_by_install = {
+            "agent-a": {"MEMORY.md": "## Summary\n\nAgent A's own fact: nightingale.\n"},
+            "agent-b": {"MEMORY.md": "## Summary\n\nAgent B's private fact: zeta-merger financial terms.\n"},
+        }
+        mock_stream = self._run_chat(specialist_context=spec, files_by_install=files_by_install)
+
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertIn("nightingale", system_prompt)
+        self.assertNotIn("zeta-merger", system_prompt)
+
+    def test_two_specialists_each_see_only_their_own_memory(self):
+        """The task's literal verify ask, mirrored from the sibling
+        provider-resolution test class: two agents, two different memory
+        files, each turn proven to load the right one and only the right
+        one."""
+        files_by_install = {
+            "agent-a": {"MEMORY.md": "## Summary\n\nAgent A fact: projectnightingale.\n"},
+            "agent-b": {"MEMORY.md": "## Summary\n\nAgent B fact: projectfirefly.\n"},
+        }
+        stream_a = self._run_chat(specialist_context=self._spec(agent_install_id="agent-a"), files_by_install=files_by_install)
+        prompt_a = stream_a.call_args.kwargs["system_prompt"]
+        self.assertIn("projectnightingale", prompt_a)
+        self.assertNotIn("projectfirefly", prompt_a)
+
+        stream_b = self._run_chat(specialist_context=self._spec(agent_install_id="agent-b"), files_by_install=files_by_install)
+        prompt_b = stream_b.call_args.kwargs["system_prompt"]
+        self.assertIn("projectfirefly", prompt_b)
+        self.assertNotIn("projectnightingale", prompt_b)
+
+    def test_fresh_specialist_with_untouched_memory_md_gets_empty_index_not_fabricated_content(self):
+        """A brand-new agent's MEMORY.md is still the default scaffold — the
+        turn must reflect an empty index, never invented/seeded memory
+        content. The scaffold's own boilerplate text must not leak into the
+        prompt disguised as a real memory fact."""
+        spec = self._spec(agent_install_id="agent-fresh")
+        files_by_install = {
+            "agent-fresh": {"MEMORY.md": sage_agent_runtime_service.workspace_context.DEFAULT_CONTEXT_FILE_CONTENTS["MEMORY.md"]},
+        }
+        mock_stream = self._run_chat(specialist_context=spec, files_by_install=files_by_install)
+
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertNotIn("## Your memory", system_prompt)
+        self.assertNotIn("Agent Memory Index", system_prompt)
+
+    def test_specialist_with_no_context_files_at_all_gets_empty_index(self):
+        """No files_by_install entry for this install (as if the namespace
+        were brand new and read_workspace_context_files returned {}) — must
+        degrade to an empty index, not raise or fabricate."""
+        spec = self._spec(agent_install_id="agent-nothing-yet")
+        mock_stream = self._run_chat(specialist_context=spec, files_by_install={})
+
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertNotIn("## Your memory", system_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -890,5 +890,140 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual(read_reply, "my_timezone = Asia/Shanghai")
 
 
+class MemoryExportOverwriteGuardTests(unittest.TestCase):
+    """Guards the overwrite landmine found while wiring specialist agents to
+    load their own MEMORY.md index: agent_memory.py's `_export_memory_md`
+    regenerates MEMORY.md from the legacy structured-facts SQLite table
+    (`memory_entries`) after every save/delete. That table is a side
+    system nothing on a live turn writes to with a real
+    agent_install_id (save_memory/delete_memory's only live callers today —
+    the /forget slash command, store_direct_chat_memory_fact,
+    handle_no_provider_memory_request — are workspace-root-scoped only), so
+    it is normally empty. Before this guard, deleting the SQLite table's
+    last row (or any future caller that scopes save/delete to a specific
+    agent) silently overwrote a REAL, notebook-authored MEMORY.md with
+    "No structured memory facts saved yet." — unversioned (agent_memory's
+    _update_memory_md bypasses memory_service's version-history write
+    path), so nothing could be rolled back after the fact.
+
+    These tests call agent_memory._save_memory/_delete_memory/
+    _export_memory_md directly (bypassing memory_service.py's Rust-kernel
+    write gate — a pre-existing test-environment gap unrelated to this fix,
+    see test_memory_cross_agent_isolation.py's identical seeding shortcut).
+    The actual write_workspace_context_file call is also mocked in every
+    test below rather than left to hit the real filesystem write-gate: this
+    sandbox's Rust runtime-kernel binary is unavailable, so an UNGUARDED
+    write attempt fails closed with WorkspaceContextRustGateError before it
+    ever reaches disk. Reading real content back afterward would then
+    "pass" for the wrong reason — the write crashed for an unrelated
+    environment reason and _delete_memory's own `except Exception: pass`
+    swallowed it, not because a guard skipped it on purpose. Asserting
+    directly on whether write_workspace_context_file was (not) called, and
+    with what content, tests the guard's actual control flow regardless of
+    whether the write-gate infrastructure is present."""
+
+    def setUp(self) -> None:
+        from server_modules import agent_memory, workspace_context
+
+        self.agent_memory = agent_memory
+        self.workspace_context = workspace_context
+        self._tmpdir = tempfile.TemporaryDirectory(prefix="memory-export-guard-")
+        self.addCleanup(self._tmpdir.cleanup)
+        tmp_root = Path(self._tmpdir.name)
+        self._workspace_patch = patch.object(workspace_context, "_WORKSPACE_DIR", tmp_root / "workspace")
+        self._memory_patch = patch.object(agent_memory, "_MEMORY_DIR", tmp_root / "runtime-memory")
+        self._workspace_patch.start()
+        self._memory_patch.start()
+        self.addCleanup(self._workspace_patch.stop)
+        self.addCleanup(self._memory_patch.stop)
+
+    def _seed_namespace(self, *, workspace_id: str, agent_install_id, memory_md_content: str) -> None:
+        """Writes every default context file straight to disk (so
+        ensure_workspace_context_files finds nothing missing and never
+        calls its own write-gate), then overwrites MEMORY.md with real
+        content — simulating an agent whose notebook (memory_write tool)
+        already populated its index."""
+        root = self.workspace_context.agent_workspace_context_dir(
+            workspace_id=workspace_id, agent_install_id=agent_install_id,
+        )
+        for filename, default in self.workspace_context.DEFAULT_CONTEXT_FILE_CONTENTS.items():
+            (root / filename).write_text(default.strip() + "\n", encoding="utf-8")
+        (root / "MEMORY.md").write_text(memory_md_content, encoding="utf-8")
+
+    def test_deleting_the_last_sqlite_entry_does_not_attempt_to_overwrite_populated_memory_md(self) -> None:
+        real_memory = "---\nPurpose: index\n---\n\n## Summary\n\nThe user's name is Priya; project deadline is Friday.\n"
+        self._seed_namespace(workspace_id="ws-1", agent_install_id=None, memory_md_content=real_memory)
+
+        # Exactly the empty-SQLite-read trigger: one structured fact exists
+        # and gets deleted, so _list_memory_entries goes from 1 row to 0.
+        self.agent_memory._save_memory("ws-1", "temp_note", "throwaway", sync_memory_md=False)
+        with patch.object(self.agent_memory, "write_workspace_context_file") as mock_write:
+            deleted = self.agent_memory._delete_memory("ws-1", "temp_note")
+
+        self.assertTrue(deleted, "the SQLite row itself must still be deleted")
+        # The guard's whole point: the empty-entries export must never even
+        # attempt to write MEMORY.md's real content away.
+        mock_write.assert_not_called()
+
+    def test_export_reports_skipped_when_it_declines_to_overwrite(self) -> None:
+        self._seed_namespace(
+            workspace_id="ws-1", agent_install_id="agent-a",
+            memory_md_content="## Summary\n\nReal, hand-written agent memory.\n",
+        )
+
+        with patch.object(self.agent_memory, "write_workspace_context_file") as mock_write:
+            result = self.agent_memory._export_memory_md("ws-1", agent_install_id="agent-a")
+
+        self.assertTrue(result.get("skipped"))
+        self.assertEqual(result.get("reason"), "memory_entries_empty_would_overwrite_populated_memory_md")
+        mock_write.assert_not_called()
+
+    def test_guard_is_per_agent_scoped_not_a_cross_agent_leak(self) -> None:
+        """The guard must not weaken isolation -- agent A's empty-entries
+        delete/export must consult only agent A's own MEMORY.md (never
+        agent B's), and agent B's file must be provably untouched on disk
+        (real disk read here is safe: nothing ever attempts to write B)."""
+        self._seed_namespace(workspace_id="ws-1", agent_install_id="agent-a", memory_md_content="## Summary\n\nAgent A real memory.\n")
+        self._seed_namespace(workspace_id="ws-1", agent_install_id="agent-b", memory_md_content="## Summary\n\nAgent B real memory.\n")
+
+        self.agent_memory._save_memory("ws-1", "temp", "x", agent_install_id="agent-a", sync_memory_md=False)
+        with patch.object(self.agent_memory, "write_workspace_context_file") as mock_write:
+            self.agent_memory._delete_memory("ws-1", "temp", agent_install_id="agent-a")
+
+        mock_write.assert_not_called()
+        content_b = self.workspace_context.read_workspace_context_file("MEMORY.md", workspace_id="ws-1", agent_install_id="agent-b")
+        self.assertIn("Agent B real memory", content_b, "agent B's file must be untouched by agent A's delete/export")
+
+    def test_export_still_proceeds_when_memory_md_is_still_the_untouched_scaffold(self) -> None:
+        """The guard's escape hatch: nothing real is lost by (re)writing an
+        untouched default MEMORY.md with the empty projection, so a
+        brand-new agent's file still gets initialized."""
+        default_content = self.workspace_context.DEFAULT_CONTEXT_FILE_CONTENTS["MEMORY.md"].strip() + "\n"
+        self._seed_namespace(workspace_id="ws-1", agent_install_id=None, memory_md_content=default_content)
+
+        with patch.object(self.agent_memory, "write_workspace_context_file") as mock_write:
+            mock_write.return_value = {"filename": "MEMORY.md", "content": "ignored"}
+            result = self.agent_memory._export_memory_md("ws-1")
+
+        self.assertNotIn("skipped", result)
+        mock_write.assert_called_once()
+        written_content = mock_write.call_args.args[1]
+        self.assertIn("No structured memory facts saved yet.", written_content)
+
+    def test_export_proceeds_normally_when_entries_are_non_empty(self) -> None:
+        """The guard is scoped to the empty-entries case only -- a normal
+        save with real structured facts must still sync MEMORY.md exactly
+        as before this fix."""
+        self._seed_namespace(workspace_id="ws-1", agent_install_id=None, memory_md_content="## Summary\n\nOld content.\n")
+
+        with patch.object(self.agent_memory, "write_workspace_context_file") as mock_write:
+            mock_write.return_value = {"filename": "MEMORY.md", "content": "ignored"}
+            self.agent_memory._save_memory("ws-1", "timezone", "Asia/Shanghai")
+
+        mock_write.assert_called_once()
+        written_content = mock_write.call_args.args[1]
+        self.assertIn("Asia/Shanghai", written_content)
+
+
 if __name__ == "__main__":
     unittest.main()
