@@ -23,7 +23,12 @@ import {
   mapWhatsAppInboundMessage,
   mapWhatsAppOutboundResult,
 } from "./message-mapper";
-import { WhatsAppOutboundStore, WhatsAppTypingKeepalive, type WhatsAppPresenceAction } from "./outbound";
+import {
+  WHATSAPP_TYPING_KEEPALIVE_MS,
+  WhatsAppOutboundStore,
+  WhatsAppTypingKeepalive,
+  type WhatsAppPresenceAction,
+} from "./outbound";
 import {
   DEFAULT_WHATSAPP_RECONNECT_POLICY,
   computeWhatsAppReconnectDelay,
@@ -113,6 +118,16 @@ export function redactWhatsAppCredentials(state: Record<string, unknown>): Recor
   return redactCredentials(state, WHATSAPP_REDACT_STRING_KEYS, WHATSAPP_REDACT_OBJECT_KEYS);
 }
 
+// TTL for the typing session started the instant an inbound message is
+// admitted (see WhatsAppPersonalRuntime.startTypingForChat), which needs to
+// stay alive for the length of a full agent turn — not just the one
+// sendMessage call WHATSAPP_TYPING_MAX_TTL_MS (60s, imported from
+// ./outbound) is sized for. Sized to safely exceed this platform's own
+// worst-case turn budget: server_modules/runtime_config.py's
+// ORION_RUN_TIMEOUT_SECONDS defaults to 300s, and
+// ORION_WHATSAPP_AUTOPILOT_RUN_TIMEOUT_SECONDS defaults to 180s.
+const WHATSAPP_INBOUND_TYPING_MAX_TTL_MS = 5 * 60_000;
+
 export class WhatsAppPersonalRuntime {
   private readonly configStore: PersonalChannelConfigStore;
   private readonly sessionStore: WhatsAppSessionStore;
@@ -129,6 +144,15 @@ export class WhatsAppPersonalRuntime {
   private reconnectAttempts = 0;
   private sentMessageIds = new Set<string>();
   private readonly draftManager = new DraftManager();
+  /**
+   * Typing sessions started on inbound receipt (see startTypingForChat),
+   * keyed by remoteJid, waiting to be claimed and stopped by whichever
+   * sendFinalOutbound() call eventually dispatches that chat's reply.
+   */
+  private readonly activeTyping = new Map<
+    string,
+    { typing: WhatsAppTypingKeepalive; startedAt: number; socket: BaileysSocketLike }
+  >();
 
   constructor(
     private readonly db: GatewayStateDb,
@@ -380,12 +404,21 @@ export class WhatsAppPersonalRuntime {
       };
     }
     const outboundRecord = (await this.outboundStore.markAttemptStarted(idempotencyKey))!;
-    const typing = new WhatsAppTypingKeepalive(
+    // Reuse the typing session started when the inbound message that
+    // triggered this reply was admitted (see startTypingForChat) so the
+    // indicator has been running since the agent started "thinking"
+    // instead of blipping on for just this network call. Falls back to a
+    // fresh session — the old behavior — when none is active for this
+    // chat (a proactive send, or the inbound session went stale).
+    const claimedTyping = this.claimTypingForChat(remoteJid);
+    const typing = claimedTyping ?? new WhatsAppTypingKeepalive(
       socket.sendPresenceUpdate
         ? (action) => socket.sendPresenceUpdate?.(action, remoteJid)
         : undefined,
     );
-    await typing.start();
+    if (!claimedTyping) {
+      await typing.start();
+    }
     try {
       const response = await socket.sendMessage(
         remoteJid,
@@ -474,6 +507,17 @@ export class WhatsAppPersonalRuntime {
     });
     this.socket = socket;
     socket.ev.on("creds.update", async () => {
+      // Mirrors connection.update's staleness guard directly below: Baileys
+      // keeps emitting on this socket's own event emitter even after we've
+      // abandoned it (e.g. handleDisconnect() or reconnectForConfigUpdate()
+      // nulled this.socket and moved on to a fresh one) — a late
+      // creds.update from the OLD socket would otherwise overwrite the
+      // on-disk auth state with stale creds, clobbering whatever the
+      // current, live socket has already advanced past. Only the socket we
+      // currently own may persist creds.
+      if (this.socket !== socket) {
+        return;
+      }
       await Promise.resolve(this.authBundle?.saveCreds?.());
     });
     socket.ev.on("connection.update", (update) => {
@@ -578,12 +622,84 @@ export class WhatsAppPersonalRuntime {
       if (mapped.message.is_group && !mapped.message.is_mentioned && !mapped.message.is_reply_to_sage) {
         continue;
       }
+      this.startTypingForChat(mapped.message.remote_jid);
       await this.publishInbound(mapped);
     }
   }
 
   private async publishInbound(payload: GatewayChannelInboundPayload): Promise<void> {
     await this.publisher?.publishEvent("channel.inbound", payload);
+  }
+
+  /**
+   * Starts a typing keepalive the instant an inbound message is admitted
+   * (and has passed the group gate above), so the indicator covers the LLM
+   * "thinking" time (which happens upstream, before the Gateway is ever
+   * asked to send a reply) instead of blipping on for only the fraction of
+   * a second around the final sendMessage call. claimTypingForChat() hands
+   * this same session to sendFinalOutbound() when the reply for this chat
+   * is ready to go out.
+   *
+   * Coalesced per chat and tagged with the socket it was started against:
+   * a second inbound message for the same remoteJid before the reply goes
+   * out reuses the running loop instead of starting a duplicate one, and a
+   * session left over from a since-replaced socket (reconnect) is treated
+   * as stale rather than reused.
+   */
+  private startTypingForChat(remoteJid: string): void {
+    const jid = String(remoteJid || "").trim();
+    if (!jid) {
+      return;
+    }
+    const socket = this.socket;
+    if (!socket?.sendPresenceUpdate) {
+      return;
+    }
+    const existing = this.activeTyping.get(jid);
+    if (
+      existing
+      && existing.socket === socket
+      && Date.now() - existing.startedAt < WHATSAPP_INBOUND_TYPING_MAX_TTL_MS
+    ) {
+      return;
+    }
+    const typing = new WhatsAppTypingKeepalive(
+      (action) => socket.sendPresenceUpdate?.(action, jid),
+      WHATSAPP_TYPING_KEEPALIVE_MS,
+      WHATSAPP_INBOUND_TYPING_MAX_TTL_MS,
+    );
+    this.activeTyping.set(jid, { typing, startedAt: Date.now(), socket });
+    void typing.start();
+  }
+
+  /**
+   * Hands the caller the typing session startTypingForChat() started for
+   * this chat, removing it from the map so it can't be claimed twice.
+   * Returns undefined — leaving a stale entry's own loop to run down on
+   * its own TTL — when there's nothing usable to claim: no session was
+   * ever started (e.g. a proactive/unprompted send), it was started
+   * against a socket that's since been replaced by a reconnect, or it
+   * already exceeded its TTL. The caller is expected to start a fresh one
+   * itself in that case.
+   */
+  private claimTypingForChat(remoteJid: string): WhatsAppTypingKeepalive | undefined {
+    const jid = String(remoteJid || "").trim();
+    if (!jid) {
+      return undefined;
+    }
+    const existing = this.activeTyping.get(jid);
+    if (!existing) {
+      return undefined;
+    }
+    this.activeTyping.delete(jid);
+    if (
+      existing.socket !== this.socket
+      || Date.now() - existing.startedAt >= WHATSAPP_INBOUND_TYPING_MAX_TTL_MS
+    ) {
+      void existing.typing.stop();
+      return undefined;
+    }
+    return existing.typing;
   }
 
   private scheduleReconnect(): void {
