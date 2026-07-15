@@ -6,17 +6,37 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import type { FleetAgent } from "../fleet-data";
 import {
   GatewayBoxPicker,
+  hardwarePlacementIsBrainBound,
   resolveHardwarePlacement,
   useWorkspaceGateways,
   type HardwarePlacementTone,
 } from "../gateway-box-picker";
 
+// Collapsed from a 4-way (none/gateway/vps/all) to the honest 3-way set,
+// 2026-07-15 — founder ruling: once an agent has hardware, a paired computer
+// or a cloud VPS, it has full run of that box by default. "Full hardware
+// access" was never a distinct, separately-grantable level; it was a fourth
+// button that just implied gateway/vps were partial by comparison. A
+// legacy-stored "all" is normalized to "gateway" before it ever reaches this
+// component (see normalizeAccess below, and fleet_tools.py server-side), so
+// this array doesn't need an "all" branch to stay backward compatible.
 const ACCESS_OPTIONS: { value: string; label: string; body: string }[] = [
   { value: "none", label: "Cloud only", body: "No computer access — runs entirely in the cloud." },
-  { value: "gateway", label: "Paired computer", body: "Shell, filesystem, and browser access on a box you've paired." },
-  { value: "vps", label: "Cloud VPS", body: "Same tool access, on a computer Empyralis provisioned for you." },
-  { value: "all", label: "Full hardware access", body: "Any paired computer or cloud VPS in this workspace." },
+  { value: "gateway", label: "Paired computer", body: "Shell, filesystem, and browser — everything on a computer you've paired." },
+  { value: "vps", label: "Cloud VPS", body: "Shell, filesystem, and browser — everything on a cloud computer Empyralis provisions for you." },
 ];
+
+/** Legacy "all" (Full hardware access, retired 2026-07-15) collapses to
+ *  "gateway" for display/selection purposes only — it doesn't touch
+ *  preferred_gateway_id, so an agent that already had a specific box picked
+ *  keeps pointing at that exact box; only the coarse bucket button that
+ *  lights up changes. The backend performs the same mapping when surfacing
+ *  and when persisting (see fleet_tools.py), so this is a client-side
+ *  backstop for a stale cached agent record, not the primary fix. */
+function normalizeAccess(raw: string | undefined | null): string {
+  const value = (raw || "none").toLowerCase();
+  return value === "all" ? "gateway" : value;
+}
 
 function dotClass(tone: HardwarePlacementTone): string {
   if (tone === "online" || tone === "cloud") return "is-online";
@@ -29,10 +49,19 @@ function dotClass(tone: HardwarePlacementTone): string {
  * that sets it (moved here from the Model tab, which kept a second,
  * confusable "brain runs on" picker for a different field — see ModelTab).
  *
- * Backed by hardware_access (none/gateway/vps/all) + preferred_gateway_id,
- * joined against live /gateway/registrations — deliberately never
- * runtime_target / hardware_status (see resolveHardwarePlacement for why
- * that pipeline is inert for real Fleet agents).
+ * Backed by hardware_access (none/gateway/vps — "all" retired 2026-07-15,
+ * normalized to "gateway" wherever it's still stored, see fleet_tools.py and
+ * normalizeAccess above) + preferred_gateway_id, joined against live
+ * /gateway/registrations — deliberately never runtime_target /
+ * hardware_status (see resolveHardwarePlacement for why that pipeline is
+ * inert for real Fleet agents).
+ *
+ * The placement preview below is brain-aware — resolveHardwarePlacement
+ * favors model_config.gateway_binding over hardware_access for
+ * cli_subscription/local agents (see hardwarePlacementIsBrainBound), so it
+ * can legitimately show something other than what this tab's own picker is
+ * set to. The preview explains that split inline rather than leaving it a
+ * silent contradiction.
  */
 export function HardwareTab({
   workspaceId,
@@ -53,7 +82,7 @@ export function HardwareTab({
   const locked = !!agent?.hardware_access_locked;
   const preset = (agent?.capability_preset || "").toLowerCase();
 
-  const [access, setAccess] = useState((agent?.hardware_access || "none").toLowerCase());
+  const [access, setAccess] = useState(normalizeAccess(agent?.hardware_access));
   const [preferredGateway, setPreferredGateway] = useState(agent?.preferred_gateway_id || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +91,7 @@ export function HardwareTab({
   // or another tab's edit landing — but never while a save is in flight.
   useEffect(() => {
     if (saving) return;
-    setAccess((agent?.hardware_access || "none").toLowerCase());
+    setAccess(normalizeAccess(agent?.hardware_access));
     setPreferredGateway(agent?.preferred_gateway_id || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent?.hardware_access, agent?.preferred_gateway_id]);
@@ -73,6 +102,7 @@ export function HardwareTab({
   // preview must agree with the Overview property and list card rather than
   // react to a control that doesn't actually govern brain placement.
   const placement = resolveHardwarePlacement(access, preferredGateway, gateways, agent?.model_config);
+  const brainBound = hardwarePlacementIsBrainBound(agent?.model_config);
 
   async function persist(nextAccess: string, nextGateway: string) {
     setSaving(true);
@@ -86,9 +116,10 @@ export function HardwareTab({
           headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
           body: JSON.stringify({
             patch: {
-              // The real 4-value column, verbatim — no collapsing to a
-              // none/gateway boolean the way the old Model-tab control did,
-              // which silently downgraded "vps"/"all" to "gateway" on save.
+              // The real column, verbatim — no collapsing to a none/gateway
+              // boolean the way the old Model-tab control did, which
+              // silently downgraded "vps" (and legacy "all") to "gateway"
+              // on save.
               hardware_access: nextAccess,
               preferred_gateway_id: nextAccess === "none" ? "" : nextGateway,
             },
@@ -102,7 +133,7 @@ export function HardwareTab({
       setError(e instanceof Error ? e.message : "Could not save.");
       // Roll the control back to the last-known-saved values rather than
       // leaving it pointed at a selection that didn't actually persist.
-      setAccess((agent?.hardware_access || "none").toLowerCase());
+      setAccess(normalizeAccess(agent?.hardware_access));
       setPreferredGateway(agent?.preferred_gateway_id || "");
     } finally {
       setSaving(false);
@@ -122,7 +153,7 @@ export function HardwareTab({
 
   return (
     <div className="fleet-detail-pad fleet-hw">
-      <div className="fleet-detail-section-title">Running on</div>
+      <div className="fleet-detail-section-title">{brainBound ? "Brain runs on" : "Running on"}</div>
       <div className="fleet-hw-card">
         <div className="fleet-hw-row">
           <span className="fleet-hw-label">Placement</span>
@@ -132,6 +163,17 @@ export function HardwareTab({
           </span>
         </div>
       </div>
+      {/* This preview and the hardware-access picker below can legitimately
+          disagree: a cli_subscription/local agent's brain is bound to a
+          computer via the Model tab, independent of this tab's own
+          hardware_access control (see hardwarePlacementIsBrainBound). Say so
+          explicitly instead of leaving two controls that read like the same
+          setting silently pointing at different answers. */}
+      <p className="fleet-hw-note" style={{ marginTop: 6 }}>
+        {brainBound
+          ? "Bound to this agent's subscription/local model connection, set on the Model tab — independent of the hardware access below, which only controls what its tools can reach."
+          : "This agent's brain runs via API call, not on specific hardware — placement here mirrors the hardware access you set below."}
+      </p>
 
       <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Hardware access</div>
       {/* Read-only — surfaces the existing audience_safe=False truth

@@ -390,18 +390,25 @@ export function FleetCreateAgentWizard({
                 this pick.
               </p>
 
+              {/* Same three placements as the Hardware tab's own picker
+                  (none/gateway/vps as "Cloud only"/"Paired computer"/"Cloud
+                  VPS") — no "full access" concept here either: once this
+                  agent has hardware, it has full run of that box by
+                  default. Labels below are wizard-flavored ("Paired
+                  computer" vs onboarding straight into pairing) but map
+                  1:1 onto HardwareTab.tsx's ACCESS_OPTIONS values. */}
               <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Where does it work?</div>
               <div className="fleet-wizard-options">
                 <button type="button" className={`fleet-wizard-option${placement === "cloud" ? " is-selected" : ""}`} onClick={() => setPlacement("cloud")}>
-                  <span className="fleet-wizard-option-label">Cloud <span className="fleet-wizard-option-tag">Recommended</span></span>
+                  <span className="fleet-wizard-option-label">Cloud only <span className="fleet-wizard-option-tag">Recommended</span></span>
                   <span className="fleet-wizard-option-body">No hardware. Runs entirely on Empyralis’ infrastructure.</span>
                 </button>
                 <button type="button" className={`fleet-wizard-option${placement === "vps" ? " is-selected" : ""}`} onClick={() => setPlacement("vps")}>
-                  <span className="fleet-wizard-option-label">Self-hosted VPS</span>
-                  <span className="fleet-wizard-option-body">A cloud server you control, connected over SSH.</span>
+                  <span className="fleet-wizard-option-label">Cloud VPS</span>
+                  <span className="fleet-wizard-option-body">A cloud server, provisioned by Empyralis or connected over SSH.</span>
                 </button>
                 <button type="button" className={`fleet-wizard-option${placement === "gateway" ? " is-selected" : ""}`} onClick={() => setPlacement("gateway")}>
-                  <span className="fleet-wizard-option-label">This computer</span>
+                  <span className="fleet-wizard-option-label">Paired computer</span>
                   <span className="fleet-wizard-option-body">A computer you’ve paired as a Gateway.</span>
                 </button>
               </div>
