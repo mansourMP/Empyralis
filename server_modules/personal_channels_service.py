@@ -1349,7 +1349,11 @@ async def _deliver_whatsapp_personal_reply(
         remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
         text=str(outbound.get("text") or "").strip(),
         idempotency_key=idempotency_key,
-        reply_to_external_message_id=external_message_id,
+        # Auto-replies dispatch as normal messages, not forced quote-reply
+        # bubbles: always threading a reply to the triggering message reads
+        # as robotic on Telegram/WhatsApp. An explicit "reply to X" send
+        # (send_whatsapp_personal_message) still honors a caller-supplied id.
+        reply_to_external_message_id=None,
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
@@ -1640,7 +1644,11 @@ async def _handle_telegram_gateway_channel_inbound(
         remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
         text=str(outbound.get("text") or "").strip(),
         idempotency_key=idempotency_key,
-        reply_to_external_message_id=external_message_id,
+        # Auto-replies dispatch as normal messages, not forced quote-reply
+        # bubbles: always threading a reply to the triggering message reads
+        # as robotic on Telegram/WhatsApp. An explicit "reply to X" send
+        # (send_telegram_personal_message) still honors a caller-supplied id.
+        reply_to_external_message_id=None,
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
@@ -1780,7 +1788,11 @@ async def _deliver_local_bridge_personal_reply(
         remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
         text=str(outbound.get("text") or "").strip(),
         idempotency_key=idempotency_key,
-        reply_to_external_message_id=external_message_id,
+        # Auto-replies dispatch as normal messages, not forced quote-reply
+        # bubbles: always threading a reply to the triggering message reads
+        # as robotic. An explicit "reply to X" send
+        # (send_local_bridge_personal_message) still honors a caller-supplied id.
+        reply_to_external_message_id=None,
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
