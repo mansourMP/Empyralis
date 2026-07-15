@@ -474,8 +474,57 @@ async def _resolve_agent_cloud_provider(
     mode = str(mc.get("mode") or "platform_credits").strip().lower()
     provider = str(mc.get("provider") or "").strip().lower()
 
-    # ── platform_credits: use default workspace resolution ──────────
+    # ── platform_credits: resolve THIS agent's OWN stored provider first;
+    # the shared workspace default is consulted ONLY when the agent has
+    # never been given a provider of its own — never as a live knob every
+    # platform_credits agent tracks together. §29 per-agent-provider fix:
+    # this branch used to hard-delegate to _resolve_cloud_provider (the
+    # shared admin_defaults.sage_ai_provider workspace setting) for EVERY
+    # platform_credits agent unconditionally — `provider` above was already
+    # extracted from this agent's own model_config but silently discarded
+    # right here, so changing that one workspace-wide setting (Sage's /model
+    # command, or the AI-Setup page) shifted every default agent's brain at
+    # once. That violated the platform's per-agent isolation law and was
+    # the exact cross-agent bleed byok_api/cli_subscription/local never had
+    # (see docs/PLATFORM-MAP.md's per-agent-provider audit).
+    #
+    # Backward compat (no data migration, no write-on-read): an agent
+    # created before this fix — or one whose owner explicitly left it on
+    # "platform default" in the create-agent wizard — has no
+    # model_config.provider at all, so it keeps resolving to the LIVE
+    # workspace default exactly as it always did (the fall-through below).
+    # A read/resolve path must never have a write side effect, so nothing
+    # is stamped back onto the agent's own config just because it happened
+    # to resolve here. Once an agent DOES have its own provider (every
+    # agent created via the create-agent wizard's Brain step gets asked —
+    # see FleetCreateAgentWizard.tsx — or any agent an operator explicitly
+    # rebinds via fleet_configure_agent), it is fully isolated from then on:
+    # the workspace default can change freely without ever touching it.
     if mode == "platform_credits":
+        if provider:
+            credentials = direct_chat_credentials(workspace_id, provider)
+            if supports_direct_message_native_chat(provider, credentials):
+                return provider, credentials, "platform_credits"
+            # This agent's OWN provider is unavailable — HARD STOP, exactly
+            # like every other mode's hard rule (see this function's
+            # docstring). NEVER silently fall through to the workspace
+            # default: that would reopen cross-agent bleed through the back
+            # door the moment a per-agent provider goes dark.
+            await _ledger_provider_unavailable(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                mode=mode,
+                provider=provider,
+                reason=f"platform_credits provider '{provider}' is unavailable or missing credentials.",
+            )
+            raise RuntimeError(
+                f"This agent is bound to the {provider} provider, but it isn't "
+                f"available right now. An operator must fix the connection "
+                f"(vault key or entitlement) or rebind this agent to a "
+                f"different provider from its Model tab."
+            )
+        # No provider stored on this agent — fall back to the workspace's
+        # shared default, LIVE (see the backward-compat note above).
         # check_master_model_config=False, explicitly: this call resolves
         # THIS agent's own platform_credits mode via the shared workspace
         # default — it must never fail because of an unrelated mismatch on
@@ -499,10 +548,18 @@ async def _resolve_agent_cloud_provider(
                 "An operator must configure the provider via fleet_configure_agent."
             )
 
-        from server_modules.direct_chat_provider_service import (
-            direct_chat_credentials,
-            supports_direct_message_native_chat,
-        )
+        # direct_chat_credentials/supports_direct_message_native_chat are
+        # already imported at module top (see the import block near the top
+        # of this file) — no local re-import here. A local `from ... import
+        # direct_chat_credentials` used to sit right here; Python treats a
+        # name assigned ANYWHERE in a function body as local to the WHOLE
+        # function, so that import silently shadowed the module-level names
+        # for this entire function — including the platform_credits branch
+        # above, which references them too (§29) — and defeated
+        # `patch("server_modules.sage_agent_runtime_service.
+        # direct_chat_credentials", ...)` in tests, which patches the
+        # module-level binding this file's OTHER call sites (e.g.
+        # _resolve_cloud_provider) already rely on being patchable that way.
         credentials = direct_chat_credentials(workspace_id, provider)
         if not supports_direct_message_native_chat(provider, credentials):
             await _ledger_provider_unavailable(

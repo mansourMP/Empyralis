@@ -388,6 +388,183 @@ class PerAgentAIBindingTests(unittest.TestCase):
         # Different providers resolved
         self.assertNotEqual(prov1, prov2)
 
+    # ── §29 per-agent-provider fix: platform_credits resolves THIS agent's
+    # own stored provider first, the shared workspace default only as a
+    # fallback for an agent that's never had one of its own ──────────────
+
+    def test_platform_credits_with_explicit_provider_never_touches_workspace_default(self):
+        """The strongest possible proof, matching the existing "nothing
+        configured" test's own style: patch _resolve_cloud_provider to
+        explode if it's ever called, and confirm an agent with its OWN
+        stored provider resolves without touching it at all."""
+        exploding_workspace_default = AsyncMock(
+            side_effect=AssertionError("must not be called for an agent with its own provider")
+        )
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                new=exploding_workspace_default,
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+                return_value={"api_key": "sk-agent-own-anthropic-key"},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+                return_value=True,
+            ),
+        ):
+            provider, creds, billing = _run(
+                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    workspace_id="ws-test",
+                    agent_model_config={"mode": "platform_credits", "provider": "anthropic"},
+                    agent_id="agent-pc-own-provider",
+                )
+            )
+        self.assertEqual(provider, "anthropic")
+        self.assertEqual(billing, "platform_credits")
+        self.assertEqual(creds, {"api_key": "sk-agent-own-anthropic-key"})
+        exploding_workspace_default.assert_not_awaited()
+
+    def test_two_default_agents_different_stored_providers_resolve_independently(self):
+        """Task's literal ask (a): two agents, BOTH platform_credits, with
+        different stored providers — each resolves to its own, never the
+        other's, and never the shared workspace default."""
+        def _fake_credentials(_workspace_id, provider):
+            return {"api_key": f"sk-{provider}-key"}
+
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+                side_effect=_fake_credentials,
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+                return_value=True,
+            ),
+        ):
+            prov1, creds1, bill1 = _run(
+                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    workspace_id="ws-test",
+                    agent_model_config={"mode": "platform_credits", "provider": "anthropic"},
+                    agent_id="agent-default-1",
+                )
+            )
+            prov2, creds2, bill2 = _run(
+                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    workspace_id="ws-test",
+                    agent_model_config={"mode": "platform_credits", "provider": "openai"},
+                    agent_id="agent-default-2",
+                )
+            )
+
+        self.assertEqual(prov1, "anthropic")
+        self.assertEqual(bill1, "platform_credits")
+        self.assertEqual(creds1, {"api_key": "sk-anthropic-key"})
+        self.assertEqual(prov2, "openai")
+        self.assertEqual(bill2, "platform_credits")
+        self.assertEqual(creds2, {"api_key": "sk-openai-key"})
+        self.assertNotEqual(prov1, prov2)
+        self.assertNotEqual(creds1, creds2)
+
+    def test_changing_workspace_default_does_not_change_an_agents_own_provider(self):
+        """Task's literal ask (b): an agent with its OWN stored provider is
+        immune to a workspace-default change. Simulated by making the
+        workspace-default resolver return something else entirely (a
+        change an admin could make via Sage's /model command or the
+        AI-Setup page) — the agent's resolved provider must not move."""
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                new=AsyncMock(return_value=("gemini", {"api_key": "sk-new-workspace-default"})),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+                return_value={"api_key": "sk-agent-own-openai-key"},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+                return_value=True,
+            ),
+        ):
+            provider, creds, billing = _run(
+                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    workspace_id="ws-test",
+                    agent_model_config={"mode": "platform_credits", "provider": "openai"},
+                    agent_id="agent-pinned-to-openai",
+                )
+            )
+        self.assertEqual(provider, "openai")
+        self.assertNotEqual(provider, "gemini")
+        self.assertEqual(creds, {"api_key": "sk-agent-own-openai-key"})
+        self.assertEqual(billing, "platform_credits")
+
+    def test_legacy_agent_with_no_stored_provider_still_tracks_workspace_default(self):
+        """The documented backward-compat carve-out, in direct contrast to
+        the test above: an agent that has NEVER been given its own provider
+        (pre-fix agent, or one whose owner left it on "platform default" in
+        the create-agent wizard) keeps tracking the shared workspace default
+        live — the exact behavior it always had. This is intentional, not a
+        gap: the create-agent wizard now asks for a provider on every new
+        agent, so only already-unconfigured agents take this path."""
+        with patch(
+            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            new=AsyncMock(return_value=("gemini", {"api_key": "sk-new-workspace-default"})),
+        ) as mock_default:
+            provider, creds, billing = _run(
+                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    workspace_id="ws-test",
+                    agent_model_config={"mode": "platform_credits"},
+                    agent_id="agent-legacy-no-provider",
+                )
+            )
+        mock_default.assert_awaited_once()
+        self.assertEqual(provider, "gemini")
+        self.assertEqual(creds, {"api_key": "sk-new-workspace-default"})
+        self.assertEqual(billing, "platform_credits")
+
+    def test_platform_credits_explicit_provider_unavailable_hard_stops_no_fallback(self):
+        """The hard rule applies to platform_credits' own-provider branch
+        exactly like every other mode: an unavailable bound provider fails
+        loudly and is ledgered — it must NEVER silently fall back to the
+        workspace default (that would reopen the exact cross-agent bleed
+        this fix closes, just one layer deeper)."""
+        mock_ledger = AsyncMock()
+        exploding_workspace_default = AsyncMock(
+            side_effect=AssertionError("must not fall back to the workspace default")
+        )
+        with (
+            patch("server_modules.activity_ledger_service.append_activity_event", new=mock_ledger),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                new=exploding_workspace_default,
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+                return_value={},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._resolve_agent_cloud_provider(
+                        workspace_id="ws-test",
+                        agent_model_config={"mode": "platform_credits", "provider": "anthropic"},
+                        agent_id="agent-pc-dead-key",
+                    )
+                )
+        self.assertIn("anthropic", str(ctx.exception))
+        exploding_workspace_default.assert_not_awaited()
+        mock_ledger.assert_awaited_once()
+        call_kwargs = mock_ledger.await_args.kwargs
+        self.assertEqual(call_kwargs["action"], "provider_unavailable")
+        self.assertEqual(call_kwargs["status"], "blocked")
+        self.assertEqual(call_kwargs["metadata"]["mode"], "platform_credits")
+        self.assertEqual(call_kwargs["metadata"]["provider"], "anthropic")
+
     def test_provider_unavailable_is_ledgered(self):
         """Provider unavailable writes a ledger event."""
         mock_ledger = AsyncMock()

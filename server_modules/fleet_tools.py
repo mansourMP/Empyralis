@@ -346,8 +346,26 @@ async def _resolve_cloud_agent_readiness(
 
     try:
         if mode == "platform_credits":
-            # The workspace's shared default provider — the SAME resolution
-            # a platform_credits turn actually uses at turn time.
+            # §29 per-agent-provider fix: mirrors _resolve_agent_cloud_
+            # provider's own platform_credits branch (this agent's OWN
+            # stored provider wins; the workspace default is a fallback
+            # for an agent that's never had one of its own) — NOT the
+            # shared resolver, for the same no-ledger-side-effect-on-
+            # every-poll reason documented above. Same primitives as the
+            # byok_api branch just below.
+            if provider:
+                from server_modules.direct_chat_provider_service import (
+                    direct_chat_credentials,
+                    supports_direct_message_native_chat,
+                )
+
+                credentials = direct_chat_credentials(workspace_id, provider)
+                if supports_direct_message_native_chat(provider, credentials):
+                    return True, ""
+                return False, f"This agent's {provider} provider is not available (missing credentials or entitlement)."
+
+            # No provider stored — the workspace's shared default, the SAME
+            # resolution a platform_credits turn actually uses at turn time.
             # check_master_model_config=False: this checks THIS agent's own
             # platform_credits mode, not Sage's — must never fail because of
             # an unrelated misconfiguration on Sage's own card (see
@@ -388,6 +406,59 @@ async def _resolve_cloud_agent_readiness(
         # "ready" — that would silently reintroduce the exact always-online
         # lie this function exists to remove.
         return False, str(exc).strip() or "Could not verify this agent's AI provider configuration."
+
+
+def recommended_model_config_for_gateway(
+    gateway_id: str,
+    *,
+    workspace_id: str,
+) -> Optional[Dict[str, str]]:
+    """BYO-brain creation-flow hint (§29 per-agent-provider): when the box an
+    agent is being placed on already has an authenticated Claude Code or
+    Codex CLI, recommend reusing it as a cli_subscription binding instead of
+    steering the create-agent wizard's Brain step toward Empyralis credits
+    by default — "you already have Codex on this box, use it" rather than
+    making the owner reconfigure or re-login.
+
+    Reuses gateway_registry_service.gateway_registration_public_payload's
+    llm_runtimes — the SAME installed+authenticated signal
+    fleet_configure_agent's own cli_subscription save-time check (above) and
+    the frontend's GatewayBoxPicker/ModelTab already read off
+    GET /api/gateway/registrations. No new detection source.
+
+    Returns a ready-to-patch model_config dict — {mode, provider, runtime,
+    gateway_binding} — when a subscription is ready to reuse, else None.
+    Claude Code wins when a box happens to have both ready, matching the
+    create-agent wizard's own default subscriptionProvider. Best-effort:
+    any lookup failure returns None — this is a UX hint, never a gate.
+    """
+    gid = str(gateway_id or "").strip()
+    if not gid:
+        return None
+    try:
+        from server_modules import gateway_state_repository, gateway_registry_service
+
+        registration = gateway_state_repository.get_gateway_registration(gid)
+        if not isinstance(registration, dict) or not registration:
+            return None
+        registration_workspace_id = str(registration.get("workspace_id") or "").strip()
+        if registration_workspace_id and registration_workspace_id != (str(workspace_id or "").strip() or "default"):
+            return None
+        payload = gateway_registry_service.gateway_registration_public_payload(registration)
+        llm_runtimes = payload.get("llm_runtimes") if isinstance(payload.get("llm_runtimes"), dict) else {}
+    except Exception:
+        return None
+
+    for runtime, provider_id in (("claude_code", "claude_code_cli"), ("codex", "openai-codex")):
+        entry = llm_runtimes.get(runtime)
+        if isinstance(entry, dict) and bool(entry.get("installed")) and bool(entry.get("authenticated")):
+            return {
+                "mode": "cli_subscription",
+                "provider": provider_id,
+                "runtime": runtime,
+                "gateway_binding": gid,
+            }
+    return None
 
 
 async def _resolve_hardware_status(
@@ -1225,7 +1296,20 @@ async def fleet_configure_agent(
         target_agent_id=agent_id,
         metadata={"patch_keys": sorted(clean_patch.keys())},
     )
-    return {"ok": True, "agent_id": agent_id, "applied": sorted(clean_patch.keys())}
+    response: Dict[str, Any] = {"ok": True, "agent_id": agent_id, "applied": sorted(clean_patch.keys())}
+    # Hardware-aware "recommended" reuse (§29): only worth the lookup when
+    # THIS patch just (re)bound the agent's placement — a real gateway id,
+    # not the "cloud"/unbind case. Best-effort, additive-only key; existing
+    # callers that don't read it are unaffected.
+    if "preferred_gateway_id" in clean_patch:
+        _bound_gateway_id = str(meta.get("preferred_gateway_id") or "").strip()
+        if _bound_gateway_id:
+            _recommendation = recommended_model_config_for_gateway(
+                _bound_gateway_id, workspace_id=workspace_id,
+            )
+            if _recommendation:
+                response["recommended_model_config"] = _recommendation
+    return response
 
 
 async def fleet_message_agent(
