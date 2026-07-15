@@ -4,10 +4,8 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import "./fleet-theme.css";
 import { FleetCommandPalette } from "./FleetCommandPalette";
-import { FleetHelpButton } from "./FleetHelpButton";
 import { FleetShellDecider } from "./FleetShellDecider";
 import { PrimaryRail } from "./PrimaryRail";
-import { SageLauncher } from "./SageLauncher";
 import { useFleetPreferences } from "./fleet-preferences";
 
 /**
@@ -87,6 +85,9 @@ export function FleetShell({
         onToggleSection={toggleSection}
         mobileOpen={mobileNavOpen}
         onCloseMobile={closeMobileNav}
+        sageOpen={sageOpen}
+        onOpenSage={onOpenSage}
+        onCloseSage={onCloseSage}
       />
       {mobileNavOpen && <div className="fleet-rail-scrim" onClick={closeMobileNav} />}
       <div className="fleet-shell-panel">
@@ -98,13 +99,6 @@ export function FleetShell({
         onToggleTheme={toggleTheme}
         onOpenSage={onOpenSage}
       />
-      <SageLauncher
-        workspaceId={workspaceId}
-        open={sageOpen}
-        onOpen={onOpenSage}
-        onClose={onCloseSage}
-      />
-      <FleetHelpButton />
     </div>
   );
 }
