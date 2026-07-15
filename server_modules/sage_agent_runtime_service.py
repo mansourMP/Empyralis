@@ -440,6 +440,14 @@ async def _resolve_cloud_provider(
 # local mode — this set is the cli_subscription-only subset of that one).
 _VALID_CLI_SUBSCRIPTION_RUNTIMES = {"claude_code", "codex"}
 
+# Reasoning-effort picker (Fleet Model tab, model_config.reasoning_effort).
+# Matches scripts/orion_local_worker_llm.py's resolve_requested_reasoning_effort
+# and provider_profiles.py's PROVIDER_MODEL_CATALOG reasoning_levels union —
+# "xhigh" is real (GPT-5.x/Codex-class models), not a typo for "high". Only
+# consulted for platform_credits/byok_api — see SpecialistRuntimeContext.
+# reasoning_effort's docstring for why cli_subscription/local don't use it.
+_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+
 
 async def _resolve_agent_cloud_provider(
     workspace_id: str,
@@ -2574,6 +2582,10 @@ async def _run_sage_action_loop_v3(
     sender_class: str = "owner",
     agent_install_id: str = "",
     preferred_gateway_id: str = "",
+    # Fleet Model tab's model_config.reasoning_effort, already resolved +
+    # validated by the caller (handle_sage_chat) against
+    # _VALID_REASONING_EFFORTS. Empty = no override (provider/model default).
+    reasoning_effort: str = "",
 ) -> dict[str, Any] | None:
     # Phase 4B: when agent_install_id is set this turn runs as that specialist —
     # its tool whitelist, tool-call executor identity, and mid-turn memory
@@ -2778,7 +2790,7 @@ async def _run_sage_action_loop_v3(
             provider=provider,
             model=model,
             credentials=credentials,
-            reasoning_effort="",
+            reasoning_effort=reasoning_effort,
             session_ctx=session_ctx,
         ),
     )
@@ -2838,7 +2850,7 @@ async def _run_sage_action_loop_v3(
                 normalized_workspace_id=workspace_id,
                 normalized_requested_provider=provider,
                 normalized_requested_model=model,
-                normalized_reasoning_effort="",
+                normalized_reasoning_effort=reasoning_effort or None,
                 normalized_thread_id=trace_id,
                 normalized_message=message,
                 compacted_prior_messages=prior_messages,
@@ -3772,6 +3784,25 @@ async def handle_sage_chat(
         if _spec_model:
             requested_model = _spec_model
 
+    # ── Reasoning effort (Fleet Model tab's model_config.reasoning_effort) ──
+    # Specialist-only today, matching how model/provider overrides above are
+    # scoped: only a specialist with its own SpecialistRuntimeContext carries
+    # a resolved reasoning_effort (see specialist_runtime_context.py). Sage's
+    # own master-install model_config is not consulted for model/provider
+    # either (see _resolve_cloud_provider's docstring — check_master_model_
+    # config is never passed True on this path), so leaving Sage's own
+    # reasoning_effort unwired here is consistent with that existing scope,
+    # not a new gap. Validated against _VALID_REASONING_EFFORTS so a stale or
+    # hand-edited value can't reach the generation service as an arbitrary
+    # string (it would otherwise get quoted straight into a system-prompt
+    # instruction — see stream_provider_backed_direct_chat's degradation
+    # branch).
+    requested_reasoning_effort = ""
+    if _spec is not None:
+        _spec_reasoning_effort = str(getattr(_spec, "reasoning_effort", "") or "").strip().lower()
+        if _spec_reasoning_effort in _VALID_REASONING_EFFORTS:
+            requested_reasoning_effort = _spec_reasoning_effort
+
     # --- Build Sage prompt/context before any model-backed action loop ---
     # --- Load recent conversation turns from shared thread store ---
     effective_tenant_id = normalized_tenant_id or "default"
@@ -4208,6 +4239,7 @@ async def handle_sage_chat(
         # Phase 4B: run the tool loop as the resolved specialist (empty for Sage).
         agent_install_id=_spec_install_id,
         preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
+        reasoning_effort=requested_reasoning_effort,
     )
     if action_result is not None:
         if "sage_action_loop" not in used_context:
@@ -4284,6 +4316,7 @@ async def handle_sage_chat(
                     sender_id=sender_id,
                     agent_install_id=_spec_install_id,
                     preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
+                    reasoning_effort=requested_reasoning_effort,
                 )
                 if not isinstance(_corrected, dict):
                     return None
