@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 
 from server_modules.workspace_context import (
     agent_workspace_context_dir,
+    is_default_context_content,
     read_workspace_context_file,
     write_workspace_context_file,
 )
@@ -554,6 +555,34 @@ def _update_memory_md(workspace_id: str, content: str, agent_install_id: str | N
 
 def _export_memory_md(workspace_id: str, agent_install_id: str | None = None) -> Dict[str, Any]:
     entries = _list_memory_entries(workspace_id, agent_install_id=agent_install_id)
+    if not entries:
+        # OVERWRITE GUARD: this structured-facts SQLite table (memory_entries)
+        # is a legacy side system — nothing on any live turn writes to it with
+        # a real agent_install_id today (save_memory/delete_memory's only
+        # live callers are workspace-root-scoped: the /forget slash command,
+        # store_direct_chat_memory_fact, handle_no_provider_memory_request).
+        # MEMORY.md's actual source of truth is the notebook system
+        # (memory_write tool -> memory_service.memory_write_file ->
+        # write_workspace_context_file), which this table does not track at
+        # all. An empty `entries` read here — e.g. after deleting the last
+        # SQLite row — must NEVER blow away real notebook content by
+        # overwriting MEMORY.md with the empty "No structured memory facts
+        # saved yet." projection. Skip the write whenever MEMORY.md already
+        # holds real (non-default-scaffold) content; only let the empty
+        # projection through when MEMORY.md is still untouched, so a
+        # brand-new file still gets initialized.
+        existing = read_workspace_context_file(
+            "MEMORY.md",
+            workspace_id=workspace_id,
+            agent_install_id=agent_install_id,
+        )
+        if str(existing or "").strip() and not is_default_context_content("MEMORY.md", existing):
+            return {
+                "workspace_id": _normalize_workspace_token(workspace_id),
+                "agent_install_id": str(agent_install_id or "").strip() or None,
+                "skipped": True,
+                "reason": "memory_entries_empty_would_overwrite_populated_memory_md",
+            }
     return _update_memory_md(
         workspace_id,
         _build_memory_md_projection(entries),
