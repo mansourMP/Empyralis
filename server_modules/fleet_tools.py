@@ -290,16 +290,104 @@ def _resolve_runtime_target(inst: Dict[str, Any]) -> str:
     return "unknown"
 
 
-def _resolve_hardware_status(
+async def _resolve_cloud_agent_readiness(
+    workspace_id: str,
+    model_config: Dict[str, Any],
+) -> tuple[bool, str]:
+    """Check whether a CLOUD-placement agent's model_config resolves to a
+    usable AI provider + credential RIGHT NOW — the honesty check backing
+    _resolve_hardware_status's "online" for cloud agents (see there for why
+    this exists: cloud placement used to be reported "online"
+    unconditionally, regardless of whether the bound model_config could
+    actually produce a turn).
+
+    Mirrors sage_agent_runtime_service._resolve_agent_cloud_provider's mode
+    dispatch (platform_credits / byok_api / cli_subscription / local) and
+    calls the SAME credential-resolution primitives it uses — but
+    deliberately does NOT call that function directly. Both this function
+    and _resolve_agent_cloud_provider never make a live model call (config/
+    credential presence only), so that's not the reason; the reason is its
+    ledger-on-failure side effect: _resolve_agent_cloud_provider's
+    byok_api/cli_subscription/local/unknown branches write a
+    "provider_unavailable" ledger event on failure, which is correct for a
+    real denied turn but wrong here. fleet_list_agents polls every ~30s
+    (see its "Not ledgered" note above) — ledgering a "turn denied" event on
+    every poll of a permanently-misconfigured agent would fabricate
+    thousands of fake denied-turn events for turns that were never
+    attempted, exactly the kind of dishonest signal this fix exists to
+    remove, not add.
+
+    Returns (ready, reason) — reason is "" when ready.
+    """
+    mc = dict(model_config or {})
+    mode = str(mc.get("mode") or "platform_credits").strip().lower()
+    provider = str(mc.get("provider") or "").strip().lower()
+
+    try:
+        if mode == "platform_credits":
+            # The workspace's shared default provider — the SAME resolution
+            # a platform_credits turn actually uses at turn time.
+            # check_master_model_config=False: this checks THIS agent's own
+            # platform_credits mode, not Sage's — must never fail because of
+            # an unrelated misconfiguration on Sage's own card (see
+            # _resolve_cloud_provider's docstring).
+            from server_modules.sage_agent_runtime_service import _resolve_cloud_provider
+
+            await _resolve_cloud_provider(workspace_id, check_master_model_config=False)
+            return True, ""
+
+        if mode == "byok_api":
+            if not provider:
+                return False, "No provider is configured for this agent's own API key (BYOK)."
+            from server_modules.direct_chat_provider_service import (
+                direct_chat_credentials,
+                supports_direct_message_native_chat,
+            )
+
+            credentials = direct_chat_credentials(workspace_id, provider)
+            if supports_direct_message_native_chat(provider, credentials):
+                return True, ""
+            return False, f"This agent's {provider} API key is missing or invalid."
+
+        if mode in ("cli_subscription", "local"):
+            gateway_binding = str(mc.get("gateway_binding") or "").strip()
+            if not gateway_binding:
+                return False, f"{mode} mode requires a paired computer, but none is bound."
+            if mode == "cli_subscription":
+                from server_modules.sage_agent_runtime_service import _VALID_CLI_SUBSCRIPTION_RUNTIMES
+
+                runtime = str(mc.get("runtime") or "claude_code").strip().lower() or "claude_code"
+                if runtime not in _VALID_CLI_SUBSCRIPTION_RUNTIMES:
+                    return False, f"Unsupported cli_subscription runtime: {runtime}."
+            return True, ""
+
+        return False, f"Unrecognized model_config mode: {mode or '(none)'}."
+    except Exception as exc:
+        # Fail CLOSED, not open: an unexpected error here must never read as
+        # "ready" — that would silently reintroduce the exact always-online
+        # lie this function exists to remove.
+        return False, str(exc).strip() or "Could not verify this agent's AI provider configuration."
+
+
+async def _resolve_hardware_status(
     inst: Dict[str, Any],
     heartbeats: Dict[str, dict],
-) -> tuple[str, Optional[str], Optional[str]]:
-    """Resolve hardware status, last heartbeat, and current run for an
-    agent install.
+    *,
+    workspace_id: str = "",
+) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
+    """Resolve hardware status, last heartbeat, current run, and (when not
+    ready) a human reason for an agent install.
 
-    Returns (status, last_heartbeat_iso, current_run_id):
-      - "online" — heartbeat received within the freshness window
+    Returns (status, last_heartbeat_iso, current_run_id, not_ready_reason):
+      - "online" — heartbeat received within the freshness window, OR (for
+        a cloud-placement agent) its model_config resolves to a usable
+        provider + credential right now
       - "offline" — a worker registered here before, but not recently
+      - "error" — a cloud-placement agent whose model_config can NOT
+        currently produce a turn (dead/missing BYOK key, exhausted/blocked
+        platform entitlement, unbound cli_subscription/local gateway, ...)
+        — see not_ready_reason. Cloud agents have no heartbeat/liveness
+        concept, so this is a config-honesty check, not a liveness ping.
       - "unknown" — no gateway/VPS worker has ever registered for this agent
     """
     profile = _runtime_profile_dict(inst)
@@ -311,20 +399,33 @@ def _resolve_hardware_status(
         status = "online" if bool(hb.get("online", False)) else "offline"
         last_hb = str(hb.get("last_heartbeat_at") or "").strip() or None
         current_run_id = str(hb.get("current_run_id") or "").strip() or None
-        return status, last_hb, current_run_id
+        return status, last_hb, current_run_id, None
 
     # Cloud agents have no worker/heartbeat concept — the platform runs
-    # their turns synchronously, so "online" always, no run-in-progress
-    # tracking (there's no queue for a cloud text-agent turn to sit in).
+    # their turns synchronously, no run-in-progress tracking (there's no
+    # queue for a cloud text-agent turn to sit in). "online" here used to be
+    # unconditional ("always online") regardless of whether the bound
+    # model_config could actually produce a turn, which lied to the Status
+    # row, sidebar dots, and "Online: N/M" count whenever a cloud agent's
+    # credential was dead, missing, or exhausted. Fixed: report ready only
+    # when the SAME provider-resolution logic the runtime uses to dispatch a
+    # real turn would actually resolve a usable credential — see
+    # _resolve_cloud_agent_readiness for what "usable" means and why it
+    # doesn't just call _resolve_agent_cloud_provider directly.
     target = str(profile.get("default_execution_target") or "").strip().lower()
     if target in ("cloud", "empyralis-cloud"):
-        return "online", None, None
+        ready, reason = await _resolve_cloud_agent_readiness(
+            workspace_id, resolve_model_config(inst),
+        )
+        if ready:
+            return "online", None, None, None
+        return "error", None, None, (reason or "This agent's AI provider is not configured.")
 
     # No machine_id at all — never paired with a gateway/VPS worker.
     if not machine_id:
-        return "unknown", None, None
+        return "unknown", None, None, None
 
-    return "offline", None, None
+    return "offline", None, None, None
 
 
 async def _fetch_latest_heartbeats(workspace_id: str) -> Dict[str, dict]:
@@ -487,8 +588,8 @@ async def fleet_list_agents(
 
         # ── Phase U3: runtime target + hardware status ──
         _runtime_target = _resolve_runtime_target(inst_dict)
-        _hardware_status, _last_heartbeat, _current_run_id = _resolve_hardware_status(
-            inst_dict, _heartbeats
+        _hardware_status, _last_heartbeat, _current_run_id, _hardware_status_reason = await _resolve_hardware_status(
+            inst_dict, _heartbeats, workspace_id=workspace_id,
         )
 
         # ── Phase 7B: capability preset + hardware access + context policy ──
@@ -517,6 +618,10 @@ async def fleet_list_agents(
             # Phase U3: placement visibility
             "runtime_target": _runtime_target,
             "hardware_status": _hardware_status,
+            # Populated only when hardware_status is not a ready state (e.g.
+            # a cloud agent whose model_config can't currently produce a
+            # turn) — the honest "why" behind the Status row/sidebar dot.
+            "hardware_status_reason": _hardware_status_reason,
             "last_heartbeat": _last_heartbeat,
             "current_run_id": _current_run_id,
             "last_activity": (_last_active.get(str(inst_dict.get("id") or "").strip()) or {}).get("last_active_at"),
