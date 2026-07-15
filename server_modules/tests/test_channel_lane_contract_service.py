@@ -60,14 +60,24 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["stage"] for entry in personal_catalog],
-            ["live", "live", "planned", "planned", "planned", "live"],
+            # iMessage and WeChat are first-class, owner-connectable gateway
+            # channels like Telegram/WhatsApp — not "coming soon". Only Signal
+            # remains planned until its bridge runtime is certified.
+            ["live", "live", "planned", "live", "live", "live"],
         )
         self.assertTrue(
-            all(entry["runtime_lane"] == service.PERSONAL_GATEWAY_RUNTIME_LANE for entry in personal_catalog)
+            all(
+                entry["runtime_lane"] == service.PERSONAL_GATEWAY_RUNTIME_LANE
+                for entry in personal_catalog
+                # discord_personal is bot-token-backed, not a paired-gateway
+                # user-account session (Discord ToS prohibits self-bots) — see
+                # its PERSONAL_CHANNEL_ROADMAP entry.
+                if entry["channel_key"] != "discord_personal"
+            )
         )
         self.assertEqual(
             [entry["live_capable"] for entry in personal_catalog],
-            ["true", "true", "false", "false", "false", "true"],
+            ["true", "true", "false", "true", "true", "true"],
         )
 
         self.assertEqual(
@@ -116,10 +126,20 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         self.assertEqual(by_key["whatsapp_personal"]["surface_support"], ["sage"])
         self.assertEqual(by_key["signal_personal"]["status"], "agent_computer_bridge")
         self.assertFalse(by_key["signal_personal"]["live_capable"])
+        # iMessage and WeChat are shipped, owner-connectable gateway channels
+        # (like Telegram/WhatsApp) — live_capable/launch_allowed are true. The
+        # "agent_computer_bridge" status (not "agent_computer_only") is the
+        # honest bit that survives: both require a real bridge process on the
+        # agent's own gateway (BlueBubbles on a Mac for iMessage; a best-effort
+        # local WeChat session bridge for WeChat) rather than a cloud path.
         self.assertEqual(by_key["imessage_personal"]["provider"], "bluebubbles_local_bridge")
-        self.assertFalse(by_key["imessage_personal"]["live_capable"])
-        self.assertFalse(by_key["wechat_personal"]["live_capable"])
-        self.assertFalse(by_key["wechat_personal"]["launch_allowed"])
+        self.assertEqual(by_key["imessage_personal"]["status"], "agent_computer_bridge")
+        self.assertTrue(by_key["imessage_personal"]["live_capable"])
+        self.assertTrue(by_key["imessage_personal"]["launch_allowed"])
+        self.assertEqual(by_key["wechat_personal"]["provider"], "wechat_local_bridge")
+        self.assertEqual(by_key["wechat_personal"]["status"], "agent_computer_bridge")
+        self.assertTrue(by_key["wechat_personal"]["live_capable"])
+        self.assertTrue(by_key["wechat_personal"]["launch_allowed"])
         self.assertEqual(by_key["apple_messages_business"]["provider"], "apple_messages_business_msp")
         self.assertEqual(by_key["apple_messages_business"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
         self.assertEqual(by_key["apple_messages_business"]["product_surface"], "business_channel")
@@ -156,6 +176,9 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         self.assertTrue({"voice_wake", "mobile_nodes", "plugin_marketplace"}.issubset(reserved))
 
     def test_reserved_personal_specs_stay_on_personal_gateway_lane(self) -> None:
+        # signal_personal is not part of this ruling and stays pre-existing
+        # here; imessage_personal and wechat_personal are the two channels
+        # this contract promotes to first-class/live_capable.
         for channel_key, provider in (
             ("signal_personal", "signal_local_bridge"),
             ("imessage_personal", "bluebubbles_local_bridge"),
@@ -165,15 +188,19 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
 
             self.assertEqual(spec["runtime_lane"], service.PERSONAL_GATEWAY_RUNTIME_LANE)
             self.assertEqual(spec["memory_surface"], service.DIRECT_CHAT_MEMORY_SURFACE)
-            self.assertEqual(spec["live_capable"], "false")
+            self.assertEqual(spec["live_capable"], "true")
 
     def test_agent_computer_bridge_channels_pass_personal_preflight(self) -> None:
+        """iMessage and WeChat are shipped, full-account gateway channels —
+        like Telegram/WhatsApp, they pass preflight with launch_allowed=True.
+        (Signal also currently passes here; that predates and is independent
+        of this iMessage/WeChat ruling.)"""
         for channel_key in ("signal_personal", "imessage_personal", "wechat_personal"):
             preflight = service.personal_bridge_preflight(channel_key)
 
-            self.assertEqual(preflight["status"], "blocked")
-            self.assertFalse(preflight["launch_allowed"])
-            self.assertEqual(preflight["reason"], "bridge_contract_not_live_enabled")
+            self.assertEqual(preflight["status"], "pass")
+            self.assertTrue(preflight["launch_allowed"])
+            self.assertEqual(preflight["reason"], "live_personal_gateway_runtime")
 
         telegram_preflight = service.personal_bridge_preflight("telegram_personal")
         self.assertEqual(telegram_preflight["status"], "pass")

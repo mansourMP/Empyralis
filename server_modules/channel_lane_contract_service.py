@@ -44,8 +44,8 @@ PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
         "provider": "wechat_local_bridge",
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
         "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
-        "stage": "planned",
-        "live_capable": "false",
+        "stage": "live",
+        "live_capable": "true",
     },
     "discord_personal": {
         "provider": "discord_bot",
@@ -92,8 +92,11 @@ PERSONAL_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
         "label": "iMessage",
         "provider": "bluebubbles_local_bridge",
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "stage": "planned",
-        "live_capable": "false",
+        # Full-account gateway channel like Telegram/WhatsApp: owner-connectable
+        # and launch-allowed, via a real Mac running BlueBubbles Server as this
+        # agent's gateway. There is no cloud path — a Mac is required.
+        "stage": "live",
+        "live_capable": "true",
         "family": "personal",
         "session_owner": "paired_gateway",
     },
@@ -102,8 +105,11 @@ PERSONAL_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
         "label": "WeChat",
         "provider": "wechat_local_bridge",
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "stage": "planned",
-        "live_capable": "false",
+        # Full-account gateway channel like Telegram/WhatsApp: owner-connectable
+        # and launch-allowed, via a real WeChat session on this agent's gateway.
+        # WeChat has no official API, so this bridge is best-effort.
+        "stage": "live",
+        "live_capable": "true",
         "family": "personal",
         "session_owner": "paired_gateway",
     },
@@ -619,9 +625,12 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
         "category": "personal_runtime",
         "stage": "live",
+        # "agent_computer_bridge" (not "agent_computer_only") is the honest
+        # distinction from Telegram/WhatsApp: this needs a real Mac running
+        # BlueBubbles Server as the bridge — there is no cloud path.
         "status": "agent_computer_bridge",
-        "live_capable": False,
-        "launch_allowed": False,
+        "live_capable": True,
+        "launch_allowed": True,
         "requires_agent_computer": True,
         "account_provider": "imessage_personal",
         "connector_id": None,
@@ -636,9 +645,12 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
         "category": "personal_runtime",
         "stage": "live",
+        # "agent_computer_bridge" (not "agent_computer_only") is the honest
+        # distinction from Telegram/WhatsApp: WeChat has no official API, so
+        # this runs through a best-effort local bridge on the agent's gateway.
         "status": "agent_computer_bridge",
-        "live_capable": False,
-        "launch_allowed": False,
+        "live_capable": True,
+        "launch_allowed": True,
         "requires_agent_computer": True,
         "account_provider": "wechat_personal",
         "connector_id": None,
