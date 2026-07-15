@@ -227,14 +227,21 @@ def _oauth_completion_url(
     else:
         query["connected"] = provider
     # Fleet agent-connectors: send the browser back to the agent's own
-    # Connectors tab (not the generic workspace integrations page) when this
-    # OAuth round-trip was started from the wizard/tab picker.
+    # Channels or Connectors tab (not the generic workspace integrations
+    # page) when this OAuth round-trip was started from the agent's own tab
+    # picker. Same "sage" == channels / else == connectors surface
+    # vocabulary as the no-agent-context branch below — this branch used to
+    # ignore `surface` entirely and always land on /connectors, so a channel
+    # connect (Slack/Discord) started from the agent's Channels tab — and,
+    # on failure, needing its error banner to show there — landed on the
+    # wrong tab instead.
     if agent_install_id and project_id:
+        tab = "channels" if str(surface or "").strip().lower() == "sage" else "connectors"
         return (
             f"{connection_oauth_service.request_origin(request)}"
             f"/w/{urlparse.quote(str(workspace_id or 'ws-1').strip() or 'ws-1')}"
             f"/projects/{urlparse.quote(str(project_id).strip())}"
-            f"/agents/{urlparse.quote(str(agent_install_id).strip())}/connectors?"
+            f"/agents/{urlparse.quote(str(agent_install_id).strip())}/{tab}?"
             f"{urlparse.urlencode(query)}"
         )
     # Map surface to frontend section: "sage" → channels, "studio" / None → apps
@@ -244,6 +251,29 @@ def _oauth_completion_url(
         f"/w/{urlparse.quote(str(workspace_id or 'ws-1').strip() or 'ws-1')}/integrations?"
         f"{urlparse.urlencode(query)}"
     )
+
+
+async def _resolve_agent_project_id(agent_install_id: str, workspace_id: str) -> str:
+    """Resolve an agent install's project_id for the OAuth completion
+    redirect — the agent's own Connectors/Channels tab route is
+    /w/{ws}/projects/{project_id}/agents/{agent_install_id}/{tab}, so without
+    project_id the redirect can't target it and falls back to the generic
+    workspace integrations page. Shared by both the success and error
+    branches of complete_connection_oauth_callback so a failed OAuth
+    round-trip round-trips back to the same place a successful one would.
+    """
+    normalized_agent_install_id = str(agent_install_id or "").strip()
+    if not normalized_agent_install_id:
+        return ""
+    try:
+        from server_modules import agent_registry_repository, control_plane_repository
+        tenant_id = await control_plane_repository.resolve_tenant_id_for_workspace(workspace_id, default="default")
+        bundle = await agent_registry_repository.get_workspace_agent_install_bundle(
+            normalized_agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+        )
+        return str((bundle or {}).get("project_id") or "").strip()
+    except Exception:
+        return ""
 
 
 @router.get("/connections/catalog")
@@ -520,6 +550,17 @@ def _optional_oauth_user(
         return None
 
 
+def _state_has_user_id_for_log(state: str) -> bool:
+    """Best-effort "does this state carry a user_id" check for the
+    OAUTH_CALLBACK log line only. Never raises: decode_state raises
+    HTTPException on invalid/expired state, and the caller logs this before
+    its own try/except is in play."""
+    try:
+        return "user_id" in (connection_oauth_service.decode_state(state) or {})
+    except Exception:
+        return False
+
+
 @router.get("/connections/oauth/{provider}/callback")
 async def complete_connection_oauth_callback(
     provider: str,
@@ -534,7 +575,14 @@ async def complete_connection_oauth_callback(
         provider,
         current_user is not None,
         len(state) if state else 0,
-        "user_id" in (connection_oauth_service.decode_state(state) or {}),
+        # Best-effort peek for this log line only — decode_state RAISES
+        # HTTPException on invalid/expired state, and this runs before the
+        # callback's own try/except below, so an unguarded call here would
+        # 500 the whole callback (no redirect at all, not even the generic
+        # /integrations dead end) on nothing more than a stale or malformed
+        # state param — e.g. the callback URL hit directly, or a bookmarked/
+        # replayed link.
+        _state_has_user_id_for_log(state),
     )
     workspace_id = "ws-1"
     state_payload: Dict[str, Any] = {}
@@ -578,17 +626,7 @@ async def complete_connection_oauth_callback(
         surface = str(state_payload.get("surface") or "sage").strip() or "sage"
 
         agent_install_id = str(payload.get("agent_install_id") or "").strip()
-        project_id = ""
-        if agent_install_id:
-            try:
-                from server_modules import agent_registry_repository, control_plane_repository
-                tenant_id = await control_plane_repository.resolve_tenant_id_for_workspace(workspace_id, default="default")
-                bundle = await agent_registry_repository.get_workspace_agent_install_bundle(
-                    agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
-                )
-                project_id = str((bundle or {}).get("project_id") or "").strip()
-            except Exception:
-                project_id = ""
+        project_id = await _resolve_agent_project_id(agent_install_id, workspace_id)
 
         completion_url = _oauth_completion_url(
             request, workspace_id=workspace_id, provider=provider_id, surface=surface,
@@ -604,7 +642,29 @@ async def complete_connection_oauth_callback(
             str(exc.detail or "oauth_failed"),
             traceback.format_exc()[-400:],
         )
+        # state_payload is already decoded by this point for most failures
+        # (decode happens early in the try block above) — but a failure that
+        # short-circuits before that, namely the provider itself reporting
+        # `error=` (e.g. the user clicked "Cancel" on the consent screen),
+        # never runs it. Recover it here on a best-effort basis so THAT
+        # failure — arguably the single most common one — still round-trips
+        # to the right place; this never overrides exc.detail, so the error
+        # message shown to the user is unaffected either way.
+        if not state_payload and state:
+            try:
+                state_payload = connection_oauth_service.decode_state(state)
+                workspace_id = str(state_payload.get("workspace_id") or "").strip() or workspace_id
+            except HTTPException:
+                state_payload = {}
         surface = str(state_payload.get("surface") or "").strip() or None
+        # Fleet agent-connectors: mirror the success path so a failed OAuth
+        # round-trip lands back on the agent's own Channels/Connectors tab
+        # (with connection_error set) instead of the generic workspace
+        # integrations page — previously this branch dropped agent_install_id/
+        # project_id entirely, stranding the user with no visible link back
+        # to where they started.
+        agent_install_id = str(state_payload.get("agent_install_id") or "").strip()
+        project_id = await _resolve_agent_project_id(agent_install_id, workspace_id)
         return RedirectResponse(
             _oauth_completion_url(
                 request,
@@ -612,6 +672,8 @@ async def complete_connection_oauth_callback(
                 provider=provider,
                 error=str(exc.detail or "oauth_failed"),
                 surface=surface,
+                agent_install_id=agent_install_id or None,
+                project_id=project_id or None,
             ),
             status_code=303,
         )

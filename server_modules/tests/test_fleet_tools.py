@@ -385,5 +385,254 @@ class FleetScheduleControlTests(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
+    """fleet_tools._resolve_hardware_status — no-fake-state fix.
+
+    Before this fix, a cloud-placement agent's hardware_status was reported
+    "online" UNCONDITIONALLY (the comment literally said "always online"),
+    regardless of whether its bound model_config could actually produce a
+    turn. That feeds the Status row, sidebar dots, and the "Online: N/M"
+    count on the agents list — a dead BYOK key or exhausted platform
+    entitlement still showed a green "Ready" dot. These tests pin the
+    honest replacement: ready only when the SAME provider-resolution logic
+    the runtime uses at turn time (sage_agent_runtime_service's
+    _resolve_agent_cloud_provider / _resolve_cloud_provider) would actually
+    resolve a usable credential.
+    """
+
+    @staticmethod
+    def _cloud_inst(model_config):
+        return {
+            "id": "agent-1",
+            "runtime_profile": {"default_execution_target": "cloud"},
+            "metadata": {"model_config": model_config},
+        }
+
+    def test_platform_credits_ready_when_workspace_default_provider_resolves(self):
+        """The honest platform_credits default resolves to the workspace's
+        shared default provider — "workspace has a usable default provider"
+        is what "ready" means here, not any agent-specific credential."""
+        inst = self._cloud_inst({"mode": "platform_credits"})
+        with patch(
+            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            new=AsyncMock(return_value=("deepseek", {"api_key": "sk-live"})),
+        ):
+            status, last_hb, run_id, reason = _run(
+                fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+            )
+        self.assertEqual(status, "online")
+        self.assertIsNone(last_hb)
+        self.assertIsNone(run_id)
+        self.assertIsNone(reason)
+
+    def test_platform_credits_not_ready_when_workspace_default_provider_unavailable(self):
+        """The exact bug this fix targets: an agent whose model_config can't
+        actually produce a turn used to still show "online"."""
+        inst = self._cloud_inst({"mode": "platform_credits"})
+        with patch(
+            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            new=AsyncMock(side_effect=RuntimeError("Platform AI credits are exhausted.")),
+        ):
+            status, last_hb, run_id, reason = _run(
+                fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+            )
+        self.assertEqual(status, "error")
+        self.assertIsNone(last_hb)
+        self.assertIsNone(run_id)
+        self.assertIn("exhausted", reason)
+
+    def test_default_model_config_is_treated_as_platform_credits(self):
+        """An agent install with no model_config at all (the seed default)
+        must resolve exactly like an explicit platform_credits agent — not
+        fall into the "unrecognized mode" bucket."""
+        inst = self._cloud_inst({})
+        with patch(
+            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            new=AsyncMock(return_value=("deepseek", {"api_key": "sk-live"})),
+        ):
+            status, _last_hb, _run_id, reason = _run(
+                fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+            )
+        self.assertEqual(status, "online")
+        self.assertIsNone(reason)
+
+    def test_byok_api_ready_when_key_configured(self):
+        inst = self._cloud_inst({"mode": "byok_api", "provider": "anthropic"})
+        with (
+            patch(
+                "server_modules.direct_chat_provider_service.direct_chat_credentials",
+                return_value={"api_key": "sk-ant-live"},
+            ),
+            patch(
+                "server_modules.direct_chat_provider_service.supports_direct_message_native_chat",
+                return_value=True,
+            ),
+        ):
+            status, _last_hb, _run_id, reason = _run(
+                fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+            )
+        self.assertEqual(status, "online")
+        self.assertIsNone(reason)
+
+    def test_byok_api_not_ready_when_key_missing(self):
+        """A dead/missing BYOK credential — this used to still read
+        "online" unconditionally."""
+        inst = self._cloud_inst({"mode": "byok_api", "provider": "anthropic"})
+        with (
+            patch(
+                "server_modules.direct_chat_provider_service.direct_chat_credentials",
+                return_value={},
+            ),
+            patch(
+                "server_modules.direct_chat_provider_service.supports_direct_message_native_chat",
+                return_value=False,
+            ),
+        ):
+            status, last_hb, run_id, reason = _run(
+                fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+            )
+        self.assertEqual(status, "error")
+        self.assertIsNone(last_hb)
+        self.assertIsNone(run_id)
+        self.assertIn("anthropic", reason)
+
+    def test_byok_api_not_ready_when_no_provider_specified(self):
+        inst = self._cloud_inst({"mode": "byok_api"})
+        status, _last_hb, _run_id, reason = _run(
+            fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+        )
+        self.assertEqual(status, "error")
+        self.assertIn("BYOK", reason)
+
+    def test_cli_subscription_not_ready_without_gateway_binding(self):
+        inst = self._cloud_inst({"mode": "cli_subscription"})
+        status, _last_hb, _run_id, reason = _run(
+            fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+        )
+        self.assertEqual(status, "error")
+        self.assertIn("paired computer", reason)
+
+    def test_cli_subscription_ready_with_valid_gateway_binding(self):
+        """No live call to the gateway — presence of a bound gateway +
+        supported runtime is "usable", matching
+        _resolve_agent_cloud_provider's own (non-live) validation."""
+        inst = self._cloud_inst({
+            "mode": "cli_subscription", "gateway_binding": "gw-1", "runtime": "claude_code",
+        })
+        status, _last_hb, _run_id, reason = _run(
+            fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+        )
+        self.assertEqual(status, "online")
+        self.assertIsNone(reason)
+
+    def test_unresolvable_internal_error_fails_closed_not_ready(self):
+        """An unexpected internal error while checking readiness must never
+        be read as "ready" — that would silently reintroduce the
+        always-online lie."""
+        inst = self._cloud_inst({"mode": "platform_credits"})
+        with patch(
+            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            status, _last_hb, _run_id, reason = _run(
+                fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+            )
+        self.assertEqual(status, "error")
+        self.assertTrue(reason)
+
+    def test_gateway_agent_heartbeat_status_unaffected_by_cloud_honesty_check(self):
+        """Non-cloud (gateway/VPS) agents must keep resolving purely off the
+        heartbeat table — the cloud-only readiness check must never run for
+        them, even when their model_config would itself be unresolvable."""
+        inst = {
+            "id": "agent-1",
+            "runtime_profile": {"default_execution_target": "gateway", "machine_id": "mach-1"},
+            "metadata": {"model_config": {"mode": "byok_api", "provider": "anthropic"}},
+        }
+        heartbeats = {
+            "mach-1": {"online": True, "last_heartbeat_at": "2026-07-15T00:00:00Z", "current_run_id": "run-1"},
+        }
+        status, last_hb, run_id, reason = _run(
+            fleet_tools._resolve_hardware_status(inst, heartbeats, workspace_id="ws-1")
+        )
+        self.assertEqual(status, "online")
+        self.assertEqual(last_hb, "2026-07-15T00:00:00Z")
+        self.assertEqual(run_id, "run-1")
+        self.assertIsNone(reason)
+
+    def test_unpaired_agent_is_unknown_not_error(self):
+        inst = {"id": "agent-1", "runtime_profile": {}, "metadata": {}}
+        status, _last_hb, _run_id, reason = _run(
+            fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+        )
+        self.assertEqual(status, "unknown")
+        self.assertIsNone(reason)
+
+
+class FleetListAgentsHardwareStatusIntegrationTests(unittest.TestCase):
+    """fleet_list_agents end-to-end: hardware_status/hardware_status_reason
+    for a cloud agent must reflect its REAL model_config, not always read
+    "online" — the same fix, exercised through the actual tool the
+    agents/project list UI polls."""
+
+    @staticmethod
+    def _installs():
+        return [
+            {
+                "id": "agent-broken",
+                "label": "Broken Cloud Agent",
+                "project_id": "proj-1",
+                "runtime_profile": {"default_execution_target": "cloud"},
+                "metadata": {
+                    "role": "specialist",
+                    "model_config": {"mode": "byok_api", "provider": "anthropic"},
+                },
+            },
+            {
+                "id": "agent-healthy",
+                "label": "Healthy Cloud Agent",
+                "project_id": "proj-1",
+                "runtime_profile": {"default_execution_target": "cloud"},
+                "metadata": {"role": "specialist", "model_config": {"mode": "platform_credits"}},
+            },
+        ]
+
+    def test_list_agents_reports_honest_status_per_agent(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=self._installs()),
+            ),
+            patch.object(fleet_tools, "_fetch_latest_heartbeats", new=AsyncMock(return_value={})),
+            patch.object(fleet_tools, "_fetch_latest_activity", new=AsyncMock(return_value={})),
+            patch.object(fleet_tools, "_fetch_agent_channels", new=AsyncMock(return_value={})),
+            patch(
+                "server_modules.direct_chat_provider_service.direct_chat_credentials",
+                return_value={},
+            ),
+            patch(
+                "server_modules.direct_chat_provider_service.supports_direct_message_native_chat",
+                return_value=False,
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                new=AsyncMock(return_value=("deepseek", {"api_key": "sk-live"})),
+            ),
+        ):
+            result = _run(fleet_tools.fleet_list_agents(actor_id="user-1", workspace_id="ws-1"))
+
+        self.assertTrue(result["ok"])
+        by_id = {a["agent_id"]: a for a in result["agents"]}
+
+        broken = by_id["agent-broken"]
+        self.assertEqual(broken["hardware_status"], "error")
+        self.assertTrue(broken["hardware_status_reason"])
+        self.assertIn("anthropic", broken["hardware_status_reason"])
+
+        healthy = by_id["agent-healthy"]
+        self.assertEqual(healthy["hardware_status"], "online")
+        self.assertIsNone(healthy["hardware_status_reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
