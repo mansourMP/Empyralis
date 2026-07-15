@@ -98,6 +98,27 @@ def resolve_subagents_enabled(install: Optional[Dict[str, Any]]) -> bool:
     return resolve_agent_role(install) == OPERATOR_ROLE
 
 
+def resolve_hardware_access(install: Optional[Dict[str, Any]]) -> str:
+    """Resolve the effective hardware_access bucket for an agent install.
+
+    Reads the workspace_agent_installs.hardware_access COLUMN directly (not
+    metadata — see fleet_configure_agent), defaulting to "none". Normalizes
+    the legacy "all" value ("Full hardware access", retired 2026-07-15 —
+    once an agent has hardware, gateway or vps, it has full run of that box
+    by default, so a separate "full access" tier was never real) to
+    "gateway", so every consumer of fleet_list_agents' output — the Hardware
+    tab's picker, the Overview/card placement badge, an operator agent
+    reasoning over this list — sees only the current three-way vocabulary,
+    whether or not a given row has been re-saved since the option was
+    removed from the UI. fleet_configure_agent performs the same coercion on
+    write, so a touched row self-heals to a real "gateway"/"vps"/"none"
+    permanently; this is what makes an untouched legacy row still render
+    correctly forever, not just until its next edit.
+    """
+    value = str((install or {}).get("hardware_access") or "none").strip().lower()
+    return "gateway" if value == "all" else (value or "none")
+
+
 def resolve_model_config(install: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Resolve the per-agent model_config.
 
@@ -608,7 +629,7 @@ async def fleet_list_agents(
             "subagents_enabled": resolve_subagents_enabled(inst_dict),
             "model_config": resolve_model_config(inst_dict),
             "capability_preset": str(_meta_i.get("capability_preset") or "").strip(),
-            "hardware_access": str(inst_dict.get("hardware_access") or "none").strip(),
+            "hardware_access": resolve_hardware_access(inst_dict),
             "hardware_access_locked": bool(_meta_i.get("hardware_access_locked") or _pco_i.get("hardware_access_locked")),
             "context_policy": dict(_ctx_pol),
             "instructions": str(_meta_i.get("instructions") or "").strip(),
@@ -1111,10 +1132,30 @@ async def fleet_configure_agent(
             from server_modules import capability_presets as _caps_cfg
 
             requested = str(clean_patch["hardware_access"] or "").strip().lower()
-            if requested not in {"none", "gateway", "vps", "all"}:
+            # "all" (Full hardware access) was retired 2026-07-15 — founder
+            # ruling: once an agent has hardware (gateway or vps) it has full
+            # run of that box by default, so a separate "full access" tier
+            # was never a real, distinct capability, just a confusing fourth
+            # button. It never had distinct runtime behavior either (nothing
+            # in the hardware runtime adapters or action broker branches on
+            # "all" — grep confirms the only two live references before this
+            # change were this validator and the reserved PRESET_OPERATOR
+            # default in capability_presets.py). Any caller still sending it —
+            # a stale UI bundle mid-deploy, an old script, an operator-agent
+            # tool-call built from older context — is coerced to "gateway"
+            # rather than rejected: "full reign of a specific paired box" is
+            # the closer of the two surviving meanings to what "all" used to
+            # promise, and this doesn't touch preferred_gateway_id, so a
+            # request that also sets a specific VPS box still lands on that
+            # exact box regardless of this bucket. A row already stored as
+            # "all" is normalized in fleet_list_agents below on every read,
+            # so it never depends on being re-saved to render correctly.
+            if requested == "all":
+                requested = "gateway"
+            if requested not in {"none", "gateway", "vps"}:
                 return {
                     "ok": False,
-                    "error": "hardware_access must be one of: none, gateway, vps, all",
+                    "error": "hardware_access must be one of: none, gateway, vps",
                 }
             if requested != "none" and _caps_cfg.hardware_is_locked(bundle_dict):
                 await _ledger_fleet_action(
