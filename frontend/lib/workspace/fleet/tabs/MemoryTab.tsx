@@ -35,6 +35,23 @@ export function MemoryTab({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Agent identity guard — this tab can stay mounted across an agent switch
+  // (command palette / Back nav swap the agentId prop without unmounting it,
+  // same as every other fleet tab), so any state describing "which file is
+  // open" has to be re-keyed off agentId or it survives the switch. Left
+  // unguarded: `selected`/`content`/`original` from agent A linger after
+  // apiBase has already moved on to agent B, so a later save() PUTs A's
+  // (possibly-dirty) content at B's file path — cross-agent memory
+  // corruption. Mirrors WorkTab keying its thread loader off a url that
+  // embeds agentId (tabs/WorkTab.tsx); here the reset is explicit since
+  // selected/content/original/isDefault have no url of their own to key off.
+  useEffect(() => {
+    setSelected(null);
+    setContent("");
+    setOriginal("");
+    setIsDefault(false);
+  }, [agentId]);
+
   const loadTree = useCallback(async () => {
     setLoading(true);
     try {
@@ -116,7 +133,13 @@ export function MemoryTab({
         credentials: "include",
         headers: buildCookieAuthHeaders("DELETE", {}),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // The backend refuses to delete core files (MEMORY.md, SOUL.md, …) by
+      // raising server-side, which routes_fleet.py's delete handler catches
+      // and turns into {ok:false, error} at HTTP 200 — checking res.ok alone
+      // (as this used to) reads that as success and shows "deleted" for a
+      // file that's still there. Same ok===false parse as save() above.
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d?.ok === false) throw new Error(d?.error || d?.detail || `HTTP ${res.status}`);
       setSelected(null);
       setContent("");
       setOriginal("");
@@ -155,7 +178,14 @@ export function MemoryTab({
             <div className="fleet-memory-editor-header">
               <span>{selected}</span>
               <div style={{ display: "flex", gap: 8 }}>
-                <button type="button" className="fleet-btn" onClick={del} aria-label="Delete file">
+                <button
+                  type="button"
+                  className="fleet-btn"
+                  onClick={del}
+                  disabled={selected === indexPath}
+                  aria-label="Delete file"
+                  title={selected === indexPath ? "The memory index can't be deleted, only edited" : "Delete file"}
+                >
                   <Trash2 size={13} strokeWidth={1.75} />
                 </button>
                 <button type="button" className="fleet-btn fleet-btn--accent" onClick={save} disabled={!dirty || saving}>
