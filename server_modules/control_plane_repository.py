@@ -1551,12 +1551,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_channel_execution_leases_active_threa
 -- new name and the stale one dropped. (Rebuild is safe: is_inbound_owner was
 -- never written as true for the bot channels before this phase, so no existing
 -- rows collide. A DB dirtied during testing must de-dupe first.)
+--
+-- 'slack' was added to the predicate after v2 first shipped (it was
+-- omitted by mistake -- see the NOTE on routes_fleet.fleet_assign_agent_slack,
+-- which documents this exact gap). Because this is the same index name as
+-- before, CREATE ... IF NOT EXISTS is a no-op on any database that already
+-- has uq_agent_channel_bindings_inbound_owner_v2 (i.e. every already-
+-- provisioned environment) -- adding 'slack' here only takes effect for a
+-- database that creates this index for the first time.
+-- migrations/fix_slack_channel_uniqueness.sql is what actually applies the
+-- corrected predicate (dedupe-then-rebuild) to an existing database; run it
+-- once, by hand, after review.
 DROP INDEX IF EXISTS uq_agent_channel_bindings_active_inbound_owner;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_channel_bindings_inbound_owner_v2
     ON agent_channel_bindings(tenant_id, workspace_id, channel_key, lower((binding->>'endpoint_key')))
     WHERE enabled = TRUE
       AND channel_key IN ('telegram', 'telegram_bot', 'discord', 'discord_bot',
-                          'whatsapp', 'email', 'phone', 'web_chat')
+                          'whatsapp', 'email', 'phone', 'web_chat', 'slack')
       AND lower(COALESCE(binding->>'is_inbound_owner', 'false')) = 'true'
       AND NULLIF(lower(COALESCE(binding->>'endpoint_key', '')), '') IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_turns_request_role
