@@ -1414,6 +1414,202 @@ async def fleet_resume_agent(
     return {"ok": True, "agent_id": agent_id, "stopped": {"active": False}}
 
 
+async def fleet_delete_agent(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Owner-only, irreversible: permanently delete a specialist agent install
+    and everything scoped to it.
+
+    Teardown scope:
+      1. Discord/Telegram: release the agent-EXCLUSIVE BYO bot (deletes its
+         webhook + vault credential + channel binding) via the same
+         release_agent_discord/release_agent_telegram helpers the dedicated
+         .../agent-channels/{discord,telegram} DELETE routes already use.
+      2. Slack: delete this agent's channel binding row (Slack's OAuth
+         connection itself is workspace-wide/shared — nothing else to release).
+      3. Cancel this agent's pending self-scheduled wake-ups
+         (agent_scheduler_wake_requests). That table is append-only by
+         established convention — see bounded_scheduler_service.
+         cancel_wake_request's own docstring ("this table has no DELETE
+         statement anywhere in the codebase") — and isn't FK-linked to a
+         SPECIALIST's install id anyway (master_agent_install_id points at
+         the OPERATOR that executes the wake-up, not this agent), so a hard
+         delete of the install row below would never reach these rows even
+         if we wanted it to.
+      4. Wipe this agent's on-disk memory tree (MEMORY.md + memory/files/**),
+         which is not FK-tracked at all.
+      5. Hard-delete the workspace_agent_installs row itself. Its FK
+         ON DELETE CASCADE removes agent_manifests, agent_bible_versions,
+         agent_skill_bindings, agent_connector_bindings, agent_channel_bindings
+         (belt-and-suspenders with steps 1-2 above), agent_runtime_profiles,
+         deployed_agents (+ its own usage/cost-ledger cascades),
+         agent_channel_execution_leases, and security_control_states — every
+         remaining per-agent child row keyed by agent_install_id.
+         tool_toggles/connector_bindings/memory_scope_overrides are columns
+         ON this row, so they're gone the moment it is.
+
+    Deliberately conservative about what this does NOT touch: connector vault
+    credentials are project-scoped and reusable by OTHER agents (see
+    connectors_actions.store_agent_connector_credential's "provenance only"
+    comment on agent_install_id) — only this agent's binding to them goes
+    away (via cascade), never the credential itself. Every step above is
+    keyed strictly off this one agent_id; nothing here ever touches a
+    workspace-level or shared row.
+
+    Never deletes the workspace's master/operator install (Sage): losing it
+    would strand the workspace with no operator, and — more dangerous —
+    workspace_context.agent_workspace_context_dir silently resolves an EMPTY
+    agent_install_id to the bare WORKSPACE memory root (see that function's
+    own security note re: the 2026-07-14 cross-agent memory leak fixed in
+    skills_service.py). Treating Sage as "just another agent_id" in step 4
+    above would risk wiping shared workspace memory, not just one agent's.
+    """
+    from server_modules import agent_registry_repository as repo
+    from server_modules import control_plane_repository
+
+    agent_id = str(agent_id or "").strip()
+    if not agent_id:
+        return {"ok": False, "error": "agent_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(agent_id, tenant_id=tenant_id, workspace_id=workspace_id)
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+    bundle_dict = dict(bundle) if isinstance(bundle, dict) else {}
+    _agent_label = str(bundle_dict.get("label") or "").strip() or "This agent"
+
+    master = await repo.get_workspace_master_agent_install(tenant_id=tenant_id, workspace_id=workspace_id)
+    if master and str(master.get("id") or "").strip() == agent_id:
+        return {"ok": False, "error": "Cannot delete the workspace's operator agent."}
+
+    # Fail fast, before any destructive side effect, if the control plane
+    # isn't reachable — avoids the worse partial-teardown outcome of ripping
+    # out channels/schedules/memory and then failing on the row delete itself.
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return {"ok": False, "error": "Control-plane database unavailable; cannot delete agent."}
+
+    # 1-2. Release channel-owned resources while the binding rows this needs
+    # (to find each one's vault credential id) still exist.
+    channel_release: Dict[str, Any] = {}
+    try:
+        from server_modules import discord_bot_provisioning_service as discord_prov
+        channel_release["discord"] = await discord_prov.release_agent_discord(
+            agent_install_id=agent_id, workspace_id=workspace_id, tenant_id=tenant_id,
+        )
+    except Exception as exc:
+        channel_release["discord"] = {"released": False, "error": str(exc)[:300]}
+    try:
+        from server_modules import hosted_bot_provisioning_service as telegram_prov
+        channel_release["telegram"] = await telegram_prov.release_agent_telegram(
+            agent_install_id=agent_id, workspace_id=workspace_id, tenant_id=tenant_id,
+        )
+    except Exception as exc:
+        channel_release["telegram"] = {"released": False, "error": str(exc)[:300]}
+    try:
+        from server_modules import agent_bindings_repository as bindings
+        channel_release["slack"] = {
+            "deleted": await bindings.delete_channel_binding(
+                tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_id, channel_key="slack",
+            )
+        }
+    except Exception as exc:
+        channel_release["slack"] = {"deleted": False, "error": str(exc)[:300]}
+
+    # 3. Cancel pending self-scheduled wake-ups (status transition, not delete).
+    cancelled_schedules = 0
+    try:
+        from server_modules.bounded_scheduler_service import cancel_wake_request, list_wake_requests_for_agent
+        pending = await list_wake_requests_for_agent(tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id)
+        for wake in pending:
+            wake_id = str(wake.get("id") or "").strip()
+            if not wake_id:
+                continue
+            cancel_result = await cancel_wake_request(
+                tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id,
+                wake_id=wake_id, cancelled_by=actor_id or "owner",
+            )
+            if cancel_result.get("ok"):
+                cancelled_schedules += 1
+    except Exception:
+        pass
+
+    # 4. Wipe this agent's on-disk memory tree. agent_id is already validated
+    # non-empty and non-master above; the parent.name check below is
+    # belt-and-suspenders so this rmtree can never land on the bare workspace
+    # scope root even if that invariant is ever broken upstream.
+    memory_wiped = False
+    try:
+        from server_modules.workspace_context import agent_workspace_context_dir
+
+        agent_dir = agent_workspace_context_dir(workspace_id=workspace_id, agent_install_id=agent_id)
+        if agent_dir.parent.name == "agents" and agent_dir.exists():
+            import shutil
+
+            shutil.rmtree(agent_dir, ignore_errors=True)
+            memory_wiped = True
+    except Exception:
+        pass
+
+    # 5. Hard-delete the install row (see docstring for the full cascade this
+    # triggers). Postgres-only, mirroring scale_harness.py's own
+    # DELETE FROM workspace_agent_installs — the only other hard-delete of
+    # this table in the codebase; there is no local-SQLite-fallback delete
+    # path reachable here without reaching into agent_registry_repository's
+    # private _local helpers.
+    await control_plane_repository.rls_execute(
+        pool,
+        "DELETE FROM workspace_agent_installs WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
+        agent_id, tenant_id, workspace_id,
+        tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+
+    # Best-effort: clear a leftover per-agent kill switch from a prior stop.
+    try:
+        from server_modules import kill_switch_gate
+        kill_switch_gate.clear_kill_switch(f"{kill_switch_gate.AGENT_KILL_PREFIX}{agent_id}")
+    except Exception:
+        pass
+
+    # install_id is intentionally omitted below — the row is already gone by
+    # this point, and activity_ledger_events.install_id is a real FK
+    # (ON DELETE SET NULL) to workspace_agent_installs; inserting a NEW row
+    # that points at an id that no longer exists would violate that
+    # constraint outright, not silently null itself.
+    await activity_ledger_service.append_activity_event(
+        tenant_id=await _resolve_ledger_tenant_id(workspace_id),
+        workspace_id=workspace_id,
+        actor_type="user",
+        actor_id=str(actor_id or "").strip() or "unknown",
+        event_class="fleet_control",
+        detail_level="audit_reference",
+        action="agent_deleted",
+        title=f"{_agent_label} deleted",
+        summary=f"{actor_label or actor_id} deleted this agent.",
+        status="executed",
+        metadata={
+            "agent_id": agent_id,
+            "agent_label": _agent_label,
+            "deleted_by_user_id": actor_id,
+            "channel_release": channel_release,
+            "cancelled_schedules": cancelled_schedules,
+            "memory_wiped": memory_wiped,
+        },
+    )
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "deleted": True,
+        "channel_release": channel_release,
+        "cancelled_schedules": cancelled_schedules,
+        "memory_wiped": memory_wiped,
+    }
+
+
 async def fleet_stop_workspace(
     *,
     actor_id: str,

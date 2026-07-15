@@ -340,6 +340,37 @@ async def fleet_resume_agent_route(
         return {"ok": False, "error": str(exc)}
 
 
+@router.delete("/api/w/{workspace_id}/fleet/agents/{agent_id}")
+async def fleet_delete_agent_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only, irreversible: permanently delete a single agent. Tears down
+    its channel bindings (Discord/Telegram/Slack, incl. the agent-exclusive
+    BYO bot credential + Telegram webhook), connector bindings, pending
+    schedules, tool toggles, and on-disk memory, then hard-deletes the
+    workspace_agent_installs row itself. See fleet_tools.fleet_delete_agent's
+    own docstring for the exact teardown scope (and what it deliberately
+    leaves untouched, like project-scoped connector credentials shared with
+    other agents, and the workspace's own operator/Sage install, which this
+    can never delete)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_delete_agent
+
+    try:
+        return await fleet_delete_agent(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @router.post("/api/w/{workspace_id}/fleet/stop-all")
 async def fleet_stop_workspace_route(
     request: Request,

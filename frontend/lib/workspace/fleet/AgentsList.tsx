@@ -2,7 +2,10 @@
 
 import type { CSSProperties, KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Square } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Play, Square, Trash2 } from "lucide-react";
+
+import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
 import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
 import { deriveStatus, timeAgo, tintForAgent, TINTS } from "./fleet-presentation";
@@ -86,6 +89,118 @@ function compactAgo(iso: string | null | undefined): string {
   return timeAgo(iso).replace(/\s+ago$/, "");
 }
 
+/** DELETE .../fleet/agents/{agentId} — owner-only, irreversible (see
+ *  routes_fleet.py / fleet_tools.fleet_delete_agent). Written inline here
+ *  rather than added to fleet-data.ts: this build's scope is deliberately
+ *  limited to AgentsList.tsx so it doesn't collide with other in-flight
+ *  edits to shared fleet files. Mirrors fleet-data.ts's own
+ *  postFleetStopControl in shape (credentials + CSRF header + the same
+ *  {ok:false, error} normalization on a non-2xx or {ok:false} body). */
+async function deleteFleetAgentInline(
+  workspaceId: string,
+  agentId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(
+      `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`,
+      {
+        method: "DELETE",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("DELETE"),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) {
+      return { ok: false, error: String(data?.error || data?.detail || `HTTP ${res.status}`) };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
+  }
+}
+
+/** Delete-agent confirmation — rendered via portal so its fixed overlay
+ *  always covers the full viewport regardless of where the triggering row
+ *  sits in the list. Reuses the existing .fleet-small-dialog/.fleet-btn
+ *  design-system classes (fleet-theme.css) rather than introducing new
+ *  ones, plus the shared --offline-* red tokens (lib/ui/theme-tokens.css)
+ *  for the destructive accent — no stylesheet changes needed. */
+function DeleteAgentDialog({
+  agentName,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  agentName: string;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      role="presentation"
+      onClick={() => { if (!busy) onCancel(); }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0, 0, 0, 0.5)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="fleet-delete-agent-title"
+        className="fleet-small-dialog"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="fleet-small-dialog-header">
+          <span id="fleet-delete-agent-title" className="fleet-title">Delete agent</span>
+        </div>
+        <div className="fleet-small-dialog-body">
+          <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
+            Delete <strong>{agentName}</strong>? This removes its memory, credentials, and channel
+            connections and can&apos;t be undone.
+          </p>
+          {error && (
+            <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>
+          )}
+        </div>
+        <div className="fleet-small-dialog-footer">
+          <button type="button" className="fleet-btn" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="fleet-btn"
+            style={{ color: "#fff", background: "var(--offline-dot)", borderColor: "var(--offline-dot)" }}
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? "Deleting…" : "Delete agent"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /**
  * Fleet agent list — dense, column-aligned rows on a shared 6-column grid, with
  * a muted header row above and no per-agent cards. Every value has a column;
@@ -115,8 +230,9 @@ export function AgentsList({
   projectById?: Map<string, FleetProject>;
   groupByProject?: boolean;
   onSelect: (agentId: string, projectId: string) => void;
-  /** Called after a stop/resume mutation succeeds — the caller should
-   *  re-fetch (useFleetAgents().refresh) so the row's status reflects it. */
+  /** Called after a stop/resume/delete mutation succeeds — the caller should
+   *  re-fetch (useFleetAgents().refresh) so the row's status reflects it (or,
+   *  for delete, so the removed agent drops out of `agents` entirely). */
   onAgentStoppedChanged?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -249,6 +365,9 @@ function AgentRow({
   tabIndex: number;
 }) {
   const [busy, setBusy] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const stopped = Boolean(agent.stopped?.active);
   const st = deriveStatus(agent.hardware_status || "unknown", stopped, Boolean(agent.current_run_id));
   const preset = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
@@ -261,6 +380,11 @@ function AgentRow({
   const brain = brainLabel(agent.model_config);
   const channel = (agent.channel || "").trim();
   const relative = compactAgo(agent.last_activity);
+  // The workspace operator (Sage) is never deletable (see
+  // fleet_tools.fleet_delete_agent's own guard) — don't even offer the
+  // control for that row rather than showing an affordance that always errors.
+  const isOperator = agent.role === "operator";
+  const agentDisplayName = agent.label || "this agent";
 
   const activate = () => onSelect(agent.agent_id, agent.project_id || "");
   const handleKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -280,7 +404,32 @@ function AgentRow({
     if (result.ok) onStoppedChanged?.();
   };
 
+  const openDeleteConfirm = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (deleting) return;
+    setDeleteError(null);
+    setConfirmOpen(true);
+  };
+  const closeDeleteConfirm = useCallback(() => {
+    if (deleting) return;
+    setConfirmOpen(false);
+    setDeleteError(null);
+  }, [deleting]);
+  const confirmDelete = useCallback(async () => {
+    setDeleting(true);
+    setDeleteError(null);
+    const result = await deleteFleetAgentInline(workspaceId, agent.agent_id);
+    setDeleting(false);
+    if (result.ok) {
+      setConfirmOpen(false);
+      onStoppedChanged?.();
+    } else {
+      setDeleteError(result.error || "Failed to delete agent.");
+    }
+  }, [workspaceId, agent.agent_id, onStoppedChanged]);
+
   return (
+    <>
     <div
       role="button"
       className="fleet-agent-row"
@@ -332,6 +481,19 @@ function AgentRow({
         >
           {stopped ? <Play size={12} strokeWidth={2} /> : <Square size={12} strokeWidth={2} />}
         </button>
+        {!isOperator && (
+          <button
+            type="button"
+            className="fleet-agent-stop-btn"
+            style={{ color: "var(--offline-text)" }}
+            title="Delete agent"
+            aria-label={`Delete ${agent.label || "agent"}`}
+            disabled={deleting}
+            onClick={openDeleteConfirm}
+          >
+            <Trash2 size={12} strokeWidth={2} />
+          </button>
+        )}
       </span>
 
       {/* UI Contract Part 2 "Agent rows": a real two-line mobile design, not
@@ -352,5 +514,15 @@ function AgentRow({
         </div>
       </div>
     </div>
+    {confirmOpen && (
+      <DeleteAgentDialog
+        agentName={agentDisplayName}
+        busy={deleting}
+        error={deleteError}
+        onCancel={closeDeleteConfirm}
+        onConfirm={confirmDelete}
+      />
+    )}
+    </>
   );
 }
