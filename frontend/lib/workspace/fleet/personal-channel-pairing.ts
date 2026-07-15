@@ -78,6 +78,16 @@ const ACTIVE_STATUSES = new Set([
   "pairing_code_required",
 ]);
 
+// Exported so a caller outside the poll loop above (FleetAgentDetail's
+// ChannelsTab, gating its Telegram/WhatsApp mode-picker so switching doors
+// mid-pairing can't silently unmount PersonalChannelConnectPanel and discard
+// a code/QR/password step's typed input) keys off the exact same definition
+// of "mid-pairing" instead of re-deriving its own list that could drift from
+// this one.
+export function isPersonalChannelStatusActive(status: string | null | undefined): boolean {
+  return !!status && ACTIVE_STATUSES.has(status);
+}
+
 function channelPath(channelKey: PersonalChannelKey): "telegram" | "whatsapp" {
   return channelKey === "telegram_personal" ? "telegram" : "whatsapp";
 }
@@ -114,10 +124,23 @@ export function usePersonalChannelStatus(
   channelKey: PersonalChannelKey,
   gatewayId: string | null,
   agentId?: string | null,
+  options?: {
+    // Keep polling on the resting statuses too (idle/connected/disconnected/
+    // etc), instead of stopping once settled. For a caller that's WATCHING
+    // for a transition INTO an active status from the outside (e.g.
+    // ChannelsTab's door-picker gate, which needs to notice this channel go
+    // from idle to code_required even though it never itself calls a
+    // /setup endpoint or anyone else's onRefresh) — the default
+    // stop-when-resting behavior below would latch onto a stale "idle"
+    // snapshot from this hook instance's own first fetch and never poll
+    // again, since nothing else can nudge THIS instance's interval back on.
+    alwaysPoll?: boolean;
+  },
 ) {
   const [view, setView] = useState<PersonalChannelView | null>(null);
   const [loading, setLoading] = useState(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const alwaysPoll = !!options?.alwaysPoll;
 
   const refresh = useCallback(async () => {
     if (!gatewayId) {
@@ -149,7 +172,7 @@ export function usePersonalChannelStatus(
 
   useEffect(() => {
     const status = view?.state?.status;
-    const shouldPoll = !!gatewayId && (!status || ACTIVE_STATUSES.has(status));
+    const shouldPoll = !!gatewayId && (alwaysPoll || !status || ACTIVE_STATUSES.has(status));
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
@@ -160,7 +183,7 @@ export function usePersonalChannelStatus(
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [view?.state?.status, gatewayId, refresh]);
+  }, [view?.state?.status, gatewayId, refresh, alwaysPoll]);
 
   return { view, loading, refresh };
 }
