@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { CONNECTOR_ICONS } from "./fleet-icons";
@@ -74,6 +74,33 @@ export function ConnectorPicker({
       await refreshAll();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not switch connector.");
+    } finally {
+      setBusyKey(null);
+    }
+  }, [workspaceId, agentId, refreshAll]);
+
+  // Backend contract: DELETE .../fleet/agent-connectors?agent_id&connector_key
+  // removes ONLY this agent's binding row (server_modules/connectors_actions.py
+  // unsubscribe_agent_connector) — the project-scoped credential itself, and
+  // any other agent subscribed to it, are untouched.
+  const disconnectConnector = useCallback(async (connector: FleetConnector) => {
+    const key = `${connector.id}:disconnect`;
+    setBusyKey(key);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}&connector_key=${encodeURIComponent(connector.id)}`,
+        {
+          method: "DELETE",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("DELETE", {}),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      await refreshAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not disconnect.");
     } finally {
       setBusyKey(null);
     }
@@ -159,6 +186,17 @@ export function ConnectorPicker({
         const icon = CONNECTOR_ICONS[c.id];
         const connectBusy = busyKey === `${c.id}:new`;
         const notConfigured = c.configured === false;
+        // healthStatus is fetched on every FleetConnector but was previously
+        // dropped on the floor — an expired/degraded connector rendered
+        // identically to a healthy one. Flag anything other than "healthy".
+        const unhealthy = Boolean(c.healthStatus) && c.healthStatus !== "healthy";
+        const manualFieldsOpen = manualFieldsFor?.id === c.id;
+        // `?.` here (not narrowing on manualFieldsOpen) so this stays safe
+        // regardless of what TS infers about manualFieldsFor's nullability.
+        const manualRequiredFields = manualFieldsOpen ? (manualFieldsFor?.authRequiredFields || []) : [];
+        const manualFieldsComplete = manualRequiredFields.every(
+          (field) => (fieldValues[field] || "").trim().length > 0
+        );
         return (
           <div
             key={c.id}
@@ -170,7 +208,19 @@ export function ConnectorPicker({
                 {icon ? <img src={icon} alt="" /> : c.label.charAt(0)}
               </span>
               <div>
-                <div className="fleet-connector-picker-label">{c.label}</div>
+                <div className="fleet-connector-picker-label">
+                  {c.label}
+                  {unhealthy && (
+                    <span
+                      className="fleet-badge"
+                      style={{ color: "var(--warning-text)", borderColor: "var(--warning-text)" }}
+                      title={`Connector health: ${fieldLabel(c.healthStatus)}`}
+                    >
+                      <AlertTriangle size={10} strokeWidth={2} />
+                      {fieldLabel(c.healthStatus)}
+                    </span>
+                  )}
+                </div>
                 <div className="fleet-connector-picker-summary">
                   {notConfigured ? "Not configured on this deployment" : c.summary}
                 </div>
@@ -182,6 +232,7 @@ export function ConnectorPicker({
                 {projectCreds.map((cred) => {
                   const selected = cred.subscribed_agent_ids.includes(agentId);
                   const rowBusy = busyKey === `${c.id}:${cred.id}`;
+                  const disconnectBusy = busyKey === `${c.id}:disconnect`;
                   // This account is account/cloud-level, not per-agent — every
                   // OTHER agent already subscribed to it will keep using the
                   // SAME live connection the instant this agent joins too, so
@@ -191,21 +242,44 @@ export function ConnectorPicker({
                     .map((id) => agentLabelById.get(id) || id);
                   return (
                     <div key={cred.id} className="fleet-connector-picker-row-group">
-                      <button
-                        type="button"
-                        className={`fleet-connector-picker-row${selected ? " is-selected" : ""}`}
-                        disabled={selected || rowBusy}
-                        onClick={() => useCredential(c, cred.id)}
-                      >
-                        {rowBusy ? (
-                          <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
-                        ) : (
-                          <span className="fleet-connector-picker-radio" aria-hidden="true" />
+                      <div style={{ display: "flex", alignItems: "stretch", gap: 6 }}>
+                        <button
+                          type="button"
+                          className={`fleet-connector-picker-row${selected ? " is-selected" : ""}`}
+                          disabled={selected || rowBusy}
+                          onClick={() => useCredential(c, cred.id)}
+                          style={{ flex: 1 }}
+                        >
+                          {rowBusy ? (
+                            <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                          ) : (
+                            <span className="fleet-connector-picker-radio" aria-hidden="true" />
+                          )}
+                          <span className="fleet-connector-picker-account">
+                            {cred.account_label || cred.label || "Connected account"}
+                          </span>
+                        </button>
+                        {selected && (
+                          // The only DELETE caller for this endpoint (see
+                          // routes_fleet.py fleet_disconnect_agent_connector) —
+                          // previously unreachable from the UI entirely, so a
+                          // connected connector could never be removed.
+                          <button
+                            type="button"
+                            className="fleet-btn"
+                            onClick={() => disconnectConnector(c)}
+                            disabled={disconnectBusy}
+                            aria-label={`Disconnect ${c.label}`}
+                            title="Remove this agent's connection (the credential itself is kept for other agents)"
+                          >
+                            {disconnectBusy ? (
+                              <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                            ) : (
+                              "Disconnect"
+                            )}
+                          </button>
                         )}
-                        <span className="fleet-connector-picker-account">
-                          {cred.account_label || cred.label || "Connected account"}
-                        </span>
-                      </button>
+                      </div>
                       {otherSubscribers.length > 0 && (
                         <p
                           className="fleet-connector-picker-shared-warning"
@@ -219,7 +293,7 @@ export function ConnectorPicker({
                 })}
                 <button
                   type="button"
-                  className={`fleet-connector-picker-row${manualFieldsFor?.id === c.id ? " is-selected" : ""}`}
+                  className={`fleet-connector-picker-row${manualFieldsOpen ? " is-selected" : ""}`}
                   disabled={connectBusy}
                   onClick={() => startConnectNew(c)}
                 >
@@ -242,10 +316,10 @@ export function ConnectorPicker({
               </button>
             )}
 
-            {manualFieldsFor?.id === c.id && (
+            {manualFieldsOpen && (
               <div className="fleet-channel-expand">
                 <p className="fleet-channel-expand-hint">Enter credentials for {c.label}.</p>
-                {(manualFieldsFor.authRequiredFields || []).map((field) => (
+                {manualRequiredFields.map((field) => (
                   <label key={field} className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
                     <span>{fieldLabel(field)}</span>
                     <input
@@ -268,7 +342,8 @@ export function ConnectorPicker({
                     type="button"
                     className="fleet-btn fleet-btn--accent"
                     onClick={saveManualCredentials}
-                    disabled={busyKey === `${c.id}:manual`}
+                    disabled={busyKey === `${c.id}:manual` || !manualFieldsComplete}
+                    title={!manualFieldsComplete ? "Fill in every field before saving" : undefined}
                   >
                     {busyKey === `${c.id}:manual` ? "Saving…" : "Save"}
                   </button>
