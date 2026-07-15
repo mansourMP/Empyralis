@@ -35,6 +35,7 @@ import type {
 import { PROTOCOL_VERSION } from "../protocol/types";
 import { GatewayRuntimeMetadata } from "../runtime/runtime-metadata";
 import { HeartbeatLoop } from "./heartbeat";
+import { resolveMediaFetch, type GatewayMediaFetchRequestPayload } from "./media-fetch";
 import { ReconnectBackoff, classifyReconnectError, classifyCloseCode, sleep, type CloseCodeContext } from "./reconnect";
 import { GatewayCapabilityRouter } from "../supervisor/capability-router";
 import { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
@@ -949,6 +950,23 @@ export class GatewayWsClient {
         }
         const payload = await runtime.handleChannelOutbound(channelPayload);
         await this.sendResponse(frame.id, true, payload ?? {});
+        return;
+      }
+      // channel.media_fetch isn't in the GatewayRequestType union (see
+      // media-fetch.ts's module doc for why its types live locally instead
+      // of in protocol/types.ts), so frame.type has to be widened to
+      // string before comparing against a literal outside that union.
+      if ((frame.type as string) === "channel.media_fetch") {
+        const mediaFetchPayload = frame as unknown as GatewayRequestEnvelope<GatewayMediaFetchRequestPayload>;
+        const result = await resolveMediaFetch(
+          this.db.rootDirPath(),
+          mediaFetchPayload.payload?.media_id ?? "",
+        );
+        if (result.ok) {
+          await this.sendResponse(frame.id, true, result.payload as unknown as Record<string, unknown>);
+        } else {
+          await this.sendResponse(frame.id, false, undefined, result.error);
+        }
         return;
       }
       await this.sendResponse(frame.id, false, undefined, {
