@@ -54,10 +54,18 @@ const NOT_YET_SUPPORTED_CHANNELS: Record<string, string> = {
 };
 
 /**
- * Floating "Ask Sage" corner console — a pill-shaped button fixed at the
- * bottom-right, immediately left of the Help button. Opens a docked panel
- * (not a full page) with two sections: Chat (reuses AgentChat) and Connect
- * (personal channel pairing via GatewayPairPanel).
+ * "Ask AI" console launcher — a rail row rendered at the bottom of
+ * PrimaryRail's nav (the fleet-rail-utility group in PrimaryRail.tsx),
+ * directly above the Shortcuts row. Opens a docked panel (not a full page)
+ * with two sections: Chat (reuses AgentChat) and Connect (personal channel
+ * pairing via GatewayPairPanel).
+ *
+ * Was previously a floating pill fixed to the bottom-right corner; moved
+ * into the rail because on mobile that floating pair (this + Help) sat
+ * directly on top of the chat composer's Send button, making Send
+ * unreachable. Only the user-facing button label changed ("Ask Sage" →
+ * "Ask AI") — component/route/class names still say Sage, the operator
+ * agent's actual name, which is unrelated, underlying machinery.
  *
  * Unlike the Help popover, this panel does NOT close on outside click — a
  * console you're using while also looking at the page behind it should stay
@@ -218,14 +226,17 @@ export function SageLauncher({
       )}
       <button
         type="button"
-        className="fleet-sage-launcher-btn"
+        className={`fleet-rail-item fleet-sage-launcher-btn${open ? " fleet-rail-item--active" : ""}`}
         onClick={() => (open ? onClose() : onOpen())}
-        aria-label="Ask Sage"
+        aria-label="Ask AI"
         aria-haspopup="dialog"
         aria-expanded={open}
+        title="Ask AI"
       >
-        <Sparkles size={14} strokeWidth={1.75} />
-        <span>Ask Sage</span>
+        <span className="fleet-rail-item-icon">
+          <Sparkles size={16} strokeWidth={1.75} />
+        </span>
+        <span className="fleet-rail-item-label">Ask AI</span>
       </button>
     </div>
   );

@@ -27,6 +27,8 @@ import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { StatusDot } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
+import { FleetHelpButton } from "./FleetHelpButton";
+import { SageLauncher } from "./SageLauncher";
 
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
@@ -75,6 +77,9 @@ export function PrimaryRail({
   onToggleSection,
   mobileOpen = false,
   onCloseMobile,
+  sageOpen,
+  onOpenSage,
+  onCloseSage,
 }: {
   workspaceId: string;
   ownerName?: string;
@@ -88,6 +93,9 @@ export function PrimaryRail({
   onToggleSection?: (key: FleetSectionKey) => void;
   mobileOpen?: boolean;
   onCloseMobile?: () => void;
+  sageOpen: boolean;
+  onOpenSage: () => void;
+  onCloseSage: () => void;
 }) {
   const router = useRouter();
   const pathname = usePathname() || "";
@@ -367,6 +375,24 @@ export function PrimaryRail({
           );
         })}
       </nav>
+
+      {/* Ask AI + Shortcuts — moved here (2026-07) from a floating
+          bottom-right corner pair that, on mobile, sat directly on top of
+          the chat composer's Send button and blocked it. Deliberately does
+          NOT close the mobile drawer when either panel opens: both panels
+          are DOM descendants of .fleet-rail, so on mobile they inherit the
+          rail's own z-index:70 (above the scrim's 65) automatically without
+          needing to out-rank it themselves. Closing the drawer on the same
+          click would instead be actively wrong — .fleet-rail's slide
+          animation is a `transform`, which reparents any position:fixed
+          descendant's containing block to the rail itself, so a closing
+          (translating-away) drawer would carry a just-opened fixed panel
+          off-screen with it. Leaving the drawer open and letting the panel
+          render within it sidesteps that entirely. */}
+      <div className="fleet-rail-utility">
+        <SageLauncher workspaceId={workspaceId} open={sageOpen} onOpen={onOpenSage} onClose={onCloseSage} />
+        <FleetHelpButton />
+      </div>
 
       <div className="fleet-rail-controls">
         <button

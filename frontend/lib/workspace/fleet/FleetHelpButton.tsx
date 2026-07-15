@@ -15,9 +15,14 @@ const SHORTCUTS: { keys: string; label: string }[] = [
 ];
 
 /**
- * Floating "?" over the bottom-right of the content area (Linear-style) —
- * not a rail item. Its popover is the real keyboard-shortcut reference this
- * app already has (the `g`-then-key chords, j/k, Cmd+K), not a placeholder.
+ * "Shortcuts" rail row, rendered directly below Ask AI at the bottom of
+ * PrimaryRail's nav (the fleet-rail-utility group in PrimaryRail.tsx). Its
+ * popover is the real keyboard-shortcut reference this app already has
+ * (the `g`-then-key chords, j/k, Cmd+K), not a placeholder.
+ *
+ * Was previously a floating "?" pinned to the bottom-right corner of the
+ * content area; moved into the rail alongside Ask AI because on mobile that
+ * floating pair sat directly on top of the chat composer's Send button.
  */
 export function FleetHelpButton() {
   const [open, setOpen] = useState(false);
@@ -55,14 +60,17 @@ export function FleetHelpButton() {
       )}
       <button
         type="button"
-        className="fleet-help-float-btn"
+        className={`fleet-rail-item fleet-help-float-btn${open ? " fleet-rail-item--active" : ""}`}
         onClick={() => setOpen((v) => !v)}
-        title="Help"
-        aria-label="Help"
+        title="Keyboard shortcuts"
+        aria-label="Keyboard shortcuts"
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <HelpCircle size={16} strokeWidth={1.75} />
+        <span className="fleet-rail-item-icon">
+          <HelpCircle size={16} strokeWidth={1.75} />
+        </span>
+        <span className="fleet-rail-item-label">Shortcuts</span>
       </button>
     </div>
   );

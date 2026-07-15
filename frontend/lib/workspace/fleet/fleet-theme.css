@@ -531,13 +531,30 @@ a.fleet-breadcrumb:hover {
   pointer-events: auto;
 }
 
+/* Ask AI + Shortcuts — pinned to the bottom of the rail, directly above the
+   theme/collapse controls. margin-top:auto lives here (not on
+   .fleet-rail-controls below, which used to carry it) so this row leads the
+   whole trailing footer cluster (utility → controls → pulse → owner) that
+   gets pushed to the bottom of .fleet-rail's flex column. Same border-top
+   treatment as .fleet-rail-owner below, marking it as its own group
+   distinct from the nav list above. Buttons inside compose .fleet-rail-item
+   for identical row styling/hover/collapsed behavior — see SageLauncher.tsx
+   and FleetHelpButton.tsx. */
+.fleet-rail-utility {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: auto;
+  padding: 10px 0 6px;
+  border-top: 1px solid var(--border);
+}
+
 .fleet-rail-controls {
   position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 6px 4px;
-  margin-top: auto;
 }
 
 .fleet-rail--collapsed .fleet-rail-controls {
@@ -731,46 +748,26 @@ a.fleet-breadcrumb:hover {
   padding: 4px 10px;
 }
 
-/* ── Floating help (Linear-style, bottom-right over content) ──────────────── */
+/* ── Shortcuts rail row (formerly a floating "?", Linear-style bottom-right) ── */
+/* Trigger button composes .fleet-rail-item for row layout, hover, and
+   collapsed-rail (icon-only) treatment — see FleetHelpButton.tsx. Only the
+   wrapper's positioning and the popover's anchor live here. */
 
 .fleet-help-float {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  /* UI Contract §7: floating elements never overlap an open drawer/sheet.
-     Was tied with .fleet-toolbar-popover at z-index 40 — same tier as the
-     properties drawer's OWN popovers, but above the drawer itself (30),
-     so this button rendered on top of an open Properties panel instead of
-     underneath it. 20 sits below both the drawer (30) and its scrim (29)
-     while staying above ordinary content and the rail's local popovers
-     (9-10). */
+  position: relative;
+  width: 100%;
+  /* UI Contract §7 heritage: needed z-index:20 to clear an open properties
+     drawer/scrim while this floated over the page at bottom-right. Kept at
+     the same value now that it's a rail row, so .fleet-help-popover (an
+     absolute child) still paints above .fleet-shell-panel's content —
+     same reasoning as .fleet-sage-launcher below. */
   z-index: 20;
-}
-
-.fleet-help-float-btn {
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-card);
-  color: var(--text-muted);
-  cursor: pointer;
-  box-shadow: 0 4px 16px -6px rgba(0, 0, 0, 0.3);
-  transition: background var(--motion-base) ease-out, color var(--motion-base) ease-out;
-}
-
-.fleet-help-float-btn:hover {
-  background: var(--bg-card-hover);
-  color: var(--text-primary);
 }
 
 .fleet-help-popover {
   position: absolute;
   bottom: calc(100% + 10px);
-  right: 0;
+  left: 0;
   width: 220px;
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -807,17 +804,17 @@ a.fleet-breadcrumb:hover {
   white-space: nowrap;
 }
 
-/* ── Sage launcher (corner console, sits left of Help) ───────────────────── */
+/* ── Ask AI rail row (formerly a floating corner console, sat left of Help) ── */
+/* Trigger button composes .fleet-rail-item too — see SageLauncher.tsx. */
 
 .fleet-sage-launcher {
-  position: fixed;
-  right: 62px; /* 20px edge + 30px help btn + 12px gap */
-  bottom: 20px;
-  /* UI Contract §7 — see .fleet-help-float's identical fix, same bug, for
-     the idle button. But this wrapper also holds .fleet-sage-console when
-     open (a real chat surface, not a "floating bubble"), which needs to
-     stay above the properties drawer like any other active dialog — the
-     .is-open bump below restores that specifically while open. */
+  position: relative;
+  width: 100%;
+  /* This wrapper also holds .fleet-sage-console when open (a real chat
+     surface, not a "floating bubble"), which needs to stay above the
+     properties drawer (z-index 30) like any other active dialog — the
+     .is-open bump below restores that specifically while open. Same
+     z-index heritage as .fleet-help-float above. */
   z-index: 20;
 }
 
@@ -825,33 +822,10 @@ a.fleet-breadcrumb:hover {
   z-index: 45;
 }
 
-.fleet-sage-launcher-btn {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  height: 30px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-card);
-  color: var(--text-muted);
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: var(--weight-medium);
-  cursor: pointer;
-  box-shadow: 0 4px 16px -6px rgba(0, 0, 0, 0.3);
-  transition: background var(--motion-base) ease-out, color var(--motion-base) ease-out;
-}
-
-.fleet-sage-launcher-btn:hover {
-  background: var(--bg-card-hover);
-  color: var(--text-primary);
-}
-
 .fleet-sage-console {
   position: absolute;
   bottom: calc(100% + 10px);
-  right: 0;
+  left: 0;
   width: 400px;
   max-height: min(560px, calc(100vh - 60px));
   background: var(--bg-card);
@@ -5068,21 +5042,16 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   /* .fleet-btn is the shared base for every primary/secondary action button
      app-wide (New agent, Save, Create key, Stop all agents, …) — one rule
      here instead of hunting down each call site. Contract §2: 32-34px
-     mobile. Same scale for the icon-only toolbar buttons and the two
-     floating corner buttons present on every page. */
+     mobile. Same scale for the icon-only toolbar buttons. Ask AI and
+     Shortcuts (formerly the two floating corner buttons present on every
+     page) now compose .fleet-rail-item and pick up its own 40px mobile
+     row height above — no separate override needed. */
   .fleet-btn {
     height: 32px;
   }
   .fleet-icon-btn {
     width: 34px;
     height: 34px;
-  }
-  .fleet-sage-launcher-btn,
-  .fleet-help-float-btn {
-    height: 34px;
-  }
-  .fleet-help-float-btn {
-    width: 34px;
   }
 
   .fleet-rail-scrim {
@@ -5148,20 +5117,37 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     padding: 8px 6px;
   }
 
-  /* Sage console: fixed 400px, anchored right:0 relative to a launcher
-     button that itself sits 62px from the viewport edge — on a 390px
-     screen that runs the panel's left edge ~70px past the left edge of
-     the viewport. Detaches from the launcher's local anchor and floats
-     as its own fixed, viewport-margined panel instead (found while
-     verifying §7's z-index fix, not in the contract's own Part 2 list,
-     but "opens a working panel" is the floor under every item on it). */
+  /* Sage console: fixed 400px is wider than most phones. Stays
+     position:absolute (inherited from the base rule, anchored to its own
+     .fleet-sage-launcher row) rather than switching to fixed — .fleet-rail
+     animates open/closed via `transform` on mobile, and `transform` on an
+     ancestor reparents any position:fixed descendant's containing block to
+     that ancestor's own box instead of the viewport, which would mismeasure
+     every dimension below against the ~320px drawer instead of the real
+     screen width. absolute has no such gotcha: it just clamps to the
+     viewport width with a little breathing room on each side, same as the
+     help popover beside it needs no override at all because 220px already
+     fits. */
   .fleet-sage-console {
-    position: fixed;
-    left: 12px;
-    right: 12px;
-    bottom: 76px;
-    width: auto;
+    width: min(400px, calc(100vw - 24px));
     max-height: min(70vh, calc(100vh - 100px));
+  }
+
+  /* If the drawer isn't open, neither panel should be visible either — both
+     are DOM descendants of .fleet-rail, so if the drawer gets dismissed
+     (scrim tap, the hamburger toggle, Escape, or a route change) while
+     either is still open, .fleet-rail's own slide-shut `transform` carries
+     the panel along with it toward the left edge. Each panel is wider than
+     that offset, though, so instead of leaving cleanly it leaves an
+     orphaned sliver still sitting in the viewport, visible but unusable
+     (confirmed live: the Sage console left ~40px of itself showing after
+     dismissing the drawer via the scrim with the console still open).
+     Hiding by CSS keyed off the drawer's own open class is correct no
+     matter which of those dismissal paths fired, instead of chasing each
+     one to also close the panel's React state. */
+  .fleet-rail:not(.fleet-rail--mobile-open) .fleet-sage-console,
+  .fleet-rail:not(.fleet-rail--mobile-open) .fleet-help-popover {
+    display: none;
   }
 
   /* Projects list keeps the grid-collapse treatment (3 tracks + a muted
