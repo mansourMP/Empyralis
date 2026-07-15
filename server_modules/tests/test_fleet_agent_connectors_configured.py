@@ -15,6 +15,10 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _owner_user() -> dict:
+    return {"user_id": "owner-1", "email": "owner@example.com"}
+
+
 class FleetAgentConnectorsConfiguredFieldTests(unittest.TestCase):
     _CATALOG_ITEMS = [
         {
@@ -51,9 +55,13 @@ class FleetAgentConnectorsConfiguredFieldTests(unittest.TestCase):
                 "server_modules.connection_oauth_service.oauth_provider_configured",
                 return_value=False,
             ),
+            patch.object(
+                routes_fleet.auth_module, "enforce_workspace_access",
+                lambda current_user, workspace_id, minimum_role="viewer": workspace_id,
+            ),
         ):
             result = _run(routes_fleet.fleet_agent_connectors(
-                request=None, workspace_id="ws-1", agent_id="agent-1",
+                request=None, workspace_id="ws-1", agent_id="agent-1", current_user=_owner_user(),
             ))
 
         self.assertTrue(result["ok"])
@@ -70,9 +78,13 @@ class FleetAgentConnectorsConfiguredFieldTests(unittest.TestCase):
                 "server_modules.connection_oauth_service.oauth_provider_configured",
                 return_value=True,
             ),
+            patch.object(
+                routes_fleet.auth_module, "enforce_workspace_access",
+                lambda current_user, workspace_id, minimum_role="viewer": workspace_id,
+            ),
         ):
             result = _run(routes_fleet.fleet_agent_connectors(
-                request=None, workspace_id="ws-1", agent_id="agent-1",
+                request=None, workspace_id="ws-1", agent_id="agent-1", current_user=_owner_user(),
             ))
 
         github = next(c for c in result["connectors"] if c["id"] == "github")
@@ -90,9 +102,13 @@ class FleetAgentConnectorsConfiguredFieldTests(unittest.TestCase):
                 "server_modules.connection_oauth_service.oauth_provider_configured",
                 return_value=False,
             ),
+            patch.object(
+                routes_fleet.auth_module, "enforce_workspace_access",
+                lambda current_user, workspace_id, minimum_role="viewer": workspace_id,
+            ),
         ):
             result = _run(routes_fleet.fleet_agent_connectors(
-                request=None, workspace_id="ws-1", agent_id="agent-1",
+                request=None, workspace_id="ws-1", agent_id="agent-1", current_user=_owner_user(),
             ))
 
         custom_api = next(c for c in result["connectors"] if c["id"] == "custom_api")

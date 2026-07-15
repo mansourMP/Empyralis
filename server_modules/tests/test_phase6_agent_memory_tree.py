@@ -133,24 +133,38 @@ class Phase6MemoryTreeTests(unittest.TestCase):
         async def _fake_ns(workspace_id, agent_id):
             return "install-a"
 
+        owner_user = {"user_id": "owner-1", "email": "owner@example.com"}
+
+        def _fake_enforce_workspace_access(current_user, workspace_id, minimum_role="viewer"):
+            return workspace_id
+
         async def _run():
-            with patch.object(routes_fleet, "_resolve_memory_namespace", _fake_ns):
+            with (
+                patch.object(routes_fleet, "_resolve_memory_namespace", _fake_ns),
+                patch.object(routes_fleet.auth_module, "enforce_workspace_access", _fake_enforce_workspace_access),
+            ):
                 body = routes_fleet.FleetMemoryFileWriteRequest(content="Owner-written note.", mode="replace")
-                w = await routes_fleet.fleet_agent_memory_file_write(None, self.ws, "install-a", body, path="procedures/refunds.md")
+                w = await routes_fleet.fleet_agent_memory_file_write(
+                    None, self.ws, "install-a", body, path="procedures/refunds.md", current_user=owner_user,
+                )
                 self.assertTrue(w["ok"])
 
-                t = await routes_fleet.fleet_agent_memory_tree(None, self.ws, "install-a")
+                t = await routes_fleet.fleet_agent_memory_tree(None, self.ws, "install-a", current_user=owner_user)
                 self.assertTrue(t["ok"])
                 self.assertEqual(t["scope"], "install")
                 self.assertIn("procedures/refunds.md", [x["path"] for x in t["topics"]])
 
-                r = await routes_fleet.fleet_agent_memory_file_read(None, self.ws, "install-a", path="procedures/refunds.md")
+                r = await routes_fleet.fleet_agent_memory_file_read(
+                    None, self.ws, "install-a", path="procedures/refunds.md", current_user=owner_user,
+                )
                 self.assertEqual(r["content"], "Owner-written note.")
 
-                d = await routes_fleet.fleet_agent_memory_file_delete(None, self.ws, "install-a", path="procedures/refunds.md")
+                d = await routes_fleet.fleet_agent_memory_file_delete(
+                    None, self.ws, "install-a", path="procedures/refunds.md", current_user=owner_user,
+                )
                 self.assertTrue(d["deleted"])
 
-                t2 = await routes_fleet.fleet_agent_memory_tree(None, self.ws, "install-a")
+                t2 = await routes_fleet.fleet_agent_memory_tree(None, self.ws, "install-a", current_user=owner_user)
                 self.assertEqual(t2["topic_count"], 0)
 
         asyncio.run(_run())

@@ -21,12 +21,24 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _owner_user() -> dict:
+    return {"user_id": "owner-1", "email": "owner@example.com"}
+
+
+def _bypass_workspace_access():
+    return patch.object(
+        routes_fleet.auth_module, "enforce_workspace_access",
+        lambda current_user, workspace_id, minimum_role="viewer": workspace_id,
+    )
+
+
 class FleetSlackChannelBindingTests(unittest.TestCase):
     def test_assign_requires_a_channel_id(self):
         body = routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="   ")
-        result = _run(routes_fleet.fleet_assign_agent_slack(
-            request=None, workspace_id="ws-1", body=body, agent_id="agent-1",
-        ))
+        with _bypass_workspace_access():
+            result = _run(routes_fleet.fleet_assign_agent_slack(
+                request=None, workspace_id="ws-1", body=body, agent_id="agent-1", current_user=_owner_user(),
+            ))
         self.assertFalse(result["ok"])
         self.assertIn("required", result["error"].lower())
 
@@ -38,9 +50,10 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
                 "server_modules.agent_bindings_repository.upsert_channel_binding",
                 new=AsyncMock(return_value={"id": "achbind_1", "enabled": True}),
             ) as upsert_mock,
+            _bypass_workspace_access(),
         ):
             result = _run(routes_fleet.fleet_assign_agent_slack(
-                request=None, workspace_id="ws-1", body=body, agent_id="agent-1",
+                request=None, workspace_id="ws-1", body=body, agent_id="agent-1", current_user=_owner_user(),
             ))
 
         self.assertTrue(result["ok"])
@@ -63,9 +76,10 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
                 "server_modules.agent_bindings_repository.upsert_channel_binding",
                 new=AsyncMock(return_value=None),
             ),
+            _bypass_workspace_access(),
         ):
             result = _run(routes_fleet.fleet_assign_agent_slack(
-                request=None, workspace_id="ws-1", body=body, agent_id="agent-1",
+                request=None, workspace_id="ws-1", body=body, agent_id="agent-1", current_user=_owner_user(),
             ))
         self.assertFalse(result["ok"])
 
@@ -76,9 +90,10 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
                 "server_modules.agent_bindings_repository.delete_channel_binding",
                 new=AsyncMock(return_value=True),
             ) as delete_mock,
+            _bypass_workspace_access(),
         ):
             result = _run(routes_fleet.fleet_release_agent_slack(
-                request=None, workspace_id="ws-1", agent_id="agent-1",
+                request=None, workspace_id="ws-1", agent_id="agent-1", current_user=_owner_user(),
             ))
 
         self.assertTrue(result["ok"])
@@ -91,7 +106,7 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
     def test_two_agents_bind_two_different_channels_independently(self):
         """Mirrors the router-side proof: two POSTs for two different
         agents/channels must each write their own distinct row."""
-        with patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")):
+        with patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")), _bypass_workspace_access():
             with patch(
                 "server_modules.agent_bindings_repository.upsert_channel_binding",
                 new=AsyncMock(return_value={"id": "achbind_support", "enabled": True}),
@@ -99,7 +114,7 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
                 _run(routes_fleet.fleet_assign_agent_slack(
                     request=None, workspace_id="ws-1",
                     body=routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="C_SUPPORT"),
-                    agent_id="agent-support-1",
+                    agent_id="agent-support-1", current_user=_owner_user(),
                 ))
                 support_kwargs = upsert_mock.await_args.kwargs
 
@@ -110,7 +125,7 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
                 _run(routes_fleet.fleet_assign_agent_slack(
                     request=None, workspace_id="ws-1",
                     body=routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="C_SALES"),
-                    agent_id="agent-sales-1",
+                    agent_id="agent-sales-1", current_user=_owner_user(),
                 ))
                 sales_kwargs = upsert_mock2.await_args.kwargs
 

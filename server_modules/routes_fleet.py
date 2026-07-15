@@ -41,15 +41,17 @@ async def fleet_usage(
     scope: str = Query("workspace", description="workspace | agent | project"),
     id: Optional[str] = Query(None, description="agent_install_id or project_id when scope != workspace"),
     period: str = Query("day", description="day | week | month"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Phase 5A: normalized usage rollup — per-agent / per-project / per-workspace,
     bucketed by day/week/month, with usd_cost totals."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules import usage_events_repository as usage_repo
 
     try:
         return await usage_repo.summarize_usage(
-            tenant_id=await _resolve_tenant(workspace_id),
-            workspace_id=workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
             scope=scope,
             scope_id=id,
             period=period,
@@ -59,19 +61,24 @@ async def fleet_usage(
 
 
 @router.get("/api/w/{workspace_id}/fleet/workspace")
-async def fleet_workspace(request: Request, workspace_id: str) -> Dict[str, Any]:
+async def fleet_workspace(
+    request: Request,
+    workspace_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
     """The workspace's own display name — the fleet shell's breadcrumb root
     (not the platform brand, not "Home"; the actual workspace) — plus the
     workspace-wide stop state (Settings' "Stop all agents")."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules import control_plane_repository
 
     try:
-        ws = await control_plane_repository.get_workspace_by_id(workspace_id)
-        name = str((ws or {}).get("name") or "").strip() or workspace_id
+        ws = await control_plane_repository.get_workspace_by_id(resolved_workspace_id)
+        name = str((ws or {}).get("name") or "").strip() or resolved_workspace_id
         meta = (ws or {}).get("metadata") if isinstance((ws or {}).get("metadata"), dict) else {}
         kill_switch = dict(meta.get("kill_switch") or {}) if isinstance(meta.get("kill_switch"), dict) else {}
         stopped = kill_switch if kill_switch.get("active") else {"active": False}
-        return {"ok": True, "workspace": {"id": workspace_id, "name": name, "stopped": stopped}}
+        return {"ok": True, "workspace": {"id": resolved_workspace_id, "name": name, "stopped": stopped}}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "workspace": {"id": workspace_id, "name": workspace_id, "stopped": {"active": False}}}
 
@@ -81,17 +88,19 @@ async def fleet_agents(
     request: Request,
     workspace_id: str,
     project_id: Optional[str] = Query(None, description="Filter to a single project"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """List workspace agents with placement visibility (Phase U3 fields).
     Each agent carries its project_id (Phase 2). Optionally filter to one
     project via ?project_id=."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.fleet_tools import fleet_list_agents
 
     try:
         result = await fleet_list_agents(
             actor_id="fleet_ui",
-            workspace_id=workspace_id,
-            tenant_id=await _resolve_tenant(workspace_id),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
         )
         if project_id and result.get("ok") and isinstance(result.get("agents"), list):
             wanted = str(project_id).strip()
@@ -110,19 +119,21 @@ async def fleet_projects(
     request: Request,
     workspace_id: str,
     include_archived: bool = Query(False),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """List projects in the workspace, each with its agent count."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules import projects_repository as projects
 
     try:
         # Guarantee a default project exists so ungrouped agents have a home.
-        await projects.ensure_default_project(tenant_id=await _resolve_tenant(workspace_id), workspace_id=workspace_id)
+        await projects.ensure_default_project(tenant_id=await _resolve_tenant(resolved_workspace_id), workspace_id=resolved_workspace_id)
         rows = await projects.list_projects(
-            tenant_id=await _resolve_tenant(workspace_id),
-            workspace_id=workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
             include_archived=include_archived,
         )
-        counts = await projects.count_agents_by_project(tenant_id=await _resolve_tenant(workspace_id), workspace_id=workspace_id)
+        counts = await projects.count_agents_by_project(tenant_id=await _resolve_tenant(resolved_workspace_id), workspace_id=resolved_workspace_id)
         for p in rows:
             p["agent_count"] = int(counts.get(p["id"], 0))
         return {"ok": True, "projects": rows}
@@ -140,14 +151,16 @@ async def fleet_create_project(
     request: Request,
     workspace_id: str,
     body: FleetCreateProjectRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Create a project."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import projects_repository as projects
 
     try:
         project = await projects.create_project(
-            tenant_id=await _resolve_tenant(workspace_id),
-            workspace_id=workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
             name=body.name,
             description=body.description,
         )
@@ -168,24 +181,26 @@ async def fleet_patch_project(
     workspace_id: str,
     project_id: str,
     body: FleetPatchProjectRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Rename, edit, or archive/unarchive a project."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import projects_repository as projects
 
     try:
         project = None
         if body.name is not None or body.description is not None:
             project = await projects.rename_project(
-                tenant_id=await _resolve_tenant(workspace_id),
-                workspace_id=workspace_id,
+                tenant_id=await _resolve_tenant(resolved_workspace_id),
+                workspace_id=resolved_workspace_id,
                 project_id=project_id,
                 name=body.name,
                 description=body.description,
             )
         if body.archived is not None:
             project = await projects.set_project_archived(
-                tenant_id=await _resolve_tenant(workspace_id),
-                workspace_id=workspace_id,
+                tenant_id=await _resolve_tenant(resolved_workspace_id),
+                workspace_id=resolved_workspace_id,
                 project_id=project_id,
                 archived=body.archived,
             )
@@ -209,15 +224,17 @@ async def fleet_create_agent_route(
     request: Request,
     workspace_id: str,
     body: FleetCreateAgentRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Create a specialist agent (create-agent wizard, steps 1-2)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules.fleet_tools import fleet_create_agent
 
     try:
         result = await fleet_create_agent(
-            actor_id="fleet_ui",
-            workspace_id=workspace_id,
-            tenant_id=await _resolve_tenant(workspace_id),
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
             name=body.name,
             instructions=body.instructions,
             purpose_preset=body.purpose_preset,
@@ -239,16 +256,18 @@ async def fleet_configure_agent_route(
     workspace_id: str,
     agent_id: str,
     body: FleetConfigureAgentRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Patch an agent's fleet-managed config (create-agent wizard steps 2-5,
     and any future inline edits from the agent detail modal)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules.fleet_tools import fleet_configure_agent
 
     try:
         result = await fleet_configure_agent(
-            actor_id="fleet_ui",
-            workspace_id=workspace_id,
-            tenant_id=await _resolve_tenant(workspace_id),
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
             agent_id=agent_id,
             patch=body.patch,
         )
@@ -478,14 +497,16 @@ async def fleet_agent_activity(
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
     since: Optional[str] = Query(None, description="ISO timestamp filter"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Get REAL ledger events for an agent (Phase U4 detail panel Activity tab)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.fleet_tools import fleet_get_agent_activity
 
     try:
         result = await fleet_get_agent_activity(
             actor_id="fleet_ui",
-            workspace_id=workspace_id,
+            workspace_id=resolved_workspace_id,
             agent_id=agent_id,
             since=since,
         )
@@ -500,15 +521,17 @@ async def fleet_project_activity(
     workspace_id: str,
     project_id: str = Query(..., description="Project ID"),
     limit: int = Query(20, description="Max events to return"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Recent ledger events across a project's agents (project detail right
     panel's Activity section — panel-only, no separate tab)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.fleet_tools import fleet_get_project_activity
 
     try:
         result = await fleet_get_project_activity(
-            workspace_id=workspace_id,
-            tenant_id=await _resolve_tenant(workspace_id),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
             project_id=project_id,
             limit=limit,
         )
@@ -522,13 +545,15 @@ async def fleet_agent_memory(
     request: Request,
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Per-agent memory file listing (agent detail modal → Memory tab)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.agent_memory_tools import memory_list
 
     try:
         result = await memory_list(
-            workspace_id=workspace_id,
+            workspace_id=resolved_workspace_id,
             agent_install_id=agent_id,
             agent_id=agent_id,
         )
@@ -564,16 +589,20 @@ class FleetMemoryFileWriteRequest(BaseModel):
 
 
 @router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/tree")
-async def fleet_agent_memory_tree(request: Request, workspace_id: str, agent_id: str) -> Dict[str, Any]:
+async def fleet_agent_memory_tree(
+    request: Request, workspace_id: str, agent_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
     """The agent's memory tree: MEMORY.md index + topic files."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules import agent_memory_tree_service as tree
 
     try:
-        ns = await _resolve_memory_namespace(workspace_id, agent_id)
+        ns = await _resolve_memory_namespace(resolved_workspace_id, agent_id)
         return {
             "ok": True, "agent_id": agent_id,
             "scope": "workspace" if ns is None else "install",
-            **tree.list_tree(workspace_id, agent_install_id=ns),
+            **tree.list_tree(resolved_workspace_id, agent_install_id=ns),
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -583,12 +612,14 @@ async def fleet_agent_memory_tree(request: Request, workspace_id: str, agent_id:
 async def fleet_agent_memory_file_read(
     request: Request, workspace_id: str, agent_id: str,
     path: str = Query(..., description="Tree path, e.g. MEMORY.md or customers/acme.md"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules import agent_memory_tree_service as tree
 
     try:
-        ns = await _resolve_memory_namespace(workspace_id, agent_id)
-        return {"ok": True, **tree.read_file(workspace_id, path, agent_install_id=ns)}
+        ns = await _resolve_memory_namespace(resolved_workspace_id, agent_id)
+        return {"ok": True, **tree.read_file(resolved_workspace_id, path, agent_install_id=ns)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -597,13 +628,15 @@ async def fleet_agent_memory_file_read(
 async def fleet_agent_memory_file_write(
     request: Request, workspace_id: str, agent_id: str, body: FleetMemoryFileWriteRequest,
     path: str = Query(..., description="Tree path to write"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import agent_memory_tree_service as tree
 
     try:
-        ns = await _resolve_memory_namespace(workspace_id, agent_id)
+        ns = await _resolve_memory_namespace(resolved_workspace_id, agent_id)
         return {"ok": True, **tree.write_file(
-            workspace_id, path, body.content or "", mode=body.mode or "replace",
+            resolved_workspace_id, path, body.content or "", mode=body.mode or "replace",
             agent_install_id=ns, actor="owner",
         )}
     except Exception as exc:
@@ -614,12 +647,14 @@ async def fleet_agent_memory_file_write(
 async def fleet_agent_memory_file_delete(
     request: Request, workspace_id: str, agent_id: str,
     path: str = Query(..., description="Tree path to delete (topic files only)"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import agent_memory_tree_service as tree
 
     try:
-        ns = await _resolve_memory_namespace(workspace_id, agent_id)
-        return {"ok": True, "deleted": tree.delete_file(workspace_id, path, agent_install_id=ns), "path": path}
+        ns = await _resolve_memory_namespace(resolved_workspace_id, agent_id)
+        return {"ok": True, "deleted": tree.delete_file(resolved_workspace_id, path, agent_install_id=ns), "path": path}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -629,6 +664,7 @@ async def fleet_agent_channels(
     request: Request,
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Per-agent channel/pairing status (agent detail modal → Channels tab).
     Returns workspace channel state — per-agent channels are not yet provisioned
@@ -649,18 +685,19 @@ async def fleet_agent_channels(
     every personal-channel item's `connected` stays hardcoded False
     regardless of real state.
     """
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.connection_catalog_service import agent_status_items
     from server_modules.sage_telegram_hosted_service import is_configured as hosted_configured
 
     try:
-        tenant_id = await _resolve_tenant(workspace_id)
+        tenant_id = await _resolve_tenant(resolved_workspace_id)
         from server_modules import agent_registry_repository as _reg
-        bundle = await _reg.get_workspace_agent_install_bundle(agent_id, tenant_id=tenant_id, workspace_id=workspace_id)
+        bundle = await _reg.get_workspace_agent_install_bundle(agent_id, tenant_id=tenant_id, workspace_id=resolved_workspace_id)
         bundle_metadata = (bundle or {}).get("metadata") if isinstance((bundle or {}).get("metadata"), dict) else {}
         selected_gateway_id = str((bundle_metadata or {}).get("preferred_gateway_id") or "").strip() or None
 
         items = await agent_status_items(
-            workspace_id=workspace_id, agent_id=agent_id, tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id, agent_id=agent_id, tenant_id=tenant_id,
             surface="sage", selected_gateway_id=selected_gateway_id,
         )
         enriched: List[Dict[str, Any]] = []
@@ -701,7 +738,7 @@ async def fleet_agent_channels(
         try:
             from server_modules import agent_bindings_repository as _bindings
             agent_bindings = await _bindings.list_agent_channel_bindings(
-                tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_id,
+                tenant_id=tenant_id, workspace_id=resolved_workspace_id, agent_install_id=agent_id,
             )
             slack_binding = next((b for b in agent_bindings if b.get("channel_key") == "slack"), None)
             if slack_binding:
@@ -726,6 +763,7 @@ async def fleet_agent_connectors(
     request: Request,
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Per-agent connectors (agent detail modal → Connectors tab).
     Returns MCP/OAuth connectors available to this agent based on its role.
@@ -741,11 +779,12 @@ async def fleet_agent_connectors(
     agent's connection (or the unassigned legacy workspace credential) does not
     make it connected here.
     """
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.connection_catalog_service import agent_status_items
     from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS, oauth_provider_configured
 
     try:
-        items = await agent_status_items(workspace_id=workspace_id, agent_id=agent_id, surface="apps")
+        items = await agent_status_items(workspace_id=resolved_workspace_id, agent_id=agent_id, surface="apps")
 
         enriched: List[Dict[str, Any]] = []
         for item in items:
@@ -792,6 +831,7 @@ async def fleet_connect_agent_connector(
     workspace_id: str,
     body: FleetConnectAgentConnectorRequest,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Connect a connector inside an agent's Connectors tab (or the create-agent
     wizard's Connectors step). Two paths:
@@ -806,13 +846,14 @@ async def fleet_connect_agent_connector(
     Either way, the binding row is the isolation boundary: an agent only
     counts as connected if it holds an enabled binding pointing at the
     credential."""
-    tenant_id = await _resolve_tenant(workspace_id)
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
 
     if body.credential_id:
         from server_modules.connectors_actions import subscribe_agent_to_project_credential
         try:
             result = await subscribe_agent_to_project_credential(
-                workspace_id=workspace_id,
+                workspace_id=resolved_workspace_id,
                 agent_install_id=agent_id,
                 credential_id=body.credential_id,
                 tenant_id=tenant_id,
@@ -825,7 +866,7 @@ async def fleet_connect_agent_connector(
     from server_modules.connectors_actions import store_agent_connector_credential
     try:
         result = await store_agent_connector_credential(
-            workspace_id=workspace_id,
+            workspace_id=resolved_workspace_id,
             agent_install_id=agent_id,
             tenant_id=tenant_id,
             provider=body.provider,
@@ -845,17 +886,19 @@ async def fleet_disconnect_agent_connector(
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
     connector_key: str = Query(..., description="Connector id/provider to disconnect"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Unsubscribe this agent from a connector: removes ONLY its binding row.
     The project-scoped credential is untouched — other agents subscribed to it
     (or this one, again later) are unaffected."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules.connectors_actions import unsubscribe_agent_connector
 
     try:
         result = await unsubscribe_agent_connector(
-            workspace_id=workspace_id,
+            workspace_id=resolved_workspace_id,
             agent_install_id=agent_id,
-            tenant_id=await _resolve_tenant(workspace_id),
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
             connector_key=connector_key,
         )
         return {"ok": True, **result}
@@ -868,18 +911,20 @@ async def fleet_project_connectors(
     request: Request,
     workspace_id: str,
     project_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """List a project's connector credentials (the reuse-or-separate picker's
     data source). Each item carries the agent_install_ids currently subscribed
     to it, so the picker can show "Use acme-support@gmail.com" for any
     provider the project already has."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.connectors_actions import list_project_connectors
 
     try:
         items = await list_project_connectors(
-            workspace_id=workspace_id,
+            workspace_id=resolved_workspace_id,
             project_id=project_id,
-            tenant_id=await _resolve_tenant(workspace_id),
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
         )
         return {"ok": True, "connectors": items}
     except Exception as exc:
@@ -890,14 +935,16 @@ async def fleet_project_connectors(
 async def fleet_connection_summary(
     request: Request,
     workspace_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Honest workspace-aggregate counters for the Fleet Home strip:
     connectors/channels connected = sum of enabled bindings across the
     workspace's agents; total = catalog size."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.connection_catalog_service import workspace_connection_summary
 
     try:
-        summary = await workspace_connection_summary(workspace_id=workspace_id, tenant_id=await _resolve_tenant(workspace_id))
+        summary = await workspace_connection_summary(workspace_id=resolved_workspace_id, tenant_id=await _resolve_tenant(resolved_workspace_id))
         return {"ok": True, **summary}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -919,14 +966,16 @@ async def fleet_assign_agent_telegram(
     workspace_id: str,
     body: FleetTelegramAssignRequest,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Give this agent its OWN Telegram bot from the user's BotFather token."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import hosted_bot_provisioning_service as prov
 
-    tenant_id = await _resolve_tenant(workspace_id)
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
     try:
         result = await prov.assign_byo_bot(
-            agent_install_id=agent_id, workspace_id=workspace_id, tenant_id=tenant_id, token=body.token,
+            agent_install_id=agent_id, workspace_id=resolved_workspace_id, tenant_id=tenant_id, token=body.token,
         )
         return {"ok": True, "channel": result}
     except Exception as exc:
@@ -938,15 +987,17 @@ async def fleet_release_agent_telegram(
     request: Request,
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Release this agent's Telegram bot: delete webhook, clear binding, and
     delete its BYO credential."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import hosted_bot_provisioning_service as prov
 
-    tenant_id = await _resolve_tenant(workspace_id)
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
     try:
         result = await prov.release_agent_telegram(
-            agent_install_id=agent_id, workspace_id=workspace_id, tenant_id=tenant_id,
+            agent_install_id=agent_id, workspace_id=resolved_workspace_id, tenant_id=tenant_id,
         )
         return {"ok": True, **result}
     except Exception as exc:
@@ -963,15 +1014,17 @@ async def fleet_assign_agent_discord(
     workspace_id: str,
     body: FleetDiscordAssignRequest,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Give this agent its OWN Discord bot from the user's bot token (BYO only —
     there is no hosted Discord pool yet). One bot binds to exactly one agent."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import discord_bot_provisioning_service as prov
 
-    tenant_id = await _resolve_tenant(workspace_id)
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
     try:
         result = await prov.assign_agent_discord(
-            agent_install_id=agent_id, workspace_id=workspace_id,
+            agent_install_id=agent_id, workspace_id=resolved_workspace_id,
             tenant_id=tenant_id, token=body.token or "",
         )
         return {"ok": True, "channel": result}
@@ -986,15 +1039,17 @@ async def fleet_release_agent_discord(
     request: Request,
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Release this agent's Discord bot: clear the binding and delete the
     agent-scoped credential."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import discord_bot_provisioning_service as prov
 
-    tenant_id = await _resolve_tenant(workspace_id)
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
     try:
         result = await prov.release_agent_discord(
-            agent_install_id=agent_id, workspace_id=workspace_id, tenant_id=tenant_id,
+            agent_install_id=agent_id, workspace_id=resolved_workspace_id, tenant_id=tenant_id,
         )
         return {"ok": True, **result}
     except Exception as exc:
@@ -1011,6 +1066,7 @@ async def fleet_assign_agent_slack(
     workspace_id: str,
     body: FleetSlackChannelBindRequest,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Bind this agent to one Slack channel within the workspace's already-
     connected Slack app. Slack's OAuth connection is workspace-wide (one
@@ -1028,16 +1084,17 @@ async def fleet_assign_agent_slack(
     match the existing convention so enabling that guarantee later is a
     pure index change, not a data migration. Out of scope here (that
     file is shared, high-blast-radius schema/migration code)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import agent_bindings_repository as bindings
 
     channel_id = str(body.slack_channel_id or "").strip()
     if not channel_id:
         return {"ok": False, "error": "slack_channel_id is required."}
 
-    tenant_id = await _resolve_tenant(workspace_id)
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
     try:
         result = await bindings.upsert_channel_binding(
-            tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_id,
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id, agent_install_id=agent_id,
             channel_key="slack", enabled=True,
             binding={
                 "endpoint_key": channel_id,
@@ -1057,14 +1114,16 @@ async def fleet_release_agent_slack(
     request: Request,
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Release this agent's Slack channel binding."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import agent_bindings_repository as bindings
 
-    tenant_id = await _resolve_tenant(workspace_id)
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
     try:
         deleted = await bindings.delete_channel_binding(
-            tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_id,
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id, agent_install_id=agent_id,
             channel_key="slack",
         )
         return {"ok": True, "deleted": bool(deleted)}
@@ -1077,16 +1136,18 @@ async def fleet_agent_tools(
     request: Request,
     workspace_id: str,
     agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Per-agent tool catalog (agent detail modal → Tools tab).
     Returns the tool manifest for this agent based on its hardware_status
     and role."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules.fleet_tools import fleet_get_agent_tools
 
     try:
         manifest = await fleet_get_agent_tools(
-            workspace_id=workspace_id,
-            tenant_id=await _resolve_tenant(workspace_id),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
             agent_id=agent_id,
         )
         return manifest
