@@ -70,6 +70,99 @@ export function redactTelegramCredentials(state: Record<string, unknown>): Recor
   return redactCredentials(state, TELEGRAM_REDACT_STRING_KEYS, TELEGRAM_REDACT_OBJECT_KEYS);
 }
 
+// GramJS's own update loop — and half a dozen other internal call sites
+// (node_modules/telegram/client/{updates,downloads,users,auth,messageParse,
+// dialogs}.js, node_modules/telegram/events/{NewMessage,Album}.js) — call
+// exactly six methods on `client._log`: canSend(level), warn(message),
+// info(message), debug(message), error(message), and (via
+// client.setLogLevel()) setLevel(level). GramJS assigns `this._log` exactly
+// once, inside TelegramBaseClient's constructor
+// (node_modules/telegram/client/telegramBaseClient.js:63-68 —
+// `clientParams.baseLogger` if truthy, else `new extensions/Logger()`), and
+// never reassigns it afterwards anywhere in the package. So a guard that
+// runs once, synchronously, immediately after `new TelegramClient(...)` —
+// before `connect()`/`start()` is ever called, i.e. before the update loop
+// can tick even once — covers that client's *entire* lifetime, including
+// every reconnect. There is no later point where GramJS swaps the logger
+// out from under us, so there is no "point of use" inside library code we
+// would need to guard instead.
+//
+// Why the existing fix (newGramLogger(), below) isn't that guarantee on its
+// own: it constructs a real GramJS Logger and hands it in as `baseLogger`,
+// trusting that `typeof telegram.Logger === "function"` being true means
+// the *instance* it just built behaves like GramJS's own default Logger.
+// That trust is exactly the gap — it verifies the class resolved, never the
+// object GramJS actually ends up storing in `client._log`. It also
+// silently falls back to `undefined` (letting GramJS build its own
+// default) the moment `telegram.Logger` isn't a constructor, with no
+// verification that the fallback is any better. That matters here because
+// package.json pins GramJS via `"telegram": "^2.0.0"` while
+// scripts/install-agent-computer.sh provisions boxes with `npm install`
+// (not `npm ci`), so different boxes can silently resolve different 2.x.y
+// GramJS builds over time as new versions publish — consistent with this
+// bug report citing GramJS "2.26.21" while the committed
+// package-lock.json pins "2.26.22" (two labels for builds that don't even
+// agree with themselves: GramJS's own internal Version_1.version string
+// reads "2.26.21" on the exact tarball npm calls "2.26.22"). If some
+// resolved build ever renames/removes the top-level `Logger` export, wraps
+// it differently, or reshapes what `_log` needs to expose, the `typeof`
+// check degrades silently instead of failing loudly — and we'd have no way
+// of knowing until the update loop crashed again.
+//
+// ensureGramLoggerShape() removes that trust entirely: it inspects the
+// actual object GramJS ended up with in `client._log` — not the class it
+// was built from — and repairs it if anything required is missing or not a
+// function. That stays correct regardless of *why* `_log` might be broken:
+// a module-resolution mismatch, GramJS version drift, a future GramJS
+// release reshaping Logger, or a future code path that constructs a
+// TelegramClient without going through newGramLogger() at all.
+const GRAM_LOGGER_METHODS = ["canSend", "warn", "info", "debug", "error", "setLevel"] as const;
+
+function hasWorkingGramLogger(candidate: unknown): candidate is Record<string, (...args: unknown[]) => unknown> {
+  if (!candidate || typeof candidate !== "object") {
+    return false;
+  }
+  const record = candidate as Record<string, unknown>;
+  return GRAM_LOGGER_METHODS.every((method) => typeof record[method] === "function");
+}
+
+// A minimal, dependency-free stand-in for GramJS's extensions/Logger.Logger,
+// used only if neither the client's own `_log` nor a freshly built GramJS
+// Logger actually has the required shape. canSend() always returns true so
+// genuine errors stay visible in the gateway's logs instead of being
+// silently swallowed — this guard exists to stop a missing logger method
+// from crashing the process, not to hide the errors it was trying to report.
+function createGramLoggerShim(): Record<string, (...args: unknown[]) => unknown> {
+  const emit = (level: string, message: unknown): void => {
+    console.log(`[telegram:${level}]`, message);
+  };
+  return {
+    canSend: () => true,
+    warn: (message: unknown) => emit("warn", message),
+    info: (message: unknown) => emit("info", message),
+    debug: (message: unknown) => emit("debug", message),
+    error: (message: unknown) => emit("error", message),
+    setLevel: () => undefined,
+    log: (level: unknown, message: unknown) => emit(String(level ?? "log"), message),
+  };
+}
+
+/**
+ * Guarantees `client._log` has a working canSend/warn/info/debug/error/
+ * setLevel — installing a real rebuilt GramJS Logger if possible, else a
+ * minimal shim — before the client is ever connected. See the block
+ * comment above for why running this once, right after construction, is
+ * sufficient for the client's entire lifetime. Exported for direct unit
+ * testing.
+ */
+export function ensureGramLoggerShape(client: { _log?: unknown }, buildGramLogger: () => unknown): void {
+  if (hasWorkingGramLogger(client._log)) {
+    return;
+  }
+  const rebuilt = buildGramLogger();
+  client._log = hasWorkingGramLogger(rebuilt) ? rebuilt : createGramLoggerShim();
+}
+
 export class TelegramPersonalRuntime {
   private readonly configStore: PersonalChannelConfigStore;
   private readonly sessionStore: TelegramSessionStore;
@@ -576,14 +669,13 @@ export class TelegramPersonalRuntime {
       throw new Error("telegram_package_missing");
     }
 
-    // GramJS's update loop logs errors via `client._log.canSend(...)` — a method
-    // that only exists on GramJS's OWN Logger. We were passing the gateway's
-    // logger as baseLogger, so the instant an authenticated session hit any
-    // update-loop error, that call threw ("canSend is not a function") and
-    // crashed the whole process — connect → crash → restart → reconnect → crash,
-    // which is why a real login looped forever. Hand GramJS a real GramJS Logger
-    // instead, so it logs the error and reconnects normally. (Falls back to
-    // undefined — GramJS then builds its own default Logger — if the export moves.)
+    // Best-effort first attempt: hand GramJS a real GramJS Logger as
+    // baseLogger instead of the gateway's own logger (which lacks
+    // GramJS-specific methods like canSend and used to crash the update
+    // loop). ensureGramLoggerShape() below — called right after each
+    // `new TelegramClient(...)` — is what actually guarantees the result;
+    // see the comment on ensureGramLoggerShape for why this typeof check
+    // alone isn't sufficient.
     const GramLogger = telegram.Logger as (new (...args: unknown[]) => any) | undefined;
     const newGramLogger = (): unknown =>
       typeof GramLogger === "function" ? new GramLogger() : undefined;
@@ -606,6 +698,7 @@ export class TelegramPersonalRuntime {
           apiHash,
           { connectionRetries: 5, baseLogger: newGramLogger() },
         );
+        ensureGramLoggerShape(client, newGramLogger);
         await client.connect();
         try {
           const code = await client.sendCode({ apiId, apiHash }, phoneNumber);
@@ -632,6 +725,7 @@ export class TelegramPersonalRuntime {
           apiHash,
           { connectionRetries: 5, baseLogger: newGramLogger() },
         );
+        ensureGramLoggerShape(client, newGramLogger);
         const phoneNumber = String(config.phoneNumber || "").trim();
         const loginCode = String(config.loginCode || "").trim();
         const password = String(config.password || "").trim();
