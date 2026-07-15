@@ -1,4 +1,9 @@
+import { promises as fs } from "fs";
+import { execFile } from "child_process";
+import crypto from "crypto";
+import os from "os";
 import path from "path";
+import { promisify } from "util";
 import pino from "pino";
 
 import { GatewayStateDb } from "../../state/db";
@@ -20,8 +25,16 @@ import {
 import { buildWhatsAppQrPayload } from "./qr-login";
 import {
   buildWhatsAppClientMessageId,
+  defaultWhatsAppMimeTypeForKind,
+  detectWhatsAppInboundMedia,
   mapWhatsAppInboundMessage,
   mapWhatsAppOutboundResult,
+  normalizeWhatsAppOutboundMediaList,
+  WHATSAPP_VOICE_MIMETYPE,
+  type WhatsAppInboundMediaDescriptor,
+  type WhatsAppInboundMediaItem,
+  type WhatsAppOutboundDispatchPayload,
+  type WhatsAppOutboundMediaItem,
 } from "./message-mapper";
 import {
   WHATSAPP_TYPING_KEEPALIVE_MS,
@@ -52,6 +65,8 @@ import type {
   PersonalChannelCapabilityManifest,
   PersonalChannelHealthSnapshot,
 } from "../personal-runtime";
+
+const execFileAsync = promisify(execFile);
 
 type DynamicImport = <T>(specifier: string) => Promise<T>;
 const dynamicImport = new Function("specifier", "return import(specifier)") as DynamicImport;
@@ -88,6 +103,11 @@ interface BaileysSocketLike {
    *  account's own WhatsApp settings. */
   logout?: () => Promise<void>;
   end?: (error: Error | undefined) => void;
+  /** Re-requests a fresh download URL for expired media (Baileys throws a
+   *  410/404-style error when a media message's original URL has expired)
+   *  -- passed as downloadMediaMessage()'s ctx.reuploadRequest so a media
+   *  message downloaded a while after receipt can still be fetched. */
+  updateMediaMessage?: (msg: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
 interface WhatsAppBaileysAdapter {
@@ -106,6 +126,14 @@ interface WhatsAppBaileysAdapter {
    *  from the SAME loaded module so our atomic writer's output is
    *  byte-for-byte what Baileys' own reader expects. */
   credsCodec: WhatsAppCredsCodec;
+  /** Downloads a WhatsApp media message's bytes via Baileys'
+   *  downloadMediaMessage. Baileys itself enforces no size limit -- the
+   *  caller (downloadInboundMedia) applies WHATSAPP_MEDIA_MAX_BYTES both
+   *  before (declared size) and after (actual buffer length) the call. */
+  downloadMedia: (
+    rawMessage: Record<string, unknown>,
+    ctx: { logger: unknown; reuploadRequest?: (msg: Record<string, unknown>) => Promise<unknown> },
+  ) => Promise<Buffer>;
 }
 
 export interface WhatsAppGatewayPublisher {
@@ -143,6 +171,22 @@ export function redactWhatsAppCredentials(state: Record<string, unknown>): Recor
 // ORION_RUN_TIMEOUT_SECONDS defaults to 300s, and
 // ORION_WHATSAPP_AUTOPILOT_RUN_TIMEOUT_SECONDS defaults to 180s.
 const WHATSAPP_INBOUND_TYPING_MAX_TTL_MS = 5 * 60_000;
+
+// Inbound/outbound media size ceiling -- generous enough for WhatsApp's own
+// client-side media limits (images/voice/most documents) while bounding
+// memory use per attachment; matches the media contract's "size-capped
+// (~25MB)" requirement in both directions.
+const WHATSAPP_MEDIA_MAX_BYTES = 25 * 1024 * 1024;
+// Wall-clock ceiling on a single ffmpeg transcode (voice-note Opus/OGG
+// conversion) so a pathological input can't hang the gateway process.
+const WHATSAPP_FFMPEG_TIMEOUT_MS = 60_000;
+// Subdirectory (under the gateway state dir root) inbound media bytes are
+// written to -- also the leading path segment of every inbound media_id.
+// Sibling of the existing whatsapp/auth dir (see session-store.ts), keeping
+// all WhatsApp on-disk state namespaced under whatsapp/. The Telegram
+// channel uses a top-level telegram-media/ instead; the relative-to-root
+// media_id contract (below) is identical either way.
+const WHATSAPP_MEDIA_SUBDIR = "whatsapp/media";
 
 export class WhatsAppPersonalRuntime {
   private readonly configStore: PersonalChannelConfigStore;
@@ -289,7 +333,7 @@ export class WhatsAppPersonalRuntime {
       setupKind: "qr_pairing",
       capabilities: ["configure", "inbound", "outbound", "text", "groups"],
       chatTypes: ["dm", "group"],
-      media: { text: true, images: false, files: false, reactions: false, voice: false },
+      media: { text: true, images: true, files: true, reactions: false, voice: true },
       safety: {
         ownerPairingRequired: true,
         allowlistRequired: false,
@@ -411,8 +455,9 @@ export class WhatsAppPersonalRuntime {
     const idempotencyKey = String(payload.idempotency_key || "").trim();
     const remoteJid = String(payload.remote_jid || "").trim();
     const text = String(payload.text || "").trim();
-    if (!idempotencyKey || !remoteJid || !text) {
-      throw new Error("channel.outbound requires idempotency_key, remote_jid, and text.");
+    const mediaItems = normalizeWhatsAppOutboundMediaList((payload as WhatsAppOutboundDispatchPayload).media);
+    if (!idempotencyKey || !remoteJid || (!text && mediaItems.length === 0)) {
+      throw new Error("channel.outbound requires idempotency_key, remote_jid, and text and/or media.");
     }
     if (text.length > 65536) {
       throw new Error(
@@ -463,11 +508,19 @@ export class WhatsAppPersonalRuntime {
       await typing.start();
     }
     try {
-      const response = await socket.sendMessage(
-        remoteJid,
-        { text },
-        { messageId: outboundRecord.clientMessageId || clientMessageId },
-      );
+      const response = mediaItems.length > 0
+        ? await this.sendOutboundMediaItems(
+            socket,
+            remoteJid,
+            text,
+            mediaItems,
+            outboundRecord.clientMessageId || clientMessageId,
+          )
+        : await socket.sendMessage(
+            remoteJid,
+            { text },
+            { messageId: outboundRecord.clientMessageId || clientMessageId },
+          );
       const mapped = mapWhatsAppOutboundResult(
         {
           idempotencyKey,
@@ -491,6 +544,203 @@ export class WhatsAppPersonalRuntime {
       return mapped;
     } finally {
       await typing.stop();
+    }
+  }
+
+  /**
+   * Sends a media-bearing outbound dispatch -- one Baileys sendMessage per
+   * attachment (WhatsApp supports exactly one media item per message, same
+   * as inbound). The FIRST item is sent with the caller's messageId (so
+   * idempotency/ack tracking lines up with the existing single-message
+   * contract) and carries `text` as its caption when the item has none of
+   * its own; further items are best-effort follow-ups. Voice notes don't
+   * support a caption bubble in WhatsApp's UI, so a voice item's caption
+   * (or the primary item's leftover `text`) goes out as a separate
+   * plain-text follow-up instead of being silently dropped.
+   */
+  private async sendOutboundMediaItems(
+    socket: BaileysSocketLike,
+    remoteJid: string,
+    text: string,
+    mediaItems: WhatsAppOutboundMediaItem[],
+    primaryMessageId: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    let primaryResponse: Record<string, unknown> | undefined;
+    for (let index = 0; index < mediaItems.length; index += 1) {
+      const item = mediaItems[index];
+      const isPrimary = index === 0;
+      const caption = item.caption ?? (isPrimary ? (text || undefined) : undefined);
+      const content = await this.buildOutboundMediaContent(item, caption);
+      if (!content) {
+        // Best-effort -- an unresolvable attachment (missing file, bad URL,
+        // over the size cap) must not sink the rest of the dispatch.
+        continue;
+      }
+      const isVoice = item.kind === "voice" || item.as_voice === true;
+      const response = await socket.sendMessage(
+        remoteJid,
+        content,
+        isPrimary ? { messageId: primaryMessageId } : undefined,
+      );
+      if (isPrimary) {
+        primaryResponse = response;
+      }
+      if (isVoice && caption) {
+        await socket.sendMessage(remoteJid, { text: caption });
+      }
+    }
+    if (!primaryResponse && text) {
+      // Every attachment failed to resolve but there's still text to send --
+      // degrade to a text-only message rather than losing the turn entirely.
+      primaryResponse = await socket.sendMessage(
+        remoteJid,
+        { text },
+        { messageId: primaryMessageId },
+      );
+    }
+    return primaryResponse;
+  }
+
+  /** Resolves one outbound media item to a Baileys sendMessage content
+   *  object (image/video/audio/document), transcoding to voice-note
+   *  Opus/OGG first when the item is a voice send and its source isn't
+   *  already Opus/OGG. Returns undefined when the source can't be resolved
+   *  (missing/oversized file, failed fetch, transcode failure) so the
+   *  caller can degrade gracefully instead of failing the whole dispatch. */
+  private async buildOutboundMediaContent(
+    item: WhatsAppOutboundMediaItem,
+    caption: string | undefined,
+  ): Promise<Record<string, unknown> | undefined> {
+    const resolved = await this.resolveOutboundMediaBytes(item);
+    if (!resolved) {
+      return undefined;
+    }
+    let buffer = resolved.buffer;
+    const mimeType = resolved.mimeType;
+    const normalizedMime = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+    const wantsVoice = item.kind === "voice" || item.as_voice === true;
+
+    if (wantsVoice) {
+      if (normalizedMime !== "audio/ogg" && normalizedMime !== "audio/opus") {
+        try {
+          buffer = await this.transcodeToWhatsAppVoiceOpus(buffer);
+        } catch {
+          return undefined;
+        }
+      }
+      return { audio: buffer, ptt: true, mimetype: WHATSAPP_VOICE_MIMETYPE };
+    }
+    if (item.kind === "audio" || normalizedMime.startsWith("audio/")) {
+      return { audio: buffer, mimetype: mimeType };
+    }
+    if (item.kind === "image" || normalizedMime.startsWith("image/")) {
+      return { image: buffer, caption, mimetype: mimeType };
+    }
+    if (item.kind === "video" || normalizedMime.startsWith("video/")) {
+      return { video: buffer, caption, mimetype: mimeType };
+    }
+    // "file" (document) -- Baileys requires an explicit mimetype for document sends.
+    return {
+      document: buffer,
+      mimetype: mimeType || "application/octet-stream",
+      fileName: this.resolveOutboundDocumentFileName(item, mimeType),
+      caption,
+    };
+  }
+
+  /** Reads an outbound media item's bytes from source_path (local disk on
+   *  this same box) or source_url (HTTP/S fetch), capped at
+   *  WHATSAPP_MEDIA_MAX_BYTES either way. source_path wins when both are
+   *  present. */
+  private async resolveOutboundMediaBytes(
+    item: WhatsAppOutboundMediaItem,
+  ): Promise<{ buffer: Buffer; mimeType: string } | undefined> {
+    let buffer: Buffer | undefined;
+    if (item.source_path) {
+      try {
+        const stat = await fs.stat(item.source_path);
+        if (!stat.isFile() || stat.size > WHATSAPP_MEDIA_MAX_BYTES) {
+          return undefined;
+        }
+        buffer = await fs.readFile(item.source_path);
+      } catch {
+        return undefined;
+      }
+    } else if (item.source_url) {
+      try {
+        const response = await fetch(item.source_url);
+        if (!response.ok) {
+          return undefined;
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        if (arrayBuffer.byteLength > WHATSAPP_MEDIA_MAX_BYTES) {
+          return undefined;
+        }
+        buffer = Buffer.from(arrayBuffer);
+      } catch {
+        return undefined;
+      }
+    }
+    if (!buffer || buffer.length === 0) {
+      return undefined;
+    }
+    const mimeType = item.mime_type || defaultWhatsAppMimeTypeForKind(item.kind);
+    return { buffer, mimeType };
+  }
+
+  private resolveOutboundDocumentFileName(item: WhatsAppOutboundMediaItem, mimeType: string): string {
+    if (item.source_path) {
+      const base = path.basename(item.source_path);
+      if (base) {
+        return base;
+      }
+    }
+    if (item.source_url) {
+      try {
+        const base = path.basename(new URL(item.source_url).pathname);
+        if (base) {
+          return decodeURIComponent(base);
+        }
+      } catch {
+        // fall through to the mimetype-derived default below
+      }
+    }
+    const ext = mimeType.split("/")[1]?.split(";")[0]?.trim();
+    return ext ? `file.${ext}` : "file";
+  }
+
+  /** Transcodes arbitrary audio to WhatsApp's native voice-note format
+   *  (mono Opus in an OGG container, 48kHz/64kbps) by shelling out to
+   *  ffmpeg -- mirrors OpenClaw's outbound-media-contract.ts transcode
+   *  recipe (-c:a libopus -ar 48000 -b:a 64k -f ogg). Requires a system
+   *  `ffmpeg` binary; throws if it's missing or the process fails, which
+   *  the caller (buildOutboundMediaContent) treats as "this attachment
+   *  can't be sent" rather than crashing the whole dispatch. */
+  private async transcodeToWhatsAppVoiceOpus(buffer: Buffer): Promise<Buffer> {
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "empyralis-wa-voice-"));
+    try {
+      const inputPath = path.join(workDir, "input.audio");
+      const outputPath = path.join(workDir, "voice.ogg");
+      await fs.writeFile(inputPath, buffer);
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-hide_banner",
+          "-loglevel", "error",
+          "-y",
+          "-i", inputPath,
+          "-vn",
+          "-c:a", "libopus",
+          "-ar", "48000",
+          "-b:a", "64k",
+          "-f", "ogg",
+          outputPath,
+        ],
+        { timeout: WHATSAPP_FFMPEG_TIMEOUT_MS },
+      );
+      return await fs.readFile(outputPath);
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -686,7 +936,15 @@ export class WhatsAppPersonalRuntime {
       if (!entry || typeof entry !== "object") {
         continue;
       }
-      const mapped = mapWhatsAppInboundMessage(entry as Record<string, unknown>, { ownedJid });
+      const rawEntry = entry as Record<string, unknown>;
+      const mediaDescriptor = detectWhatsAppInboundMedia(rawEntry.message as Record<string, unknown> | undefined);
+      const resolvedMedia = mediaDescriptor
+        ? await this.downloadInboundMedia(rawEntry, mediaDescriptor)
+        : undefined;
+      const mapped = mapWhatsAppInboundMessage(rawEntry, {
+        ownedJid,
+        media: resolvedMedia ? [resolvedMedia] : undefined,
+      });
       if (!mapped || (mapped.message.from_me && !mapped.message.is_self_chat)) {
         continue;
       }
@@ -701,6 +959,70 @@ export class WhatsAppPersonalRuntime {
       this.startTypingForChat(mapped.message.remote_jid);
       await this.publishInbound(mapped);
     }
+  }
+
+  /** Downloads a detected media attachment's bytes via Baileys, capped at
+   *  WHATSAPP_MEDIA_MAX_BYTES, and stores them under this gateway's own
+   *  state dir (<stateDir>/whatsapp/media/<basename>).
+   *
+   *  media_id is that stored file's path RELATIVE to the gateway state dir
+   *  root (GatewayStateDb.rootDirPath()), NOT a bare/opaque token -- the
+   *  exact same contract the Telegram channel uses (see
+   *  build/telegram-media's downloadAndStoreTelegramMedia and
+   *  protocol/types.ts GatewayChannelInboundMediaItem). The gateway and the
+   *  co-located server share the state-dir filesystem on the paired Agent
+   *  Computer box, so the server resolves media_id by joining it back onto
+   *  that same root it already has -- there is no HTTP fetch route. (The
+   *  only difference from Telegram is the subdir: whatsapp/media, sibling of
+   *  the existing whatsapp/auth dir, vs Telegram's top-level telegram-media.)
+   *
+   *  Best-effort: any failure (declared size over the cap, a download error,
+   *  an oversized actual payload) returns undefined rather than dropping the
+   *  whole inbound message -- a message with a caption but an unfetchable
+   *  attachment should still reach the agent as text. */
+  private async downloadInboundMedia(
+    rawMessage: Record<string, unknown>,
+    descriptor: WhatsAppInboundMediaDescriptor,
+  ): Promise<WhatsAppInboundMediaItem | undefined> {
+    if (
+      typeof descriptor.declaredSizeBytes === "number"
+      && descriptor.declaredSizeBytes > WHATSAPP_MEDIA_MAX_BYTES
+    ) {
+      return undefined;
+    }
+    const socket = this.socket;
+    const reuploadRequest = socket?.updateMediaMessage
+      ? (msg: Record<string, unknown>) => socket.updateMediaMessage!(msg)
+      : undefined;
+    let buffer: Buffer;
+    try {
+      const adapter = await this.getAdapter();
+      buffer = await adapter.downloadMedia(rawMessage, { logger: this.logger, reuploadRequest });
+    } catch {
+      return undefined;
+    }
+    if (!buffer || buffer.length === 0 || buffer.length > WHATSAPP_MEDIA_MAX_BYTES) {
+      return undefined;
+    }
+    // Sanitize the WhatsApp stanza id (sender-influenced) down to filesystem-
+    // safe chars before using it as a basename prefix -- the randomUUID()
+    // suffix already guarantees uniqueness, so this prefix is purely for
+    // debuggability and must never be able to escape the media dir.
+    const rawExternalId = String((rawMessage.key as { id?: unknown } | undefined)?.id ?? "").trim();
+    const safeExternalId = rawExternalId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) || "media";
+    const baseName = `${safeExternalId}-${crypto.randomUUID()}`;
+    const mediaId = `${WHATSAPP_MEDIA_SUBDIR}/${baseName}`;
+    const absolutePath = path.join(this.db.rootDirPath(), "whatsapp", "media", baseName);
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, buffer, { mode: 0o600 });
+    return {
+      kind: descriptor.kind,
+      media_id: mediaId,
+      mime_type: descriptor.mimeType,
+      filename: descriptor.filename,
+      size_bytes: buffer.length,
+      duration_sec: descriptor.durationSec,
+    };
   }
 
   private async publishInbound(payload: GatewayChannelInboundPayload): Promise<void> {
@@ -908,6 +1230,18 @@ export class WhatsAppPersonalRuntime {
         }
       },
       credsCodec,
+      downloadMedia: async (rawMessage, ctx) => {
+        const downloadMediaMessage = baileysModule.downloadMediaMessage;
+        if (typeof downloadMediaMessage !== "function") {
+          throw new Error("Baileys downloadMediaMessage is unavailable.");
+        }
+        return downloadMediaMessage(
+          rawMessage,
+          "buffer",
+          {},
+          ctx.reuploadRequest ? { reuploadRequest: ctx.reuploadRequest, logger: ctx.logger } : undefined,
+        );
+      },
     };
     return this.adapter;
   }
