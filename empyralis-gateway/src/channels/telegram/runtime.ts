@@ -576,6 +576,18 @@ export class TelegramPersonalRuntime {
       throw new Error("telegram_package_missing");
     }
 
+    // GramJS's update loop logs errors via `client._log.canSend(...)` — a method
+    // that only exists on GramJS's OWN Logger. We were passing the gateway's
+    // logger as baseLogger, so the instant an authenticated session hit any
+    // update-loop error, that call threw ("canSend is not a function") and
+    // crashed the whole process — connect → crash → restart → reconnect → crash,
+    // which is why a real login looped forever. Hand GramJS a real GramJS Logger
+    // instead, so it logs the error and reconnects normally. (Falls back to
+    // undefined — GramJS then builds its own default Logger — if the export moves.)
+    const GramLogger = telegram.Logger as (new (...args: unknown[]) => any) | undefined;
+    const newGramLogger = (): unknown =>
+      typeof GramLogger === "function" ? new GramLogger() : undefined;
+
     this.adapter = {
       requestCode: async (config) => {
         const sessionString = String(config.sessionString || "").trim();
@@ -592,7 +604,7 @@ export class TelegramPersonalRuntime {
           new StringSession(sessionString),
           apiId,
           apiHash,
-          { connectionRetries: 5, baseLogger: this.logger },
+          { connectionRetries: 5, baseLogger: newGramLogger() },
         );
         await client.connect();
         try {
@@ -618,7 +630,7 @@ export class TelegramPersonalRuntime {
           new StringSession(sessionString),
           apiId,
           apiHash,
-          { connectionRetries: 5, baseLogger: this.logger },
+          { connectionRetries: 5, baseLogger: newGramLogger() },
         );
         const phoneNumber = String(config.phoneNumber || "").trim();
         const loginCode = String(config.loginCode || "").trim();
