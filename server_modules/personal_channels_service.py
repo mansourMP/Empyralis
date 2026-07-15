@@ -652,9 +652,13 @@ DM_POLICY_ALLOWLIST = "allowlist"
 DM_POLICY_PAIRING = "pairing"
 DM_POLICY_OPEN = "open"
 DM_POLICY_MODES = {DM_POLICY_OWNER_ONLY, DM_POLICY_ALLOWLIST, DM_POLICY_PAIRING, DM_POLICY_OPEN}
-# Safe-by-default: reply only to the owner's own identity until a workspace
-# deliberately opens the channel up.
-DEFAULT_DM_POLICY_MODE = DM_POLICY_OWNER_ONLY
+# Default OPEN (reply to everyone) to preserve existing live-agent behavior and
+# NOT retroactively silence already-configured personal-channel agents; the
+# channel manifest now honestly reflects the enforced mode. The owner can
+# restrict any agent to owner_only / allowlist / pairing per channel. The strict
+# default (owner_only) is a product decision deferred to the owner, who can test
+# it on a live channel — flipping this constant is the one-line change to adopt it.
+DEFAULT_DM_POLICY_MODE = DM_POLICY_OPEN
 
 
 def _default_dm_policy_config() -> Dict[str, Any]:
