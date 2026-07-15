@@ -132,6 +132,29 @@ export interface GatewayToolInvokeChunkPayload {
   delta: string;
 }
 
+/** Shared media-kind vocabulary for the channel.inbound / channel.outbound
+ *  media contract — see GatewayChannelInboundMediaItem/OutboundMediaItem. */
+export type GatewayChannelMediaKind = "image" | "voice" | "audio" | "video" | "file";
+
+/** A single inbound media attachment. The gateway downloads the bytes and
+ *  persists them locally under its own state dir (see
+ *  state/db.ts's GatewayStateDb.rootDirPath()); `media_id` is the path to
+ *  that file, RELATIVE to the gateway state dir root, not an opaque token
+ *  or a fetchable URL. There is no HTTP media-fetch endpoint on the gateway
+ *  — the contract is "gateway writes bytes to a well-known local path
+ *  under its state dir, the server reads that same path directly" (the
+ *  gateway and the server share a filesystem / state-dir mount on a paired
+ *  Agent Computer box). See channels/telegram/runtime.ts's
+ *  downloadAndStoreTelegramMedia() for the producer side of this contract. */
+export interface GatewayChannelInboundMediaItem {
+  kind: GatewayChannelMediaKind;
+  media_id: string;
+  mime_type: string;
+  filename?: string;
+  size_bytes: number;
+  duration_sec?: number;
+}
+
 export interface GatewayChannelInboundPayload {
   channel_key: string;
   provider: string;
@@ -151,6 +174,10 @@ export interface GatewayChannelInboundPayload {
     is_mentioned?: boolean;
     is_reply_to_sage?: boolean;
     quoted_stanza_id?: string;
+    /** Present only when the inbound message carried one or more media
+     *  attachments (photo/voice/audio/video/document/sticker on Telegram).
+     *  Absent (not an empty array) for text-only messages. */
+    media?: GatewayChannelInboundMediaItem[];
   };
 }
 
@@ -170,6 +197,21 @@ export interface GatewayCliLoginOutputPayload {
   error_kind?: string;
 }
 
+/** A single outbound media attachment the server wants delivered. Exactly
+ *  one of source_path/source_url must be set — source_path is a local
+ *  filesystem path the gateway process can read directly (shared state-dir
+ *  mount on a paired Agent Computer box, same assumption as
+ *  GatewayChannelInboundMediaItem.media_id), source_url is a direct URL the
+ *  channel's own client library downloads/streams itself. */
+export interface GatewayChannelOutboundMediaItem {
+  kind: GatewayChannelMediaKind;
+  source_path?: string;
+  source_url?: string;
+  mime_type?: string;
+  caption?: string;
+  as_voice?: boolean;
+}
+
 export interface GatewayChannelOutboundPayload {
   channel_key: string;
   provider: string;
@@ -182,4 +224,7 @@ export interface GatewayChannelOutboundPayload {
   delta?: string;
   reply_to_external_message_id?: string;
   metadata?: Record<string, unknown>;
+  /** Present when the server wants one or more media attachments sent
+   *  alongside (or instead of) `text`. See GatewayChannelOutboundMediaItem. */
+  media?: GatewayChannelOutboundMediaItem[];
 }

@@ -1,3 +1,6 @@
+import { promises as fs } from "fs";
+import path from "path";
+import crypto from "crypto";
 import pino from "pino";
 
 import { GatewayStateDb } from "../../state/db";
@@ -5,13 +8,21 @@ import { redactCredentials } from "../foundation/credential-redactor";
 import { DraftManager, normalizeChannelOutboundOperation } from "../foundation/draft-manager";
 import type {
   GatewayChannelInboundPayload,
+  GatewayChannelMediaKind,
   GatewayChannelOutboundPayload,
   GatewayRequestEnvelope,
   GatewayScope,
   GatewayToolInvokePayload,
 } from "../../protocol/types";
 import { buildTelegramConnectedState, buildTelegramPreflightState, loadTelegramLoginConfig, maskPhoneNumber, type TelegramLinkedAccount, type TelegramLoginConfig } from "./login";
-import { mapTelegramInboundMessage, mapTelegramOutboundResult, type TelegramInboundMessage } from "./message-mapper";
+import {
+  mapTelegramInboundMessage,
+  mapTelegramOutboundMediaItem,
+  mapTelegramOutboundResult,
+  type TelegramInboundMediaItem,
+  type TelegramInboundMessage,
+  type TelegramOutboundMediaItem,
+} from "./message-mapper";
 import {
   TELEGRAM_TYPING_KEEPALIVE_MS,
   TelegramOutboundStore,
@@ -49,6 +60,15 @@ export interface TelegramAdapterClient {
     text: string,
     replyToExternalMessageId?: string,
   ) => Promise<Record<string, unknown> | undefined>;
+  /** Sends one media attachment (image/voice/audio/video/file). Optional so
+   *  existing adapter mocks (and any future adapter that only ever supports
+   *  text) keep compiling — sendFinalOutbound throws a clear error if the
+   *  server asks for media and the connected adapter doesn't implement it. */
+  sendMedia?: (
+    remoteJid: string,
+    media: TelegramOutboundMediaItem,
+    replyToExternalMessageId?: string,
+  ) => Promise<Record<string, unknown> | undefined>;
   sendChatAction?: (remoteJid: string, action: TelegramChatAction) => Promise<void> | void;
   disconnect?: () => Promise<void> | void;
   exportSessionString?: () => Promise<string> | string;
@@ -73,6 +93,234 @@ const TELEGRAM_REDACT_OBJECT_KEYS = ["authState", "creds", "keys"] as const;
 
 export function redactTelegramCredentials(state: Record<string, unknown>): Record<string, unknown> {
   return redactCredentials(state, TELEGRAM_REDACT_STRING_KEYS, TELEGRAM_REDACT_OBJECT_KEYS);
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Inbound/outbound media (photo/voice/audio/video/document/sticker).
+//
+// Contract with the server: inbound media is downloaded via GramJS
+// (client.downloadMedia) and written to disk under
+// <gateway state dir>/telegram-media/; the published channel.inbound
+// event's message.media[].media_id is that file's path RELATIVE to the
+// gateway state dir root (see state/db.ts's GatewayStateDb.rootDirPath()).
+// There is no HTTP media-fetch route on the gateway for this — the gateway
+// and the server share a filesystem / state-dir mount on a paired Agent
+// Computer box, so the server resolves media_id by joining it onto the
+// same state dir root it already has. See GatewayChannelInboundMediaItem's
+// doc comment in protocol/types.ts for the wire-shape side of this.
+//
+// Outbound mirrors this: GatewayChannelOutboundMediaItem.source_path is a
+// path the gateway process reads directly (same shared-filesystem
+// assumption); source_url is handed to GramJS as-is and it fetches/streams
+// the file via Telegram's own servers.
+// ───────────────────────────────────────────────────────────────────────
+
+/** Subdirectory of the gateway state dir that inbound Telegram media is
+ *  written under — also the leading path segment of every media_id. */
+export const TELEGRAM_MEDIA_SUBDIR = "telegram-media";
+
+/** ~25MB, matching the task's inbound size cap. Checked against the
+ *  declared size BEFORE downloading (skips the download entirely for an
+ *  oversized file) and again against the actual downloaded buffer length
+ *  (defense in depth against a missing/lying declared size). Overridable
+ *  for ops/testing via EMPYRALIS_TELEGRAM_MAX_MEDIA_BYTES — read directly
+ *  from process.env, the same pattern EMPYRALIS_TELEGRAM_PATH already uses
+ *  in connectClientInternal() below, rather than threaded through
+ *  GatewayConfig. */
+export function resolveTelegramMaxMediaBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number.parseInt(String(env.EMPYRALIS_TELEGRAM_MAX_MEDIA_BYTES || "").trim(), 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 25 * 1024 * 1024;
+}
+
+const TELEGRAM_MIME_EXTENSIONS: Readonly<Record<string, string>> = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
+  "video/mp4": ".mp4",
+  "video/webm": ".webm",
+  "video/quicktime": ".mov",
+  "audio/ogg": ".ogg",
+  "audio/mpeg": ".mp3",
+  "audio/mp4": ".m4a",
+  "audio/x-m4a": ".m4a",
+  "audio/wav": ".wav",
+  "audio/x-wav": ".wav",
+  "application/pdf": ".pdf",
+  "application/zip": ".zip",
+};
+
+/** Picks a filesystem extension for a downloaded media item: a known-mime
+ *  lookup first, then whatever extension the original filename already
+ *  had, then the mime subtype itself, finally a generic fallback. Exported
+ *  for direct unit testing. */
+export function extensionForTelegramMime(mimeType: string | undefined, fallbackName?: string): string {
+  const mime = String(mimeType || "").trim().toLowerCase();
+  if (mime && TELEGRAM_MIME_EXTENSIONS[mime]) {
+    return TELEGRAM_MIME_EXTENSIONS[mime];
+  }
+  const name = String(fallbackName || "").trim();
+  const dot = name.lastIndexOf(".");
+  if (dot > 0 && dot < name.length - 1) {
+    return name.slice(dot).toLowerCase();
+  }
+  const subtype = mime.split("/")[1]?.split(";")[0]?.trim();
+  if (subtype) {
+    return `.${subtype.replace(/[^a-z0-9]/gi, "")}`;
+  }
+  return ".bin";
+}
+
+/** Structural mirror of GramJS's Api.Message.file getter
+ *  (node_modules/telegram/tl/custom/file.js) — deliberately loose/minimal
+ *  rather than importing GramJS's real class, so tests can pass plain mock
+ *  objects instead of constructing real Api.* instances. */
+export interface TelegramRawMediaFile {
+  name?: string;
+  mimeType?: string;
+  size?: number;
+  duration?: number;
+}
+
+/** Structural mirror of the subset of GramJS's Api.Message convenience
+ *  getters (node_modules/telegram/tl/custom/message.js) used to classify
+ *  inbound media. */
+export interface TelegramRawMediaMessage {
+  photo?: unknown;
+  voice?: unknown;
+  video?: unknown;
+  videoNote?: unknown;
+  gif?: unknown;
+  audio?: unknown;
+  sticker?: unknown;
+  document?: unknown;
+  file?: TelegramRawMediaFile;
+}
+
+export interface TelegramMediaClassification {
+  kind: GatewayChannelMediaKind;
+  file: TelegramRawMediaFile;
+}
+
+/** Classifies a raw GramJS message's media (if any) into one of the
+ *  contract's five kinds. Order matters: voice notes, round videos, GIFs,
+ *  and stickers are all technically GramJS "documents" too, so the more
+ *  specific getters must be checked before falling back to the generic
+ *  `.document`. Pure — exported for direct unit testing without touching
+ *  GramJS at all. */
+export function classifyTelegramInboundMedia(
+  rawMessage: TelegramRawMediaMessage | null | undefined,
+): TelegramMediaClassification | null {
+  const file = rawMessage?.file;
+  if (!rawMessage || !file) {
+    return null;
+  }
+  if (rawMessage.photo) {
+    return { kind: "image", file };
+  }
+  if (rawMessage.voice) {
+    return { kind: "voice", file };
+  }
+  if (rawMessage.videoNote || rawMessage.video || rawMessage.gif) {
+    return { kind: "video", file };
+  }
+  if (rawMessage.audio) {
+    return { kind: "audio", file };
+  }
+  if (rawMessage.sticker) {
+    // Static stickers are webp images; animated/video stickers still report
+    // their real mime type (e.g. video/webm) via file.mimeType regardless —
+    // the contract has no dedicated "sticker" kind, so this buckets with
+    // images rather than dropping them.
+    return { kind: "image", file };
+  }
+  if (rawMessage.document) {
+    return { kind: "file", file };
+  }
+  return null;
+}
+
+/** Structural mirror of the one GramJS TelegramClient method this module
+ *  calls — again deliberately minimal so tests can mock it without a real
+ *  GramJS client. */
+export interface TelegramMediaDownloader {
+  downloadMedia: (messageOrMedia: unknown) => Promise<Buffer | string | undefined>;
+}
+
+/** Downloads one classified media item via GramJS (client.downloadMedia —
+ *  called with no `thumb` argument, which is what makes GramJS download the
+ *  largest photo variant rather than a thumbnail; see
+ *  node_modules/telegram/client/downloads.js's getThumb(), which sorts
+ *  ascending and pops the last/largest entry when thumb is undefined) and
+ *  persists it under <stateDir>/telegram-media/. Returns null (never
+ *  throws) on any failure — an unavailable/oversized/corrupt attachment
+ *  should never sink the whole inbound message when there's still a
+ *  caption (or other attachments) worth delivering. */
+export async function downloadAndStoreTelegramMedia(params: {
+  client: TelegramMediaDownloader;
+  rawMessage: unknown;
+  classification: TelegramMediaClassification;
+  stateDir: string;
+  externalMessageId: string;
+  maxBytes?: number;
+  logger?: { warn?: (...args: any[]) => unknown };
+}): Promise<TelegramInboundMediaItem | null> {
+  const { client, rawMessage, classification, stateDir, externalMessageId, logger } = params;
+  const maxBytes = params.maxBytes ?? resolveTelegramMaxMediaBytes();
+  const declaredSize = Number(classification.file.size);
+  if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
+    logger?.warn?.(
+      { externalMessageId, declaredSize, maxBytes },
+      "telegram inbound media exceeds size cap — skipping download",
+    );
+    return null;
+  }
+  let downloaded: Buffer | string | undefined;
+  try {
+    downloaded = await client.downloadMedia(rawMessage);
+  } catch (error) {
+    logger?.warn?.({ externalMessageId, error }, "telegram inbound media download failed");
+    return null;
+  }
+  // GramJS's downloadMedia only returns a string when called with an
+  // `outputFile` path argument (see downloads.d.ts) — we never pass one, so
+  // a string here means nothing usable was downloaded.
+  if (!downloaded || typeof downloaded === "string" || downloaded.length === 0) {
+    return null;
+  }
+  if (downloaded.length > maxBytes) {
+    logger?.warn?.(
+      { externalMessageId, size: downloaded.length, maxBytes },
+      "telegram inbound media exceeded size cap after download — discarding",
+    );
+    return null;
+  }
+  const mimeType = String(classification.file.mimeType || "").trim() || "application/octet-stream";
+  const filename = String(classification.file.name || "").trim() || undefined;
+  const ext = extensionForTelegramMime(mimeType, filename);
+  const baseName = `${externalMessageId}-${crypto.randomUUID()}${ext}`;
+  const mediaId = `${TELEGRAM_MEDIA_SUBDIR}/${baseName}`;
+  const absolutePath = path.join(stateDir, TELEGRAM_MEDIA_SUBDIR, baseName);
+  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  await fs.writeFile(absolutePath, downloaded);
+  try {
+    await fs.chmod(absolutePath, 0o600);
+  } catch {
+    // Best-effort — OK on filesystems that don't support unix permissions.
+  }
+  const durationSec = Number.isFinite(Number(classification.file.duration))
+    ? Number(classification.file.duration)
+    : undefined;
+  return {
+    kind: classification.kind,
+    mediaId,
+    mimeType,
+    filename,
+    sizeBytes: downloaded.length,
+    durationSec,
+  };
 }
 
 // GramJS's own update loop — and half a dozen other internal call sites
@@ -305,7 +553,7 @@ export class TelegramPersonalRuntime {
       setupKind: "phone_login",
       capabilities: ["configure", "inbound", "outbound", "text", "groups"],
       chatTypes: ["dm", "group"],
-      media: { text: true, images: false, files: false, reactions: false, voice: false },
+      media: { text: true, images: true, files: true, reactions: false, voice: true },
       safety: {
         ownerPairingRequired: true,
         allowlistRequired: false,
@@ -408,13 +656,21 @@ export class TelegramPersonalRuntime {
     const idempotencyKey = String(payload.idempotency_key || "").trim();
     const remoteJid = String(payload.remote_jid || "").trim();
     const text = String(payload.text || "").trim();
-    if (!idempotencyKey || !remoteJid || !text) {
-      throw new Error("channel.outbound requires idempotency_key, remote_jid, and text.");
+    const rawMediaItems = Array.isArray(payload.media) ? payload.media.filter(Boolean) : [];
+    if (!idempotencyKey || !remoteJid || (!text && rawMediaItems.length === 0)) {
+      throw new Error("channel.outbound requires idempotency_key, remote_jid, and text or media.");
     }
     if (text.length > 4096) {
       throw new Error(
         `Telegram message exceeds maximum length of 4096 characters (got ${text.length}).`,
       );
+    }
+    // Validate/normalize every media item up front — a malformed item
+    // (unknown kind, missing source) rejects the whole call before any send
+    // is attempted, instead of partially delivering and then throwing.
+    const mediaItems = rawMediaItems.map((item) => mapTelegramOutboundMediaItem(item));
+    if (mediaItems.length > 0 && typeof client.sendMedia !== "function") {
+      throw new Error("Telegram adapter does not support sending media.");
     }
     const now = new Date().toISOString();
     const existing = await this.outboundStore.beginSend(
@@ -458,17 +714,33 @@ export class TelegramPersonalRuntime {
       await typing.start();
     }
     try {
-      const response = await client.sendMessage(
-        remoteJid,
-        text,
-        String(payload.reply_to_external_message_id || "").trim() || undefined,
-      );
+      const replyTo = String(payload.reply_to_external_message_id || "").trim() || undefined;
+      // Media first, then text — each media item carries its own optional
+      // caption (contract: {kind, source_path|source_url, mime_type,
+      // caption?, as_voice?}), so `text` here is a distinct, additional
+      // message rather than a caption double-send. Most dispatches will set
+      // exactly one of text/media; sending both is supported, not assumed.
+      const mediaResults: Array<{ kind: GatewayChannelMediaKind; external_message_id?: string }> = [];
+      let response: Record<string, unknown> | undefined;
+      for (const item of mediaItems) {
+        // Guarded above (mediaItems.length > 0 implies sendMedia exists);
+        // non-null assertion documents that instead of re-checking per item.
+        response = await client.sendMedia!(remoteJid, item, replyTo);
+        mediaResults.push({
+          kind: item.kind,
+          external_message_id: String(response?.externalMessageId ?? "").trim() || undefined,
+        });
+      }
+      if (text) {
+        response = await client.sendMessage(remoteJid, text, replyTo);
+      }
       const mapped = mapTelegramOutboundResult(
         {
           idempotencyKey,
           remoteJid,
           text,
-          replyToExternalMessageId: String(payload.reply_to_external_message_id || "").trim() || undefined,
+          replyToExternalMessageId: replyTo,
+          media: mediaResults.length > 0 ? mediaResults : undefined,
         },
         response,
       );
@@ -909,7 +1181,15 @@ export class TelegramPersonalRuntime {
             const rawMessage = event?.message;
             const text = String(rawMessage?.message ?? "").trim();
             const externalMessageId = String(rawMessage?.id ?? "").trim();
-            if (!text || !externalMessageId) {
+            if (!externalMessageId) {
+              return;
+            }
+            // A media message with no caption has empty `text` — classify
+            // media BEFORE the emptiness check below so a bare photo/voice/
+            // video/etc. isn't silently dropped the way it would be if this
+            // still required non-empty text unconditionally.
+            const classification = classifyTelegramInboundMedia(rawMessage as TelegramRawMediaMessage | undefined);
+            if (!text && !classification) {
               return;
             }
             const chat = typeof event?.getChat === "function" ? await event.getChat() : undefined;
@@ -931,6 +1211,25 @@ export class TelegramPersonalRuntime {
               || String(sender?.username ?? chat?.title ?? "").trim()
               || undefined
             );
+            let media: TelegramInboundMediaItem[] | undefined;
+            if (classification) {
+              // Never let a download/disk-write failure sink the whole
+              // inbound message — downloadAndStoreTelegramMedia already
+              // returns null (not a throw) for a failed/oversized download;
+              // this catches the remaining failure mode (fs errors while
+              // persisting the bytes) the same way.
+              const stored = await downloadAndStoreTelegramMedia({
+                client,
+                rawMessage,
+                classification,
+                stateDir: this.db.rootDirPath(),
+                externalMessageId,
+                logger: this.logger,
+              }).catch(() => null);
+              if (stored) {
+                media = [stored];
+              }
+            }
             await messageHandler({
               externalMessageId,
               remoteJid,
@@ -941,6 +1240,7 @@ export class TelegramPersonalRuntime {
                 Number(rawMessage?.date ?? Math.floor(Date.now() / 1000)) * 1000,
               ).toISOString(),
               fromMe: Boolean(rawMessage?.out),
+              media,
             });
           },
           NewMessage ? new NewMessage({ incoming: true }) : undefined,
@@ -969,6 +1269,35 @@ export class TelegramPersonalRuntime {
                 sendArgs.replyTo = Number.isFinite(numericReplyTo) ? numericReplyTo : replyToExternalMessageId;
               }
               const sent = await client.sendMessage(remoteJid, sendArgs);
+              return {
+                externalMessageId: String(sent?.id ?? "").trim() || undefined,
+                remoteJid: String(sent?.chatId ?? remoteJid).trim() || remoteJid,
+              };
+            },
+            sendMedia: async (remoteJid, media, replyToExternalMessageId) => {
+              const fileArg = media.sourcePath || media.sourceUrl;
+              if (!fileArg) {
+                throw new Error("telegram_media_source_required");
+              }
+              const sendArgs: Record<string, unknown> = { file: fileArg };
+              if (media.caption) {
+                sendArgs.caption = media.caption;
+              }
+              const numericReplyTo = Number.parseInt(String(replyToExternalMessageId || "").trim(), 10);
+              if (replyToExternalMessageId) {
+                sendArgs.replyTo = Number.isFinite(numericReplyTo) ? numericReplyTo : replyToExternalMessageId;
+              }
+              if (media.kind === "voice" || media.asVoice) {
+                // Telegram's compact round-waveform voice message.
+                sendArgs.voiceNote = true;
+              } else if (media.kind !== "image") {
+                // video/audio/file -> Telegram document, per contract
+                // ("video/file→sendFile as document"). GramJS infers the
+                // photo-vs-document split for "image" from forceDocument
+                // being left unset/false, same as an ordinary sendFile call.
+                sendArgs.forceDocument = true;
+              }
+              const sent = await client.sendFile(remoteJid, sendArgs);
               return {
                 externalMessageId: String(sent?.id ?? "").trim() || undefined,
                 remoteJid: String(sent?.chatId ?? remoteJid).trim() || remoteJid,
