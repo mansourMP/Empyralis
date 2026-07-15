@@ -416,15 +416,18 @@ export function ensureGramLoggerShape(client: { _log?: unknown }, buildGramLogge
   client._log = hasWorkingGramLogger(rebuilt) ? rebuilt : createGramLoggerShim();
 }
 
-// TTL for the typing session started the instant an inbound message is
-// admitted (see TelegramPersonalRuntime.startTypingForChat), which needs to
-// stay alive for the length of a full agent turn — not just the one
-// sendMessage call TELEGRAM_TYPING_MAX_TTL_MS (60s, imported from
-// ./outbound) is sized for. Sized to safely exceed this platform's own
-// worst-case turn budget: server_modules/runtime_config.py's
-// ORION_RUN_TIMEOUT_SECONDS defaults to 300s, and
-// ORION_TELEGRAM_AUTOPILOT_RUN_TIMEOUT_SECONDS defaults to 180s.
-const TELEGRAM_INBOUND_TYPING_MAX_TTL_MS = 5 * 60_000;
+// Backstop TTL for the typing session started the instant an inbound message
+// is admitted (see TelegramPersonalRuntime.startTypingForChat). It stays
+// alive across the agent's think-time and is normally ended by whichever
+// comes first: the reply's sendMessage claiming it, or — when the agent
+// decides to STAY SILENT (a [SILENT]/no-reply turn) — an explicit
+// channel.typing_stop from the server. This constant is only the last-resort
+// bound for when neither of those arrives (e.g. the gateway missed the stop
+// because it was mid-reconnect). It was 5min, which made an orphaned session
+// (any suppressed reply before the explicit-stop wiring existed) show
+// "typing…" for five minutes straight — the exact symptom reported in prod.
+// 90s comfortably covers real reply turns while capping the worst case.
+const TELEGRAM_INBOUND_TYPING_MAX_TTL_MS = 90_000;
 
 export class TelegramPersonalRuntime {
   private readonly configStore: PersonalChannelConfigStore;

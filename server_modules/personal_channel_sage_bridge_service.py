@@ -14,6 +14,7 @@ from server_modules.error_notification import classify_error_notification  # noq
 
 from server_modules import authority_mandate_service
 from server_modules import channel_lane_contract_service
+from server_modules.channel_adapter import filter_outbound_reply
 
 
 def _build_error_reply_dict(
@@ -169,7 +170,9 @@ def _build_personal_reply(
                     guarded=guarded,
                 ),
             )
-        reply = str((result or {}).get("reply") or "").strip()
+        # Same [SILENT]/NO_REPLY suppression as the unified path above — this
+        # legacy fallback builder must not leak the sentinel either.
+        reply = filter_outbound_reply(str((result or {}).get("reply") or "").strip())
         if reply:
             return {
                 "text": reply,
@@ -237,7 +240,13 @@ async def _build_unified_sage_personal_reply_async(
             agent_id=str(agent_id or "").strip(),
             attachments=list(attachments) if attachments else None,
         )
-        reply = str((result or {}).get("message") or "").strip()
+        # Suppress the runtime's [SILENT]/NO_REPLY sentinels via the shared
+        # filter — the personal-channel path (unlike direct_chat/hosted)
+        # never applied it, so a "stay quiet" turn was shipped verbatim,
+        # posting a literal "[SILENT]" into the chat (esp. group chats where
+        # most messages aren't for the agent). None here → every handler's
+        # existing empty-reply skip path fires (no outbound, no dispatch).
+        reply = filter_outbound_reply(str((result or {}).get("message") or "").strip())
         if reply:
             return {
                 "text": reply,
