@@ -16,7 +16,7 @@ import {
   runtimeForProvider,
 } from "./fleet-provider-constants";
 import { useFleetAgentChannels, type FleetAgent } from "./fleet-data";
-import { GatewayBoxPicker } from "./gateway-box-picker";
+import { GatewayBoxPicker, RUNTIME_LABELS } from "./gateway-box-picker";
 import { ChannelsTab } from "./FleetAgentDetail";
 import { ConnectorPicker } from "./ConnectorPicker";
 import { GatewayPairPanel, type GatewayRegistrationRecord } from "@/lib/gateway/GatewayPairPanel";
@@ -126,6 +126,15 @@ export function FleetCreateAgentWizard({
   const [agentId, setAgentId] = useState<string | null>(null);
   const [resolvedProjectId, setResolvedProjectId] = useState("");
   const [createdAgent, setCreatedAgent] = useState<FleetAgent | null>(null);
+  // Hardware-aware "recommended" reuse (founder ruling, §29): set from the
+  // Placement PATCH response (fleet_configure_agent's recommended_model_
+  // config — computed server-side off the SAME llm_runtimes signal the box
+  // picker already reads, see fleet_tools.recommended_model_config_for_
+  // gateway) whenever a real gateway got bound. Non-null only when that box
+  // already has an authenticated Claude Code or Codex CLI ready to reuse.
+  const [recommendedModelConfig, setRecommendedModelConfig] = useState<{
+    mode: string; provider: string; runtime: "claude_code" | "codex"; gateway_binding: string;
+  } | null>(null);
 
   // Step 1 — Placement (+ purpose preset, sent in the same create call)
   const [purposePreset, setPurposePreset] = useState<string>("internal_assistant");
@@ -140,6 +149,7 @@ export function FleetCreateAgentWizard({
 
   // Step 2 — Brain
   const [providerMode, setProviderMode] = useState<WizardProviderMode>("platform");
+  const [platformProvider, setPlatformProvider] = useState("");
   const [byokProvider, setByokProvider] = useState("anthropic");
   const [byokKey, setByokKey] = useState("");
   const [subscriptionProvider, setSubscriptionProvider] = useState("claude_code_cli");
@@ -153,7 +163,11 @@ export function FleetCreateAgentWizard({
   // The provider whose model catalog the Brain step's model picker should
   // show — keep the selected model in sync with it (freeform providers get
   // "" so their text field starts empty rather than carrying a stale id).
-  const activeModelProvider = providerMode === "byok" ? byokProvider : providerMode === "local" ? (localProvider || "ollama") : "";
+  // "platform" only joins this once the owner picks an explicit provider —
+  // an empty platformProvider ("Platform default") must NOT re-default
+  // selectedModel, or every plain create would silently overwrite the
+  // seeded model default (seed_specialist_metadata's "deepseek-reasoner").
+  const activeModelProvider = providerMode === "byok" ? byokProvider : providerMode === "local" ? (localProvider || "ollama") : providerMode === "platform" ? platformProvider : "";
   useEffect(() => {
     if (!activeModelProvider) return;
     setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(activeModelProvider) ? "" : defaultModelForProvider(activeModelProvider));
@@ -174,6 +188,7 @@ export function FleetCreateAgentWizard({
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+    return data;
   }
 
   async function hydrateCreatedAgent(id: string) {
@@ -216,10 +231,11 @@ export function FleetCreateAgentWizard({
         setAgentId(id);
         setResolvedProjectId(projId);
       }
-      await patchAgent(id, {
+      const patchResult = await patchAgent(id, {
         hardware_access: placement === "cloud" ? "none" : placement,
         preferred_gateway_id: placement === "cloud" ? "" : selectedNodeId.trim(),
       });
+      setRecommendedModelConfig(patchResult?.recommended_model_config || null);
       await hydrateCreatedAgent(id);
       setStep(2);
     } catch (e) {
@@ -249,6 +265,17 @@ export function FleetCreateAgentWizard({
     setShowGatewayPair(false);
     setSelectedNodeId(String(g.gateway_id || ""));
     void refreshNodes();
+  }
+
+  // "You already have Codex on this box — use it" (founder ruling, §29):
+  // one click adopts the hardware-recommended subscription instead of
+  // making the owner re-navigate the box picker and reselect a runtime
+  // they've already signed in on this exact machine.
+  function applyRecommendedSubscription() {
+    if (!recommendedModelConfig) return;
+    setProviderMode("subscription");
+    setSubscriptionProvider(recommendedModelConfig.provider);
+    setGatewayBinding(recommendedModelConfig.gateway_binding);
   }
 
   // Step 2 (Brain) → who pays / which brain / which model, in one commit.
@@ -307,6 +334,19 @@ export function FleetCreateAgentWizard({
       }
       if (providerMode === "byok") {
         await patchAgent(agentId, { model_config: { mode: "byok_api", provider: byokProvider, model: selectedModel.trim() || undefined } });
+      } else if (providerMode === "platform" && platformProvider) {
+        // Only patch when the owner explicitly locked this agent to a
+        // provider — the seeded default (mode: platform_credits, no
+        // provider) already matches "platform" with nothing picked, so
+        // skip the round-trip rather than clobbering the seeded model
+        // default (seed_specialist_metadata's "deepseek-reasoner") for
+        // every plain create. An explicit pick here is isolated per-agent
+        // from birth — the workspace-wide default can change later without
+        // ever touching it (see sage_agent_runtime_service.
+        // _resolve_agent_cloud_provider's platform_credits branch).
+        await patchAgent(agentId, {
+          model_config: { mode: "platform_credits", provider: platformProvider, model: selectedModel.trim() || undefined },
+        });
       } else if (providerMode === "local") {
         await patchAgent(agentId, {
           model_config: {
@@ -518,9 +558,23 @@ export function FleetCreateAgentWizard({
           {step === 2 && (
             <div className="fleet-wizard-panel">
               <div className="fleet-detail-section-title">Who pays for the model?</div>
+              {recommendedModelConfig && providerMode !== "subscription" && (
+                <div
+                  className="fleet-channel-expand"
+                  style={{ borderColor: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}
+                >
+                  <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>
+                    You already have {RUNTIME_LABELS[recommendedModelConfig.runtime]} signed in on this computer —
+                    use it instead of Empyralis credits?
+                  </p>
+                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={applyRecommendedSubscription}>
+                    Use it
+                  </button>
+                </div>
+              )}
               <div className="fleet-wizard-options">
                 <button type="button" className={`fleet-wizard-option${providerMode === "platform" ? " is-selected" : ""}`} onClick={() => setProviderMode("platform")}>
-                  <span className="fleet-wizard-option-label">Empyralis credits <span className="fleet-wizard-option-tag">Recommended</span></span>
+                  <span className="fleet-wizard-option-label">Empyralis credits {!recommendedModelConfig && <span className="fleet-wizard-option-tag">Recommended</span>}</span>
                   <span className="fleet-wizard-option-body">Runs on your plan’s credits. Nothing to set up.</span>
                 </button>
                 <button type="button" className={`fleet-wizard-option${providerMode === "byok" ? " is-selected" : ""}`} onClick={() => setProviderMode("byok")}>
@@ -528,7 +582,7 @@ export function FleetCreateAgentWizard({
                   <span className="fleet-wizard-option-body">Use your key for any provider. You pay them directly.</span>
                 </button>
                 <button type="button" className={`fleet-wizard-option${providerMode === "subscription" ? " is-selected" : ""}`} onClick={() => setProviderMode("subscription")}>
-                  <span className="fleet-wizard-option-label">Your subscription</span>
+                  <span className="fleet-wizard-option-label">Your subscription {recommendedModelConfig && <span className="fleet-wizard-option-tag">Recommended</span>}</span>
                   <span className="fleet-wizard-option-body">Route through your Claude Code or Codex plan. Needs the Gateway.</span>
                 </button>
                 <button type="button" className={`fleet-wizard-option${providerMode === "local" ? " is-selected" : ""}`} onClick={() => setProviderMode("local")}>
@@ -536,6 +590,20 @@ export function FleetCreateAgentWizard({
                   <span className="fleet-wizard-option-body">Ollama on your own machine, via the Gateway.</span>
                 </button>
               </div>
+              {providerMode === "platform" && (
+                <div className="fleet-channel-expand">
+                  <label className="fleet-wizard-label">Provider</label>
+                  <select className="fleet-wizard-input" value={platformProvider} onChange={(e) => setPlatformProvider(e.currentTarget.value)}>
+                    <option value="">Platform default</option>
+                    {BYOK_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                  </select>
+                  <p className="fleet-wizard-hint">
+                    {platformProvider
+                      ? `This agent always uses ${providerLabel(platformProvider)}, billed to your Empyralis credits — independent of any other agent or a workspace-wide setting change.`
+                      : "Tracks your workspace's shared default provider (DeepSeek, unless changed workspace-wide). Pick a specific provider above to lock this agent to it permanently, independent of every other agent."}
+                  </p>
+                </div>
+              )}
               {providerMode === "byok" && (
                 <div className="fleet-channel-expand">
                   <label className="fleet-wizard-label">Provider</label>
@@ -573,8 +641,9 @@ export function FleetCreateAgentWizard({
               <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Which model?</div>
               {providerMode === "platform" && (
                 <p className="fleet-wizard-hint">
-                  This agent uses Empyralis’ managed model (DeepSeek). Nothing to configure — Empyralis
-                  picks and maintains it for you.
+                  {platformProvider
+                    ? `Empyralis manages the exact ${providerLabel(platformProvider)} model for you.`
+                    : "Empyralis picks and maintains the model for you."}
                 </p>
               )}
               {providerMode === "byok" && (

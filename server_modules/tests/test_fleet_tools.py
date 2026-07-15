@@ -456,6 +456,57 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
         self.assertEqual(status, "online")
         self.assertIsNone(reason)
 
+    def test_platform_credits_with_own_provider_ready_uses_that_provider_not_workspace_default(self):
+        """§29 mirror: an agent with its OWN stored platform_credits provider
+        is checked against THAT provider's credential, never the shared
+        workspace default — proven by making the workspace-default resolver
+        explode if it's ever called."""
+        inst = self._cloud_inst({"mode": "platform_credits", "provider": "anthropic"})
+        exploding_workspace_default = AsyncMock(
+            side_effect=AssertionError("must not check the workspace default for an agent with its own provider")
+        )
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                new=exploding_workspace_default,
+            ),
+            patch(
+                "server_modules.direct_chat_provider_service.direct_chat_credentials",
+                return_value={"api_key": "sk-ant-live"},
+            ),
+            patch(
+                "server_modules.direct_chat_provider_service.supports_direct_message_native_chat",
+                return_value=True,
+            ),
+        ):
+            status, _last_hb, _run_id, reason = _run(
+                fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+            )
+        self.assertEqual(status, "online")
+        self.assertIsNone(reason)
+        exploding_workspace_default.assert_not_awaited()
+
+    def test_platform_credits_with_own_provider_not_ready_when_that_provider_is_dead(self):
+        """The honesty half of the mirror: a dead per-agent provider reads
+        "error", not "online" — even though the workspace default (unchecked
+        here) might otherwise resolve fine."""
+        inst = self._cloud_inst({"mode": "platform_credits", "provider": "anthropic"})
+        with (
+            patch(
+                "server_modules.direct_chat_provider_service.direct_chat_credentials",
+                return_value={},
+            ),
+            patch(
+                "server_modules.direct_chat_provider_service.supports_direct_message_native_chat",
+                return_value=False,
+            ),
+        ):
+            status, _last_hb, _run_id, reason = _run(
+                fleet_tools._resolve_hardware_status(inst, {}, workspace_id="ws-1")
+            )
+        self.assertEqual(status, "error")
+        self.assertIn("anthropic", reason)
+
     def test_byok_api_ready_when_key_configured(self):
         inst = self._cloud_inst({"mode": "byok_api", "provider": "anthropic"})
         with (
@@ -567,6 +618,240 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
         )
         self.assertEqual(status, "unknown")
         self.assertIsNone(reason)
+
+
+class RecommendedModelConfigForGatewayTests(unittest.TestCase):
+    """§29 per-agent-provider fix, task (c): hardware-aware "recommended"
+    reuse. fleet_tools.recommended_model_config_for_gateway is the reusable
+    detection the create-agent wizard's Brain step is recommended off of —
+    reuses gateway_registry_service.gateway_registration_public_payload's
+    llm_runtimes, the SAME source fleet_configure_agent's own
+    cli_subscription save-time check (above) already reads. No live network
+    call — a plain, fast, unit-testable function."""
+
+    @staticmethod
+    def _registration(**overrides):
+        base = {"gateway_id": "gateway-1", "workspace_id": "ws-1", "status": "active"}
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def _llm_runtimes_payload(*, claude_code=None, codex=None):
+        def _entry(state):
+            if state is None:
+                return {"installed": False, "authenticated": False}
+            installed, authenticated = state
+            return {"installed": installed, "authenticated": authenticated}
+
+        return {"llm_runtimes": {"claude_code": _entry(claude_code), "codex": _entry(codex)}}
+
+    def test_a_new_agent_created_on_a_gateway_with_an_authenticated_subscription_gets_it_recommended(self):
+        """Task's literal ask (c): a box with an authenticated Codex CLI is
+        recommended for a new agent being placed on it."""
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(codex=(True, True)),
+            ),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertEqual(result, {
+            "mode": "cli_subscription",
+            "provider": "openai-codex",
+            "runtime": "codex",
+            "gateway_binding": "gateway-1",
+        })
+
+    def test_claude_code_preferred_over_codex_when_both_ready(self):
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(claude_code=(True, True), codex=(True, True)),
+            ),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertEqual(result["runtime"], "claude_code")
+        self.assertEqual(result["provider"], "claude_code_cli")
+
+    def test_installed_but_not_authenticated_is_not_recommended(self):
+        """Installed-but-signed-out must not be recommended — reusing it
+        would fail the very first turn, the opposite of "no re-login"."""
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(claude_code=(True, False)),
+            ),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertIsNone(result)
+
+    def test_no_runtime_ready_returns_none(self):
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertIsNone(result)
+
+    def test_empty_gateway_id_returns_none_without_any_lookup(self):
+        exploding = AsyncMock(side_effect=AssertionError("must not look up an empty gateway id"))
+        with patch("server_modules.gateway_state_repository.get_gateway_registration", new=exploding):
+            result = fleet_tools.recommended_model_config_for_gateway("", workspace_id="ws-1")
+        self.assertIsNone(result)
+
+    def test_unknown_gateway_id_returns_none(self):
+        with patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=None):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-missing", workspace_id="ws-1")
+        self.assertIsNone(result)
+
+    def test_gateway_bound_to_a_different_workspace_returns_none(self):
+        """A gateway_id belonging to another workspace must never leak a
+        recommendation across tenants."""
+        with (
+            patch(
+                "server_modules.gateway_state_repository.get_gateway_registration",
+                return_value=self._registration(workspace_id="ws-OTHER"),
+            ),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(claude_code=(True, True)),
+            ),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertIsNone(result)
+
+    def test_lookup_failure_returns_none_never_raises(self):
+        """Best-effort: this is a UX hint, never a gate — a lookup error must
+        never surface as an exception to the creation flow."""
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            side_effect=RuntimeError("db unavailable"),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertIsNone(result)
+
+
+class FleetConfigureAgentRecommendationTests(unittest.TestCase):
+    """fleet_configure_agent surfaces recommended_model_config in its
+    response when a patch (re)binds preferred_gateway_id — the single
+    source of truth the create-agent wizard's Placement step reads off the
+    SAME PATCH it already makes, no extra round trip."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    def test_binding_a_gateway_with_ready_subscription_surfaces_recommendation(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch.object(
+                fleet_tools,
+                "recommended_model_config_for_gateway",
+                return_value={"mode": "cli_subscription", "provider": "claude_code_cli", "runtime": "claude_code", "gateway_binding": "gateway-1"},
+            ) as mock_recommend,
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"preferred_gateway_id": "gateway-1"},
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("recommended_model_config"), {
+            "mode": "cli_subscription", "provider": "claude_code_cli", "runtime": "claude_code", "gateway_binding": "gateway-1",
+        })
+        mock_recommend.assert_called_once_with("gateway-1", workspace_id="ws-1")
+
+    def test_binding_a_gateway_with_no_ready_subscription_omits_the_key(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch.object(fleet_tools, "recommended_model_config_for_gateway", return_value=None),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"preferred_gateway_id": "gateway-1"},
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertNotIn("recommended_model_config", result)
+
+    def test_unbinding_to_cloud_never_looks_up_a_recommendation(self):
+        """placement="cloud" sends preferred_gateway_id="" — an empty
+        binding must skip the lookup entirely, not "recommend" for a blank
+        gateway id."""
+        exploding = AsyncMock(side_effect=AssertionError("must not compute a recommendation for an empty gateway id"))
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch.object(fleet_tools, "recommended_model_config_for_gateway", new=exploding),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"preferred_gateway_id": ""},
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertNotIn("recommended_model_config", result)
+
+    def test_patch_unrelated_to_hardware_never_looks_up_a_recommendation(self):
+        """A patch that never touches preferred_gateway_id at all (e.g. a
+        plain rename) must not pay for the lookup."""
+        exploding = AsyncMock(side_effect=AssertionError("must not compute a recommendation when hardware wasn't touched"))
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch.object(fleet_tools, "recommended_model_config_for_gateway", new=exploding),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "Renamed Agent"},
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertNotIn("recommended_model_config", result)
 
 
 class FleetListAgentsHardwareStatusIntegrationTests(unittest.TestCase):
