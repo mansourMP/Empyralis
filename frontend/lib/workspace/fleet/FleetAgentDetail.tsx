@@ -1014,7 +1014,12 @@ function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId
 // ── Channels ────────────────────────────────────────────────────────────────
 
 import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
-import { useGatewayPersonalChannelSurfaces } from "./personal-channel-pairing";
+import {
+  isPersonalChannelStatusActive,
+  useGatewayPersonalChannelSurfaces,
+  usePersonalChannelStatus,
+  type PersonalChannelKey,
+} from "./personal-channel-pairing";
 
 // Fixed platform order the grid renders in, mapped to the backend
 // connection id that carries that platform's live status.
@@ -1262,6 +1267,51 @@ export function ChannelsTab({
     }
   }, [workspaceId, agentId, slackChannelId, handleChannelsChanged]);
 
+  const activePlatform = CHANNEL_GRID_PLATFORMS.find((p) => p.id === expanded) || null;
+  const doors = expanded ? CHANNEL_DOORS[expanded] || [] : [];
+  // A lone real door needs no picker — it auto-activates. Otherwise the user's
+  // click on a specific (real) door decides which one is active.
+  const activeDoor = doors.length === 1 && doors[0].real ? doors[0] : doors.find((d) => d.key === selectedDoor) || null;
+
+  // Live pairing status for whichever full-account door is on screen right
+  // now. PersonalChannelConnectPanel (rendered below when activeDoor is
+  // full_account) polls this exact same endpoint internally to drive its own
+  // phone/code/QR/password steps — this is a second, parallel read of it,
+  // used only to gate the doors picker just below. Must be called
+  // unconditionally on every render (rules of hooks), so every branch that
+  // isn't "a full_account door is currently active" passes a null gatewayId,
+  // which short-circuits usePersonalChannelStatus into a no-op — no fetch,
+  // no poll, view stays null. alwaysPoll: true because this instance has no
+  // onRefresh() of its own to ride in on (unlike PersonalChannelConnectPanel,
+  // which re-fetches right after every phone/code/password submit) — without
+  // it, this poll would fetch "idle" once, stop (idle isn't an
+  // ACTIVE_STATUSES status), and never notice the user going on to actually
+  // pair from inside the panel below.
+  const pairingChannelKey: PersonalChannelKey | null =
+    activeDoor?.key !== "full_account" ? null
+      : expanded === "sage_telegram_hosted" ? "telegram_personal"
+      : expanded === "whatsapp_personal" ? "whatsapp_personal"
+      : null;
+  const { view: pairingView } = usePersonalChannelStatus(
+    workspaceId,
+    pairingChannelKey || "telegram_personal",
+    pairingChannelKey ? agentGatewayId : null,
+    agentId,
+    { alwaysPoll: true },
+  );
+  // True only while the door on screen right now is full_account AND its
+  // pairing is actively mid-flight (a code/QR/password step with real typed
+  // input at stake — the ACTIVE_STATUSES a fresh poll loop is worth running
+  // for, see personal-channel-pairing.ts). Switching the picker to a
+  // different door at that exact moment would unmount
+  // PersonalChannelConnectPanel and silently discard whatever's been typed
+  // so far — the founder-reported bug this gates. Once pairing settles
+  // (connected, or back to idle/disconnected) the picker returns to normal.
+  const pairingActive = !!pairingChannelKey && isPersonalChannelStatusActive(pairingView?.state?.status);
+  // The doors picker's actual render list: collapsed to just the in-flight
+  // door while pairingActive, otherwise the full set (unchanged behavior).
+  const displayDoors = pairingActive && activeDoor ? [activeDoor] : doors;
+
   // Only the TRUE first load (no channels fetched yet) gets the full-tab
   // skeleton — refresh() (called after every connect-success, see
   // handleChannelsChanged above) also flips `loading` true/false, and
@@ -1324,12 +1374,6 @@ export function ChannelsTab({
     setSlackBindSaved(platform.id === "slack" ? Boolean(slackChannelBinding) : false);
   }
 
-  const activePlatform = CHANNEL_GRID_PLATFORMS.find((p) => p.id === expanded) || null;
-  const doors = expanded ? CHANNEL_DOORS[expanded] || [] : [];
-  // A lone real door needs no picker — it auto-activates. Otherwise the user's
-  // click on a specific (real) door decides which one is active.
-  const activeDoor = doors.length === 1 && doors[0].real ? doors[0] : doors.find((d) => d.key === selectedDoor) || null;
-
   return (
     <div>
       <div className="fleet-channel-grid">
@@ -1387,10 +1431,18 @@ export function ChannelsTab({
             </div>
 
             <div className="fleet-channel-banner-body">
-              {doors.length >= 1 && (
+              {/* While a full_account pairing is actively mid-flight (a
+                   code/QR/password step with real typed input at stake —
+                   see pairingActive/displayDoors above), the picker collapses
+                   to JUST the active door, rendered the same inert way a
+                   single-door channel already is below (no onClick). Tapping
+                   an alternate-door button right now would unmount
+                   PersonalChannelConnectPanel below and silently discard
+                   whatever's been entered — this is what stops that. */}
+              {displayDoors.length >= 1 && (
                 <div className="fleet-wizard-options">
-                  {doors.map((door) => {
-                    const isOnlyRealDoor = doors.length === 1 && door.real;
+                  {displayDoors.map((door) => {
+                    const isOnlyRealDoor = displayDoors.length === 1 && door.real;
                     if (!door.real) {
                       return (
                         <button key={door.key} type="button" disabled className="fleet-wizard-option fleet-wizard-option--soon">
