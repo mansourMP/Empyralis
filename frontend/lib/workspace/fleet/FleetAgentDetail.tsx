@@ -69,31 +69,41 @@ function resolveAgentModelSummary(modelConfig: Record<string, any> | undefined |
   provider: string;
   model: string;
   isPlatformDefault: boolean;
+  /** model_config.reasoning_effort, or "" when unset OR when the mode
+   *  doesn't apply it (cli_subscription/local — see REASONING_EFFORT_
+   *  SUPPORTED_MODES). Kept off the summary for those two modes so it
+   *  never implies an effect that isn't real yet. */
+  reasoningEffort: string;
 } {
   const config = modelConfig || {};
   const mode = config.mode;
+  const reasoningEffort = REASONING_EFFORT_SUPPORTED_MODES.has(mode) ? String(config.reasoning_effort || "") : "";
   if (mode === "cli_subscription") {
     const runtime: "claude_code" | "codex" = config.runtime === "codex" ? "codex" : "claude_code";
     const provider = config.provider ? providerLabel(config.provider) : RUNTIME_LABELS[runtime];
-    return { provider, model: config.model || "CLI default", isPlatformDefault: false };
+    return { provider, model: config.model || "CLI default", isPlatformDefault: false, reasoningEffort };
   }
   if (mode === "local") {
-    return { provider: "Local", model: config.model || "Ollama", isPlatformDefault: false };
+    return { provider: "Local", model: config.model || "Ollama", isPlatformDefault: false, reasoningEffort };
   }
   if (config.provider || config.model || config.resolved_model) {
     return {
       provider: config.provider ? providerLabel(config.provider) : (config.resolved_provider_label || "Platform default"),
       model: config.model || config.resolved_model || "Default",
       isPlatformDefault: false,
+      reasoningEffort,
     };
   }
-  return { provider: "Platform default", model: "Platform default", isPlatformDefault: true };
+  return { provider: "Platform default", model: "Platform default", isPlatformDefault: true, reasoningEffort };
 }
 
 function formatModelSummaryLine(summary: ReturnType<typeof resolveAgentModelSummary>): string {
-  if (summary.isPlatformDefault) return "Platform default";
-  if (summary.provider === summary.model) return summary.model;
-  return `${summary.provider} · ${summary.model}`;
+  const base = summary.isPlatformDefault
+    ? "Platform default"
+    : summary.provider === summary.model
+      ? summary.model
+      : `${summary.provider} · ${summary.model}`;
+  return summary.reasoningEffort ? `${base} · ${reasoningEffortLabel(summary.reasoningEffort)} reasoning` : base;
 }
 
 // Properties panel's Placement row used to render placement.label with no
@@ -128,14 +138,21 @@ function isChannelConnected(channel: Pick<FleetChannel, "id" | "connected">, sla
 
 type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "chat";
 
+// "model" sits right after "overview" (was 7th of 8, second-to-last) — a
+// live complaint was "where is the button that says choose the model and
+// its reasoning??" .fleet-detail-toptabs scrolls horizontally with NO
+// visible scrollbar (fleet-theme.css — only a fade cue on mobile), so a tab
+// this far right was easy to miss entirely, not just easy to overlook.
+// Model/brain choice is foundational setup, not a deep-cut settings page —
+// it belongs near the front, same tier as Overview.
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
+  { id: "model", label: "Model", icon: Sparkles },
   { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "hardware", label: "Hardware", icon: Cpu },
-  { id: "model", label: "Model", icon: Sparkles },
   { id: "memory", label: "Memory", icon: Brain },
 ];
 
@@ -1867,6 +1884,7 @@ import {
   BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, MODE_LABELS,
   COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, type ProviderMode,
   FREEFORM_MODEL_PROVIDERS, modelsForProvider, defaultModelForProvider,
+  REASONING_EFFORT_OPTIONS, REASONING_EFFORT_SUPPORTED_MODES, reasoningEffortLabel,
 } from "./fleet-provider-constants";
 import {
   GatewayBoxPicker,
@@ -2037,6 +2055,7 @@ function ModelTab({
   const cliRuntime = runtimeForProvider(provider) === "codex" ? "codex" : "claude_code";
   const [selectedModel, setSelectedModel] = useState<string>(config.model || "");
   const [apiKey, setApiKey] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState<string>(config.reasoning_effort || "");
   // Re-default the model choice when the provider changes AFTER mount (so an
   // id from the previous provider doesn't linger in a <select> that no longer
   // has it) — but never on first render, which would clobber the agent's
@@ -2051,6 +2070,38 @@ function ModelTab({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
+  // Every field above is seeded from `config` via a useState INITIALIZER,
+  // which only runs on the component's very first render. That's fine when
+  // `agent` is already loaded by the time this tab mounts (the common path:
+  // Overview loads first, the user clicks over) — but FleetAgentDetail
+  // renders this tab unconditionally as soon as activeTab === "model", and
+  // a direct link or hard refresh landing straight on this tab (initialTab
+  // from the URL) mounts it with agent still null, before its fetch
+  // resolves. Every field then silently seeds from `{}` and stays there
+  // forever once `agent` populates a beat later — confirmed live: reload on
+  // this tab left the Reasoning-effort <select> stuck on "Model default"
+  // while the read-only "Current state" block (which reads `config` fresh
+  // on every render, not through useState) correctly showed the real saved
+  // value. Runs ONCE, the first time real agent data arrives — not on every
+  // later change, since unlike HardwareTab's identical resync effect (which
+  // auto-persists each click, so there's never an unsaved edit to protect)
+  // this tab holds edits locally until an explicit Save; resyncing after
+  // that first hydration would silently discard whatever the user is
+  // mid-editing. skipNextModelReset is primed here too so this hydration's
+  // own setProvider call doesn't trip the model-reset effect just above and
+  // clobber the model this same hydration just set.
+  const hydratedFromAgent = useRef(false);
+  useEffect(() => {
+    if (hydratedFromAgent.current || !agent) return;
+    hydratedFromAgent.current = true;
+    const freshConfig = agent.model_config || {};
+    skipNextModelReset.current = true;
+    setMode(resolveDisplayMode(freshConfig));
+    setProvider(freshConfig.provider || "");
+    setGatewayBinding(freshConfig.gateway_binding || "");
+    setSelectedModel(freshConfig.model || "");
+    setReasoningEffort(freshConfig.reasoning_effort || "");
+  }, [agent]);
   // COMING_SOON_MODES is empty today (cli_subscription and local both
   // shipped) — kept as a live check, not deleted, so gating a future mode
   // that isn't ready yet needs no new plumbing here.
@@ -2061,6 +2112,11 @@ function ModelTab({
   // time ("no computer is bound" / "cli_subscription requires a Gateway").
   const localNeedsBox = mode === "local" && !gatewayBinding.trim();
   const cliSubscriptionNeedsBox = mode === "cli_subscription" && !gatewayBinding.trim();
+  // cli_subscription/local dispatch to the paired Gateway, which has no
+  // reasoning_effort plumbing today (see REASONING_EFFORT_SUPPORTED_MODES'
+  // own comment) — the picker is hidden for those two modes instead of
+  // saving a setting that silently does nothing at turn time.
+  const reasoningEffortSupported = REASONING_EFFORT_SUPPORTED_MODES.has(mode);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2175,6 +2231,15 @@ function ModelTab({
       const rt = runtimeForProvider(provider);
       if (rt) patch.runtime = rt;
     }
+    // Only for the two modes that actually consume it at turn time (see
+    // REASONING_EFFORT_SUPPORTED_MODES) — this patch REPLACES model_config
+    // wholesale (fleet_tools.py's fleet_configure_agent does `meta[
+    // "model_config"] = dict(patch)`, not a merge), so switching to
+    // cli_subscription/local and saving correctly drops any previously-set
+    // reasoning_effort instead of leaving a stale, inert value behind.
+    if (reasoningEffortSupported && reasoningEffort) {
+      patch.reasoning_effort = reasoningEffort;
+    }
     const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
       method: "PATCH",
       credentials: "include",
@@ -2183,6 +2248,38 @@ function ModelTab({
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+  }
+
+  // Shared between the platform_credits and byok_api blocks below (the two
+  // modes reasoningEffortSupported allows) so the picker can't drift between
+  // them — see REASONING_EFFORT_SUPPORTED_MODES for why cli_subscription/
+  // local get a disabled note instead (renderReasoningEffortUnsupportedNote).
+  function renderReasoningEffortPicker() {
+    return (
+      <>
+        <label className="fleet-wizard-label">Reasoning effort</label>
+        <select
+          className="fleet-wizard-input"
+          value={reasoningEffort}
+          onChange={(e) => { setReasoningEffort(e.currentTarget.value); setSaved(false); }}
+        >
+          {REASONING_EFFORT_OPTIONS.map((o) => (
+            <option key={o.value || "unset"} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <p className="fleet-channel-expand-hint">
+          Higher effort can solve harder problems but costs more and replies slower. Models that support it natively use it directly; others get it as a strong instruction instead.
+        </p>
+      </>
+    );
+  }
+
+  function renderReasoningEffortUnsupportedNote() {
+    return (
+      <p className="fleet-channel-expand-hint">
+        Reasoning effort isn’t available for this mode yet — it only applies to platform credits and your own API key.
+      </p>
+    );
   }
 
   return (
@@ -2228,6 +2325,12 @@ function ModelTab({
             <span className="fleet-config-value">{MODE_LABELS[config.mode as ProviderMode] || config.mode}</span>
           </div>
         )}
+        {modelSummary.reasoningEffort && (
+          <div className="fleet-config-row">
+            <span className="fleet-config-label">Reasoning</span>
+            <span className="fleet-config-value">{reasoningEffortLabel(modelSummary.reasoningEffort)}</span>
+          </div>
+        )}
       </div>
 
       {/* Editor */}
@@ -2270,6 +2373,16 @@ function ModelTab({
         </button>
       </div>
 
+      {/* platform_credits has no provider/model fields (fixed to the
+          platform default) — reasoning effort is the one thing left to
+          configure here, so it gets its own expand block instead of living
+          bare under the mode buttons. */}
+      {mode === "platform_credits" && (
+        <div className="fleet-channel-expand">
+          {renderReasoningEffortPicker()}
+        </div>
+      )}
+
       {mode === "byok_api" && (
         <div className="fleet-channel-expand">
           <label className="fleet-wizard-label">Provider</label>
@@ -2306,6 +2419,7 @@ function ModelTab({
               </select>
             </>
           )}
+          {renderReasoningEffortPicker()}
         </div>
       )}
 
@@ -2318,6 +2432,7 @@ function ModelTab({
             ))}
           </select>
           <p className="fleet-channel-expand-hint">{SUBSCRIPTION_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
+          {renderReasoningEffortUnsupportedNote()}
           <div className="fleet-detail-section-title" style={{ marginTop: 16 }}>Brain runs on</div>
           <GatewayBoxPicker
             workspaceId={workspaceId}
@@ -2345,6 +2460,7 @@ function ModelTab({
             This turn only works if this model is actually pulled on the box below — run{" "}
             <code>ollama pull {selectedModel || "llama3.2"}</code> there first if you haven't.
           </p>
+          {renderReasoningEffortUnsupportedNote()}
           <div className="fleet-detail-section-title" style={{ marginTop: 16 }}>Brain runs on</div>
           <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={(id) => { setGatewayBinding(id); setSaved(false); }} requireLocalModel />
         </div>

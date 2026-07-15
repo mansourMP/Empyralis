@@ -2120,5 +2120,80 @@ class SageAgentRuntimeSpecialistProviderResolutionTests(unittest.TestCase):
         self.assertEqual(result["message"], "local reply")
 
 
+class SageAgentRuntimeReasoningEffortResolutionTests(unittest.TestCase):
+    """Fleet Model tab's reasoning-effort picker (model_config.
+    reasoning_effort) -- proves the value actually reaches the generation
+    call (stream_provider_backed_direct_chat's normalized_reasoning_effort
+    kwarg) instead of being silently discarded, the way it was hardcoded to
+    "" before this fix regardless of what model_config said. Reuses
+    SageAgentRuntimeSpecialistProviderResolutionTests's `_spec`/`_run_chat`
+    static helpers directly (not by subclassing it, which would re-run its
+    provider/credentials tests a second time under this class too)."""
+
+    _spec = staticmethod(SageAgentRuntimeSpecialistProviderResolutionTests._spec)
+    _run_chat = staticmethod(SageAgentRuntimeSpecialistProviderResolutionTests._run_chat)
+
+    def test_byok_specialist_reasoning_effort_reaches_generation_call(self):
+        spec = self._spec(provider="openai", model="gpt-5.4", mode="byok_api", reasoning_effort="high")
+        _mock_agent, _mock_ws, mock_stream = self._run_chat(specialist_context=spec)
+
+        gen_kwargs = mock_stream.call_args.kwargs
+        self.assertEqual(gen_kwargs["normalized_reasoning_effort"], "high")
+
+    def test_platform_credits_specialist_reasoning_effort_reaches_generation_call(self):
+        spec = self._spec(provider="", model="", mode="platform_credits", reasoning_effort="low")
+        mock_agent_provider = AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}, "platform_credits"))
+        _mock_agent, _mock_ws, mock_stream = self._run_chat(
+            specialist_context=spec, mock_agent_provider=mock_agent_provider,
+        )
+
+        gen_kwargs = mock_stream.call_args.kwargs
+        self.assertEqual(gen_kwargs["normalized_reasoning_effort"], "low")
+
+    def test_xhigh_is_a_valid_level_not_a_typo_for_high(self):
+        """provider_profiles.py's PROVIDER_MODEL_CATALOG genuinely lists
+        "xhigh" as a distinct reasoning level for GPT-5.x/Codex-class models
+        (see reasoning_levels on e.g. openai/gpt-5.4) -- must round-trip
+        unmolested, not get clamped to "high"."""
+        spec = self._spec(provider="openai", model="gpt-5.4", mode="byok_api", reasoning_effort="xhigh")
+        _mock_agent, _mock_ws, mock_stream = self._run_chat(specialist_context=spec)
+
+        self.assertEqual(mock_stream.call_args.kwargs["normalized_reasoning_effort"], "xhigh")
+
+    def test_unset_reasoning_effort_passes_none_not_empty_string(self):
+        """No override configured -- must reach the generation call as None
+        (stream_provider_backed_direct_chat's own falsy check treats "" and
+        None identically, but None matches the function's own
+        Optional[str] contract instead of a magic empty-string sentinel)."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api")
+        _mock_agent, _mock_ws, mock_stream = self._run_chat(specialist_context=spec)
+
+        self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
+
+    def test_invalid_reasoning_effort_is_dropped_not_passed_through_raw(self):
+        """A stale/hand-edited model_config.reasoning_effort outside
+        {low, medium, high, xhigh} must never reach the generation call --
+        stream_provider_backed_direct_chat would otherwise quote it verbatim
+        into a system-prompt instruction for any model it doesn't recognize
+        as natively reasoning-capable (see that function's degradation
+        branch), which is a prompt-injection-shaped risk for a value that
+        should have been rejected at the door."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", reasoning_effort="ultra-mega")
+        _mock_agent, _mock_ws, mock_stream = self._run_chat(specialist_context=spec)
+
+        self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
+
+    def test_sage_own_turn_reasoning_effort_stays_unset(self):
+        """Sage's own master-install model_config is not consulted for
+        model/provider either (see _resolve_cloud_provider's docstring) --
+        reasoning_effort follows that same existing scope, not a new gap."""
+        exploding = AsyncMock(side_effect=AssertionError("must not be called for Sage's own turn"))
+        _mock_agent, _mock_ws, mock_stream = self._run_chat(
+            specialist_context=None, mock_agent_provider=exploding,
+        )
+
+        self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
+
+
 if __name__ == "__main__":
     unittest.main()

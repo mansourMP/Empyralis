@@ -47,6 +47,21 @@ class SpecialistRuntimeContext:
     mode: str = ""
     gateway_binding: str = ""
     runtime: str = ""
+    # Reasoning-effort override from the Fleet Model tab (model_config.
+    # reasoning_effort) — one of _VALID_REASONING_EFFORTS in
+    # sage_agent_runtime_service.py ("low"/"medium"/"high"/"xhigh"), or empty
+    # for "no override" (provider/model default). Only meaningful for
+    # mode in (platform_credits, byok_api) — those are the two lanes that
+    # reach stream_provider_backed_direct_chat, the one call site that
+    # actually consumes it (natively for models it recognizes as reasoning
+    # models, degraded to a system-prompt instruction otherwise — see that
+    # function's own "Reasoning effort logic" block). cli_subscription/local
+    # dispatch to the Gateway instead, which has no reasoning_effort
+    # plumbing today — an override saved under those modes is carried here
+    # but never read by handle_sage_chat's gateway-dispatch branches, so it
+    # has no effect (matches the Fleet UI, which hides the picker for those
+    # two modes rather than promising something that doesn't happen yet).
+    reasoning_effort: str = ""
     # The paired box this specialist's TOOL calls (shell/file/browser) prefer,
     # distinct from gateway_binding above (which names the box that hosts the
     # AI brain itself, only used in local/cli_subscription mode). Empty = no
@@ -168,6 +183,7 @@ async def resolve_specialist_runtime_context(
         mode=_text(_model_config.get("mode")).lower(),
         gateway_binding=_text(_model_config.get("gateway_binding")),
         runtime=_text(_model_config.get("runtime")).lower(),
+        reasoning_effort=_text(_model_config.get("reasoning_effort")).lower(),
         preferred_gateway_id=_text(_inst_meta.get("preferred_gateway_id")),
         project_id=_text(bundle.get("project_id")),
         context_policy=dict(_ctx_policy),

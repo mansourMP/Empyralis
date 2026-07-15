@@ -134,3 +134,37 @@ export function modelsForProvider(providerId: string): string[] {
 export function defaultModelForProvider(providerId: string): string {
   return DEFAULT_MODEL_BY_PROVIDER[providerId] || modelsForProvider(providerId)[0] || "";
 }
+
+// ── Reasoning effort (Fleet Model tab, model_config.reasoning_effort) ──────
+// Mirrors scripts/orion_local_worker_llm.py's resolve_requested_reasoning_effort
+// and provider_profiles.py's PROVIDER_MODEL_CATALOG reasoning_levels union —
+// "xhigh" ("Extra high") is a real fourth tier for GPT-5.x/Codex-class
+// models, not a typo for "high". "" means no override (provider/model
+// default), same convention as an unset model_config.model.
+export type ReasoningEffort = "" | "low" | "medium" | "high" | "xhigh";
+
+export const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }[] = [
+  { value: "", label: "Model default" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+];
+
+export function reasoningEffortLabel(value: string): string {
+  return REASONING_EFFORT_OPTIONS.find((o) => o.value === value)?.label || "Model default";
+}
+
+// Which model_config modes actually apply reasoning_effort at turn time —
+// see sage_agent_runtime_service.py's handle_sage_chat /
+// _run_sage_action_loop_v3: platform_credits and byok_api are the two lanes
+// that reach stream_provider_backed_direct_chat, which applies this natively
+// for models it recognizes as reasoning-capable and as a soft system-prompt
+// instruction otherwise. cli_subscription/local dispatch to the paired
+// Gateway instead, which has no reasoning_effort plumbing today — the Model
+// tab hides the picker for those two modes rather than saving a setting
+// that silently does nothing.
+export const REASONING_EFFORT_SUPPORTED_MODES: ReadonlySet<ProviderMode> = new Set<ProviderMode>([
+  "platform_credits",
+  "byok_api",
+]);
