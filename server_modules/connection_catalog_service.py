@@ -95,6 +95,7 @@ def _item(
     account_provider: Optional[str] = None,
     setup_available: Optional[bool] = None,
     runtime_usable: Optional[bool] = None,
+    safety: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized_status = _token(launch_status) or LAUNCH_LOCKED
     usable = normalized_status in _USABLE_LAUNCH_STATUSES if runtime_usable is None else bool(runtime_usable)
@@ -138,6 +139,7 @@ def _item(
         "proof_blockers": ["generic_connection_test_not_implemented"] if test_action else [],
         "auth_required_fields": auth_required_fields,
         "test_runner": _GENERIC_CONNECTION_TEST_RUNNER if test_action else "not_required",
+        "safety": dict(safety) if safety else None,
     })
 
 
@@ -156,6 +158,50 @@ def _static_launch_blockers(
     if not runtime_usable:
         blockers.append("runtime_unusable")
     return blockers
+
+
+def _personal_channel_dm_safety(*, media_pipeline_active: bool) -> Dict[str, Any]:
+    """The REAL, server-enforced safety posture for a personal channel, as
+    opposed to the gateway's own static manifest claim (see
+    empyralis-gateway/src/channels/*/runtime.ts's `safety:
+    {ownerPairingRequired, allowlistRequired}` — a fixed literal per
+    channel, never backed by any actual inbound sender check until
+    personal_channels_service._enforce_dm_policy existed). This is surfaced
+    ALONGSIDE that gateway-claimed block (see
+    personal_channels_service.get_gateway_personal_channel_surfaces, which
+    passes the gateway's manifest through unmodified as `manifest.safety`)
+    rather than silently overwriting it, so a mismatch stays visible.
+
+    dm_policy_default is what a NEWLY connected agent gets on this channel
+    before any workspace configures otherwise — owner_only, i.e. only the
+    channel's own owner (self-chat / the account holder) gets a reply.
+    media_pipeline_active reflects whether personal_channels_service's
+    inbound handler for this channel actually resolves a per-agent identity
+    to store media/dmPolicy config against (true for WhatsApp/Telegram
+    today; local-bridge channels don't yet resolve one — see
+    _handle_local_bridge_gateway_channel_inbound's dmPolicy comment).
+
+    NOTE: "owner_only" / the 4-mode list below are literal copies of
+    personal_channels_service.DEFAULT_DM_POLICY_MODE /
+    .DM_POLICY_MODES — kept as plain literals rather than an import to
+    avoid pulling personal_channels_service's much heavier import graph
+    into this module's load path (this dict is built at CATALOG IMPORT
+    TIME, not lazily). Keep in sync if those constants ever change.
+    """
+    return {
+        "dm_policy_default": "owner_only",
+        "dm_policy_modes": ["allowlist", "open", "owner_only", "pairing"],
+        "dm_policy_enforced_server_side": True,
+        "dm_policy_configurable_per_agent": media_pipeline_active,
+        # True regardless of mode: connecting this channel at all requires
+        # the owner to pair their own device (QR / phone+code / bridge
+        # login) — that part of the gateway's claim has always been real.
+        "owner_pairing_required": True,
+        # Only true once a workspace switches this channel's dmPolicy to
+        # allowlist or pairing mode — false under the owner_only default,
+        # since no allowlist is consulted in that mode.
+        "allowlist_required": False,
+    }
 
 
 _CATALOG: tuple[Dict[str, Any], ...] = (
@@ -185,7 +231,7 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         requires_gateway=not os.environ.get("CLOUD_SESSION_MANAGER_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on"),
         supports_inbound=True,
         supports_outbound=True,
-        media_support=_media(text=True),
+        media_support=_media(text=True, images=True, files=True, voice=True),
         approval_policy="owner_approval_required",
         health_check="personal_channel_state",
         test_action="send_text",
@@ -195,6 +241,7 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         connector_id="telegram_personal",
         account_provider="telegram_personal",
         vault_provider="telegram_personal",
+        safety=_personal_channel_dm_safety(media_pipeline_active=True),
     ),
     _item(
         connection_id="whatsapp_personal",
@@ -207,7 +254,7 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         requires_gateway=True,
         supports_inbound=True,
         supports_outbound=True,
-        media_support=_media(text=True),
+        media_support=_media(text=True, images=True, files=True, voice=True),
         approval_policy="owner_approval_required",
         health_check="personal_channel_state",
         test_action="send_text",
@@ -217,6 +264,7 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         connector_id="whatsapp_personal",
         account_provider="whatsapp_personal",
         vault_provider="whatsapp_personal",
+        safety=_personal_channel_dm_safety(media_pipeline_active=True),
     ),
     _item(
         connection_id="signal_personal",
@@ -239,6 +287,7 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         vault_provider="signal_personal",
         setup_available=True,
         runtime_usable=True,
+        safety=_personal_channel_dm_safety(media_pipeline_active=False),
     ),
     _item(
         connection_id="imessage_personal",
@@ -261,6 +310,7 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         vault_provider="imessage_personal",
         setup_available=True,
         runtime_usable=True,
+        safety=_personal_channel_dm_safety(media_pipeline_active=False),
     ),
     _item(
         connection_id="wechat_personal",
@@ -283,6 +333,7 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         vault_provider="wechat_personal",
         setup_available=True,
         runtime_usable=True,
+        safety=_personal_channel_dm_safety(media_pipeline_active=False),
     ),
     _item(
         connection_id="telegram_bot",

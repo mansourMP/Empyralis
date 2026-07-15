@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import secrets
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -16,6 +19,8 @@ from server_modules import (
     secret_redaction_service,
     security_audit_service,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class _LazyGatewayProtocolService:
@@ -623,6 +628,463 @@ def _control_command_block_result(
     }
 
 
+# ── dmPolicy: sender allowlist / pairing enforcement ──────────────────
+#
+# The channel manifests (empyralis-gateway's PersonalChannelCapabilityManifest)
+# declare `safety: {ownerPairingRequired: true, allowlistRequired: ...}` for
+# every personal channel. Until this section existed that was a false claim:
+# nothing server-side ever checked WHO was messaging before generating a
+# reply — any contact who texted the owner's own WhatsApp/Telegram number
+# got an automatic reply, indistinguishable from the owner themselves. This
+# is the real gate. See docs/PLATFORM-MAP.md for the write-up.
+#
+# Modelled on OpenClaw's dmPolicy (extensions/signal/src/monitor/access-policy.ts,
+# extensions/slack/src/monitor/dm-auth.ts, src/channels/message-access/sender-gates.ts):
+# a per-channel policy of open | allowlist | pairing (+ a hard "disabled"
+# there we don't need, since dropping the whole channel is a separate
+# on/off switch already). We add owner_only as Empyralis's OWN strictest
+# mode and make it the default — OpenClaw's channels don't have a concept
+# of "the DM channel IS one specific person's own account", personal
+# channels here do.
+
+DM_POLICY_OWNER_ONLY = "owner_only"
+DM_POLICY_ALLOWLIST = "allowlist"
+DM_POLICY_PAIRING = "pairing"
+DM_POLICY_OPEN = "open"
+DM_POLICY_MODES = {DM_POLICY_OWNER_ONLY, DM_POLICY_ALLOWLIST, DM_POLICY_PAIRING, DM_POLICY_OPEN}
+# Safe-by-default: reply only to the owner's own identity until a workspace
+# deliberately opens the channel up.
+DEFAULT_DM_POLICY_MODE = DM_POLICY_OWNER_ONLY
+
+
+def _default_dm_policy_config() -> Dict[str, Any]:
+    return {"mode": DEFAULT_DM_POLICY_MODE, "allowlist": [], "pending_pairing": {}}
+
+
+def _normalize_dm_policy_config(raw: Any) -> Dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    mode = str(data.get("mode") or "").strip().lower()
+    if mode not in DM_POLICY_MODES:
+        mode = DEFAULT_DM_POLICY_MODE
+    allowlist = sorted({str(x).strip() for x in (data.get("allowlist") or []) if str(x or "").strip()})
+    pending_raw = data.get("pending_pairing") if isinstance(data.get("pending_pairing"), dict) else {}
+    pending = {
+        str(sender_id): dict(entry)
+        for sender_id, entry in pending_raw.items()
+        if str(sender_id or "").strip() and isinstance(entry, dict)
+    }
+    return {"mode": mode, "allowlist": allowlist, "pending_pairing": pending}
+
+
+async def _load_agent_dm_policy_config(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    channel_key: str,
+) -> Dict[str, Any]:
+    """Read-only, safe-by-default. Persisted at
+    install_metadata.dm_policy[channel_key] on the agent's own
+    workspace_agent_installs row (the same "config lives in install
+    metadata" convention triage_service.resolve_triage_config uses for
+    its own per-agent config).
+
+    Any lookup failure, missing install, or an unresolved agent_id
+    (personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID — see
+    _resolve_agent_id_for_inbound's docstring for when that happens)
+    returns owner_only with an empty allowlist. This NEVER fails open to
+    "open" or "allowlist" just because the config lookup itself failed —
+    only an explicit, successfully-loaded config can relax the default.
+    """
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
+        return _default_dm_policy_config()
+    try:
+        from server_modules import agent_registry_repository as _repo
+
+        install = await _repo.get_workspace_agent_install_bundle(
+            normalized_agent_id,
+            tenant_id=str(tenant_id or "default").strip() or "default",
+            workspace_id=str(workspace_id or "default").strip() or "default",
+        )
+    except Exception:
+        _logger.warning("dm_policy: install lookup failed for agent_id=%s — defaulting to owner_only", normalized_agent_id, exc_info=True)
+        return _default_dm_policy_config()
+    if not isinstance(install, dict):
+        return _default_dm_policy_config()
+    meta = dict(install.get("install_metadata") or install.get("metadata") or {})
+    all_policies = meta.get("dm_policy") if isinstance(meta.get("dm_policy"), dict) else {}
+    return _normalize_dm_policy_config(all_policies.get(channel_key))
+
+
+async def _persist_agent_dm_policy_config(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    channel_key: str,
+    config: Dict[str, Any],
+) -> bool:
+    """Write path for a future settings API / owner-approval command to call.
+    Best-effort: returns False (never raises) on any failure — a persistence
+    failure must never surface as a 500 in the middle of message handling.
+    update_workspace_agent_install merges `metadata` shallowly at the TOP
+    level only, so we read-modify-write the WHOLE dm_policy dict (all
+    channels), not just this channel_key's entry, or a concurrent update
+    to a sibling channel's policy could get clobbered."""
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
+        return False
+    resolved_tenant_id = str(tenant_id or "default").strip() or "default"
+    resolved_workspace_id = str(workspace_id or "default").strip() or "default"
+    try:
+        from server_modules import agent_registry_repository as _repo
+
+        install = await _repo.get_workspace_agent_install_bundle(
+            normalized_agent_id, tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id,
+        )
+        if not isinstance(install, dict):
+            return False
+        meta = dict(install.get("install_metadata") or install.get("metadata") or {})
+        all_policies = dict(meta.get("dm_policy")) if isinstance(meta.get("dm_policy"), dict) else {}
+        all_policies[channel_key] = _normalize_dm_policy_config(config)
+        updated = await _repo.update_workspace_agent_install(
+            normalized_agent_id,
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+            metadata={"dm_policy": all_policies},
+        )
+        return updated is not None
+    except Exception:
+        _logger.warning("dm_policy: persist failed for agent_id=%s channel=%s", normalized_agent_id, channel_key, exc_info=True)
+        return False
+
+
+async def approve_dm_policy_pairing_request(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    channel_key: str,
+    sender_id: Optional[str] = None,
+    code: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Owner-approval primitive: move a pending pairing request into the
+    allowlist. Matches by sender_id OR by the one-time pairing code
+    (whichever a future approval route/owner-facing command has on hand).
+    Not yet wired to a route — this is the service-layer primitive for
+    that; see this build's report for the follow-up.
+
+    Returns {"approved": bool, "sender_id": Optional[str], "reason": Optional[str]}.
+    """
+    config = await _load_agent_dm_policy_config(
+        tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id, channel_key=channel_key,
+    )
+    pending = config["pending_pairing"]
+    target_sender_id = str(sender_id or "").strip()
+    if not target_sender_id and str(code or "").strip():
+        normalized_code = str(code or "").strip()
+        for candidate_id, entry in pending.items():
+            if str(entry.get("code") or "").strip() == normalized_code:
+                target_sender_id = candidate_id
+                break
+    if not target_sender_id or target_sender_id not in pending:
+        return {"approved": False, "sender_id": target_sender_id or None, "reason": "pairing_request_not_found"}
+    pending = dict(pending)
+    pending.pop(target_sender_id, None)
+    config["pending_pairing"] = pending
+    if target_sender_id not in config["allowlist"]:
+        config["allowlist"] = sorted(set(config["allowlist"]) | {target_sender_id})
+    persisted = await _persist_agent_dm_policy_config(
+        tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id, channel_key=channel_key, config=config,
+    )
+    if not persisted:
+        return {"approved": False, "sender_id": target_sender_id, "reason": "persist_failed"}
+    return {"approved": True, "sender_id": target_sender_id, "reason": None}
+
+
+def _channel_owner_linked_id(*, channel_key: str, state: Optional[Dict[str, Any]]) -> str:
+    """The owner's own identity on this channel, as last established by a
+    real login/connect event — see _resolve_linked_identity_for_sync's
+    docstring for why this is NEVER derived from an inbound message's own
+    sender fields."""
+    if not isinstance(state, dict):
+        return ""
+    if channel_key == WHATSAPP_PERSONAL_CHANNEL_KEY:
+        return str(state.get("linked_jid") or "").strip()
+    if channel_key == TELEGRAM_PERSONAL_CHANNEL_KEY:
+        return str(state.get("linked_user_id") or "").strip()
+    return ""
+
+
+def _resolve_linked_identity_for_sync(*, current_value: Optional[str], preserved_value: str) -> Optional[str]:
+    """What to write for linked_jid/linked_user_id on a PER-MESSAGE state
+    sync. `current_value` is the signal carried on THIS message (only ever
+    non-empty for a genuine owner/self-chat event — callers must not pass
+    an arbitrary contact's sender_jid here). `preserved_value` is whatever
+    is already persisted.
+
+    Why this function exists: personal_channels_repository.upsert_whatsapp_state
+    / upsert_telegram_state overwrite linked_jid/linked_user_id UNCONDITIONALLY
+    on every call (no COALESCE — unlike their own `metadata` column, which
+    IS merged). The per-message sync in _handle_whatsapp_gateway_channel_inbound
+    used to pass message.get("sender_jid") directly — which for a plain 1:1
+    DM equals remote_jid, i.e. the CONTACT's own jid, not the owner's. That
+    silently clobbered the real owner identity (set once at login) with
+    whichever stranger most recently texted the owner, on every single
+    inbound message. Fixed here: only a genuine owner signal overwrites the
+    persisted identity; everything else preserves it unchanged.
+    """
+    resolved_current = str(current_value or "").strip()
+    if resolved_current:
+        return resolved_current
+    resolved_preserved = str(preserved_value or "").strip()
+    return resolved_preserved or None
+
+
+def _dm_policy_sender_id(message: Dict[str, Any], *, remote_jid: str) -> str:
+    """The identity dmPolicy authorizes against: the specific participant
+    who sent the message (sender_jid — meaningful inside a WhatsApp group,
+    where it differs from the group's own remote_jid) if present, else the
+    chat/contact id (remote_jid — the normal 1:1 DM case, where sender_jid
+    already equals remote_jid anyway)."""
+    return str(message.get("sender_jid") or "").strip() or str(remote_jid or "").strip()
+
+
+def _is_owner_message(
+    *,
+    channel_key: str,
+    message: Dict[str, Any],
+    sender_id: str,
+    existing_state: Optional[Dict[str, Any]],
+) -> bool:
+    """True when this inbound message is from the OWNER's own identity:
+    WhatsApp/Telegram self-chat (message.is_self_chat — computed gateway-side
+    from the live connection's own account id, see
+    empyralis-gateway/src/channels/whatsapp/message-mapper.ts), or a sender
+    that matches this channel's previously-established linked owner
+    identity (also correctly identifies the owner posting inside a WhatsApp
+    group they're a member of, since a person's JID is the same in every
+    context).
+
+    Reuses triage_service.resolve_sender_identity for the actual identity
+    resolution rather than re-implementing it — see that function's
+    docstring. channel_bindings is built fresh here from the (clobber-fixed)
+    linked identity rather than routing through triage's audience-registry
+    concept, which models a different question (customer/audience senders
+    on an audience-facing channel, not "is this sender the channel's own
+    owner").
+    """
+    if bool(message.get("is_self_chat")):
+        return True
+    linked = _channel_owner_linked_id(channel_key=channel_key, state=existing_state)
+    if not linked:
+        return False
+    from server_modules.triage_service import resolve_sender_identity
+
+    identity = resolve_sender_identity(
+        sender_id=sender_id,
+        channel_origin=channel_key,
+        channel_bindings=[{"channel_type": channel_key, "linked_user_id": linked}],
+    )
+    return identity == "owner"
+
+
+def _generate_pairing_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _pairing_challenge_text(*, label: str) -> str:
+    return (
+        f"This {label} number is a private assistant line. It only replies to its "
+        "owner and to contacts the owner has approved. The owner has been notified "
+        "that you messaged, and can approve you to enable replies."
+    )
+
+
+async def _enforce_dm_policy(
+    *,
+    registration: Dict[str, Any],
+    channel_key: str,
+    agent_id: str,
+    message: Dict[str, Any],
+    remote_jid: str,
+    existing_state: Optional[Dict[str, Any]],
+    label: str,
+) -> Dict[str, Any]:
+    """THE gate. Must run before any reply — including a control-command
+    reply — is generated for an inbound personal-channel message. Returns::
+
+        {"allowed": bool, "mode": str, "sender_id": str, "is_owner": bool,
+         "system_reply": Optional[str], "config_changed": bool}
+
+    `system_reply`, when present, is a FIXED string (never LLM-generated)
+    the caller should dispatch directly and then stop — a pairing challenge
+    must never reach the model.
+    """
+    sender_id = _dm_policy_sender_id(message, remote_jid=remote_jid)
+    is_owner = _is_owner_message(
+        channel_key=channel_key, message=message, sender_id=sender_id, existing_state=existing_state,
+    )
+    if is_owner:
+        return {
+            "allowed": True, "mode": "owner", "sender_id": sender_id, "is_owner": True,
+            "system_reply": None, "config_changed": False,
+        }
+
+    tenant_id = str(registration.get("tenant_id") or "default").strip() or "default"
+    workspace_id = str(registration.get("workspace_id") or "default").strip() or "default"
+    config = await _load_agent_dm_policy_config(
+        tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id, channel_key=channel_key,
+    )
+    mode = config["mode"]
+
+    if mode == DM_POLICY_OPEN:
+        return {
+            "allowed": True, "mode": mode, "sender_id": sender_id, "is_owner": False,
+            "system_reply": None, "config_changed": False,
+        }
+
+    if sender_id and sender_id in config["allowlist"]:
+        return {
+            "allowed": True, "mode": mode, "sender_id": sender_id, "is_owner": False,
+            "system_reply": None, "config_changed": False,
+        }
+
+    if mode == DM_POLICY_PAIRING and sender_id:
+        pending = dict(config["pending_pairing"])
+        if sender_id in pending:
+            # Already challenged once — stay silent on repeats (mirrors
+            # OpenClaw's issuePairingChallenge: no reply when !created).
+            return {
+                "allowed": False, "mode": mode, "sender_id": sender_id, "is_owner": False,
+                "system_reply": None, "config_changed": False,
+            }
+        pending[sender_id] = {
+            "code": _generate_pairing_code(),
+            "sender_name": str(message.get("push_name") or "").strip() or None,
+            "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        config["pending_pairing"] = pending
+        persisted = await _persist_agent_dm_policy_config(
+            tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id, channel_key=channel_key, config=config,
+        )
+        # Only send the challenge once we know it's actually recorded — an
+        # unrecorded challenge would re-trigger (and re-message the
+        # stranger) on every retry instead of going silent like a recorded
+        # one does.
+        reply = _pairing_challenge_text(label=label) if persisted else None
+        return {
+            "allowed": False, "mode": mode, "sender_id": sender_id, "is_owner": False,
+            "system_reply": reply, "config_changed": persisted,
+        }
+
+    # owner_only (default) and allowlist-with-no-match both land here:
+    # blocked, silent — no system reply, matching "record but do not reply."
+    return {
+        "allowed": False, "mode": mode, "sender_id": sender_id, "is_owner": False,
+        "system_reply": None, "config_changed": False,
+    }
+
+
+async def _handle_dm_policy_blocked(
+    *,
+    gateway_id: str,
+    registration: Dict[str, Any],
+    inbound: Dict[str, Any],
+    channel_key: str,
+    provider: str,
+    agent_id: str,
+    external_message_id: str,
+    remote_jid: str,
+    duplicate: bool,
+    decision: Dict[str, Any],
+    trace_id: str = "",
+) -> Dict[str, Any]:
+    """Record the drop (and, for `pairing` mode's first contact, dispatch
+    the one-time system challenge) — but never hand the message to the
+    model, and never run the normal automatic-reply path."""
+    no_reply_idempotency_key = f"{channel_key}:dmpolicy:{decision.get('mode')}:{external_message_id}"
+    refreshed_inbound = personal_channels_repository.mark_inbound_processed(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=channel_key,
+        agent_id=agent_id,
+        external_message_id=external_message_id,
+        reply_idempotency_key=no_reply_idempotency_key,
+    )
+    system_reply = str(decision.get("system_reply") or "").strip()
+    status = "pairing_challenge" if system_reply else "blocked"
+    sender_id = str(decision.get("sender_id") or "")
+    _emit_automatic_reply_audit(
+        action=f"personal_channel.{channel_key.split('_', 1)[0]}.dm_policy",
+        status=status,
+        registration=registration,
+        gateway_id=gateway_id,
+        channel_key=channel_key,
+        provider=provider,
+        detail=f"Inbound personal-channel message dropped by dmPolicy (mode={decision.get('mode')}).",
+        metadata={
+            "remote_jid": remote_jid,
+            "inbound_external_message_id": external_message_id,
+            "dm_policy_mode": decision.get("mode"),
+            "sender_id_hash": hashlib.sha256(sender_id.encode("utf-8")).hexdigest()[:16] if sender_id else None,
+        },
+        trace_id=trace_id,
+        idempotency_key=f"personal_channel.dm_policy.{status}:{gateway_id}:{channel_key}:{external_message_id}",
+    )
+    outbound: Optional[Dict[str, Any]] = None
+    if system_reply:
+        pairing_idempotency_key = f"{channel_key}:dmpolicy_pairing:{sender_id}"
+        outbound, outbound_created = personal_channels_repository.create_or_get_outbound_message(
+            gateway_id=str(gateway_id or "").strip(),
+            channel_key=channel_key,
+            agent_id=agent_id,
+            idempotency_key=pairing_idempotency_key,
+            remote_jid=remote_jid,
+            text=system_reply,
+            reply_to_external_message_id=external_message_id,
+            metadata={"reply_source": "dm_policy_pairing_challenge"},
+        )
+        if outbound_created and str(outbound.get("status") or "").strip() != "delivered":
+            try:
+                _enforce_personal_channel_dispatch_decision(
+                    gateway_id=str(gateway_id or "").strip(),
+                    registration=registration,
+                    capability_id=f"{channel_key}.send",
+                    request_id=pairing_idempotency_key,
+                )
+                dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
+                    gateway_id=str(gateway_id or "").strip(),
+                    channel_key=channel_key,
+                    provider=provider,
+                    remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
+                    text=system_reply,
+                    idempotency_key=pairing_idempotency_key,
+                    reply_to_external_message_id=None,
+                )
+                delivered = personal_channels_repository.mark_outbound_delivered(
+                    gateway_id=str(gateway_id or "").strip(),
+                    channel_key=channel_key,
+                    agent_id=agent_id,
+                    idempotency_key=pairing_idempotency_key,
+                    external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
+                    metadata={"dispatch_result": dispatch_result},
+                )
+                outbound = delivered or outbound
+            except Exception:
+                _logger.warning(
+                    "dm_policy: failed to dispatch pairing challenge channel=%s gateway=%s",
+                    channel_key, gateway_id, exc_info=True,
+                )
+    return {
+        "duplicate": duplicate,
+        "inbound": refreshed_inbound or inbound,
+        "outbound": outbound,
+        "blocked": True,
+        "policy": {"gate": "dm_policy", **decision},
+    }
+
+
 def _as_mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -916,7 +1378,22 @@ def get_gateway_personal_channel_surfaces(gateway_id: str) -> Dict[str, Any]:
                     else [],
                 ),
                 "media": secret_redaction_service.sanitize_mapping(_as_mapping(manifest.get("media"))),
+                # `safety` here is the GATEWAY's own static manifest claim,
+                # passed through unmodified (see empyralis-gateway's
+                # PersonalChannelCapabilityManifest.safety). `dm_policy` below
+                # is what the SERVER actually enforces for this channel —
+                # see _enforce_dm_policy. This endpoint has no agent_id
+                # parameter (a gateway can host more than one agent's
+                # session per channel), so this is the channel-level
+                # default/enforcement description, not one specific agent's
+                # live allowlist — fetch that per-agent via a future
+                # settings surface once one exists (see this build's report).
                 "safety": secret_redaction_service.sanitize_mapping(_as_mapping(manifest.get("safety"))),
+                "dm_policy": {
+                    "default_mode": DEFAULT_DM_POLICY_MODE,
+                    "modes": sorted(DM_POLICY_MODES),
+                    "enforced_server_side": True,
+                },
                 "manifest": secret_redaction_service.sanitize_mapping(manifest),
                 "health": secret_redaction_service.sanitize_mapping(health),
                 "state": _safe_state_summary(state),
@@ -1164,6 +1641,86 @@ def _assert_gateway_advertised_personal_channel(
             raise ValueError(f"Gateway personal channel {channel_key} health is {health_status}.")
 
 
+# ── Media pipeline (Feature B): inbound fetch/store/transcribe ────────
+#
+# THE CONTRACT: a channel.inbound message MAY carry an optional `media`
+# array; each item is {kind: "image"|"voice"|"audio"|"video"|"file",
+# media_id: "<gateway-fetchable id>", mime_type, filename?, size_bytes?,
+# duration_sec?}. See gateway_protocol_service.fetch_channel_media's
+# docstring for the exact fetch RPC, and
+# personal_channel_media_store_service's module docstring for the
+# storage/attachment-context contract.
+
+
+async def _process_inbound_media_for_turn(
+    *,
+    gateway_id: str,
+    channel_key: str,
+    provider: str,
+    registration: Dict[str, Any],
+    agent_id: str,
+    text: str,
+    media_items: List[Dict[str, Any]],
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Fetch/store any media on this inbound message, splice voice/audio
+    transcripts into the text (`[Voice message]: <transcript>`, or the
+    fixed "transcription unavailable" placeholder), and return image/file
+    attachments ready for the turn context. Never raises: any failure here
+    degrades to the original text with no attachments rather than dropping
+    the turn — matching this feature's graceful-degradation contract.
+    """
+    if not media_items:
+        return text, []
+
+    workspace_id = str(registration.get("workspace_id") or "default").strip() or "default"
+    try:
+        from server_modules import personal_channel_media_store_service as _media_store
+
+        result = await _media_store.process_inbound_media(
+            gateway_id=gateway_id,
+            channel_key=channel_key,
+            provider=provider,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            media=media_items,
+        )
+    except Exception:
+        _logger.warning(
+            "media pipeline: process_inbound_media failed channel=%s gateway=%s",
+            channel_key, gateway_id, exc_info=True,
+        )
+        return text, []
+
+    effective_text = text
+    for voice_record in result.get("voice_records") or []:
+        try:
+            from server_modules import personal_channel_transcription_service as _stt
+
+            transcription = await _stt.transcribe_voice_bytes(
+                workspace_id=workspace_id,
+                audio_bytes=voice_record.get("raw_bytes") or b"",
+                mime_type=str(voice_record.get("mime_type") or "audio/ogg"),
+                filename=str(voice_record.get("filename") or "voice-message"),
+            )
+            voice_text = _stt.format_voice_message_text(transcription)
+        except Exception:
+            _logger.warning(
+                "media pipeline: voice transcription failed channel=%s gateway=%s",
+                channel_key, gateway_id, exc_info=True,
+            )
+            voice_text = "[Voice message — transcription unavailable]"
+        effective_text = f"{effective_text}\n{voice_text}".strip() if effective_text else voice_text
+
+    attachments = list(result.get("attachments") or [])
+    if not effective_text.strip():
+        # Media-only message with nothing text-like to anchor the turn on
+        # (e.g. an image with no caption, or an unfetchable voice note) —
+        # the attachment context block (if any) still carries the image.
+        effective_text = "[Media message]"
+
+    return effective_text, attachments
+
+
 async def handle_gateway_channel_inbound(
     *,
     gateway_id: str,
@@ -1205,6 +1762,7 @@ async def _deliver_whatsapp_personal_reply(
     duplicate: bool,
     trace_id: str = "",
     agent_id: str = "",
+    attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
     if reply_idempotency_key and reply_idempotency_key.startswith(WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX):
@@ -1291,6 +1849,7 @@ async def _deliver_whatsapp_personal_reply(
             source_event_id=external_message_id,
             linked_user_name=linked_user_name,
             agent_id=agent_id,
+            attachments=attachments,
         )
         if not reply or not str(reply.get("text") or "").strip():
             no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
@@ -1407,8 +1966,9 @@ async def _handle_whatsapp_gateway_channel_inbound(
     external_message_id = str(message.get("external_message_id") or "").strip()
     remote_jid = str(message.get("remote_jid") or "").strip()
     text = str(message.get("text") or "").strip()
-    if not external_message_id or not remote_jid or not text:
-        raise ValueError("channel.inbound requires external_message_id, remote_jid, and text.")
+    media_items = [item for item in (message.get("media") or []) if isinstance(item, dict)]
+    if not external_message_id or not remote_jid or (not text and not media_items):
+        raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
     if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
         return {"ignored": True, "reason": "from_me", "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY}
     # Group gate: skip group messages unless mentioned or replying to Sage.
@@ -1426,6 +1986,13 @@ async def _handle_whatsapp_gateway_channel_inbound(
     # gateway+channel, and the sync then updates THAT SAME row to
     # "connected" rather than risking a second, wrongly-scoped row.
     agent_id = _resolve_agent_id_for_inbound(gateway_id, WHATSAPP_PERSONAL_CHANNEL_KEY)
+    # Read BEFORE the sync below writes to it: dmPolicy's owner check (further
+    # down) needs the identity established at login, not whatever the sync
+    # payload is about to (re)write — see _resolve_linked_identity_for_sync's
+    # docstring.
+    existing_state = personal_channels_repository.get_whatsapp_state(
+        str(gateway_id or "").strip(), channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY, agent_id=agent_id,
+    )
     sync_gateway_personal_channel_state(
         gateway_id=gateway_id,
         registration=registration,
@@ -1435,7 +2002,13 @@ async def _handle_whatsapp_gateway_channel_inbound(
                 WHATSAPP_PERSONAL_CHANNEL_KEY: {
                     "provider": str(payload.get("provider") or WHATSAPP_PERSONAL_PROVIDER).strip() or WHATSAPP_PERSONAL_PROVIDER,
                     "status": "connected",
-                    "linked_jid": str(message.get("sender_jid") or "").strip() or None,
+                    # Only a genuine self-chat event supplies a NEW linked_jid;
+                    # every other inbound message preserves whatever is
+                    # already persisted (see _resolve_linked_identity_for_sync).
+                    "linked_jid": _resolve_linked_identity_for_sync(
+                        current_value=str(message.get("sender_jid") or "").strip() if bool(message.get("is_self_chat")) else None,
+                        preserved_value=_channel_owner_linked_id(channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY, state=existing_state),
+                    ),
                 }
             }
         },
@@ -1453,8 +2026,34 @@ async def _handle_whatsapp_gateway_channel_inbound(
             "provider": str(payload.get("provider") or WHATSAPP_PERSONAL_PROVIDER).strip() or WHATSAPP_PERSONAL_PROVIDER,
             "received_at": str(message.get("received_at") or "").strip() or None,
             "from_me": bool(message.get("from_me")),
+            "media_kinds": [str(item.get("kind") or "").strip() for item in media_items] or None,
         },
     )
+    # ── dmPolicy gate: MUST run before any reply (including a control-command
+    # reply) is generated. See _enforce_dm_policy's docstring. ──
+    dm_decision = await _enforce_dm_policy(
+        registration=registration,
+        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
+        message=message,
+        remote_jid=remote_jid,
+        existing_state=existing_state,
+        label="WhatsApp",
+    )
+    if not dm_decision["allowed"]:
+        return await _handle_dm_policy_blocked(
+            gateway_id=gateway_id,
+            registration=registration,
+            inbound=inbound,
+            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            provider=WHATSAPP_PERSONAL_PROVIDER,
+            agent_id=agent_id,
+            external_message_id=external_message_id,
+            remote_jid=remote_jid,
+            duplicate=not created,
+            decision=dm_decision,
+            trace_id=trace_id,
+        )
     blocked_result = _control_command_block_result(
         gateway_id=gateway_id,
         registration=registration,
@@ -1471,17 +2070,28 @@ async def _handle_whatsapp_gateway_channel_inbound(
     )
     if blocked_result is not None:
         return blocked_result
+
+    effective_text, attachments = await _process_inbound_media_for_turn(
+        gateway_id=gateway_id,
+        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        provider=WHATSAPP_PERSONAL_PROVIDER,
+        registration=registration,
+        agent_id=agent_id,
+        text=text,
+        media_items=media_items,
+    )
     return await _deliver_whatsapp_personal_reply(
         gateway_id=gateway_id,
         registration=registration,
         inbound=inbound,
         remote_jid=remote_jid,
         external_message_id=external_message_id,
-        text=text,
+        text=effective_text,
         push_name=str(message.get("push_name") or "").strip() or None,
         duplicate=not created,
         trace_id=trace_id,
         agent_id=agent_id,
+        attachments=attachments,
     )
 
 
@@ -1501,13 +2111,19 @@ async def _handle_telegram_gateway_channel_inbound(
     external_message_id = str(message.get("external_message_id") or "").strip()
     remote_jid = str(message.get("remote_jid") or "").strip()
     text = str(message.get("text") or "").strip()
-    if not external_message_id or not remote_jid or not text:
-        raise ValueError("channel.inbound requires external_message_id, remote_jid, and text.")
+    media_items = [item for item in (message.get("media") or []) if isinstance(item, dict)]
+    if not external_message_id or not remote_jid or (not text and not media_items):
+        raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
     if bool(message.get("from_me")):
         return {"ignored": True, "reason": "from_me", "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY}
     # Resolved BEFORE the sync below — see the WhatsApp handler's identical
     # comment above for why the ordering matters.
     agent_id = _resolve_agent_id_for_inbound(gateway_id, TELEGRAM_PERSONAL_CHANNEL_KEY)
+    # Read BEFORE the sync below writes to it — see the WhatsApp handler's
+    # identical comment above (_resolve_linked_identity_for_sync's docstring).
+    existing_state = personal_channels_repository.get_telegram_state(
+        str(gateway_id or "").strip(), channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY, agent_id=agent_id,
+    )
     sync_gateway_personal_channel_state(
         gateway_id=gateway_id,
         registration=registration,
@@ -1517,8 +2133,21 @@ async def _handle_telegram_gateway_channel_inbound(
                 TELEGRAM_PERSONAL_CHANNEL_KEY: {
                     "provider": str(payload.get("provider") or TELEGRAM_PERSONAL_PROVIDER).strip() or TELEGRAM_PERSONAL_PROVIDER,
                     "status": "connected",
-                    "linked_user_id": str(message.get("sender_jid") or "").strip() or None,
-                    "linked_name": str(message.get("push_name") or "").strip() or None,
+                    # Telegram has no explicit is_self_chat signal on the
+                    # message payload (unlike WhatsApp) — remote_jid for a
+                    # genuine "Saved Messages" self-chat equals the owner's
+                    # own user id, which is exactly what's already preserved
+                    # in existing_state, so there is never a NEW value to
+                    # supply here; only preserve. See
+                    # _resolve_linked_identity_for_sync's docstring for why
+                    # deriving this from the message's own sender_jid (the
+                    # pre-fix behavior) silently clobbered the real owner
+                    # identity with whichever stranger last texted in.
+                    "linked_user_id": _resolve_linked_identity_for_sync(
+                        current_value=None,
+                        preserved_value=_channel_owner_linked_id(channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY, state=existing_state),
+                    ),
+                    "linked_name": str((existing_state or {}).get("linked_name") or "").strip() or None,
                 }
             }
         },
@@ -1536,8 +2165,34 @@ async def _handle_telegram_gateway_channel_inbound(
             "provider": str(payload.get("provider") or TELEGRAM_PERSONAL_PROVIDER).strip() or TELEGRAM_PERSONAL_PROVIDER,
             "received_at": str(message.get("received_at") or "").strip() or None,
             "from_me": bool(message.get("from_me")),
+            "media_kinds": [str(item.get("kind") or "").strip() for item in media_items] or None,
         },
     )
+    # ── dmPolicy gate: MUST run before any reply (including a control-command
+    # reply) is generated. See _enforce_dm_policy's docstring. ──
+    dm_decision = await _enforce_dm_policy(
+        registration=registration,
+        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
+        message=message,
+        remote_jid=remote_jid,
+        existing_state=existing_state,
+        label="Telegram",
+    )
+    if not dm_decision["allowed"]:
+        return await _handle_dm_policy_blocked(
+            gateway_id=gateway_id,
+            registration=registration,
+            inbound=inbound,
+            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+            provider=TELEGRAM_PERSONAL_PROVIDER,
+            agent_id=agent_id,
+            external_message_id=external_message_id,
+            remote_jid=remote_jid,
+            duplicate=not created,
+            decision=dm_decision,
+            trace_id=trace_id,
+        )
     blocked_result = _control_command_block_result(
         gateway_id=gateway_id,
         registration=registration,
@@ -1578,14 +2233,24 @@ async def _handle_telegram_gateway_channel_inbound(
         return {"duplicate": not created, "inbound": inbound, "outbound": outbound}
 
     if outbound is None:
+        effective_text, attachments = await _process_inbound_media_for_turn(
+            gateway_id=gateway_id,
+            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+            provider=TELEGRAM_PERSONAL_PROVIDER,
+            registration=registration,
+            agent_id=agent_id,
+            text=text,
+            media_items=media_items,
+        )
         reply = personal_channel_sage_bridge_service.build_telegram_personal_reply(
             workspace_id=str(registration.get("workspace_id") or "").strip(),
             gateway_id=str(gateway_id or "").strip(),
             remote_jid=remote_jid,
-            text=text,
+            text=effective_text,
             push_name=str(message.get("push_name") or "").strip() or None,
             source_event_id=external_message_id,
             agent_id=agent_id,
+            attachments=attachments,
         )
         if not reply or not str(reply.get("text") or "").strip():
             no_reply_idempotency_key = f"{TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
@@ -1700,6 +2365,7 @@ async def _deliver_local_bridge_personal_reply(
     provider: str,
     label: str,
     trace_id: str = "",
+    attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     no_reply_prefix = f"{channel_key}:noreply:"
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
@@ -1733,6 +2399,7 @@ async def _deliver_local_bridge_personal_reply(
             push_name=push_name,
             fallback_label=label,
             source_event_id=external_message_id,
+            attachments=attachments,
         )
         if not reply or not str(reply.get("text") or "").strip():
             no_reply_idempotency_key = f"{no_reply_prefix}{external_message_id}"
@@ -1847,8 +2514,9 @@ async def _handle_local_bridge_gateway_channel_inbound(
     external_message_id = str(message.get("external_message_id") or "").strip()
     remote_jid = str(message.get("remote_jid") or "").strip()
     text = str(message.get("text") or "").strip()
-    if not external_message_id or not remote_jid or not text:
-        raise ValueError("channel.inbound requires external_message_id, remote_jid, and text.")
+    media_items = [item for item in (message.get("media") or []) if isinstance(item, dict)]
+    if not external_message_id or not remote_jid or (not text and not media_items):
+        raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
     if bool(message.get("from_me")):
         return {"ignored": True, "reason": "from_me", "channel_key": channel_key}
     inbound, created = personal_channels_repository.record_inbound_message(
@@ -1864,8 +2532,41 @@ async def _handle_local_bridge_gateway_channel_inbound(
             "received_at": str(message.get("received_at") or "").strip() or None,
             "from_me": bool(message.get("from_me")),
             "agent_computer_bridge": True,
+            "media_kinds": [str(item.get("kind") or "").strip() for item in media_items] or None,
         },
     )
+    # ── dmPolicy gate ── Local-bridge channels (Signal/iMessage/WeChat)
+    # don't yet resolve a per-agent owner identity (no equivalent of
+    # WhatsApp's linked_jid/is_self_chat, no agent-scoped state table —
+    # a separate, pre-existing gap; see _handle_local_bridge_gateway_channel_inbound's
+    # module-level notes). existing_state=None + agent_id="" means this
+    # always evaluates to the hard-coded owner_only default with no owner
+    # signal available, i.e. every sender is blocked until that gap is
+    # closed — strictly SAFER than the previous behavior (reply to
+    # everyone, unconditionally), never worse.
+    dm_decision = await _enforce_dm_policy(
+        registration=registration,
+        channel_key=channel_key,
+        agent_id="",
+        message=message,
+        remote_jid=remote_jid,
+        existing_state=None,
+        label=label,
+    )
+    if not dm_decision["allowed"]:
+        return await _handle_dm_policy_blocked(
+            gateway_id=gateway_id,
+            registration=registration,
+            inbound=inbound,
+            channel_key=channel_key,
+            provider=provider,
+            agent_id="",
+            external_message_id=external_message_id,
+            remote_jid=remote_jid,
+            duplicate=not created,
+            decision=dm_decision,
+            trace_id=trace_id,
+        )
     blocked_result = _control_command_block_result(
         gateway_id=gateway_id,
         registration=registration,
@@ -1882,19 +2583,30 @@ async def _handle_local_bridge_gateway_channel_inbound(
     )
     if blocked_result is not None:
         return blocked_result
+
+    effective_text, attachments = await _process_inbound_media_for_turn(
+        gateway_id=gateway_id,
+        channel_key=channel_key,
+        provider=provider,
+        registration=registration,
+        agent_id="",
+        text=text,
+        media_items=media_items,
+    )
     return await _deliver_local_bridge_personal_reply(
         gateway_id=gateway_id,
         registration=registration,
         inbound=inbound,
         remote_jid=remote_jid,
         external_message_id=external_message_id,
-        text=text,
+        text=effective_text,
         push_name=str(message.get("push_name") or "").strip() or None,
         duplicate=not created,
         channel_key=channel_key,
         provider=provider,
         label=label,
         trace_id=trace_id,
+        attachments=attachments,
     )
 
 
@@ -1908,6 +2620,7 @@ async def send_local_bridge_personal_message(
     text: str,
     idempotency_key: str,
     reply_to_external_message_id: Optional[str] = None,
+    media: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(channel_key, provider)
@@ -1918,7 +2631,7 @@ async def send_local_bridge_personal_message(
         remote_jid=str(remote_jid or "").strip(),
         text=str(text or "").strip(),
         reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
-        metadata={"source": "manual_api", "agent_computer_bridge": True},
+        metadata={"source": "manual_api", "agent_computer_bridge": True, "media": list(media) if media else None},
     )
     if str(outbound.get("status") or "").strip() == "delivered":
         return outbound
@@ -1937,6 +2650,7 @@ async def send_local_bridge_personal_message(
         text=str(text or "").strip(),
         idempotency_key=str(idempotency_key or "").strip(),
         reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
+        media=media,
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
@@ -1957,6 +2671,7 @@ async def send_whatsapp_personal_message(
     idempotency_key: str,
     reply_to_external_message_id: Optional[str] = None,
     agent_id: str = "",
+    media: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(
@@ -1971,7 +2686,7 @@ async def send_whatsapp_personal_message(
         remote_jid=str(remote_jid or "").strip(),
         text=str(text or "").strip(),
         reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
-        metadata={"source": "manual_api"},
+        metadata={"source": "manual_api", "media": list(media) if media else None},
     )
     if str(outbound.get("status") or "").strip() == "delivered":
         return outbound
@@ -1990,6 +2705,7 @@ async def send_whatsapp_personal_message(
         text=str(text or "").strip(),
         idempotency_key=str(idempotency_key or "").strip(),
         reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
+        media=media,
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
@@ -2204,6 +2920,7 @@ async def send_telegram_personal_message(
     idempotency_key: str,
     reply_to_external_message_id: Optional[str] = None,
     agent_id: str = "",
+    media: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
     channel_lane_contract_service.assert_personal_gateway_channel(
@@ -2218,7 +2935,7 @@ async def send_telegram_personal_message(
         remote_jid=str(remote_jid or "").strip(),
         text=str(text or "").strip(),
         reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
-        metadata={"source": "manual_api"},
+        metadata={"source": "manual_api", "media": list(media) if media else None},
     )
     if str(outbound.get("status") or "").strip() == "delivered":
         return outbound
@@ -2237,6 +2954,7 @@ async def send_telegram_personal_message(
         text=str(text or "").strip(),
         idempotency_key=str(idempotency_key or "").strip(),
         reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
+        media=media,
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),

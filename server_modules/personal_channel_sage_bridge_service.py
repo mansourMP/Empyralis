@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import logging as _logging
 _logger = _logging.getLogger(__name__)
@@ -196,6 +196,7 @@ async def _build_unified_sage_personal_reply_async(
     fallback_label: str,
     source_event_id: Optional[str] = None,
     agent_id: str = "",
+    attachments: Optional[List[dict]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Route personal channel messages through the unified Sage turn adapter.
@@ -207,6 +208,10 @@ async def _build_unified_sage_personal_reply_async(
     agent_id: which specialist install this full-account session is bound
     to — empty means the pre-existing behavior (run as Sage). See
     sage_turn_adapter.execute_sage_turn_for_channel's own docstring.
+
+    attachments: media-pipeline attachments (image/file kinds) already
+    resolved+stored by personal_channel_media_store_service — forwarded
+    as-is to execute_sage_turn_for_channel.
     """
     from server_modules.sage_turn_adapter import execute_sage_turn_for_channel
 
@@ -230,6 +235,7 @@ async def _build_unified_sage_personal_reply_async(
             push_name=push_name,
             source_event_id=source_event_id,
             agent_id=str(agent_id or "").strip(),
+            attachments=list(attachments) if attachments else None,
         )
         reply = str((result or {}).get("message") or "").strip()
         if reply:
@@ -260,6 +266,7 @@ def _build_unified_sage_personal_reply(
     fallback_label: str,
     source_event_id: Optional[str] = None,
     agent_id: str = "",
+    attachments: Optional[List[dict]] = None,
 ) -> Optional[Dict[str, Any]]:
     import asyncio
     import threading
@@ -278,6 +285,7 @@ def _build_unified_sage_personal_reply(
                 fallback_label=fallback_label,
                 source_event_id=source_event_id,
                 agent_id=agent_id,
+                attachments=attachments,
             )
         )
 
@@ -296,6 +304,7 @@ def _build_unified_sage_personal_reply(
                     fallback_label=fallback_label,
                     source_event_id=source_event_id,
                     agent_id=agent_id,
+                    attachments=attachments,
                 )
             )
         except Exception as exc:
@@ -438,6 +447,7 @@ async def build_personal_channel_reply_async(
     push_name: Optional[str] = None,
     fallback_label: str = "channel",
     source_event_id: Optional[str] = None,
+    attachments: Optional[List[dict]] = None,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -449,6 +459,7 @@ async def build_personal_channel_reply_async(
             push_name=push_name,
             fallback_label=fallback_label,
             source_event_id=source_event_id,
+            attachments=attachments,
         )
         return unified
     except Exception as _exc:
@@ -469,6 +480,7 @@ def build_whatsapp_personal_reply(
     source_event_id: Optional[str] = None,
     linked_user_name: Optional[str] = None,
     agent_id: str = "",
+    attachments: Optional[List[dict]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a WhatsApp personal DM — as the specialist agent_id
     names (see execute_sage_turn_for_channel), or as Sage when agent_id is
@@ -477,6 +489,9 @@ def build_whatsapp_personal_reply(
     linked_user_name is accepted for future identity-context injection but
     not yet threaded into _build_unified_sage_personal_reply (same as
     build_discord_personal_reply_async's linked_user_name parameter above).
+
+    attachments: media-pipeline attachments (image/file kinds) already
+    resolved+stored by personal_channel_media_store_service.
     """
     unified = _build_unified_sage_personal_reply(
         surface_channel="whatsapp_personal",
@@ -488,6 +503,7 @@ def build_whatsapp_personal_reply(
         fallback_label="WhatsApp",
         source_event_id=source_event_id,
         agent_id=agent_id,
+        attachments=attachments,
     )
     if unified is not None:
         return unified
@@ -512,6 +528,7 @@ def build_telegram_personal_reply(
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
     agent_id: str = "",
+    attachments: Optional[List[dict]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a Telegram personal DM — see build_whatsapp_personal_reply's
     docstring for the agent_id contract."""
@@ -525,6 +542,7 @@ def build_telegram_personal_reply(
         fallback_label="Telegram",
         source_event_id=source_event_id,
         agent_id=agent_id,
+        attachments=attachments,
     )
     if unified is not None:
         return unified

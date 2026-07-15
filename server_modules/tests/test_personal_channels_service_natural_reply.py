@@ -103,6 +103,24 @@ class PersonalChannelsServiceNaturalReplyTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(result["outbound"]["status"], "delivered")
 
     async def test_telegram_auto_reply_dispatches_without_reply_to_id(self) -> None:
+        # dmPolicy defaults to owner_only (see personal_channels_service's
+        # dmPolicy section) — _handle_telegram_gateway_channel_inbound now
+        # gates on sender identity before ever building a reply. Establish
+        # remote_jid "123456789" as this channel's own linked owner identity
+        # first so the inbound message below is recognized as the owner
+        # (self-chat) and reaches the dispatch-mechanics being tested here,
+        # exactly as it did before dmPolicy existed.
+        personal_channels_repository.upsert_telegram_state(
+            gateway_id="gw-live-1",
+            tenant_id="tenant-1",
+            workspace_id="default",
+            user_id="",
+            channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+            agent_id="",
+            provider=personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
+            status="connected",
+            linked_user_id="123456789",
+        )
         with (
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
