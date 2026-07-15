@@ -1,7 +1,17 @@
 import type { GatewayFrame, GatewayRequestType, GatewayEventType } from "./types";
 import { PROTOCOL_VERSION } from "./types";
 
-export const MAX_FRAME_BYTES = 262144; // 256KB
+// Mirrors the server's MAX_GATEWAY_FRAME_BYTES (see
+// server_modules/gateway_protocol_service.py) so the gateway's own encoder
+// doesn't reject a frame the server is otherwise willing to accept over
+// the same socket. Was 256KB (262144) historically; raised to 16MiB to
+// match the server-side limit, which itself was already raised from
+// 256KB for large tool.invoke/response payloads (see git history on
+// gateway_protocol_service.py's MAX_GATEWAY_FRAME_BYTES). This gateway
+// hadn't caught up until channel.media_fetch (cloud/media-fetch.ts) made
+// the mismatch load-bearing: its base64-encoded file payload can
+// legitimately be several MB, well past the old 256KB ceiling.
+export const MAX_FRAME_BYTES = 16 * 1024 * 1024; // 16MiB
 export const MAX_FRAME_DEPTH = 32;
 export const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_VERSION] as const;
 
@@ -15,6 +25,7 @@ export const SAFE_FRAME_TYPES: ReadonlySet<string> = new Set([
   "tool.invoke",
   "tool.interrupt",
   "channel.outbound",
+  "channel.media_fetch",
   // Event types
   "gateway.hello",
   "gateway.presence",

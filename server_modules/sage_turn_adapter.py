@@ -302,6 +302,7 @@ async def execute_sage_turn_for_channel(
     source_event_id: Optional[str] = None,
     current_user: Optional[dict] = None,
     agent_id: str = "",
+    attachments: Optional[List[dict]] = None,
 ) -> Dict[str, Any]:
     """
     Channel-originated Sage turn (used by Path B: gateway personal channels).
@@ -318,6 +319,13 @@ async def execute_sage_turn_for_channel(
     becomes the specialist's own install id, and it never receives
     fleet_tools/operator powers. Resolution failures fail safe to Sage
     (unchanged pre-existing behavior), never to an error.
+
+    attachments: media-pipeline attachments already resolved+stored by
+    personal_channel_media_store_service (image/file kinds only — voice/audio
+    are transcribed into `message` text by the caller instead). Forwarded
+    as-is to execute_sage_turn(), which already threads attachments all the
+    way through to handle_sage_chat() for the web-chat upload flow — this is
+    the same pipe, just fed from a personal channel instead of the web UI.
     """
     normalized_channel = _coerce_text(surface_channel)
     normalized_agent_id = _coerce_text(agent_id)
@@ -345,6 +353,7 @@ async def execute_sage_turn_for_channel(
         channel_origin=normalized_channel,
         channel_sender_id=_coerce_text(remote_jid),
         channel_sender_name=_coerce_text(push_name),
+        attachments=list(attachments) if attachments else None,
         specialist_context=specialist_context,
     )
 

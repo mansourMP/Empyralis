@@ -156,9 +156,9 @@ test("non-JSON string fails decode", () => {
   assert.equal(result.ok, false);
 });
 
-test("oversized frame (>256KB) fails", () => {
-  // Build a frame just over 256KB
-  const bigPayload = { data: "x".repeat(300_000) };
+test("oversized frame (>MAX_FRAME_BYTES) fails", () => {
+  // Build a frame just over the size cap (16MiB — see codec.ts)
+  const bigPayload = { data: "x".repeat(MAX_FRAME_BYTES + 1000) };
   const frame = { ...MOCK_VALID_REQUEST, payload: bigPayload };
   const raw = JSON.stringify(frame);
   const result = decodeFrame(raw);
@@ -202,7 +202,7 @@ test("encodeFrame rejects invalid frame", () => {
 });
 
 test("encodeFrame rejects oversized frame", () => {
-  const bigPayload = { data: "x".repeat(300_000) };
+  const bigPayload = { data: "x".repeat(MAX_FRAME_BYTES + 1000) };
   const frame = { ...MOCK_VALID_REQUEST, payload: bigPayload };
   const encoded = encodeFrame(frame);
   assert.equal(typeof encoded !== "string", true);

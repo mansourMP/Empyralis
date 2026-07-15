@@ -1735,6 +1735,7 @@ async def dispatch_channel_outbound(
     delta: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     reply_to_external_message_id: Optional[str] = None,
+    media: Optional[List[Dict[str, Any]]] = None,
     timeout_seconds: int = DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS,
     request_id: Optional[str] = None,
     actor_id: str = "",
@@ -1777,6 +1778,11 @@ async def dispatch_channel_outbound(
         "delta": str(delta or ""),
         "metadata": dict(metadata or {}),
         "reply_to_external_message_id": str(reply_to_external_message_id or "").strip() or None,
+        # Feature B media contract (outbound leg): each item is
+        # {kind, source_path|source_url, mime_type, caption?, as_voice?}.
+        # Always present as a list (possibly empty) so the gateway can treat
+        # a missing key and an empty list identically.
+        "media": [dict(item) for item in media if isinstance(item, dict)] if media else [],
     }
     _enforce_gateway_protocol_message_decision(
         gateway_id=str(gateway_id or "").strip(),
@@ -1818,6 +1824,82 @@ async def dispatch_channel_outbound(
             _aio.run(_ledger())
     except Exception:
         pass  # ledger is best-effort, never blocks send
+    return dict(response.get("payload") or {})
+
+
+MAX_MEDIA_FETCH_BYTES = MAX_GATEWAY_FRAME_BYTES
+DEFAULT_MEDIA_FETCH_TIMEOUT_SECONDS = 60
+
+
+async def fetch_channel_media(
+    *,
+    gateway_id: str,
+    channel_key: str,
+    provider: str,
+    media_id: str,
+    timeout_seconds: int = DEFAULT_MEDIA_FETCH_TIMEOUT_SECONDS,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fetch one inbound media attachment's raw bytes from the Gateway.
+
+    THE FETCH MECHANISM (server<->gateway contract, Feature B inbound leg):
+    the Gateway always DIALS OUT to this server (it commonly sits behind a
+    user's home NAT/firewall, or an Agent Computer box with no inbound port
+    opened) — the server can never reach back in with a plain HTTP GET. So
+    media fetch reuses the SAME authenticated request/response RPC frame
+    channel that ``dispatch_channel_outbound`` already uses for
+    ``channel.outbound``: the server sends a ``channel.media_fetch``
+    REQUEST frame over the live gateway WebSocket connection with
+    ``{channel_key, provider, media_id}``; the Gateway resolves media_id
+    against however it downloaded/cached that attachment (e.g. Baileys'
+    encrypted-media downloader for WhatsApp, GramJS's file API for
+    Telegram, a local bridge's tmp path) and replies on the SAME frame id
+    with a RESPONSE payload of::
+
+        {
+          "media_id": str,
+          "mime_type": str,
+          "filename": str | None,
+          "size_bytes": int | None,
+          "data_base64": str,   # raw bytes, base64-encoded
+        }
+
+    A gateway that cannot serve a media_id inline (evicted from local
+    cache, too large, fetch failed) responds ``{"ok": False, "error":
+    {"code": "media_unavailable", "message": ...}}`` on the frame instead —
+    this function raises ValueError in that case, which callers treat as
+    "skip this one attachment" (see personal_channel_media_store_service),
+    never as a reason to drop the whole inbound turn.
+
+    Frames are capped at MAX_GATEWAY_FRAME_BYTES (16 MiB); base64 inflates
+    the payload ~33%, so this comfortably covers voice notes/images/typical
+    files but not large video — a future chunked-transfer mode is out of
+    scope here.
+    """
+    assert_not_killed(gateway_id=gateway_id)
+    connection = _get_live_connection(gateway_id)
+    if connection is None:
+        raise ValueError("Gateway is not currently connected.")
+    normalized_media_id = str(media_id or "").strip()
+    if not normalized_media_id:
+        raise ValueError("media_id is required to fetch channel media.")
+    payload = {
+        "channel_key": str(channel_key or "").strip(),
+        "provider": str(provider or "").strip(),
+        "media_id": normalized_media_id,
+    }
+    response = await connection.send_request(
+        message_type="channel.media_fetch",
+        payload=payload,
+        timeout_seconds=timeout_seconds,
+        request_id=request_id,
+    )
+    if not bool(response.get("ok")):
+        error = dict(response.get("error") or {})
+        raise ValueError(
+            str(error.get("message") or "Gateway media fetch failed.").strip()
+            or "Gateway media fetch failed."
+        )
     return dict(response.get("payload") or {})
 
 
