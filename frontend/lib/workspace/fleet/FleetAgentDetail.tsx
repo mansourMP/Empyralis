@@ -50,7 +50,7 @@ import {
 } from "./fleet-data";
 import { deriveStatus, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, type AgentStatusTone } from "./fleet-presentation";
 import { StatusChip, StatusDot } from "./fleet-indicators";
-import { PanelSection, PanelRow, FleetRightPanel } from "./FleetRightPanel";
+import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./FleetRightPanel";
 import { UsageStat, bucketSeries, type UsageBucket } from "./fleet-sparkline";
 import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
@@ -94,6 +94,36 @@ function formatModelSummaryLine(summary: ReturnType<typeof resolveAgentModelSumm
   if (summary.isPlatformDefault) return "Platform default";
   if (summary.provider === summary.model) return summary.model;
   return `${summary.provider} · ${summary.model}`;
+}
+
+// Properties panel's Placement row used to render placement.label with no
+// tone at all — the one row on that panel that never went red/green, even
+// though the adjacent Status row does. PanelRow's tone vocabulary is
+// smaller than HardwarePlacementTone's (no "degraded"), so this collapses
+// onto the closest existing bucket the same way HardwareTab's own
+// placement dot already does (see gateway-box-picker.tsx's
+// resolveHardwarePlacement + HardwareTab.tsx's dotClass): cloud/online read
+// as healthy, everything else — degraded, offline, or never-paired — reads
+// as offline so a disconnected/unpaired box is visually distinct.
+const HARDWARE_PLACEMENT_PANEL_TONE: Record<HardwarePlacementTone, PanelValueTone> = {
+  cloud: "online",
+  online: "online",
+  degraded: "offline",
+  offline: "offline",
+  unpaired: "offline",
+};
+
+// The backend's channels[].connected for Slack (routes_fleet.py's
+// fleet_agent_channels) reflects OAuth app install only — a workspace can
+// have the Slack app installed with no channel bound to THIS agent yet.
+// Every reader of "is this platform really connected" (the Properties
+// count below, the channel grid pill, the "already connected" banner
+// prefill) needs to agree that Slack isn't connected until it owns a
+// channel — slackChannelBinding, this same fetch's endpoint_key equivalent
+// — not merely OAuth-installed.
+function isChannelConnected(channel: Pick<FleetChannel, "id" | "connected">, slackChannelBinding: string | null): boolean {
+  if (channel.id === "slack") return Boolean(slackChannelBinding);
+  return channel.connected;
 }
 
 type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "chat";
@@ -146,7 +176,7 @@ export function FleetAgentDetail({
   // every other tab keeps the permanent column, so this stays false and unused there.
   const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
-  const { channels } = useFleetAgentChannels(workspaceId, agentId);
+  const { channels, refresh: refreshChannels, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
   const [costToday, setCostToday] = useState<number | null>(null);
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
@@ -166,7 +196,7 @@ export function FleetAgentDetail({
     return () => { cancelled = true; };
   }, [workspaceId, agentId]);
 
-  const connectedChannels = channels.filter((c: any) => c?.connected).length;
+  const connectedChannels = channels.filter((c) => isChannelConnected(c, slackChannelBinding)).length;
   const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
   const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(agent?.model_config));
   // Lives in the permanent properties column now, so it's computed once
@@ -181,7 +211,17 @@ export function FleetAgentDetail({
   const role = agent?.role || "agent";
   const isMaster = role === "operator";
   const { tools: agentTools } = useFleetAgentTools(workspaceId, agentId);
-  const customerAccessCount = agentTools.filter((t) => t.enabled && (t.audience_safe || t.mandate_granted)).length;
+  // Truth Map B1 (mirrors ToolsTab's identical requiredConnector/
+  // connectorMissing check): a tool bound behind requires_connector does
+  // nothing until that connector is actually connected, so it shouldn't
+  // count toward "customer access" just because it's enabled+granted.
+  const connectorById = new Map(connectors.map((c) => [c.id, c]));
+  const customerAccessCount = agentTools.filter((t) => {
+    if (!(t.enabled && (t.audience_safe || t.mandate_granted))) return false;
+    const requiredConnector = t.requires_connector ? connectorById.get(t.requires_connector) : undefined;
+    const connectorMissing = Boolean(t.requires_connector) && !requiredConnector?.connected;
+    return !connectorMissing;
+  }).length;
 
   // Page mode: keep the active tab in sync with the URL {tab} segment.
   useEffect(() => {
@@ -239,7 +279,7 @@ export function FleetAgentDetail({
   const propertiesContent = (
     <PanelSection title="Properties">
       <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
-      <PanelRow label="Placement" value={placement.label} />
+      <PanelRow label="Placement" value={placement.label} tone={HARDWARE_PLACEMENT_PANEL_TONE[placement.tone]} />
       <PanelRow label="Role" value={<span style={{ textTransform: "capitalize" }}>{role}</span>} />
       {!isMaster && (
         <PanelRow
@@ -328,7 +368,7 @@ export function FleetAgentDetail({
           )}
           {activeTab === "work" && <WorkTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
           {activeTab === "channels" && (
-            <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
+            <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} />
           )}
           {activeTab === "connectors" && (
             <ConnectorsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
@@ -339,7 +379,7 @@ export function FleetAgentDetail({
           {activeTab === "hardware" && (
             <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
           )}
-          {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
+          {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />}
           {activeTab === "memory" && (
             <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
           )}
@@ -701,6 +741,23 @@ function PersonaEditor({
   // sat in front of; expand for the rare full-rewrite edit.
   const [expanded, setExpanded] = useState(false);
 
+  // Cmd+K palette / browser Back can swap which agent this tab shows
+  // without unmounting this component (only agentId/agent change) — the
+  // `useState(agent.instructions || "")` above only seeds `draft` on the
+  // very first mount, so without this, `draft` keeps showing the PREVIOUS
+  // agent's persona (or an in-progress unsaved edit for it), and Save would
+  // PATCH that stale text onto the NEW agent's instructions. Mirrors
+  // AgentTitle's own reset effect above (`if (!editing) setDraft(label)`),
+  // keyed on agentId — not on `agent` itself, which gets a new object
+  // reference on every ~30s poll tick for the SAME agent and would clobber
+  // an in-progress, unsaved edit if used here instead.
+  useEffect(() => {
+    setDraft(agent.instructions || "");
+    setSaved(false);
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
+
   async function save() {
     setSaving(true);
     setError(null);
@@ -1031,9 +1088,26 @@ function channelStatePill(channel: FleetChannel | undefined): { label: string; t
 }
 
 export function ChannelsTab({
-  workspaceId, agentId, agent,
-}: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
+  workspaceId, agentId, agent, onChannelsChanged,
+}: {
+  workspaceId: string;
+  agentId: string;
+  agent: FleetAgent | null;
+  /** Called (in addition to this tab's own internal refresh) after a
+   *  channel connects/binds — lets a caller that holds its OWN separate
+   *  useFleetAgentChannels instance (FleetAgentDetail's Properties column,
+   *  which needs a live "Channels" count) catch up in place instead of
+   *  waiting for a remount. Optional and unused by FleetCreateAgentWizard's
+   *  standalone embed of this same tab, which has no such sidebar to sync. */
+  onChannelsChanged?: () => void;
+}) {
   const { channels, loading, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
+  // Every connect-success path below should notify both this tab's own
+  // hook instance AND (when present) the caller's separate one.
+  const handleChannelsChanged = useCallback(() => {
+    void refreshChannels();
+    onChannelsChanged?.();
+  }, [refreshChannels, onChannelsChanged]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [oauthBusy, setOauthBusy] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
@@ -1086,13 +1160,13 @@ export function ChannelsTab({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
       setByoBotSaved(true);
-      void refreshChannels();
+      handleChannelsChanged();
     } catch (e) {
       setByoBotError(e instanceof Error ? e.message : "Could not save the bot token.");
     } finally {
       setByoBotBusy(false);
     }
-  }, [workspaceId, agentId, byoToken, refreshChannels]);
+  }, [workspaceId, agentId, byoToken, handleChannelsChanged]);
 
   const saveFirstContactReply = useCallback(async (next: boolean) => {
     setFirstContactReply(next);
@@ -1163,19 +1237,30 @@ export function ChannelsTab({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
       setSlackBindSaved(true);
-      void refreshChannels();
+      handleChannelsChanged();
     } catch (e) {
       setSlackBindError(e instanceof Error ? e.message : "Could not save the channel binding.");
     } finally {
       setSlackBindBusy(false);
     }
-  }, [workspaceId, agentId, slackChannelId, refreshChannels]);
+  }, [workspaceId, agentId, slackChannelId, handleChannelsChanged]);
 
-  if (loading) {
+  // Only the TRUE first load (no channels fetched yet) gets the full-tab
+  // skeleton — refresh() (called after every connect-success, see
+  // handleChannelsChanged above) also flips `loading` true/false, and
+  // gating on `loading` alone replaced whatever the user just saw (a
+  // "Saved"/"Connected" confirmation, an open banner) with this skeleton on
+  // every single action.
+  if (loading && channels.length === 0) {
     return <div className="fleet-activity-skeleton" aria-label="Loading channels"><div className="fleet-skeleton-bar" style={{ width: "80%" }} /></div>;
   }
 
-  const byId = new Map(channels.map((c) => [c.id, c]));
+  // Slack's channel.connected from the backend means "OAuth app installed",
+  // not "this agent owns a channel" — see isChannelConnected. Normalizing
+  // it here means every reader below (grid pill via channelStatePill, and
+  // the "already connected" banner prefill) agrees with the Properties
+  // panel's own Channels count.
+  const byId = new Map(channels.map((c) => [c.id, { ...c, connected: isChannelConnected(c, slackChannelBinding) }]));
 
   function closeBanner() {
     setExpanded(null);
@@ -1461,7 +1546,7 @@ export function ChannelsTab({
                     label="Telegram"
                     agentGatewayId={agentGatewayId}
                     agentId={agentId}
-                    onConnected={refreshChannels}
+                    onConnected={handleChannelsChanged}
                   />
                 </div>
               )}
@@ -1473,7 +1558,7 @@ export function ChannelsTab({
                     label="WhatsApp"
                     agentGatewayId={agentGatewayId}
                     agentId={agentId}
-                    onConnected={refreshChannels}
+                    onConnected={handleChannelsChanged}
                   />
                 </div>
               )}
@@ -1789,6 +1874,7 @@ import {
   resolveHardwarePlacement,
   useWorkspaceGateways,
   type FleetGateway,
+  type HardwarePlacementTone,
 } from "./gateway-box-picker";
 
 function resolveDisplayMode(config: Record<string, any>): ProviderMode {
@@ -1930,7 +2016,19 @@ function cliSubscriptionHint(gateways: FleetGateway[]): string {
   return anyReady ? "A paired computer has a CLI ready" : "No paired computer has Claude Code or Codex ready";
 }
 
-function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
+function ModelTab({
+  workspaceId, agentId, agent, onSaved,
+}: {
+  workspaceId: string;
+  agentId: string;
+  agent: FleetAgent | null;
+  /** Called after a successful save so the caller can refetch — the
+   *  Properties column's "Model" row and this tab's own "Current state"
+   *  block both read model_config off the SAME `agent` prop, which
+   *  otherwise doesn't catch up until the next ~30s poll (see HardwareTab's
+   *  identical onSaved for its own placement row). */
+  onSaved?: () => void;
+}) {
   const config = agent?.model_config || {};
   const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
   const [provider, setProvider] = useState<string>(config.provider || "");
@@ -1985,13 +2083,27 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
       setError("Pick a computer to run this agent’s subscription CLI.");
       return;
     }
+    // A blank key is only safe to save when THIS provider already has a
+    // credential in the vault — i.e. byok_api was already persisted for
+    // this exact provider. Otherwise (switching into byok_api for the
+    // first time, or switching to a different provider than the one
+    // that's actually saved) there is no known credential, and patching
+    // mode=byok_api anyway would silently persist a broken config: the
+    // Properties panel and this tab's own "Current state" block would both
+    // read back "Ready" with no way to actually run a turn.
+    const hasExistingCredentialForProvider = config.mode === "byok_api" && config.provider === provider;
+    if (mode === "byok_api" && !apiKey.trim() && !hasExistingCredentialForProvider) {
+      setError("Enter your API key for this provider — none is saved yet.");
+      return;
+    }
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
       if (mode === "byok_api") {
         if (!apiKey.trim()) {
-          // Reusing existing vault key — only patch config
+          // Reusing existing vault key (hasExistingCredentialForProvider
+          // guaranteed true above) — only patch config
           await patchModelConfig();
         } else {
           // See the identical comment in FleetCreateAgentWizard.tsx's
@@ -2040,6 +2152,7 @@ function ModelTab({ workspaceId, agentId, agent }: { workspaceId: string; agentI
         await patchModelConfig();
       }
       setSaved(true);
+      onSaved?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save.");
     } finally {

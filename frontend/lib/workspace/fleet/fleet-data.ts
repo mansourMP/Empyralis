@@ -378,13 +378,27 @@ export function useFleetAgentChannels(workspaceId: string, agentId: string | nul
   const [telegramBotConnected, setTelegramBotConnected] = useState(false);
   const [slackChannelBinding, setSlackChannelBinding] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Guards against an agentId switch reordering responses: without this, a
+  // slow in-flight fetch for the PREVIOUS agent can resolve AFTER the new
+  // agent's fetch and overwrite its channels/bindings with the wrong
+  // agent's data. Same shape as the `cancelled` flag useWorkspaceStatusStrip
+  // uses below, adapted to a re-callable `refresh()` (a plain effect-scoped
+  // boolean only guards one mount, not every manual refresh() call) — the
+  // ref always tracks the most recent request, so a superseded request's
+  // response is dropped instead of applied.
+  const abortRef = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
     if (!agentId) { setChannels([]); return; }
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     try {
       const res = await fetch(
-        `/api/w/${workspaceId}/fleet/agent-channels?agent_id=${encodeURIComponent(agentId)}`
+        `/api/w/${workspaceId}/fleet/agent-channels?agent_id=${encodeURIComponent(agentId)}`,
+        { signal: controller.signal },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -392,12 +406,16 @@ export function useFleetAgentChannels(workspaceId: string, agentId: string | nul
       setHostedTelegramConfigured(data.hosted_telegram_configured || false);
       setTelegramBotConnected(Boolean(data.telegram_bot_connected));
       setSlackChannelBinding(typeof data.slack_channel_binding === "string" ? data.slack_channel_binding : null);
-    } catch { setChannels([]); }
-    finally { setLoading(false); }
+    } catch (e) {
+      if (!(e instanceof Error && e.name === "AbortError")) setChannels([]);
+    } finally {
+      if (abortRef.current === controller) setLoading(false);
+    }
   }, [workspaceId, agentId]);
 
   useEffect(() => {
     void refresh();
+    return () => { abortRef.current?.abort(); };
   }, [refresh]);
 
   return { channels, hostedTelegramConfigured, telegramBotConnected, slackChannelBinding, loading, refresh };
@@ -406,23 +424,35 @@ export function useFleetAgentChannels(workspaceId: string, agentId: string | nul
 export function useFleetAgentConnectors(workspaceId: string, agentId: string | null) {
   const [connectors, setConnectors] = useState<FleetConnector[]>([]);
   const [loading, setLoading] = useState(false);
+  // See useFleetAgentChannels' identical guard just above — same
+  // agentId-switch race, same fix.
+  const abortRef = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
     if (!agentId) { setConnectors([]); return; }
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     try {
       const res = await fetch(
-        `/api/w/${workspaceId}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}`
+        `/api/w/${workspaceId}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}`,
+        { signal: controller.signal },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setConnectors(data.connectors || []);
-    } catch { setConnectors([]); }
-    finally { setLoading(false); }
+    } catch (e) {
+      if (!(e instanceof Error && e.name === "AbortError")) setConnectors([]);
+    } finally {
+      if (abortRef.current === controller) setLoading(false);
+    }
   }, [workspaceId, agentId]);
 
   useEffect(() => {
     void refresh();
+    return () => { abortRef.current?.abort(); };
   }, [refresh]);
 
   return { connectors, loading, refresh };
@@ -468,24 +498,38 @@ export function useFleetAgentTools(workspaceId: string, agentId: string | null) 
   const [coreTools, setCoreTools] = useState<string[]>([]);
   const [isMaster, setIsMaster] = useState(false);
   const [loading, setLoading] = useState(false);
+  // See useFleetAgentChannels' identical guard above — same agentId-switch
+  // race, same fix.
+  const abortRef = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
     if (!agentId) { setTools([]); setCoreTools([]); return; }
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     try {
       const res = await fetch(
-        `/api/w/${workspaceId}/fleet/agent-tools?agent_id=${encodeURIComponent(agentId)}`
+        `/api/w/${workspaceId}/fleet/agent-tools?agent_id=${encodeURIComponent(agentId)}`,
+        { signal: controller.signal },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setTools(data.tools || []);
       setCoreTools(data.core_tools || []);
       setIsMaster(Boolean(data.is_master));
-    } catch { setTools([]); setCoreTools([]); }
-    finally { setLoading(false); }
+    } catch (e) {
+      if (!(e instanceof Error && e.name === "AbortError")) { setTools([]); setCoreTools([]); }
+    } finally {
+      if (abortRef.current === controller) setLoading(false);
+    }
   }, [workspaceId, agentId]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    return () => { abortRef.current?.abort(); };
+  }, [refresh]);
 
   return { tools, coreTools, isMaster, loading, refresh };
 }
