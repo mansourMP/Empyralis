@@ -9,9 +9,6 @@ import pino from "pino";
 import { GatewayStateDb } from "../../state/db";
 import { redactCredentials } from "../foundation/credential-redactor";
 import { DraftManager, normalizeChannelOutboundOperation } from "../foundation/draft-manager";
-import { chunkMessage, WHATSAPP_MESSAGE_LIMIT } from "../foundation/message-chunker";
-import { renderMarkdownToWhatsApp } from "../foundation/channel-markdown";
-import { DEFAULT_INBOUND_DEBOUNCE_WINDOW_MS, InboundDebouncer } from "../foundation/inbound-debounce";
 import type {
   GatewayChannelInboundPayload,
   GatewayChannelOutboundPayload,
@@ -213,14 +210,6 @@ export class WhatsAppPersonalRuntime {
   private sentMessageIds = new Set<string>();
   private readonly draftManager = new DraftManager();
   /**
-   * Coalesces a rapid burst of inbound messages on one chat into a single
-   * published channel.inbound event (one agent turn → one reply) instead of
-   * one turn per message. Sits AFTER the group gate in handleMessagesUpsert,
-   * so only admitted messages are buffered; typing (below) is untouched and
-   * still fires the instant a message is admitted.
-   */
-  private readonly inboundDebouncer: InboundDebouncer;
-  /**
    * Typing sessions started on inbound receipt (see startTypingForChat),
    * keyed by remoteJid, waiting to be claimed and stopped by whichever
    * sendFinalOutbound() call eventually dispatches that chat's reply.
@@ -239,10 +228,6 @@ export class WhatsAppPersonalRuntime {
     this.outboundStore = new WhatsAppOutboundStore(db);
     this.publisher = dependencies.publisher;
     this.adapter = dependencies.adapter;
-    this.inboundDebouncer = new InboundDebouncer({
-      windowMs: DEFAULT_INBOUND_DEBOUNCE_WINDOW_MS,
-      publish: (payload) => this.publishInbound(payload),
-    });
   }
 
   requestedCapabilities(): string[] {
@@ -405,8 +390,6 @@ export class WhatsAppPersonalRuntime {
     this.started = false;
     this.connectPromise = null;
     this.pairingCodeRequested = false;
-    // Drop any buffered inbound burst (don't publish after teardown).
-    this.inboundDebouncer.dispose();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -476,8 +459,11 @@ export class WhatsAppPersonalRuntime {
     if (!idempotencyKey || !remoteJid || (!text && mediaItems.length === 0)) {
       throw new Error("channel.outbound requires idempotency_key, remote_jid, and text and/or media.");
     }
-    // A long reply is split into sequential messages at natural boundaries
-    // (see sendWhatsAppTextChunks) rather than rejected.
+    if (text.length > 65536) {
+      throw new Error(
+        `WhatsApp message exceeds maximum length of 65536 characters (got ${text.length}).`,
+      );
+    }
     const clientMessageId = buildWhatsAppClientMessageId(idempotencyKey);
     const now = new Date().toISOString();
     const existing = await this.outboundStore.beginSend(
@@ -530,11 +516,10 @@ export class WhatsAppPersonalRuntime {
             mediaItems,
             outboundRecord.clientMessageId || clientMessageId,
           )
-        : await this.sendWhatsAppTextChunks(
-            socket,
+        : await socket.sendMessage(
             remoteJid,
-            text,
-            outboundRecord.clientMessageId || clientMessageId,
+            { text },
+            { messageId: outboundRecord.clientMessageId || clientMessageId },
           );
       const mapped = mapWhatsAppOutboundResult(
         {
@@ -563,37 +548,6 @@ export class WhatsAppPersonalRuntime {
   }
 
   /**
-   * Sends a text reply as one or more messages: chunked at natural boundaries
-   * when it exceeds WHATSAPP_MESSAGE_LIMIT, each chunk rendered from markdown
-   * to WhatsApp's native inline formatting (bold/italic/strike/monospace).
-   * Only the first chunk carries the deterministic idempotency messageId (and
-   * is the primary send result); the rest are best-effort follow-ups.
-   */
-  private async sendWhatsAppTextChunks(
-    socket: BaileysSocketLike,
-    remoteJid: string,
-    text: string,
-    primaryMessageId: string,
-  ): Promise<Record<string, unknown> | undefined> {
-    const chunks = chunkMessage(text, WHATSAPP_MESSAGE_LIMIT);
-    if (chunks.length === 0) {
-      return undefined;
-    }
-    let primaryResponse: Record<string, unknown> | undefined;
-    for (let index = 0; index < chunks.length; index += 1) {
-      const response = await socket.sendMessage(
-        remoteJid,
-        { text: renderMarkdownToWhatsApp(chunks[index]) },
-        index === 0 ? { messageId: primaryMessageId } : undefined,
-      );
-      if (index === 0) {
-        primaryResponse = response;
-      }
-    }
-    return primaryResponse;
-  }
-
-  /**
    * Sends a media-bearing outbound dispatch -- one Baileys sendMessage per
    * attachment (WhatsApp supports exactly one media item per message, same
    * as inbound). The FIRST item is sent with the caller's messageId (so
@@ -616,11 +570,7 @@ export class WhatsAppPersonalRuntime {
       const item = mediaItems[index];
       const isPrimary = index === 0;
       const caption = item.caption ?? (isPrimary ? (text || undefined) : undefined);
-      // Captions carry the same markdown → WhatsApp native formatting as a
-      // standalone text reply (WhatsApp renders *bold*/_italic_ inside a media
-      // caption too). Plain captions come back unchanged.
-      const formattedCaption = caption ? renderMarkdownToWhatsApp(caption) : caption;
-      const content = await this.buildOutboundMediaContent(item, formattedCaption);
+      const content = await this.buildOutboundMediaContent(item, caption);
       if (!content) {
         // Best-effort -- an unresolvable attachment (missing file, bad URL,
         // over the size cap) must not sink the rest of the dispatch.
@@ -635,8 +585,8 @@ export class WhatsAppPersonalRuntime {
       if (isPrimary) {
         primaryResponse = response;
       }
-      if (isVoice && formattedCaption) {
-        await socket.sendMessage(remoteJid, { text: formattedCaption });
+      if (isVoice && caption) {
+        await socket.sendMessage(remoteJid, { text: caption });
       }
     }
     if (!primaryResponse && text) {
@@ -644,7 +594,7 @@ export class WhatsAppPersonalRuntime {
       // degrade to a text-only message rather than losing the turn entirely.
       primaryResponse = await socket.sendMessage(
         remoteJid,
-        { text: renderMarkdownToWhatsApp(text) },
+        { text },
         { messageId: primaryMessageId },
       );
     }
@@ -1006,16 +956,8 @@ export class WhatsAppPersonalRuntime {
       if (mapped.message.is_group && !mapped.message.is_mentioned && !mapped.message.is_reply_to_sage) {
         continue;
       }
-      // Typing starts NOW (before the debouncer) so the indicator is live for
-      // the whole coalesce window and the agent's think-time. The publish is
-      // coalesced: a burst of rapid messages becomes one channel.inbound event
-      // / one agent turn / one reply. Media and command messages bypass the
-      // window and flush immediately (see InboundDebouncer).
       this.startTypingForChat(mapped.message.remote_jid);
-      // A message that arrived AS media bypasses the debounce window even if
-      // its download failed/was skipped (mapped then carries only the caption
-      // text) — a photo shouldn't wait, whether or not we could fetch it.
-      this.inboundDebouncer.admit(mapped, { bypass: Boolean(mediaDescriptor) });
+      await this.publishInbound(mapped);
     }
   }
 
