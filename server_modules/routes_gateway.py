@@ -620,6 +620,16 @@ class HardwareVPSTokenRequest(BaseModel):
     credentials: Dict[str, Any] = Field(default_factory=dict)
 
 
+class HardwareVPSAwsConnectRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    account_id: str = Field(min_length=1, max_length=32)
+
+
+class HardwareVPSAwsConfirmRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    connection_id: str = Field(min_length=1, max_length=192)
+
+
 def _gateway_api_url_for_remote_setup() -> str:
     return (
         str(os.getenv("EMPYRALIS_GATEWAY_API_URL") or "").strip()
@@ -1654,6 +1664,71 @@ async def create_hardware_vps_token(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"provider": provider_id, "token_id": token_id}
+
+
+@router.post("/hardware/vps/aws/connect")
+async def start_aws_vps_connect(
+    body: HardwareVPSAwsConnectRequest,
+    current_user=Depends(require_api_key),
+):
+    """Step 1 of the AWS cross-account IAM role flow (no API key paste, no
+    OAuth — see vps_provisioning_service's "AWS cross-account IAM role"
+    section): the customer types their 12-digit AWS account id, and this
+    hands back a pre-filled CloudFormation Quick-Create-Stack URL plus the
+    role ARN it derives from the fixed-role-name convention. Nothing is
+    trusted yet — see /hardware/vps/aws/confirm for the step that actually
+    proves the role exists."""
+    workspace_id = enforce_workspace_access(
+        current_user,
+        body.workspace_id or "default",
+        minimum_role="owner",
+    )
+    tenant_id = workspace_tenant_id(current_user, workspace_id)
+    user_id = str((current_user or {}).get("user_id") or "").strip() or "unknown-user"
+    try:
+        return vps_provisioning_service.create_aws_connect_intent(
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            account_id=body.account_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/hardware/vps/aws/confirm")
+async def confirm_aws_vps_connect(
+    body: HardwareVPSAwsConfirmRequest,
+    current_user=Depends(require_api_key),
+):
+    """Step 2: after the customer has (supposedly) run the CloudFormation
+    stack, attempt sts:AssumeRole against the role ARN + ExternalId from the
+    matching /hardware/vps/aws/connect call. Success stores a token_id the
+    rest of the VPS routes treat exactly like a DigitalOcean/Hetzner/Vultr
+    one; failure (stack not finished yet, wrong account, etc.) is safely
+    retryable — the connection_id stays valid until it expires."""
+    workspace_id = enforce_workspace_access(
+        current_user,
+        body.workspace_id or "default",
+        minimum_role="owner",
+    )
+    tenant_id = workspace_tenant_id(current_user, workspace_id)
+    user_id = str((current_user or {}).get("user_id") or "").strip() or "unknown-user"
+    try:
+        return vps_provisioning_service.confirm_aws_connection(
+            connection_id=body.connection_id,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="AWS connection request was not found or has expired.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/hardware/vps/plans")

@@ -6,6 +6,7 @@ import os
 import secrets
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,31 @@ from urllib import request as urlrequest
 
 from server_modules import gateway_state_repository, vault_store
 from server_modules.runtime_config import EMPYRALIS_STATE_HOME
+
+# AWS has no OAuth and no pastable API token — see PROVIDER_CONFIGS["aws"]
+# and create_aws_connect_intent/confirm_aws_connection below for the
+# CloudFormation cross-account IAM role pattern this uses instead. boto3 is
+# an optional import (mirrors artifact_service.py / provider_profiles.py's
+# BedrockAdapter) so the rest of this module — and every non-AWS provider —
+# keeps working even in an environment that never installed it.
+try:
+    import boto3 as _boto3
+except Exception:  # pragma: no cover - optional dependency at runtime
+    _boto3 = None
+
+try:
+    from botocore.exceptions import BotoCoreError as _BotoCoreError
+    from botocore.exceptions import ClientError as _ClientError
+    from botocore.exceptions import NoCredentialsError as _NoCredentialsError
+except Exception:  # pragma: no cover - optional dependency at runtime
+    class _BotoCoreError(Exception):
+        pass
+
+    class _ClientError(Exception):
+        pass
+
+    class _NoCredentialsError(Exception):
+        pass
 
 
 AGENT_INSTALLER_URL_ENV = "EMPYRALIS_AGENT_INSTALLER_URL"
@@ -33,6 +59,41 @@ LEGACY_DIGITALOCEAN_CLIENT_SECRET_ENV = "DIGITALOCEAN_OAUTH_CLIENT_SECRET"
 DEFAULT_DIGITALOCEAN_OAUTH_REDIRECT_URI = (
     "https://empyralis.ai/api/hardware/vps/oauth/digitalocean/callback"
 )
+# --- AWS cross-account IAM role (CloudFormation) — see create_aws_connect_
+# intent/confirm_aws_connection. Operator-set, both read via os.getenv and
+# both fail gracefully (VPSProvisioningError, not a crash) when unset,
+# exactly like DIGITALOCEAN_CLIENT_ID/_SECRET above (see
+# empyralis_aws_account_id / _aws_cfn_template_url).
+EMPYRALIS_AWS_ACCOUNT_ID_ENV = "EMPYRALIS_AWS_ACCOUNT_ID"
+EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV = "EMPYRALIS_AWS_CFN_TEMPLATE_URL"
+# Fixed-role-name convention: every customer's CloudFormation stack creates
+# a role with this EXACT name (see deploy/aws/empyralis-vps-role.yaml's
+# `RoleName:` property, which must match byte-for-byte — see
+# test_aws_cloudformation_template_role_name_matches_constant), so Empyralis
+# can derive arn:aws:iam::{customerAccountId}:role/{this} from nothing but
+# the 12-digit account id the customer types in — no ARN paste-back step.
+AWS_CROSS_ACCOUNT_ROLE_NAME = "EmpyralisVPSProvisioner"
+AWS_ROLE_SESSION_NAME = "empyralis-vps-provisioning"
+# IAM/STS AssumeRole is not region-scoped; this only picks which STS/console
+# endpoint to address (and where the CloudFormation stack's own metadata
+# lives) — it has no bearing on which region the customer's EC2 instances
+# actually run in.
+AWS_STS_SIGNING_REGION = "us-east-1"
+AWS_CFN_STACK_NAME = "empyralis-vps"
+# How long a "connect AWS account" intent (ExternalId + derived role_arn)
+# stays valid for confirm_aws_connection to redeem — long enough to walk
+# through the CloudFormation console at a normal pace, short enough that an
+# abandoned intent (closed tab, never ran the stack) doesn't sit around
+# indefinitely in aws_pending state.
+AWS_PENDING_CONNECTION_TTL_SECONDS = 60 * 60
+# Public, no-AWS-credentials-needed aggregator of AWS's own published
+# On-Demand pricing (see _fetch_aws_instance_pricing) — the AWS Pricing API
+# itself only has endpoints in us-east-1/ap-south-1 and a notoriously
+# hostile-to-parse response shape; this is the same well-known workaround
+# other tooling in this space uses. Best-effort only: falls back to
+# _AWS_STATIC_MONTHLY_PRICE_USD if unreachable, same resilience contract as
+# every other live-data-with-static-fallback path in this file.
+AWS_INSTANCES_VANTAGE_URL = "https://instances.vantage.sh/instances.json"
 PUBLIC_API_URL = (
     os.getenv("EMPYRALIS_PUBLIC_API_URL")
     or os.getenv("EMPYRALIS_GATEWAY_API_URL")
@@ -153,6 +214,38 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
             ProviderRegion("syd", "Sydney"),
         ),
     ),
+    "aws": ProviderConfig(
+        provider="aws",
+        label="Amazon Web Services",
+        auth_label="AWS cross-account IAM role (CloudFormation)",
+        # Not a REST endpoint like the other three — EC2 RunInstances is a
+        # signed SigV4 SDK call (see _provision_aws), which is exactly why
+        # AWS needs boto3 instead of the shared _http_json. Kept as a
+        # descriptive string, not a URL, purely so this field stays
+        # non-empty/self-documenting like every other provider's.
+        create_url="ec2:RunInstances",
+        default_region="us-east-1",
+        default_size="t3.small",
+        # AWS AMI ids are per-region and go stale — there is no fixed slug
+        # like DigitalOcean's "ubuntu-24-04-x64". Resolved live per-call via
+        # ec2:DescribeImages against Canonical's official account (see
+        # _resolve_aws_ami). Kept here only as a human-readable label.
+        default_image="ubuntu-noble-24.04",
+        # AWS credentials are never a single bearer token — see
+        # _store_aws_credentials / _aws_client. role_arn is listed here only
+        # so _provider_token still has a non-empty field to validate
+        # presence of before any AWS branch runs (defense in depth, not the
+        # real credential-loading path).
+        token_keys=("role_arn",),
+        regions=(
+            ProviderRegion("us-east-1", "US East (N. Virginia)"),
+            ProviderRegion("us-west-2", "US West (Oregon)"),
+            ProviderRegion("eu-west-1", "Europe (Ireland)"),
+            ProviderRegion("eu-central-1", "Europe (Frankfurt)"),
+            ProviderRegion("ap-southeast-1", "Asia Pacific (Singapore)"),
+            ProviderRegion("ap-south-1", "Asia Pacific (Mumbai)"),
+        ),
+    ),
 }
 
 _STATE_LOCK = threading.Lock()
@@ -265,6 +358,11 @@ def store_vps_provider_token(
     source: str = "api_token",
 ) -> str:
     provider_id = _normalize_provider(provider)
+    if provider_id == "aws":
+        raise VPSProvisioningError(
+            "AWS connects via CloudFormation, not a pasted token — "
+            "use create_aws_connect_intent / confirm_aws_connection instead."
+        )
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
     token_id = f"vps_token_{secrets.token_hex(16)}"
     now = _utc_now_iso()
@@ -349,6 +447,13 @@ def fetch_provider_plans(
         workspace_id=workspace_id,
         user_id=user_id,
     )
+    if provider_id == "aws":
+        # AWS has no bearer token to extract — _fetch_aws_plans assumes the
+        # stored cross-account role itself (role_arn + external_id) via
+        # _aws_client. See _store_aws_credentials for why this bypasses
+        # _provider_token entirely instead of joining the branches below.
+        plans = _fetch_aws_plans(credentials)
+        return {"provider": provider_id, "plans": [asdict(plan) for plan in plans]}
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
     if provider_id == "digitalocean":
         raw = _http_json(
@@ -470,7 +575,7 @@ def _normalize_digitalocean_regions(payload: Mapping[str, Any]) -> list[Dict[str
 # Providers we can fetch a *live* region/location list for, given a
 # connected account's token. Vultr has its own path (fetch_public_provider_regions)
 # since its region list is fetchable without any account at all.
-_LIVE_REGION_PROVIDERS = {"digitalocean", "hetzner"}
+_LIVE_REGION_PROVIDERS = {"digitalocean", "hetzner", "aws"}
 
 
 def fetch_provider_regions(
@@ -496,11 +601,14 @@ def fetch_provider_regions(
         credentials = load_vps_provider_credentials(
             token_id, provider=provider_id, workspace_id=workspace_id, user_id=user_id
         )
-        token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
-        on_unauthorized = (
-            _digitalocean_reauth_callback(token_id, credentials) if provider_id == "digitalocean" else None
-        )
-        regions = _fetch_live_regions(provider_id, token, on_unauthorized=on_unauthorized)
+        if provider_id == "aws":
+            regions = _fetch_aws_regions(credentials)
+        else:
+            token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+            on_unauthorized = (
+                _digitalocean_reauth_callback(token_id, credentials) if provider_id == "digitalocean" else None
+            )
+            regions = _fetch_live_regions(provider_id, token, on_unauthorized=on_unauthorized)
     except (KeyError, ValueError, VPSProvisioningError):
         regions = []
     if not regions:
@@ -672,7 +780,9 @@ def provision_vps(
     token = _provider_token(config, credentials)
     live_region_ids: set[str] = set()
     if token_id and provider_id in _LIVE_REGION_PROVIDERS:
-        live_region_ids = _fetch_live_region_ids(provider_id, token)
+        live_region_ids = (
+            _fetch_aws_region_ids(credentials) if provider_id == "aws" else _fetch_live_region_ids(provider_id, token)
+        )
     resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
     resolved_size = str(size or "").strip() or config.default_size
     name = _server_name(provider_id)
@@ -686,6 +796,8 @@ def provision_vps(
         return _provision_hetzner(config, token, resolved_region, resolved_size, name, user_data)
     if provider_id == "vultr":
         return _provision_vultr(config, token, resolved_region, resolved_size, name, user_data)
+    if provider_id == "aws":
+        return _provision_aws(credentials, resolved_region, resolved_size, name, user_data)
     raise VPSProvisioningError(f"Unsupported VPS provider: {provider_id}")
 
 
@@ -760,24 +872,32 @@ def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
     resource_id = str(record.get("provider_resource_id") or "").strip()
     if not resource_id:
         raise VPSProvisioningError("VPS provider resource id is missing.")
-    token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
-    # This record's credentials are a point-in-time snapshot taken at
-    # provision_vps() time (see record_vps_provision), not a live pointer
-    # into the token store — it can go stale on its own schedule. Give
-    # DigitalOcean the same reactive-401 refresh as every other DO call, just
-    # persisted back into this record instead of the (possibly long-gone,
-    # disconnected) original token_id.
-    on_unauthorized = None
-    if provider_id == "digitalocean":
-        def _reauth(_vps_id: str = clean_vps_id, _credentials: Mapping[str, Any] = credentials) -> Optional[str]:
-            refreshed = _refresh_digitalocean_credentials(_credentials)
-            if refreshed is None:
-                return None
-            _update_vps_record_credentials(_vps_id, refreshed)
-            return str(refreshed.get("access_token") or "").strip() or None
+    if provider_id == "aws":
+        # No bearer token, and TerminateInstances is region-scoped (unlike
+        # the other three providers' global DELETE endpoints) — the region
+        # this box was actually created in is on the record itself (see
+        # record_vps_provision), not something _delete_provider_resource's
+        # token-based signature has anywhere to carry.
+        _delete_aws_resource(credentials, str(record.get("region") or "").strip(), resource_id)
+    else:
+        token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+        # This record's credentials are a point-in-time snapshot taken at
+        # provision_vps() time (see record_vps_provision), not a live pointer
+        # into the token store — it can go stale on its own schedule. Give
+        # DigitalOcean the same reactive-401 refresh as every other DO call, just
+        # persisted back into this record instead of the (possibly long-gone,
+        # disconnected) original token_id.
+        on_unauthorized = None
+        if provider_id == "digitalocean":
+            def _reauth(_vps_id: str = clean_vps_id, _credentials: Mapping[str, Any] = credentials) -> Optional[str]:
+                refreshed = _refresh_digitalocean_credentials(_credentials)
+                if refreshed is None:
+                    return None
+                _update_vps_record_credentials(_vps_id, refreshed)
+                return str(refreshed.get("access_token") or "").strip() or None
 
-        on_unauthorized = _reauth
-    _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
+            on_unauthorized = _reauth
+        _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
     with _STATE_LOCK:
         state = _load_state()
         latest = dict((state.get("vps") or {}).get(clean_vps_id) or record)
@@ -1109,7 +1229,7 @@ def _resolved_record_status(record: Mapping[str, Any]) -> str:
 
 def _load_state() -> Dict[str, Any]:
     if not VPS_STATE_FILE.exists():
-        return {"v": 1, "vps": {}, "tokens": {}, "oauth_states": {}}
+        return {"v": 1, "vps": {}, "tokens": {}, "oauth_states": {}, "aws_pending": {}}
     try:
         parsed = json.loads(VPS_STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -1122,6 +1242,11 @@ def _load_state() -> Dict[str, Any]:
         parsed["tokens"] = {}
     if not isinstance(parsed.get("oauth_states"), dict):
         parsed["oauth_states"] = {}
+    if not isinstance(parsed.get("aws_pending"), dict):
+        # Pending "connect AWS account" intents (ExternalId + derived
+        # role_arn) awaiting confirm_aws_connection — see
+        # create_aws_connect_intent. Mirrors oauth_states' shape/lifecycle.
+        parsed["aws_pending"] = {}
     parsed.setdefault("v", 1)
     return parsed
 
@@ -1333,6 +1458,736 @@ def _digitalocean_reauth_callback(
     return _reauth
 
 
+# --- AWS cross-account IAM role (CloudFormation) --------------------------
+#
+# AWS has no OAuth and nothing worth pasting as an "API token" (a long-lived
+# AWS access key is exactly the kind of standing secret this whole file
+# otherwise avoids storing for DO/Hetzner/Vultr's OAuth paths). Instead this
+# mirrors the industry-standard cross-account pattern (Datadog, Vantage,
+# etc.): the customer runs a small CloudFormation template — hosted by
+# Empyralis, referenced by URL — that creates an IAM role in *their* account
+# trusting *Empyralis's* account, gated on a per-customer ExternalId. From
+# then on, every AWS call in this file assumes that role via STS for
+# short-lived (1 hour) credentials; nothing long-lived is ever stored.
+#
+# Flow:
+#   1. create_aws_connect_intent — customer types their 12-digit account id;
+#      we generate a random ExternalId, derive the expected role ARN via the
+#      fixed-role-name convention, and hand back a pre-filled CloudFormation
+#      Quick-Create-Stack URL. Nothing is trusted yet — the role doesn't
+#      exist in AWS until the customer runs the stack.
+#   2. The customer opens that URL (frontend, new tab) and runs the stack.
+#   3. confirm_aws_connection — we attempt sts:AssumeRole against the
+#      derived ARN + ExternalId. Success proves the role exists with the
+#      right trust policy; failure means the stack isn't done yet (or
+#      failed), and the customer can just retry. On success we additionally
+#      call sts:GetCallerIdentity on the assumed session and check its
+#      Account matches what the customer typed — defense against a stale or
+#      mistyped account id resolving somewhere unexpected.
+
+
+def empyralis_aws_account_id() -> str:
+    """Empyralis's own AWS account id — the only account the CloudFormation
+    template's trust policy allows to assume the customer's role. Surfaced
+    to the frontend so a customer can cross-check it against what the
+    CloudFormation console shows before running the stack. Fails gracefully
+    (VPSProvisioningError, not a crash) when unset, exactly like
+    _digitalocean_client_id — this is operator setup, not end-user input."""
+    account_id = (os.getenv(EMPYRALIS_AWS_ACCOUNT_ID_ENV) or "").strip()
+    if not account_id:
+        raise VPSProvisioningError(
+            f"AWS is not configured on this backend ({EMPYRALIS_AWS_ACCOUNT_ID_ENV} is unset)."
+        )
+    return account_id
+
+
+def _aws_cfn_template_url() -> str:
+    template_url = (os.getenv(EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV) or "").strip()
+    if not template_url:
+        raise VPSProvisioningError(
+            f"AWS is not configured on this backend ({EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV} is unset)."
+        )
+    return template_url
+
+
+def _validate_aws_account_id(value: str) -> str:
+    account_id = str(value or "").strip()
+    if not account_id.isdigit() or len(account_id) != 12:
+        raise ValueError("AWS account id must be exactly 12 digits.")
+    return account_id
+
+
+def aws_role_arn_for_account(account_id: str) -> str:
+    """Fixed-role-name convention: derive the role ARN Empyralis will assume
+    from nothing but the customer's account id, so the customer never pastes
+    an ARN back — see AWS_CROSS_ACCOUNT_ROLE_NAME."""
+    return f"arn:aws:iam::{_validate_aws_account_id(account_id)}:role/{AWS_CROSS_ACCOUNT_ROLE_NAME}"
+
+
+def _aws_quick_create_url(*, external_id: str, template_url: str, empyralis_account_id: str) -> str:
+    # CloudFormation's console is a hash-routed SPA — `region=` is an
+    # ordinary query param, but everything past the `#` (including its own
+    # nested `?`-delimited query string) is fragment state the console JS
+    # reads client-side. param_ExternalId pre-fills that NoEcho parameter
+    # field; param_EmpyralisAccountId pre-fills the trust-policy account id
+    # too, so the operator only has to keep EMPYRALIS_AWS_ACCOUNT_ID current
+    # in one place (this env var) rather than also hand-editing the hosted
+    # template's Parameters.Default every time — the template's own default
+    # is just a fallback for anyone who opens it directly.
+    fragment_query = urlparse.urlencode(
+        {
+            "templateURL": template_url,
+            "stackName": AWS_CFN_STACK_NAME,
+            "param_ExternalId": external_id,
+            "param_EmpyralisAccountId": empyralis_account_id,
+        }
+    )
+    return (
+        f"https://{AWS_STS_SIGNING_REGION}.console.aws.amazon.com/cloudformation/home"
+        f"?region={AWS_STS_SIGNING_REGION}#/stacks/create/review?{fragment_query}"
+    )
+
+
+def create_aws_connect_intent(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    account_id: str,
+) -> Dict[str, Any]:
+    clean_account_id = _validate_aws_account_id(account_id)
+    empyralis_account_id = empyralis_aws_account_id()
+    template_url = _aws_cfn_template_url()
+    external_id = str(uuid.uuid4())
+    role_arn = aws_role_arn_for_account(clean_account_id)
+    connection_id = f"vps_aws_pending_{secrets.token_hex(16)}"
+    record = {
+        "connection_id": connection_id,
+        "account_id": clean_account_id,
+        "external_id": external_id,
+        "role_arn": role_arn,
+        "workspace_id": str(workspace_id or "").strip() or "default",
+        "tenant_id": str(tenant_id or "").strip() or "default",
+        "user_id": str(user_id or "").strip() or "unknown-user",
+        "created_at": _utc_now_iso(),
+    }
+    with _STATE_LOCK:
+        payload = _load_state()
+        payload.setdefault("aws_pending", {})[connection_id] = record
+        _write_state(payload)
+    return {
+        "provider": "aws",
+        "connection_id": connection_id,
+        "account_id": clean_account_id,
+        "external_id": external_id,
+        "role_arn": role_arn,
+        "role_name": AWS_CROSS_ACCOUNT_ROLE_NAME,
+        "empyralis_account_id": empyralis_account_id,
+        "quick_create_url": _aws_quick_create_url(
+            external_id=external_id, template_url=template_url, empyralis_account_id=empyralis_account_id
+        ),
+    }
+
+
+def confirm_aws_connection(
+    *,
+    connection_id: str,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    clean_connection_id = _clean_identifier(connection_id, field_name="connection_id")
+    with _STATE_LOCK:
+        payload = _load_state()
+        pending = dict((payload.get("aws_pending") or {}).get(clean_connection_id) or {})
+    if not pending:
+        raise KeyError(clean_connection_id)
+    if str(pending.get("workspace_id") or "").strip() != str(workspace_id or "").strip():
+        raise KeyError(clean_connection_id)
+    if user_id and str(pending.get("user_id") or "").strip() != str(user_id or "").strip():
+        raise KeyError(clean_connection_id)
+    created_at = _parse_iso(str(pending.get("created_at") or ""))
+    if (
+        created_at is not None
+        and (datetime.now(timezone.utc) - created_at).total_seconds() > AWS_PENDING_CONNECTION_TTL_SECONDS
+    ):
+        _pop_aws_pending(clean_connection_id)
+        raise VPSProvisioningError("This AWS connection request expired. Start over and reconnect.")
+
+    role_arn = str(pending.get("role_arn") or "").strip()
+    external_id = str(pending.get("external_id") or "").strip()
+    account_id = str(pending.get("account_id") or "").strip()
+    temp_credentials = _assume_aws_role(role_arn, external_id)
+    _verify_aws_caller_identity(temp_credentials, expected_account_id=account_id)
+
+    token_id = _store_aws_credentials(
+        workspace_id=str(pending.get("workspace_id") or workspace_id or "default"),
+        tenant_id=str(pending.get("tenant_id") or tenant_id or "default"),
+        user_id=str(pending.get("user_id") or user_id or "unknown-user"),
+        credentials={"role_arn": role_arn, "external_id": external_id, "account_id": account_id},
+    )
+    _pop_aws_pending(clean_connection_id)
+    return {"provider": "aws", "token_id": token_id, "account_id": account_id}
+
+
+def _pop_aws_pending(connection_id: str) -> None:
+    with _STATE_LOCK:
+        payload = _load_state()
+        payload.setdefault("aws_pending", {}).pop(connection_id, None)
+        _write_state(payload)
+
+
+def _store_aws_credentials(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    credentials: Mapping[str, Any],
+) -> str:
+    """AWS's own store path — deliberately NOT store_vps_provider_token,
+    which normalizes a single bearer secret via _provider_token(). AWS has
+    no bearer secret to normalize: the stored credential is a (role_arn,
+    external_id, account_id) triple, useless on its own without a live
+    sts:AssumeRole against the customer's account on every single call (see
+    _aws_client) — there is no "the secret" to extract the way there is for
+    the other three providers."""
+    token_id = f"vps_token_{secrets.token_hex(16)}"
+    now = _utc_now_iso()
+    record = {
+        "token_id": token_id,
+        "provider": "aws",
+        "workspace_id": str(workspace_id or "").strip() or "default",
+        "tenant_id": str(tenant_id or "").strip() or "default",
+        "user_id": str(user_id or "").strip() or "unknown-user",
+        "source": "cloudformation",
+        "credentials_ciphertext": _encrypt_secret(dict(credentials)),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _STATE_LOCK:
+        state = _load_state()
+        state.setdefault("tokens", {})[token_id] = record
+        _write_state(state)
+    return token_id
+
+
+def _assume_aws_role(role_arn: str, external_id: str) -> Dict[str, str]:
+    """The AssumeRole wrapper every AWS call in this file goes through (via
+    _aws_client) — Empyralis's own ambient AWS credentials (boto3's normal
+    resolution chain: environment, instance profile, shared config — never
+    anything this file reads or stores itself) call sts:AssumeRole against
+    the CUSTOMER's role, scoped by the ExternalId only that customer's stack
+    was created with. Returns short-lived (1 hour) session credentials;
+    nothing here is ever persisted."""
+    if _boto3 is None:
+        raise VPSProvisioningError("boto3 is not installed; AWS VPS support requires the boto3 package.")
+    if not role_arn or not external_id:
+        raise ValueError("AWS role_arn and external_id are required.")
+    try:
+        sts_client = _boto3.client("sts", region_name=AWS_STS_SIGNING_REGION)
+        response = sts_client.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName=AWS_ROLE_SESSION_NAME,
+            ExternalId=external_id,
+            DurationSeconds=3600,
+        )
+    except _NoCredentialsError as exc:
+        raise VPSProvisioningError(
+            "Empyralis's own AWS credentials are not configured on this backend — "
+            "set them (environment or instance profile) before connecting customer AWS accounts."
+        ) from exc
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(
+            f"Could not assume the Empyralis VPS role in the customer's AWS account: {exc}"
+        ) from exc
+    creds = response.get("Credentials") if isinstance(response, Mapping) else None
+    creds = creds if isinstance(creds, Mapping) else {}
+    access_key_id = str(creds.get("AccessKeyId") or "").strip()
+    secret_access_key = str(creds.get("SecretAccessKey") or "").strip()
+    session_token = str(creds.get("SessionToken") or "").strip()
+    if not access_key_id or not secret_access_key or not session_token:
+        raise VPSProvisioningError("AWS did not return temporary credentials for the assumed role.")
+    return {
+        "aws_access_key_id": access_key_id,
+        "aws_secret_access_key": secret_access_key,
+        "aws_session_token": session_token,
+    }
+
+
+def _verify_aws_caller_identity(temp_credentials: Mapping[str, str], *, expected_account_id: str) -> None:
+    """Defense against a stale/mistyped account id happening to still
+    resolve an assumable role somewhere unexpected: after AssumeRole
+    succeeds, independently confirm the assumed session's own account
+    matches what the customer typed, via sts:GetCallerIdentity."""
+    if _boto3 is None:
+        raise VPSProvisioningError("boto3 is not installed; AWS VPS support requires the boto3 package.")
+    try:
+        sts_client = _boto3.client(
+            "sts",
+            region_name=AWS_STS_SIGNING_REGION,
+            aws_access_key_id=temp_credentials["aws_access_key_id"],
+            aws_secret_access_key=temp_credentials["aws_secret_access_key"],
+            aws_session_token=temp_credentials["aws_session_token"],
+        )
+        identity = sts_client.get_caller_identity()
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"Could not verify the assumed AWS role's identity: {exc}") from exc
+    actual_account = str((identity or {}).get("Account") or "").strip()
+    if actual_account != str(expected_account_id or "").strip():
+        raise VPSProvisioningError(
+            "The assumed AWS role belongs to a different account than expected. Reconnect and try again."
+        )
+
+
+def _aws_client(service_name: str, credentials: Mapping[str, Any], *, region: str):
+    """Every AWS service call in this file goes through here: resolve
+    role_arn/external_id from the stored credential, assume the role fresh
+    (see _assume_aws_role — short-lived, never cached across requests), and
+    build a boto3 client scoped to `region` from the resulting session
+    credentials."""
+    if _boto3 is None:
+        raise VPSProvisioningError("boto3 is not installed; AWS VPS support requires the boto3 package.")
+    role_arn = str(credentials.get("role_arn") or "").strip()
+    external_id = str(credentials.get("external_id") or "").strip()
+    if not role_arn or not external_id:
+        raise ValueError("AWS role_arn and external_id are required.")
+    temp_credentials = _assume_aws_role(role_arn, external_id)
+    try:
+        return _boto3.client(
+            service_name,
+            region_name=region,
+            aws_access_key_id=temp_credentials["aws_access_key_id"],
+            aws_secret_access_key=temp_credentials["aws_secret_access_key"],
+            aws_session_token=temp_credentials["aws_session_token"],
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"Could not create an AWS {service_name} client: {exc}") from exc
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+# --- AWS regions ------------------------------------------------------------
+
+_AWS_REGION_LABELS: Dict[str, str] = {
+    "us-east-1": "US East (N. Virginia)",
+    "us-east-2": "US East (Ohio)",
+    "us-west-1": "US West (N. California)",
+    "us-west-2": "US West (Oregon)",
+    "eu-west-1": "Europe (Ireland)",
+    "eu-west-2": "Europe (London)",
+    "eu-west-3": "Europe (Paris)",
+    "eu-central-1": "Europe (Frankfurt)",
+    "eu-north-1": "Europe (Stockholm)",
+    "ap-southeast-1": "Asia Pacific (Singapore)",
+    "ap-southeast-2": "Asia Pacific (Sydney)",
+    "ap-south-1": "Asia Pacific (Mumbai)",
+    "ap-northeast-1": "Asia Pacific (Tokyo)",
+    "ap-northeast-2": "Asia Pacific (Seoul)",
+    "sa-east-1": "South America (São Paulo)",
+    "ca-central-1": "Canada (Central)",
+}
+
+
+def _fetch_aws_regions(credentials: Mapping[str, Any]) -> list[Dict[str, str]]:
+    ec2 = _aws_client("ec2", credentials, region=PROVIDER_CONFIGS["aws"].default_region)
+    try:
+        response = ec2.describe_regions(
+            Filters=[{"Name": "opt-in-status", "Values": ["opt-in-not-required", "opted-in"]}]
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not list regions: {exc}") from exc
+    items = response.get("Regions") if isinstance(response, Mapping) else None
+    return _normalize_aws_regions(items or [])
+
+
+def _normalize_aws_regions(items: Iterable[Mapping[str, Any]]) -> list[Dict[str, str]]:
+    regions: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        region_name = str(item.get("RegionName") or "").strip()
+        if not region_name:
+            continue
+        regions.append({"id": region_name, "label": _AWS_REGION_LABELS.get(region_name, region_name)})
+    regions.sort(key=lambda entry: entry["id"])
+    return regions
+
+
+def _fetch_aws_region_ids(credentials: Mapping[str, Any]) -> set[str]:
+    """Mirrors _fetch_live_region_ids's never-raises contract for the other
+    live-region providers — provision_vps's live-region allow-list must
+    never hard-fail provisioning just because this best-effort fetch did."""
+    try:
+        return {item["id"] for item in _fetch_aws_regions(credentials)}
+    except (VPSProvisioningError, KeyError, ValueError, TypeError):
+        return set()
+
+
+# --- AWS plans (instance types + pricing) -----------------------------------
+
+# Curated candidate list, mirroring the small hand-picked set every other
+# provider effectively offers (DO/Hetzner/Vultr's own catalogs are much
+# larger than what actually gets shown) — general-purpose burstable
+# instances sized for an always-on agent-computer workload, not a
+# from-scratch enumeration of EC2's hundreds of instance types.
+_AWS_CANDIDATE_INSTANCE_TYPES: tuple[str, ...] = (
+    "t3.micro",
+    "t3.small",
+    "t3.medium",
+    "t3.large",
+    "t3.xlarge",
+    "t3.2xlarge",
+)
+# T3 instances are EBS-only — unlike DO/Hetzner/Vultr, AWS does not bundle a
+# fixed local disk size per instance type; the root volume is provisioned
+# separately (see _provision_aws's BlockDeviceMappings). This fixed size is
+# both what gets displayed per plan AND what actually gets attached, so the
+# two can never drift apart.
+_AWS_DEFAULT_ROOT_VOLUME_GB = 40
+# Static USD/month fallback (on-demand, us-east-1, Linux) for when the live
+# instances.vantage.sh aggregator is unreachable — approximate published AWS
+# list prices (hourly x ~730h/mo). Not a substitute for real-time billing
+# data; see _fetch_aws_instance_pricing.
+_AWS_STATIC_MONTHLY_PRICE_USD: Dict[str, float] = {
+    "t3.micro": 7.59,
+    "t3.small": 15.18,
+    "t3.medium": 30.37,
+    "t3.large": 60.74,
+    "t3.xlarge": 121.47,
+    "t3.2xlarge": 242.94,
+}
+
+
+def _fetch_aws_plans(credentials: Mapping[str, Any]) -> list[VPSPlan]:
+    ec2 = _aws_client("ec2", credentials, region=PROVIDER_CONFIGS["aws"].default_region)
+    try:
+        response = ec2.describe_instance_types(InstanceTypes=list(_AWS_CANDIDATE_INSTANCE_TYPES))
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not list instance types: {exc}") from exc
+    items = response.get("InstanceTypes") if isinstance(response, Mapping) else None
+    pricing = _fetch_aws_instance_pricing()
+    return _normalize_aws_plans(items or [], pricing)
+
+
+def _normalize_aws_plans(
+    instance_types: Iterable[Mapping[str, Any]],
+    pricing: Mapping[str, float],
+) -> list[VPSPlan]:
+    plans: list[VPSPlan] = []
+    for item in instance_types:
+        if not isinstance(item, Mapping):
+            continue
+        slug = str(item.get("InstanceType") or "").strip()
+        if not slug:
+            continue
+        vcpu_info = item.get("VCpuInfo") if isinstance(item.get("VCpuInfo"), Mapping) else {}
+        memory_info = item.get("MemoryInfo") if isinstance(item.get("MemoryInfo"), Mapping) else {}
+        vcpus = _to_int(vcpu_info.get("DefaultVCpus"))
+        memory_mb = _to_int(memory_info.get("SizeInMiB"))
+        if vcpus < 1 or memory_mb < 1024:
+            continue
+        price = _to_float(pricing.get(slug))
+        if price <= 0:
+            continue
+        plans.append(
+            VPSPlan(
+                id=slug,
+                slug=slug,
+                label=f"{vcpus} CPU · {_memory_label(memory_mb)} · {_AWS_DEFAULT_ROOT_VOLUME_GB}GB SSD",
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                disk_gb=_AWS_DEFAULT_ROOT_VOLUME_GB,
+                price_monthly=price,
+                price_label=f"${price:g}/mo",
+                # Specs were fetched against a single reference region
+                # (see _fetch_aws_plans) rather than threaded through per-
+                # region like DigitalOcean's — empty means "not threaded
+                # through yet", the same convention every normalizer here
+                # already uses for that state (see VPSPlan.regions).
+            )
+        )
+    return _mark_recommended(plans)
+
+
+def _fetch_aws_instance_pricing() -> Dict[str, float]:
+    try:
+        raw = _fetch_vantage_pricing_raw()
+    except Exception:
+        return dict(_AWS_STATIC_MONTHLY_PRICE_USD)
+    pricing: Dict[str, float] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        slug = str(item.get("instance_type") or "").strip()
+        if slug not in _AWS_CANDIDATE_INSTANCE_TYPES:
+            continue
+        hourly = _aws_vantage_hourly_price(item)
+        if hourly > 0:
+            pricing[slug] = round(hourly * 730, 2)
+    return pricing or dict(_AWS_STATIC_MONTHLY_PRICE_USD)
+
+
+def _aws_vantage_hourly_price(item: Mapping[str, Any]) -> float:
+    pricing = item.get("pricing") if isinstance(item.get("pricing"), Mapping) else {}
+    region_pricing = pricing.get("us-east-1") if isinstance(pricing.get("us-east-1"), Mapping) else {}
+    linux_pricing = region_pricing.get("linux") if isinstance(region_pricing.get("linux"), Mapping) else {}
+    return _to_float(linux_pricing.get("ondemand"))
+
+
+def _fetch_vantage_pricing_raw() -> Any:
+    """Isolated to its own function (rather than reusing _http_json, which
+    asserts a top-level JSON *object*) purely because instances.vantage.sh
+    returns a top-level JSON *array* — and so this is easy to monkeypatch in
+    tests the same way _http_json already is elsewhere in this file."""
+    request = urlrequest.Request(
+        AWS_INSTANCES_VANTAGE_URL,
+        method="GET",
+        headers={"Accept": "application/json", "User-Agent": "Empyralis-VPS-Provisioner/1.0"},
+    )
+    with urlrequest.urlopen(request, timeout=30) as response:
+        body = response.read().decode("utf-8")
+    return json.loads(body) if body else []
+
+
+# --- AWS provisioning / deletion --------------------------------------------
+
+_AWS_UBUNTU_OWNER_ID = "099720109477"  # Canonical's official AWS account.
+_AWS_UBUNTU_NAME_FILTER = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+_AWS_SECURITY_GROUP_NAME = "empyralis-agent-computer"
+_AWS_KEY_PAIR_NAME = "empyralis-agent-computer"
+
+
+def _resolve_aws_ami(ec2: Any) -> tuple[str, str]:
+    """Returns (image_id, root_device_name). AWS AMI ids are per-region and
+    go stale — there is no fixed slug like DigitalOcean's
+    "ubuntu-24-04-x64" — so this resolves the current Ubuntu 24.04 (Noble)
+    AMI live via ec2:DescribeImages against Canonical's own account, picking
+    the most recently published match. The root device name is read back
+    from the AMI itself (not assumed to be /dev/sda1) so
+    BlockDeviceMappings' volume-size override in _provision_aws actually
+    lands on the AMI's real root volume instead of silently no-op'ing."""
+    try:
+        response = ec2.describe_images(
+            Owners=[_AWS_UBUNTU_OWNER_ID],
+            Filters=[
+                {"Name": "name", "Values": [_AWS_UBUNTU_NAME_FILTER]},
+                {"Name": "state", "Values": ["available"]},
+                {"Name": "architecture", "Values": ["x86_64"]},
+                {"Name": "virtualization-type", "Values": ["hvm"]},
+            ],
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not resolve the Ubuntu AMI: {exc}") from exc
+    images = response.get("Images") if isinstance(response, Mapping) else []
+    candidates = [img for img in images if isinstance(img, Mapping) and str(img.get("ImageId") or "").strip()]
+    if not candidates:
+        raise VPSProvisioningError("aws provisioning failed: no Ubuntu 24.04 AMI found in this region.")
+    newest = max(candidates, key=lambda img: str(img.get("CreationDate") or ""))
+    image_id = str(newest["ImageId"]).strip()
+    root_device_name = str(newest.get("RootDeviceName") or "/dev/sda1").strip() or "/dev/sda1"
+    return image_id, root_device_name
+
+
+def _resolve_aws_network(ec2: Any) -> tuple[str, str]:
+    """Returns (vpc_id, subnet_id) — a fresh AWS account isn't guaranteed to
+    still have its default VPC (it can be deleted), so this prefers the
+    default VPC/subnet but falls back to the first available one of each
+    rather than assuming either exists."""
+    vpc_id = _first_resource_id(
+        ec2, "describe_vpcs", "Vpcs", "VpcId", filters=[{"Name": "is-default", "Values": ["true"]}]
+    ) or _first_resource_id(ec2, "describe_vpcs", "Vpcs", "VpcId")
+    if not vpc_id:
+        raise VPSProvisioningError(
+            "aws provisioning failed: no VPC is available in this account/region. Create a VPC first."
+        )
+    subnet_id = _first_resource_id(
+        ec2,
+        "describe_subnets",
+        "Subnets",
+        "SubnetId",
+        filters=[{"Name": "vpc-id", "Values": [vpc_id]}, {"Name": "default-for-az", "Values": ["true"]}],
+    ) or _first_resource_id(ec2, "describe_subnets", "Subnets", "SubnetId", filters=[{"Name": "vpc-id", "Values": [vpc_id]}])
+    if not subnet_id:
+        raise VPSProvisioningError(f"aws provisioning failed: no subnet is available in VPC {vpc_id}.")
+    return vpc_id, subnet_id
+
+
+def _first_resource_id(
+    ec2: Any,
+    method_name: str,
+    items_key: str,
+    id_key: str,
+    *,
+    filters: Optional[list[Dict[str, Any]]] = None,
+) -> str:
+    try:
+        method = getattr(ec2, method_name)
+        response = method(Filters=filters) if filters else method()
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: {method_name} failed: {exc}") from exc
+    items = response.get(items_key) if isinstance(response, Mapping) else []
+    for item in items or []:
+        if isinstance(item, Mapping):
+            value = str(item.get(id_key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _ensure_aws_security_group(ec2: Any, vpc_id: str) -> str:
+    try:
+        response = ec2.describe_security_groups(
+            Filters=[
+                {"Name": "group-name", "Values": [_AWS_SECURITY_GROUP_NAME]},
+                {"Name": "vpc-id", "Values": [vpc_id]},
+            ]
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not list security groups: {exc}") from exc
+    groups = response.get("SecurityGroups") if isinstance(response, Mapping) else []
+    for group in groups or []:
+        if isinstance(group, Mapping):
+            group_id = str(group.get("GroupId") or "").strip()
+            if group_id:
+                return group_id
+    try:
+        created = ec2.create_security_group(
+            GroupName=_AWS_SECURITY_GROUP_NAME,
+            Description=(
+                "Empyralis Agent Computer - outbound install/pairing traffic; "
+                "inbound SSH open for operator debugging only, no key pair is retained."
+            ),
+            VpcId=vpc_id,
+            TagSpecifications=[{"ResourceType": "security-group", "Tags": [{"Key": "app", "Value": "empyralis"}]}],
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not create a security group: {exc}") from exc
+    group_id = str(created.get("GroupId") or "").strip() if isinstance(created, Mapping) else ""
+    if not group_id:
+        raise VPSProvisioningError("aws provisioning failed: security group creation did not return a group id.")
+    try:
+        ec2.authorize_security_group_ingress(
+            GroupId=group_id,
+            IpPermissions=[
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0", "Description": "SSH (operator debugging)"}],
+                }
+            ],
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not authorize security group ingress: {exc}") from exc
+    return group_id
+
+
+def _ensure_aws_key_pair(ec2: Any) -> Optional[str]:
+    """Ensures an EC2 key pair exists so the instance has one attached (some
+    consoles/tooling expect it) — the private key material CreateKeyPair
+    returns is intentionally discarded: never stored, never logged.
+    Empyralis never authenticates over SSH to agent-computer boxes; pairing
+    happens entirely over the cloud-init -> HTTPS callback (see
+    cloud_init_script). Best-effort: returns None (no KeyName attached, and
+    RunInstances works fine without one) rather than failing provisioning
+    outright if key-pair management errors out."""
+    try:
+        ec2.describe_key_pairs(KeyNames=[_AWS_KEY_PAIR_NAME])
+        return _AWS_KEY_PAIR_NAME
+    except (_ClientError, _BotoCoreError):
+        pass
+    try:
+        ec2.create_key_pair(KeyName=_AWS_KEY_PAIR_NAME, KeyType="ed25519", KeyFormat="pem")
+        return _AWS_KEY_PAIR_NAME
+    except (_ClientError, _BotoCoreError):
+        return None
+
+
+def _provision_aws(
+    credentials: Mapping[str, Any],
+    region: str,
+    size: str,
+    name: str,
+    user_data: str,
+) -> VPSResult:
+    ec2 = _aws_client("ec2", credentials, region=region)
+    image_id, root_device_name = _resolve_aws_ami(ec2)
+    vpc_id, subnet_id = _resolve_aws_network(ec2)
+    security_group_id = _ensure_aws_security_group(ec2, vpc_id)
+    key_name = _ensure_aws_key_pair(ec2)
+    run_kwargs: Dict[str, Any] = {
+        "ImageId": image_id,
+        "InstanceType": size,
+        "MinCount": 1,
+        "MaxCount": 1,
+        # Plain text — botocore base64-encodes `blob`-typed params (like
+        # RunInstances' UserData) itself; unlike Vultr's raw-HTTP path below,
+        # this must NOT be pre-encoded or cloud-init receives double-encoded
+        # garbage.
+        "UserData": user_data,
+        "NetworkInterfaces": [
+            {
+                "DeviceIndex": 0,
+                "SubnetId": subnet_id,
+                "AssociatePublicIpAddress": True,
+                "Groups": [security_group_id],
+            }
+        ],
+        "BlockDeviceMappings": [
+            {
+                "DeviceName": root_device_name,
+                "Ebs": {"VolumeSize": _AWS_DEFAULT_ROOT_VOLUME_GB, "VolumeType": "gp3", "DeleteOnTermination": True},
+            }
+        ],
+        "TagSpecifications": [
+            {
+                "ResourceType": "instance",
+                "Tags": [
+                    {"Key": "Name", "Value": name},
+                    {"Key": "app", "Value": "empyralis"},
+                    {"Key": "role", "Value": "agent-computer"},
+                ],
+            }
+        ],
+    }
+    if key_name:
+        run_kwargs["KeyName"] = key_name
+    try:
+        response = ec2.run_instances(**run_kwargs)
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: {exc}") from exc
+    instances = response.get("Instances") if isinstance(response, Mapping) else []
+    instance = instances[0] if instances and isinstance(instances[0], Mapping) else {}
+    resource_id = str(instance.get("InstanceId") or "").strip()
+    if not resource_id:
+        raise VPSProvisioningError("aws did not return a created instance id.")
+    return VPSResult(
+        provider_resource_id=resource_id,
+        public_ip=str(instance.get("PublicIpAddress") or "").strip() or None,
+        region=region,
+        size=size,
+        status="provisioning",
+        provider="aws",
+    )
+
+
+def _delete_aws_resource(credentials: Mapping[str, Any], region: str, resource_id: str) -> None:
+    resolved_region = str(region or "").strip() or PROVIDER_CONFIGS["aws"].default_region
+    ec2 = _aws_client("ec2", credentials, region=resolved_region)
+    try:
+        ec2.terminate_instances(InstanceIds=[resource_id])
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws cleanup failed: {exc}") from exc
+
+
 def _normalize_digitalocean_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
     items = payload.get("sizes") if isinstance(payload.get("sizes"), list) else []
     plans: list[VPSPlan] = []
@@ -1523,7 +2378,14 @@ def _to_float(value: Any) -> float:
 
 def _normalize_provider(provider: str) -> str:
     provider_id = str(provider or "").strip().lower().replace("_", "-")
-    aliases = {"digital-ocean": "digitalocean", "do": "digitalocean", "hcloud": "hetzner"}
+    aliases = {
+        "digital-ocean": "digitalocean",
+        "do": "digitalocean",
+        "hcloud": "hetzner",
+        "amazon": "aws",
+        "amazon-web-services": "aws",
+        "ec2": "aws",
+    }
     provider_id = aliases.get(provider_id, provider_id)
     if provider_id not in PROVIDER_CONFIGS:
         raise ValueError(f"Unsupported VPS provider: {provider_id or 'missing'}.")

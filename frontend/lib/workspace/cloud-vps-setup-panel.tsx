@@ -17,12 +17,24 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   const headers = buildCookieAuthHeaders(method, { accept: 'application/json', ...(init.headers as Record<string, string> | undefined) });
   const response = await fetch(path, { ...init, headers, credentials: 'include' });
   if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status}.`);
+    // Surface the backend's own detail message when there is one (e.g. "This
+    // AWS connection request expired.") instead of just the status code —
+    // the AWS connect/confirm steps in particular rely on this to explain
+    // *why* a retryable failure happened. Falls back to the old generic
+    // message for a non-JSON or detail-less error body.
+    let detail = '';
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      detail = typeof body?.detail === 'string' ? body.detail : '';
+    } catch {
+      // Not JSON (or empty) — fall through to the generic message below.
+    }
+    throw new Error(detail || `Request failed with status ${response.status}.`);
   }
   return (await response.json()) as T;
 }
 
-export type VpsProviderId = 'digitalocean' | 'hetzner' | 'vultr';
+export type VpsProviderId = 'digitalocean' | 'hetzner' | 'vultr' | 'aws';
 type VpsStep = 'provider' | 'access' | 'plans' | 'region' | 'progress';
 type VpsProgressStage = 'idle' | 'creating' | 'installing' | 'connecting' | 'connected' | 'failed';
 
@@ -72,6 +84,23 @@ type VpsOAuthStartResponse = {
 type VpsTokenResponse = {
   provider?: string;
   token_id?: string;
+};
+
+type VpsAwsConnectResponse = {
+  provider?: string;
+  connection_id?: string;
+  account_id?: string;
+  external_id?: string;
+  role_arn?: string;
+  role_name?: string;
+  empyralis_account_id?: string;
+  quick_create_url?: string;
+};
+
+type VpsAwsConfirmResponse = {
+  provider?: string;
+  token_id?: string;
+  account_id?: string;
 };
 
 type VpsProviderRegionsPayload = {
@@ -132,9 +161,21 @@ export const CLOUD_VPS_PROVIDERS: Record<VpsProviderId, VpsProviderCard> = {
     logoSrc: '/brand-assets/infrastructure/vultr.svg',
     features: ['API token', 'Ubuntu 24.04', '25 regions'],
   },
+  aws: {
+    id: 'aws',
+    label: 'AWS',
+    tagline: 'No API keys',
+    accountMethod: 'CloudFormation role',
+    // Not used for aws's own connect step (which never renders the generic
+    // token-paste form — see the 'access' step below) — kept for type/
+    // structural parity with the other three providers.
+    tokenUrl: 'https://console.aws.amazon.com/cloudformation/',
+    logoSrc: '/brand-assets/infrastructure/aws.svg',
+    features: ['No API keys', 'CloudFormation', 'IAM role'],
+  },
 };
 
-export const CLOUD_VPS_PROVIDER_IDS: VpsProviderId[] = ['digitalocean', 'hetzner', 'vultr'];
+export const CLOUD_VPS_PROVIDER_IDS: VpsProviderId[] = ['digitalocean', 'hetzner', 'vultr', 'aws'];
 
 const PROVIDERS = CLOUD_VPS_PROVIDERS;
 const PROVIDER_IDS = CLOUD_VPS_PROVIDER_IDS;
@@ -244,6 +285,16 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
   const [selectedProvider, setSelectedProvider] = useState<VpsProviderId | null>(null);
   const [apiToken, setApiToken] = useState('');
   const [tokenId, setTokenId] = useState('');
+  // AWS's "access" step is a 2-stage sub-flow (enter account id -> open
+  // CloudFormation & confirm) rather than a single token paste — see the
+  // 'access' step JSX and startAwsConnect/confirmAwsConnect below.
+  const [awsAccountId, setAwsAccountId] = useState('');
+  const [awsSubStep, setAwsSubStep] = useState<'account' | 'stack'>('account');
+  const [awsConnectionId, setAwsConnectionId] = useState('');
+  const [awsExternalId, setAwsExternalId] = useState('');
+  const [awsRoleArn, setAwsRoleArn] = useState('');
+  const [awsEmpyralisAccountId, setAwsEmpyralisAccountId] = useState('');
+  const [awsQuickCreateUrl, setAwsQuickCreateUrl] = useState('');
   const [plans, setPlans] = useState<VpsPlan[]>([]);
   const [selectedPlanId, setSelectedPlanId] = useState('');
   const [regions, setRegions] = useState<VpsRegion[]>([]);
@@ -298,6 +349,13 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setSelectedProvider(null);
     setApiToken('');
     setTokenId('');
+    setAwsAccountId('');
+    setAwsSubStep('account');
+    setAwsConnectionId('');
+    setAwsExternalId('');
+    setAwsRoleArn('');
+    setAwsEmpyralisAccountId('');
+    setAwsQuickCreateUrl('');
     setPlans([]);
     setSelectedPlanId('');
     setRegions([]);
@@ -469,6 +527,13 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
   async function selectProvider(providerId: VpsProviderId) {
     setSelectedProvider(providerId);
     setApiToken('');
+    setAwsAccountId('');
+    setAwsSubStep('account');
+    setAwsConnectionId('');
+    setAwsExternalId('');
+    setAwsRoleArn('');
+    setAwsEmpyralisAccountId('');
+    setAwsQuickCreateUrl('');
     setError(null);
     setPlans([]);
     setSelectedPlanId('');
@@ -545,6 +610,97 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
       await finishConnecting(selectedProvider, nextTokenId);
     } catch (tokenError) {
       setError(tokenError instanceof Error ? tokenError.message : 'Could not verify provider account.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // AWS step 1: the customer's 12-digit account id is enough to derive the
+  // expected role ARN (fixed-role-name convention) and get back a pre-filled
+  // CloudFormation Quick-Create-Stack URL — nothing is trusted/connected yet.
+  async function startAwsConnect() {
+    const cleanAccountId = awsAccountId.trim();
+    if (!/^\d{12}$/.test(cleanAccountId)) {
+      setError('Enter your 12-digit AWS account id.');
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      const payload = await requestJson<VpsAwsConnectResponse>('/api/hardware/vps/aws/connect', {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ workspace_id: workspaceId, account_id: cleanAccountId }),
+      });
+      const connectionId = String(payload?.connection_id || '').trim();
+      const quickCreateUrl = String(payload?.quick_create_url || '').trim();
+      if (!connectionId || !quickCreateUrl) {
+        throw new Error('AWS connection details were not returned.');
+      }
+      setAwsConnectionId(connectionId);
+      setAwsExternalId(String(payload?.external_id || '').trim());
+      setAwsRoleArn(String(payload?.role_arn || '').trim());
+      setAwsEmpyralisAccountId(String(payload?.empyralis_account_id || '').trim());
+      setAwsQuickCreateUrl(quickCreateUrl);
+      setAwsSubStep('stack');
+    } catch (connectError) {
+      setError(connectError instanceof Error ? connectError.message : 'Could not start the AWS connection.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openAwsCloudFormation() {
+    if (!awsQuickCreateUrl) {
+      return;
+    }
+    const popup = window.open(awsQuickCreateUrl, '_blank', 'noopener,noreferrer');
+    if (!popup) {
+      // Popup blocked — fall back to navigating this tab; the panel state
+      // (connection id, role arn, etc.) is untouched either way, so coming
+      // back and clicking "Confirm" still works.
+      window.location.assign(awsQuickCreateUrl);
+    }
+  }
+
+  // AWS step 2: after the customer has (supposedly) run the stack, attempt
+  // sts:AssumeRole against the role ARN + ExternalId from step 1. A failure
+  // here just means the stack isn't done yet (or failed) — retryable, and
+  // awsConnectionId/awsRoleArn/etc. stay put so "Confirm" can simply be
+  // clicked again without re-entering the account id.
+  async function confirmAwsConnect() {
+    if (!awsConnectionId) {
+      setError('Start the AWS connection first.');
+      setAwsSubStep('account');
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      const payload = await requestJson<VpsAwsConfirmResponse>('/api/hardware/vps/aws/confirm', {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ workspace_id: workspaceId, connection_id: awsConnectionId }),
+      });
+      const nextTokenId = String(payload?.token_id || '').trim();
+      if (!nextTokenId) {
+        throw new Error('AWS did not return a connected account id.');
+      }
+      const accountLabel = `AWS ${String(payload?.account_id || awsAccountId).trim()}`;
+      saveConnection('aws', nextTokenId, accountLabel);
+      await finishConnecting('aws', nextTokenId);
+    } catch (confirmError) {
+      setError(
+        confirmError instanceof Error
+          ? confirmError.message
+          : 'Could not verify the AWS role yet — make sure the CloudFormation stack finished, then try again.',
+      );
     } finally {
       setBusy(false);
     }
@@ -858,33 +1014,99 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
                 {`Connect to create your ${selectedPlan.label} · ${selectedPlan.price_label} server.`}
               </p>
             ) : null}
-            {provider.id === 'digitalocean' ? (
+            {provider.id === 'aws' ? (
+              awsSubStep === 'account' ? (
+                <div className="cloud-vps-access-form">
+                  <p className="cloud-vps-panel__note">
+                    No API key to paste. Empyralis connects to AWS through a CloudFormation-created IAM
+                    role scoped to EC2 only — enter your AWS account id to get a ready-to-run setup link.
+                  </p>
+                  <label className="app-form-field">
+                    <span className="app-form-field__label">AWS Account ID</span>
+                    <input
+                      className="app-field"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      maxLength={12}
+                      value={awsAccountId}
+                      onChange={(event) => setAwsAccountId(event.target.value.replace(/[^0-9]/g, ''))}
+                      placeholder="123456789012"
+                    />
+                  </label>
+                  <AppButton
+                    tone="primary"
+                    type="button"
+                    onClick={() => void startAwsConnect()}
+                    disabled={busy || awsAccountId.trim().length !== 12}
+                  >
+                    {busy ? 'Preparing setup link' : 'Continue →'}
+                  </AppButton>
+                </div>
+              ) : (
+                <div className="cloud-vps-access-form">
+                  <p className="cloud-vps-panel__note">
+                    Open AWS CloudFormation and create the stack — the role name and external ID are
+                    already filled in below, nothing to type or paste there.
+                  </p>
+                  <dl className="cloud-vps-aws-detail">
+                    <dt>Granting access to</dt>
+                    <dd>{awsEmpyralisAccountId ? `Empyralis AWS account ${awsEmpyralisAccountId}` : '—'}</dd>
+                    <dt>Role (fixed name)</dt>
+                    <dd>{awsRoleArn || '—'}</dd>
+                    <dt>External ID</dt>
+                    <dd>{awsExternalId || '—'}</dd>
+                  </dl>
+                  <AppButton tone="secondary" type="button" onClick={openAwsCloudFormation} disabled={!awsQuickCreateUrl}>
+                    <span>Open AWS CloudFormation</span>
+                    <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
+                  </AppButton>
+                  <AppButton tone="primary" type="button" onClick={() => void confirmAwsConnect()} disabled={busy}>
+                    {busy ? 'Verifying role' : "I've created the stack — Confirm →"}
+                  </AppButton>
+                  <button
+                    type="button"
+                    className="cloud-vps-token-link"
+                    onClick={() => {
+                      setAwsSubStep('account');
+                      setError(null);
+                    }}
+                  >
+                    <span>Use a different AWS account</span>
+                  </button>
+                </div>
+              )
+            ) : (
               <>
-                <AppButton tone="primary" type="button" onClick={() => void startDigitalOceanOAuth()} disabled={busy}>
-                  {busy ? 'Opening DigitalOcean' : 'Log in with DigitalOcean'}
-                </AppButton>
-                <p className="cloud-vps-panel__note">Or connect with a personal access token:</p>
+                {provider.id === 'digitalocean' ? (
+                  <>
+                    <AppButton tone="primary" type="button" onClick={() => void startDigitalOceanOAuth()} disabled={busy}>
+                      {busy ? 'Opening DigitalOcean' : 'Log in with DigitalOcean'}
+                    </AppButton>
+                    <p className="cloud-vps-panel__note">Or connect with a personal access token:</p>
+                  </>
+                ) : null}
+                <div className="cloud-vps-access-form">
+                  <label className="app-form-field">
+                    <span className="app-form-field__label">API Token</span>
+                    <input
+                      className="app-field"
+                      type="password"
+                      value={apiToken}
+                      onChange={(event) => setApiToken(event.target.value)}
+                      placeholder="Paste API token"
+                    />
+                  </label>
+                  <a className="cloud-vps-token-link" href={provider.tokenUrl} target="_blank" rel="noreferrer">
+                    <span>{`Create token at ${provider.label}`}</span>
+                    <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
+                  </a>
+                  <AppButton tone="primary" type="button" onClick={() => void verifyApiToken()} disabled={busy || loadingPlans}>
+                    {busy || loadingPlans ? 'Verifying token' : 'Verify token →'}
+                  </AppButton>
+                </div>
               </>
-            ) : null}
-            <div className="cloud-vps-access-form">
-              <label className="app-form-field">
-                <span className="app-form-field__label">API Token</span>
-                <input
-                  className="app-field"
-                  type="password"
-                  value={apiToken}
-                  onChange={(event) => setApiToken(event.target.value)}
-                  placeholder="Paste API token"
-                />
-              </label>
-              <a className="cloud-vps-token-link" href={provider.tokenUrl} target="_blank" rel="noreferrer">
-                <span>{`Create token at ${provider.label}`}</span>
-                <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
-              </a>
-              <AppButton tone="primary" type="button" onClick={() => void verifyApiToken()} disabled={busy || loadingPlans}>
-                {busy || loadingPlans ? 'Verifying token' : 'Verify token →'}
-              </AppButton>
-            </div>
+            )}
             {error ? <p className="cloud-vps-panel__error">{error}</p> : null}
           </section>
         ) : null}

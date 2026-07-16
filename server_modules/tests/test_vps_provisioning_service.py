@@ -1,6 +1,8 @@
 import base64
 import io
+import pathlib
 import time
+import uuid
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
@@ -27,6 +29,162 @@ class _FakeUrlopenResponse:
 
     def read(self):
         return self._body
+
+
+# --- AWS test fixtures ------------------------------------------------------
+#
+# vps._boto3 is the single seam every AWS call in the service goes through
+# (see _aws_client / _assume_aws_role / _verify_aws_caller_identity) — these
+# fakes stand in for boto3.client(...), letting tests drive
+# sts:AssumeRole/sts:GetCallerIdentity and every ec2:* call the service makes
+# without touching real AWS.
+
+
+class _FakeStsClient:
+    def __init__(self, *, account_id: str = "123456789012", fail_assume_role: bool = False):
+        self.assume_role_calls: list[dict] = []
+        self.get_caller_identity_calls = 0
+        self._account_id = account_id
+        self._fail_assume_role = fail_assume_role
+
+    def assume_role(self, **kwargs):
+        self.assume_role_calls.append(kwargs)
+        if self._fail_assume_role:
+            raise vps._ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Role not found or trust policy not satisfied yet"}},
+                "AssumeRole",
+            )
+        return {
+            "Credentials": {
+                "AccessKeyId": "AKIAFAKEFAKEFAKEFAKE",
+                "SecretAccessKey": "fake_secret_access_key",
+                "SessionToken": "fake_session_token",
+            }
+        }
+
+    def get_caller_identity(self):
+        self.get_caller_identity_calls += 1
+        return {"Account": self._account_id}
+
+
+class _FakeEc2Client:
+    def __init__(
+        self,
+        *,
+        describe_regions_response=None,
+        describe_instance_types_response=None,
+        describe_images_response=None,
+        describe_vpcs_response=None,
+        describe_subnets_response=None,
+        describe_security_groups_response=None,
+        create_security_group_response=None,
+        describe_key_pairs_should_fail=True,
+        create_key_pair_response=None,
+        run_instances_response=None,
+        terminate_instances_response=None,
+    ):
+        self._describe_regions_response = describe_regions_response or {"Regions": []}
+        self._describe_instance_types_response = describe_instance_types_response or {"InstanceTypes": []}
+        self._describe_images_response = describe_images_response or {"Images": []}
+        self._describe_vpcs_response = describe_vpcs_response or {"Vpcs": []}
+        self._describe_subnets_response = describe_subnets_response or {"Subnets": []}
+        self._describe_security_groups_response = describe_security_groups_response or {"SecurityGroups": []}
+        self._create_security_group_response = create_security_group_response or {"GroupId": "sg-fake"}
+        self._describe_key_pairs_should_fail = describe_key_pairs_should_fail
+        self._create_key_pair_response = create_key_pair_response or {"KeyName": vps._AWS_KEY_PAIR_NAME}
+        self._run_instances_response = run_instances_response or {"Instances": [{"InstanceId": "i-fake"}]}
+        self._terminate_instances_response = terminate_instances_response or {}
+
+        self.describe_regions_calls = 0
+        self.describe_instance_types_calls: list[dict] = []
+        self.describe_images_calls: list[dict] = []
+        self.describe_vpcs_calls: list[dict] = []
+        self.describe_subnets_calls: list[dict] = []
+        self.describe_security_groups_calls: list[dict] = []
+        self.create_security_group_calls: list[dict] = []
+        self.authorize_security_group_ingress_calls: list[dict] = []
+        self.describe_key_pairs_calls: list[dict] = []
+        self.create_key_pair_calls: list[dict] = []
+        self.run_instances_calls: list[dict] = []
+        self.terminate_instances_calls: list[dict] = []
+
+    def describe_regions(self, **kwargs):
+        self.describe_regions_calls += 1
+        return self._describe_regions_response
+
+    def describe_instance_types(self, **kwargs):
+        self.describe_instance_types_calls.append(kwargs)
+        return self._describe_instance_types_response
+
+    def describe_images(self, **kwargs):
+        self.describe_images_calls.append(kwargs)
+        return self._describe_images_response
+
+    def describe_vpcs(self, **kwargs):
+        self.describe_vpcs_calls.append(kwargs)
+        return self._describe_vpcs_response
+
+    def describe_subnets(self, **kwargs):
+        self.describe_subnets_calls.append(kwargs)
+        return self._describe_subnets_response
+
+    def describe_security_groups(self, **kwargs):
+        self.describe_security_groups_calls.append(kwargs)
+        return self._describe_security_groups_response
+
+    def create_security_group(self, **kwargs):
+        self.create_security_group_calls.append(kwargs)
+        return self._create_security_group_response
+
+    def authorize_security_group_ingress(self, **kwargs):
+        self.authorize_security_group_ingress_calls.append(kwargs)
+        return {}
+
+    def describe_key_pairs(self, **kwargs):
+        self.describe_key_pairs_calls.append(kwargs)
+        if self._describe_key_pairs_should_fail:
+            raise vps._ClientError(
+                {"Error": {"Code": "InvalidKeyPair.NotFound", "Message": "not found"}}, "DescribeKeyPairs"
+            )
+        return {"KeyPairs": [{"KeyName": vps._AWS_KEY_PAIR_NAME}]}
+
+    def create_key_pair(self, **kwargs):
+        self.create_key_pair_calls.append(kwargs)
+        return self._create_key_pair_response
+
+    def run_instances(self, **kwargs):
+        self.run_instances_calls.append(kwargs)
+        return self._run_instances_response
+
+    def terminate_instances(self, **kwargs):
+        self.terminate_instances_calls.append(kwargs)
+        return self._terminate_instances_response
+
+
+class _FakeBoto3:
+    """Stands in for the `boto3` module itself — only `.client(...)` is ever
+    called on it (see vps._assume_aws_role / _verify_aws_caller_identity /
+    _aws_client)."""
+
+    def __init__(self, *, sts=None, ec2=None):
+        self._clients = {}
+        if sts is not None:
+            self._clients["sts"] = sts
+        if ec2 is not None:
+            self._clients["ec2"] = ec2
+        self.client_calls: list[dict] = []
+
+    def client(self, service_name, **kwargs):
+        self.client_calls.append({"service_name": service_name, **kwargs})
+        return self._clients[service_name]
+
+
+_AWS_ROLE_ARN = "arn:aws:iam::123456789012:role/EmpyralisVPSProvisioner"
+_AWS_CREDENTIALS = {"role_arn": _AWS_ROLE_ARN, "external_id": "ext-test-id", "account_id": "123456789012"}
+
+
+def _fake_aws_image(image_id="ami-fake", created="2026-01-01T00:00:00.000Z", root_device="/dev/sda1"):
+    return {"ImageId": image_id, "CreationDate": created, "RootDeviceName": root_device}
 
 
 def test_cloud_init_script_runs_agent_computer_installer():
@@ -1201,3 +1359,805 @@ async def test_hardware_vps_delete_route_enforces_owner_access():
     assert response["status"] == "deleted"
     access_mock.assert_called_once_with({"user_id": "user-1"}, "ws-1", minimum_role="owner")
     delete_mock.assert_called_once_with("vps_1")
+
+
+# =============================================================================
+# AWS: CloudFormation cross-account IAM role connect flow
+# =============================================================================
+
+
+def test_normalize_provider_resolves_aws_aliases():
+    assert vps._normalize_provider("aws") == "aws"
+    assert vps._normalize_provider("AWS") == "aws"
+    assert vps._normalize_provider("amazon") == "aws"
+    assert vps._normalize_provider("amazon-web-services") == "aws"
+    assert vps._normalize_provider("ec2") == "aws"
+
+
+def test_aws_role_arn_for_account_uses_fixed_role_name_convention():
+    assert (
+        vps.aws_role_arn_for_account("123456789012")
+        == "arn:aws:iam::123456789012:role/EmpyralisVPSProvisioner"
+    )
+    with pytest.raises(ValueError):
+        vps.aws_role_arn_for_account("12345")
+    with pytest.raises(ValueError):
+        vps.aws_role_arn_for_account("12345678901a")
+
+
+def test_store_vps_provider_token_rejects_aws():
+    # AWS connects via create_aws_connect_intent/confirm_aws_connection, not
+    # a pasted token — the generic token route must refuse it outright
+    # rather than silently mis-storing a role_arn as though it were a
+    # bearer secret.
+    with pytest.raises(vps.VPSProvisioningError, match="CloudFormation"):
+        vps.store_vps_provider_token(
+            provider="aws",
+            workspace_id="ws-1",
+            tenant_id="tenant-1",
+            user_id="user-1",
+            credentials={"role_arn": _AWS_ROLE_ARN},
+        )
+
+
+# --- create_aws_connect_intent: ExternalId + Quick-Create URL generation ----
+
+
+def test_create_aws_connect_intent_generates_external_id_and_quick_create_url(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+    monkeypatch.setenv("EMPYRALIS_AWS_ACCOUNT_ID", "999999999999")
+    monkeypatch.setenv(
+        "EMPYRALIS_AWS_CFN_TEMPLATE_URL",
+        "https://empyralis-templates.s3.amazonaws.com/empyralis-vps-role.yaml",
+    )
+
+    result = vps.create_aws_connect_intent(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+    )
+
+    assert result["provider"] == "aws"
+    assert result["account_id"] == "123456789012"
+    assert result["role_arn"] == "arn:aws:iam::123456789012:role/EmpyralisVPSProvisioner"
+    assert result["role_name"] == vps.AWS_CROSS_ACCOUNT_ROLE_NAME
+    assert result["empyralis_account_id"] == "999999999999"
+    assert result["connection_id"].startswith("vps_aws_pending_")
+
+    # A real UUID4 — not just any random-looking string.
+    assert str(uuid.UUID(result["external_id"])) == result["external_id"]
+
+    quick_create_url = result["quick_create_url"]
+    assert quick_create_url.startswith(
+        "https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#"
+    )
+    fragment = quick_create_url.split("#", 1)[1]
+    assert fragment.startswith("/stacks/create/review?")
+    query = parse_qs(urlsplit(fragment).query)
+    assert query["templateURL"] == ["https://empyralis-templates.s3.amazonaws.com/empyralis-vps-role.yaml"]
+    assert query["stackName"] == ["empyralis-vps"]
+    assert query["param_ExternalId"] == [result["external_id"]]
+    assert query["param_EmpyralisAccountId"] == ["999999999999"]
+
+
+def test_create_aws_connect_intent_rejects_malformed_account_id(monkeypatch):
+    monkeypatch.setenv("EMPYRALIS_AWS_ACCOUNT_ID", "999999999999")
+    monkeypatch.setenv("EMPYRALIS_AWS_CFN_TEMPLATE_URL", "https://example.com/template.yaml")
+
+    with pytest.raises(ValueError):
+        vps.create_aws_connect_intent(
+            workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="not-an-account-id"
+        )
+    with pytest.raises(ValueError):
+        vps.create_aws_connect_intent(
+            workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="12345"
+        )
+
+
+def test_create_aws_connect_intent_fails_gracefully_without_account_id_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.delenv("EMPYRALIS_AWS_ACCOUNT_ID", raising=False)
+    monkeypatch.setenv("EMPYRALIS_AWS_CFN_TEMPLATE_URL", "https://example.com/template.yaml")
+
+    with pytest.raises(vps.VPSProvisioningError, match="EMPYRALIS_AWS_ACCOUNT_ID"):
+        vps.create_aws_connect_intent(
+            workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+        )
+
+
+def test_create_aws_connect_intent_fails_gracefully_without_template_url_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setenv("EMPYRALIS_AWS_ACCOUNT_ID", "999999999999")
+    monkeypatch.delenv("EMPYRALIS_AWS_CFN_TEMPLATE_URL", raising=False)
+
+    with pytest.raises(vps.VPSProvisioningError, match="EMPYRALIS_AWS_CFN_TEMPLATE_URL"):
+        vps.create_aws_connect_intent(
+            workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+        )
+
+
+# --- The AssumeRole wrapper --------------------------------------------------
+
+
+def test_assume_aws_role_fails_gracefully_without_boto3(monkeypatch):
+    monkeypatch.setattr(vps, "_boto3", None)
+
+    with pytest.raises(vps.VPSProvisioningError, match="boto3"):
+        vps._assume_aws_role(_AWS_ROLE_ARN, "ext-1")
+
+
+def test_assume_aws_role_requires_role_arn_and_external_id():
+    with pytest.raises(ValueError):
+        vps._assume_aws_role("", "ext-1")
+    with pytest.raises(ValueError):
+        vps._assume_aws_role(_AWS_ROLE_ARN, "")
+
+
+def test_assume_aws_role_surfaces_missing_empyralis_credentials(monkeypatch):
+    class _RaisingStsClient:
+        def assume_role(self, **kwargs):
+            raise vps._NoCredentialsError()
+
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_RaisingStsClient()))
+
+    with pytest.raises(vps.VPSProvisioningError, match="Empyralis's own AWS credentials"):
+        vps._assume_aws_role(_AWS_ROLE_ARN, "ext-1")
+
+
+def test_assume_aws_role_returns_short_lived_session_credentials(monkeypatch):
+    sts_client = _FakeStsClient()
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=sts_client))
+
+    creds = vps._assume_aws_role(_AWS_ROLE_ARN, "ext-1")
+
+    assert creds == {
+        "aws_access_key_id": "AKIAFAKEFAKEFAKEFAKE",
+        "aws_secret_access_key": "fake_secret_access_key",
+        "aws_session_token": "fake_session_token",
+    }
+    assert sts_client.assume_role_calls[0]["RoleArn"] == _AWS_ROLE_ARN
+    assert sts_client.assume_role_calls[0]["ExternalId"] == "ext-1"
+    assert sts_client.assume_role_calls[0]["RoleSessionName"] == vps.AWS_ROLE_SESSION_NAME
+
+
+def test_aws_client_requires_role_arn_and_external_id():
+    with pytest.raises(ValueError):
+        vps._aws_client("ec2", {"role_arn": ""}, region="us-east-1")
+
+
+# --- confirm_aws_connection: AssumeRole + GetCallerIdentity + storage -------
+
+
+def test_confirm_aws_connection_assumes_role_and_stores_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+    monkeypatch.setenv("EMPYRALIS_AWS_ACCOUNT_ID", "999999999999")
+    monkeypatch.setenv("EMPYRALIS_AWS_CFN_TEMPLATE_URL", "https://example.com/template.yaml")
+
+    intent = vps.create_aws_connect_intent(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+    )
+
+    sts_client = _FakeStsClient(account_id="123456789012")
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=sts_client))
+
+    result = vps.confirm_aws_connection(
+        connection_id=intent["connection_id"], workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1"
+    )
+
+    assert result == {"provider": "aws", "token_id": result["token_id"], "account_id": "123456789012"}
+    assert result["token_id"].startswith("vps_token_")
+    assert sts_client.assume_role_calls[0]["RoleArn"] == "arn:aws:iam::123456789012:role/EmpyralisVPSProvisioner"
+    assert sts_client.assume_role_calls[0]["ExternalId"] == intent["external_id"]
+    assert sts_client.get_caller_identity_calls == 1
+
+    loaded = vps.load_vps_provider_credentials(
+        result["token_id"], provider="aws", workspace_id="ws-1", user_id="user-1"
+    )
+    assert loaded["role_arn"] == "arn:aws:iam::123456789012:role/EmpyralisVPSProvisioner"
+    assert loaded["external_id"] == intent["external_id"]
+    assert loaded["account_id"] == "123456789012"
+
+    # The pending intent is consumed on success — a second confirm can't
+    # replay it.
+    with pytest.raises(KeyError):
+        vps.confirm_aws_connection(
+            connection_id=intent["connection_id"], workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1"
+        )
+
+
+def test_confirm_aws_connection_is_retryable_when_role_not_ready_yet(tmp_path, monkeypatch):
+    # The customer clicking "Confirm" before actually finishing the
+    # CloudFormation stack must be a normal, retryable failure — not one
+    # that burns the connection_id.
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+    monkeypatch.setenv("EMPYRALIS_AWS_ACCOUNT_ID", "999999999999")
+    monkeypatch.setenv("EMPYRALIS_AWS_CFN_TEMPLATE_URL", "https://example.com/template.yaml")
+
+    intent = vps.create_aws_connect_intent(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+    )
+
+    monkeypatch.setattr(
+        vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(account_id="123456789012", fail_assume_role=True))
+    )
+    with pytest.raises(vps.VPSProvisioningError):
+        vps.confirm_aws_connection(
+            connection_id=intent["connection_id"], workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1"
+        )
+
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(account_id="123456789012")))
+    result = vps.confirm_aws_connection(
+        connection_id=intent["connection_id"], workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1"
+    )
+    assert result["provider"] == "aws"
+
+
+def test_confirm_aws_connection_rejects_caller_identity_account_mismatch(tmp_path, monkeypatch):
+    # AssumeRole itself can succeed (role exists, ExternalId matches) while
+    # still resolving to the wrong account if the customer mistyped their
+    # account id in a way that happens to be assumable — GetCallerIdentity
+    # is the independent check that catches this.
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+    monkeypatch.setenv("EMPYRALIS_AWS_ACCOUNT_ID", "999999999999")
+    monkeypatch.setenv("EMPYRALIS_AWS_CFN_TEMPLATE_URL", "https://example.com/template.yaml")
+
+    intent = vps.create_aws_connect_intent(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+    )
+
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(account_id="000000000099")))
+
+    with pytest.raises(vps.VPSProvisioningError, match="different account"):
+        vps.confirm_aws_connection(
+            connection_id=intent["connection_id"], workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1"
+        )
+
+
+def test_confirm_aws_connection_enforces_workspace_scope(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+    monkeypatch.setenv("EMPYRALIS_AWS_ACCOUNT_ID", "999999999999")
+    monkeypatch.setenv("EMPYRALIS_AWS_CFN_TEMPLATE_URL", "https://example.com/template.yaml")
+
+    intent = vps.create_aws_connect_intent(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+    )
+
+    with pytest.raises(KeyError):
+        vps.confirm_aws_connection(
+            connection_id=intent["connection_id"], workspace_id="ws-OTHER", tenant_id="tenant-1", user_id="user-1"
+        )
+
+
+def test_confirm_aws_connection_expires_after_ttl(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+    monkeypatch.setenv("EMPYRALIS_AWS_ACCOUNT_ID", "999999999999")
+    monkeypatch.setenv("EMPYRALIS_AWS_CFN_TEMPLATE_URL", "https://example.com/template.yaml")
+
+    intent = vps.create_aws_connect_intent(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+    )
+    with vps._STATE_LOCK:
+        state = vps._load_state()
+        state["aws_pending"][intent["connection_id"]]["created_at"] = "2000-01-01T00:00:00Z"
+        vps._write_state(state)
+
+    with pytest.raises(vps.VPSProvisioningError, match="expired"):
+        vps.confirm_aws_connection(
+            connection_id=intent["connection_id"], workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1"
+        )
+
+
+# --- Plan normalization (pure functions) ------------------------------------
+
+
+def test_normalize_aws_plans_merges_specs_and_pricing():
+    instance_types = [
+        {"InstanceType": "t3.micro", "VCpuInfo": {"DefaultVCpus": 2}, "MemoryInfo": {"SizeInMiB": 1024}},
+        {"InstanceType": "t3.small", "VCpuInfo": {"DefaultVCpus": 2}, "MemoryInfo": {"SizeInMiB": 2048}},
+        # No pricing entry below for this one — must be dropped, never
+        # returned with a bogus $0/mo price.
+        {"InstanceType": "t3.nano", "VCpuInfo": {"DefaultVCpus": 2}, "MemoryInfo": {"SizeInMiB": 1024}},
+    ]
+    pricing = {"t3.micro": 7.59, "t3.small": 15.18}
+
+    plans = vps._normalize_aws_plans(instance_types, pricing)
+
+    assert [p.slug for p in plans] == ["t3.micro", "t3.small"]
+    assert plans[0].price_label == "$7.59/mo"
+    assert plans[0].disk_gb == vps._AWS_DEFAULT_ROOT_VOLUME_GB
+    assert plans[0].vcpus == 2
+    assert plans[0].memory_mb == 1024
+    # First plan meeting _mark_recommended's >=2GB fallback threshold.
+    assert plans[1].recommended is True
+    assert plans[0].recommended is False
+
+
+def test_normalize_aws_plans_drops_types_below_memory_floor():
+    instance_types = [{"InstanceType": "t3.nano", "VCpuInfo": {"DefaultVCpus": 2}, "MemoryInfo": {"SizeInMiB": 512}}]
+    pricing = {"t3.nano": 3.8}
+
+    assert vps._normalize_aws_plans(instance_types, pricing) == []
+
+
+def test_normalize_aws_regions_sorts_and_labels_known_regions():
+    items = [{"RegionName": "us-west-2"}, {"RegionName": "us-east-1"}, {"RegionName": "xx-made-up-1"}]
+
+    regions = vps._normalize_aws_regions(items)
+
+    assert [r["id"] for r in regions] == ["us-east-1", "us-west-2", "xx-made-up-1"]
+    assert regions[0]["label"] == "US East (N. Virginia)"
+    # Unknown region falls back to its own code as the label instead of
+    # being dropped — never "available nowhere" just for lacking a
+    # human-friendly name in the curated map.
+    assert regions[2]["label"] == "xx-made-up-1"
+
+
+def test_fetch_aws_instance_pricing_falls_back_to_static_table_on_failure(monkeypatch):
+    def _boom():
+        raise vps.urlerror.URLError("unreachable")
+
+    monkeypatch.setattr(vps, "_fetch_vantage_pricing_raw", _boom)
+
+    assert vps._fetch_aws_instance_pricing() == vps._AWS_STATIC_MONTHLY_PRICE_USD
+
+
+def test_fetch_aws_instance_pricing_prefers_live_vantage_data(monkeypatch):
+    monkeypatch.setattr(
+        vps,
+        "_fetch_vantage_pricing_raw",
+        lambda: [
+            {"instance_type": "t3.small", "pricing": {"us-east-1": {"linux": {"ondemand": "0.0208"}}}},
+            # Not one of the curated candidate types — must be ignored.
+            {"instance_type": "m5.24xlarge", "pricing": {"us-east-1": {"linux": {"ondemand": "4.608"}}}},
+        ],
+    )
+
+    pricing = vps._fetch_aws_instance_pricing()
+
+    assert pricing == {"t3.small": round(0.0208 * 730, 2)}
+
+
+# --- Live boto3/STS/EC2-backed fetches --------------------------------------
+
+
+def test_fetch_aws_regions_uses_assumed_role_ec2_client(monkeypatch):
+    sts_client = _FakeStsClient(account_id="123456789012")
+    ec2_client = _FakeEc2Client(
+        describe_regions_response={"Regions": [{"RegionName": "us-west-2"}, {"RegionName": "eu-west-1"}]}
+    )
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=sts_client, ec2=ec2_client))
+
+    regions = vps._fetch_aws_regions(_AWS_CREDENTIALS)
+
+    assert [r["id"] for r in regions] == ["eu-west-1", "us-west-2"]
+    assert sts_client.assume_role_calls[0]["ExternalId"] == "ext-test-id"
+    assert ec2_client.describe_regions_calls == 1
+
+
+def test_fetch_aws_region_ids_never_raises(monkeypatch):
+    class _FailingEc2(_FakeEc2Client):
+        def describe_regions(self, **kwargs):
+            raise vps._ClientError({"Error": {"Code": "Throttling", "Message": "slow down"}}, "DescribeRegions")
+
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(), ec2=_FailingEc2()))
+
+    assert vps._fetch_aws_region_ids(_AWS_CREDENTIALS) == set()
+
+
+def test_fetch_aws_plans_end_to_end_with_live_pricing(monkeypatch):
+    sts_client = _FakeStsClient(account_id="123456789012")
+    ec2_client = _FakeEc2Client(
+        describe_instance_types_response={
+            "InstanceTypes": [{"InstanceType": "t3.small", "VCpuInfo": {"DefaultVCpus": 2}, "MemoryInfo": {"SizeInMiB": 2048}}]
+        }
+    )
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=sts_client, ec2=ec2_client))
+    monkeypatch.setattr(
+        vps,
+        "_fetch_vantage_pricing_raw",
+        lambda: [{"instance_type": "t3.small", "pricing": {"us-east-1": {"linux": {"ondemand": "0.0208"}}}}],
+    )
+
+    plans = vps._fetch_aws_plans(_AWS_CREDENTIALS)
+
+    assert len(plans) == 1
+    assert plans[0].slug == "t3.small"
+    assert plans[0].price_monthly == round(0.0208 * 730, 2)
+    # DescribeInstanceTypes was scoped to the curated candidate list, not a
+    # full, unbounded enumeration of every EC2 instance type.
+    assert set(ec2_client.describe_instance_types_calls[0]["InstanceTypes"]) == set(vps._AWS_CANDIDATE_INSTANCE_TYPES)
+
+
+# --- Provisioning / deletion -------------------------------------------------
+
+
+def test_provision_aws_creates_instance_with_resolved_ami_network_and_disk(monkeypatch):
+    sts_client = _FakeStsClient(account_id="123456789012")
+    ec2_client = _FakeEc2Client(
+        describe_images_response={
+            "Images": [
+                _fake_aws_image("ami-old", "2025-01-01T00:00:00.000Z", "/dev/sda1"),
+                _fake_aws_image("ami-new", "2026-06-01T00:00:00.000Z", "/dev/xvda"),
+            ]
+        },
+        describe_vpcs_response={"Vpcs": [{"VpcId": "vpc-1", "IsDefault": True}]},
+        describe_subnets_response={"Subnets": [{"SubnetId": "subnet-1"}]},
+        describe_security_groups_response={"SecurityGroups": []},
+        create_security_group_response={"GroupId": "sg-1"},
+        run_instances_response={"Instances": [{"InstanceId": "i-0123456789abcdef0", "PublicIpAddress": "198.51.100.5"}]},
+    )
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=sts_client, ec2=ec2_client))
+
+    result = vps._provision_aws(
+        _AWS_CREDENTIALS, "us-west-2", "t3.small", "empyralis-agent-computer-aws-abcd", "#cloud-config\nfoo"
+    )
+
+    assert result.provider == "aws"
+    assert result.provider_resource_id == "i-0123456789abcdef0"
+    assert result.public_ip == "198.51.100.5"
+    assert result.region == "us-west-2"
+    assert result.size == "t3.small"
+
+    run_call = ec2_client.run_instances_calls[0]
+    assert run_call["ImageId"] == "ami-new"  # the NEWEST match, not just the first returned
+    assert run_call["InstanceType"] == "t3.small"
+    assert run_call["UserData"] == "#cloud-config\nfoo"  # plain text — botocore base64-encodes it, not us
+    assert run_call["BlockDeviceMappings"][0]["DeviceName"] == "/dev/xvda"  # from the AMI itself, not hardcoded
+    assert run_call["BlockDeviceMappings"][0]["Ebs"]["VolumeSize"] == vps._AWS_DEFAULT_ROOT_VOLUME_GB
+    assert run_call["NetworkInterfaces"][0]["SubnetId"] == "subnet-1"
+    assert run_call["NetworkInterfaces"][0]["AssociatePublicIpAddress"] is True
+    assert run_call["NetworkInterfaces"][0]["Groups"] == ["sg-1"]
+    assert run_call["KeyName"] == vps._AWS_KEY_PAIR_NAME
+    # A security group had to be created (none existed) — and given an
+    # ingress rule, since create_security_group_response was reached at all.
+    assert ec2_client.create_security_group_calls
+    assert ec2_client.authorize_security_group_ingress_calls[0]["GroupId"] == "sg-1"
+
+    # boto3.client("ec2", ...) was built with the *box's* region, not aws's
+    # module-level default_region — us-east-1 in PROVIDER_CONFIGS.
+    fake_boto3 = vps._boto3
+    ec2_client_call = next(c for c in fake_boto3.client_calls if c["service_name"] == "ec2")
+    assert ec2_client_call["region_name"] == "us-west-2"
+
+
+def test_provision_aws_omits_key_name_when_key_pair_management_fails(monkeypatch):
+    class _NoKeyPairEc2(_FakeEc2Client):
+        def create_key_pair(self, **kwargs):
+            raise vps._ClientError({"Error": {"Code": "UnauthorizedOperation", "Message": "denied"}}, "CreateKeyPair")
+
+    ec2_client = _NoKeyPairEc2(
+        describe_images_response={"Images": [_fake_aws_image()]},
+        describe_vpcs_response={"Vpcs": [{"VpcId": "vpc-1"}]},
+        describe_subnets_response={"Subnets": [{"SubnetId": "subnet-1"}]},
+        describe_security_groups_response={"SecurityGroups": [{"GroupId": "sg-1"}]},
+        run_instances_response={"Instances": [{"InstanceId": "i-nokeypair"}]},
+    )
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(), ec2=ec2_client))
+
+    result = vps._provision_aws(_AWS_CREDENTIALS, "us-east-1", "t3.micro", "name", "#cloud-config\n")
+
+    assert result.provider_resource_id == "i-nokeypair"
+    assert "KeyName" not in ec2_client.run_instances_calls[0]
+
+
+def test_provision_aws_raises_when_no_vpc_available(monkeypatch):
+    ec2_client = _FakeEc2Client(
+        describe_images_response={"Images": [_fake_aws_image()]},
+        describe_vpcs_response={"Vpcs": []},
+    )
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(), ec2=ec2_client))
+
+    with pytest.raises(vps.VPSProvisioningError, match="VPC"):
+        vps._provision_aws(_AWS_CREDENTIALS, "us-east-1", "t3.micro", "name", "#cloud-config\n")
+
+    assert not ec2_client.run_instances_calls
+
+
+def test_delete_aws_resource_terminates_instance_in_recorded_region(monkeypatch):
+    ec2_client = _FakeEc2Client()
+    fake_boto3 = _FakeBoto3(sts=_FakeStsClient(), ec2=ec2_client)
+    monkeypatch.setattr(vps, "_boto3", fake_boto3)
+
+    vps._delete_aws_resource(_AWS_CREDENTIALS, "eu-west-1", "i-abc")
+
+    assert ec2_client.terminate_instances_calls == [{"InstanceIds": ["i-abc"]}]
+    ec2_client_call = next(c for c in fake_boto3.client_calls if c["service_name"] == "ec2")
+    assert ec2_client_call["region_name"] == "eu-west-1"
+
+
+# --- End to end through the shared provision_vps / delete_recorded_vps -----
+
+
+def test_provision_vps_aws_end_to_end(monkeypatch):
+    ec2_client = _FakeEc2Client(
+        describe_images_response={"Images": [_fake_aws_image()]},
+        describe_vpcs_response={"Vpcs": [{"VpcId": "vpc-1"}]},
+        describe_subnets_response={"Subnets": [{"SubnetId": "subnet-1"}]},
+        describe_security_groups_response={"SecurityGroups": [{"GroupId": "sg-1"}]},
+        run_instances_response={"Instances": [{"InstanceId": "i-abc123", "PublicIpAddress": "203.0.113.9"}]},
+    )
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(), ec2=ec2_client))
+
+    result = vps.provision_vps("aws", _AWS_CREDENTIALS, "us-west-2", "t3.medium", "pair_aws")
+
+    assert result.provider == "aws"
+    assert result.provider_resource_id == "i-abc123"
+    assert result.public_ip == "203.0.113.9"
+    run_call = ec2_client.run_instances_calls[0]
+    assert run_call["InstanceType"] == "t3.medium"
+    assert "#cloud-config" in run_call["UserData"]
+    assert "pair_aws" in run_call["UserData"]
+
+
+def test_provision_vps_aws_invalid_region_rejected_before_any_aws_call():
+    with pytest.raises(ValueError):
+        vps.provision_vps("aws", _AWS_CREDENTIALS, "not-a-real-region", None, "pair_aws")
+
+
+def test_provision_vps_accepts_live_only_aws_region(monkeypatch):
+    # "af-south-1" is not in aws's static PROVIDER_CONFIGS regions tuple, but
+    # IS returned by the live DescribeRegions call — same defect-#3-shaped
+    # guarantee the DigitalOcean live-region tests already pin.
+    ec2_client = _FakeEc2Client(
+        describe_regions_response={"Regions": [{"RegionName": "af-south-1"}]},
+        describe_images_response={"Images": [_fake_aws_image()]},
+        describe_vpcs_response={"Vpcs": [{"VpcId": "vpc-1"}]},
+        describe_subnets_response={"Subnets": [{"SubnetId": "subnet-1"}]},
+        describe_security_groups_response={"SecurityGroups": [{"GroupId": "sg-1"}]},
+        run_instances_response={"Instances": [{"InstanceId": "i-live-region"}]},
+    )
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(), ec2=ec2_client))
+
+    result = vps.provision_vps(
+        "aws", _AWS_CREDENTIALS, "af-south-1", None, "pair_aws", token_id="vps_token_live_aws"
+    )
+
+    assert result.provider_resource_id == "i-live-region"
+
+
+def test_provision_vps_aws_still_accepts_static_region_when_live_fetch_fails(monkeypatch):
+    class _FailingRegionsEc2(_FakeEc2Client):
+        def describe_regions(self, **kwargs):
+            raise vps._ClientError({"Error": {"Code": "Throttling", "Message": "slow down"}}, "DescribeRegions")
+
+    ec2_client = _FailingRegionsEc2(
+        describe_images_response={"Images": [_fake_aws_image()]},
+        describe_vpcs_response={"Vpcs": [{"VpcId": "vpc-1"}]},
+        describe_subnets_response={"Subnets": [{"SubnetId": "subnet-1"}]},
+        describe_security_groups_response={"SecurityGroups": [{"GroupId": "sg-1"}]},
+        run_instances_response={"Instances": [{"InstanceId": "i-static-region"}]},
+    )
+    monkeypatch.setattr(vps, "_boto3", _FakeBoto3(sts=_FakeStsClient(), ec2=ec2_client))
+
+    result = vps.provision_vps(
+        "aws", _AWS_CREDENTIALS, "us-east-1", None, "pair_aws", token_id="vps_token_live_aws"
+    )
+
+    assert result.provider_resource_id == "i-static-region"
+
+
+def test_delete_recorded_vps_terminates_aws_instance(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    vps.record_vps_provision(
+        vps_id="vps_aws_1",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="aws",
+        provider_resource_id="i-0123456789abcdef0",
+        public_ip="198.51.100.5",
+        region="eu-west-1",
+        size="t3.small",
+        status="provisioning",
+        pairing_token="pair_aws",
+        credentials=_AWS_CREDENTIALS,
+    )
+
+    ec2_client = _FakeEc2Client()
+    fake_boto3 = _FakeBoto3(sts=_FakeStsClient(), ec2=ec2_client)
+    monkeypatch.setattr(vps, "_boto3", fake_boto3)
+
+    result = vps.delete_recorded_vps("vps_aws_1")
+
+    assert result["status"] == "deleted"
+    assert ec2_client.terminate_instances_calls == [{"InstanceIds": ["i-0123456789abcdef0"]}]
+    ec2_client_call = next(c for c in fake_boto3.client_calls if c["service_name"] == "ec2")
+    assert ec2_client_call["region_name"] == "eu-west-1"
+
+
+@pytest.mark.asyncio
+async def test_hardware_vps_plans_route_requires_connected_account_for_aws_without_token():
+    # Unlike Vultr, AWS has no pre-connect public plan catalog (first pass —
+    # DescribeInstanceTypes needs an assumed role) — no token_id must behave
+    # exactly like DigitalOcean/Hetzner's equivalent guard.
+    with pytest.raises(routes_gateway.HTTPException) as exc_info:
+        await routes_gateway.get_hardware_vps_plans(
+            "aws", token_id=None, workspace_id=None, current_user={"user_id": "user-1"}
+        )
+
+    assert exc_info.value.status_code == 400
+
+
+# --- Routes: /hardware/vps/aws/connect and /hardware/vps/aws/confirm -------
+
+
+@pytest.mark.asyncio
+async def test_start_aws_vps_connect_route_enforces_owner_access_and_returns_intent():
+    current_user = {"user_id": "user-1"}
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1") as access_mock,
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "create_aws_connect_intent",
+            return_value={
+                "provider": "aws",
+                "connection_id": "vps_aws_pending_1",
+                "quick_create_url": "https://example.com",
+            },
+        ) as intent_mock,
+    ):
+        body = routes_gateway.HardwareVPSAwsConnectRequest(workspace_id="ws-1", account_id="123456789012")
+        response = await routes_gateway.start_aws_vps_connect(body, current_user=current_user)
+
+    assert response["connection_id"] == "vps_aws_pending_1"
+    access_mock.assert_called_once_with(current_user, "ws-1", minimum_role="owner")
+    intent_mock.assert_called_once_with(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", account_id="123456789012"
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_aws_vps_connect_route_maps_invalid_account_id_to_400():
+    current_user = {"user_id": "user-1"}
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "create_aws_connect_intent",
+            side_effect=ValueError("AWS account id must be exactly 12 digits."),
+        ),
+    ):
+        body = routes_gateway.HardwareVPSAwsConnectRequest(workspace_id="ws-1", account_id="not-valid")
+        with pytest.raises(routes_gateway.HTTPException) as exc_info:
+            await routes_gateway.start_aws_vps_connect(body, current_user=current_user)
+
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_start_aws_vps_connect_route_maps_unconfigured_backend_to_500():
+    current_user = {"user_id": "user-1"}
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "create_aws_connect_intent",
+            side_effect=vps.VPSProvisioningError("AWS is not configured on this backend."),
+        ),
+    ):
+        body = routes_gateway.HardwareVPSAwsConnectRequest(workspace_id="ws-1", account_id="123456789012")
+        with pytest.raises(routes_gateway.HTTPException) as exc_info:
+            await routes_gateway.start_aws_vps_connect(body, current_user=current_user)
+
+    assert exc_info.value.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_confirm_aws_vps_connect_route_maps_expired_intent_to_404():
+    current_user = {"user_id": "user-1"}
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "confirm_aws_connection",
+            side_effect=KeyError("vps_aws_pending_missing"),
+        ),
+    ):
+        body = routes_gateway.HardwareVPSAwsConfirmRequest(workspace_id="ws-1", connection_id="vps_aws_pending_missing")
+        with pytest.raises(routes_gateway.HTTPException) as exc_info:
+            await routes_gateway.confirm_aws_vps_connect(body, current_user=current_user)
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_confirm_aws_vps_connect_route_maps_role_not_ready_to_502():
+    current_user = {"user_id": "user-1"}
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "confirm_aws_connection",
+            side_effect=vps.VPSProvisioningError("Could not assume the Empyralis VPS role."),
+        ),
+    ):
+        body = routes_gateway.HardwareVPSAwsConfirmRequest(workspace_id="ws-1", connection_id="vps_aws_pending_1")
+        with pytest.raises(routes_gateway.HTTPException) as exc_info:
+            await routes_gateway.confirm_aws_vps_connect(body, current_user=current_user)
+
+    assert exc_info.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_confirm_aws_vps_connect_route_returns_token_on_success():
+    current_user = {"user_id": "user-1"}
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1") as access_mock,
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "confirm_aws_connection",
+            return_value={"provider": "aws", "token_id": "vps_token_abc", "account_id": "123456789012"},
+        ) as confirm_mock,
+    ):
+        body = routes_gateway.HardwareVPSAwsConfirmRequest(workspace_id="ws-1", connection_id="vps_aws_pending_1")
+        response = await routes_gateway.confirm_aws_vps_connect(body, current_user=current_user)
+
+    assert response["token_id"] == "vps_token_abc"
+    access_mock.assert_called_once_with(current_user, "ws-1", minimum_role="owner")
+    confirm_mock.assert_called_once_with(
+        connection_id="vps_aws_pending_1", workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1"
+    )
+
+
+# --- deploy/aws/empyralis-vps-role.yaml <-> Python constant consistency ----
+
+
+def test_aws_cloudformation_template_role_name_matches_constant():
+    import yaml
+
+    template_path = pathlib.Path(__file__).resolve().parents[2] / "deploy" / "aws" / "empyralis-vps-role.yaml"
+
+    class _Loader(yaml.SafeLoader):
+        pass
+
+    _Loader.add_multi_constructor("!", lambda loader, tag_suffix, node: None)
+
+    with template_path.open("r", encoding="utf-8") as handle:
+        template = yaml.load(handle, Loader=_Loader)
+
+    role_properties = template["Resources"]["EmpyralisVPSProvisionerRole"]["Properties"]
+    assert role_properties["RoleName"] == vps.AWS_CROSS_ACCOUNT_ROLE_NAME
+
+    # Every IAM action _provision_aws/_fetch_aws_plans/_fetch_aws_regions/
+    # _delete_aws_resource actually call must be covered by the template's
+    # inline policy — catches the policy and the implementation silently
+    # drifting apart from each other.
+    statements = role_properties["Policies"][0]["PolicyDocument"]["Statement"]
+    granted_actions = {action for statement in statements for action in statement["Action"]}
+    required_actions = {
+        "ec2:RunInstances",
+        "ec2:DescribeInstances",
+        "ec2:TerminateInstances",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeRegions",
+        "ec2:DescribeImages",
+        "ec2:CreateTags",
+        "ec2:DescribeKeyPairs",
+        "ec2:CreateKeyPair",
+        "ec2:ImportKeyPair",
+        "ec2:DescribeSecurityGroups",
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+    }
+    assert required_actions.issubset(granted_actions)
