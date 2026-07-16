@@ -1091,8 +1091,20 @@ async def fleet_configure_agent(
                 _authenticated = bool(_entry.get("authenticated"))
                 if not _installed or not _authenticated:
                     _label = "Codex" if _runtime == "codex" else "Claude Code"
+                    # display_name is a top-level registration column (set by
+                    # pairing/rename — see gateway_registry_service.rename_
+                    # gateway_registration), never nested under metadata. Reading
+                    # metadata.get("display_name") here always missed it and fell
+                    # through to the raw OS hostname, so a box the user had
+                    # renamed (e.g. "Production Gateway") showed this error under
+                    # its old auto-generated hostname instead — a confusing
+                    # "which box is this even talking about" mismatch against the
+                    # box-picker dropdown, which already reads display_name
+                    # correctly via gatewayLabel(). _payload above already
+                    # resolved this the right way; reuse it instead of
+                    # re-deriving from raw metadata.
                     _box_label = str(
-                        _registration.get("metadata", {}).get("display_name")
+                        _payload.get("display_name")
                         or _registration.get("metadata", {}).get("hostname")
                         or _gateway_id
                     )
