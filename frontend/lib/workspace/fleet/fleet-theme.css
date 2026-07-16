@@ -230,6 +230,49 @@ a.fleet-breadcrumb:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* Mobile (<=768px) collapsed breadcrumb — the full chain (.fleet-breadcrumb-seg,
+   below) wraps/overflows a 375-414px topbar once a chain runs 3+ segments deep
+   (e.g. Projects › {project} › {agent} › Overview). Hidden here; shown inside
+   the 768px query further down, where .fleet-breadcrumb-seg does the reverse —
+   exactly one of the two chain shapes is ever visible at a given width. See
+   Breadcrumbs.tsx: this is the "‹ parent" back-affordance (composed the same
+   way as the Inbox mobile back button, fleet-inbox-back) plus the current
+   page's own label; with no parent (a top-level section, one crumb deep)
+   there's nothing to go back to, so it's current-page-only, no chevron. */
+.fleet-breadcrumb-mobile {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.fleet-breadcrumb-mobile-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  padding: 6px 6px 6px 2px;
+  margin-left: -2px;
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: var(--text-sm);
+  transition: color var(--motion-base) ease-out, background var(--motion-base) ease-out;
+}
+.fleet-breadcrumb-mobile-back:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+.fleet-breadcrumb-mobile-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
 /* ── Primary rail ────────────────────────────────────────────────────────── */
 
 .fleet-rail {
@@ -393,6 +436,18 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* The one scrolling region between the fixed header above (.fleet-rail-
+     header) and the fixed footer controls below (.fleet-rail-utility >
+     controls > pulse > owner, pinned via that block's margin-top:auto) —
+     same convention as .fleet-shell-scroll. Without this, a long Projects/
+     Agents subnav list has nowhere to go: .fleet-rail is a flex column
+     stretched to the viewport height with no overflow of its own, so the
+     footer controls (theme/collapse toggle, account menu) get pushed off
+     the bottom of the screen and become unreachable — worst on the ~320px
+     mobile drawer, which has the least vertical room to spare. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .fleet-rail-section {
@@ -2993,6 +3048,17 @@ a.fleet-breadcrumb:hover {
   margin: 24px 0 8px;
 }
 
+/* One-line role subtitle under a detail tab's own content (Channels vs.
+   Connectors — two grids of platform cards that otherwise read as the same
+   "integrations" thing). Plain body text, not a section label — sits above
+   everything else in the tab with no top margin since it IS the top of the
+   tab body. */
+.fleet-tab-subtitle {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
 /* ── Overview title — inline rename (click-to-edit) ─────────────────────── */
 
 .fleet-overview-title {
@@ -4982,6 +5048,28 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     font-size: 12px;
   }
 
+  /* Full chain -> collapsed back-affordance + current page (see the
+     .fleet-breadcrumb-mobile rule above for why this is CSS-driven rather
+     than a JS width check). .fleet-breadcrumbs itself needs flex+min-width
+     so it can actually shrink below its content's intrinsic width inside
+     the topbar row (hamburger + breadcrumbs + right-aligned page action) —
+     otherwise a long current-page label pushes the action button off the
+     48px-tall mobile topbar instead of eliding. */
+  .fleet-breadcrumbs {
+    flex: 1;
+    min-width: 0;
+  }
+  .fleet-breadcrumb-seg {
+    display: none;
+  }
+  .fleet-breadcrumb-mobile {
+    display: flex;
+  }
+  .fleet-breadcrumb-mobile-current {
+    font-size: 15px;
+    font-weight: var(--weight-medium);
+  }
+
   .fleet-rail,
   .fleet-rail--collapsed {
     position: fixed;
@@ -5109,6 +5197,15 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     padding: 16px 12px;
   }
 
+  /* .fleet-content-toolbar (the right-aligned action row above the table,
+     e.g. Sort/Filter) kept its desktop 32px side padding while .fleet-content
+     just above got trimmed to 12px — a 20px jog where the toolbar's controls
+     sat 20px further right than the table/list below it. Match the same
+     12px gutter so the toolbar and the content beneath it share one edge. */
+  .fleet-content-toolbar {
+    padding: 0 12px;
+  }
+
   /* UI Contract §8: an anchored popover is already one of the two allowed
      shapes for filter/sort/panel controls on mobile — this one just
      needed its internal rows brought to the §3 sub-row height (was 31px,
@@ -5190,7 +5287,13 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     display: block;
     height: auto;
     min-height: 0;
-    padding: 4px 12px;
+    /* var(--fleet-list-padding-x), not a hardcoded 12px — .fleet-agent-group-
+       header (shown when sorted "Group by project") reads the same variable
+       (0px here, .fleet-agents-list above) and .fleet-content already
+       supplies the 12px outer gutter. A hardcoded 12px here double-counted
+       that gutter on rows only, so each group's divider header sat 12px
+       left of its own rows instead of lining up with them. */
+    padding: 4px var(--fleet-list-padding-x);
   }
   .fleet-agents-list-header {
     display: none;

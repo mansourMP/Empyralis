@@ -131,8 +131,22 @@ const HARDWARE_PLACEMENT_PANEL_TONE: Record<HardwarePlacementTone, PanelValueTon
 // prefill) needs to agree that Slack isn't connected until it owns a
 // channel — slackChannelBinding, this same fetch's endpoint_key equivalent
 // — not merely OAuth-installed.
-function isChannelConnected(channel: Pick<FleetChannel, "id" | "connected">, slackChannelBinding: string | null): boolean {
+//
+// Telegram has the mirror-image gap: sage_telegram_hosted's own `connected`
+// only reflects the hosted-bot door (Sage's shared bot, deep-linked to this
+// agent). A BYO bot token (this agent's own bot, see CHANNEL_DOORS'
+// sage_telegram_hosted.byo_bot) lives entirely in telegramBotConnected —
+// same "rides along on this fetch instead of the channel's own row" shape
+// as slackChannelBinding — so a live BYO-bot agent read as connected: false
+// everywhere here: undercounted in the Properties "Channels" total, and the
+// grid pill showed "Set up" instead of "Connected".
+function isChannelConnected(
+  channel: Pick<FleetChannel, "id" | "connected">,
+  slackChannelBinding: string | null,
+  telegramBotConnected: boolean,
+): boolean {
   if (channel.id === "slack") return Boolean(slackChannelBinding);
+  if (channel.id === "sage_telegram_hosted") return channel.connected || telegramBotConnected;
   return channel.connected;
 }
 
@@ -193,7 +207,7 @@ export function FleetAgentDetail({
   // every other tab keeps the permanent column, so this stays false and unused there.
   const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
-  const { channels, refresh: refreshChannels, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
+  const { channels, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
   const [costToday, setCostToday] = useState<number | null>(null);
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
@@ -213,7 +227,7 @@ export function FleetAgentDetail({
     return () => { cancelled = true; };
   }, [workspaceId, agentId]);
 
-  const connectedChannels = channels.filter((c) => isChannelConnected(c, slackChannelBinding)).length;
+  const connectedChannels = channels.filter((c) => isChannelConnected(c, slackChannelBinding, telegramBotConnected)).length;
   const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
   const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(agent?.model_config));
   // Lives in the permanent properties column now, so it's computed once
@@ -1327,7 +1341,7 @@ export function ChannelsTab({
   // it here means every reader below (grid pill via channelStatePill, and
   // the "already connected" banner prefill) agrees with the Properties
   // panel's own Channels count.
-  const byId = new Map(channels.map((c) => [c.id, { ...c, connected: isChannelConnected(c, slackChannelBinding) }]));
+  const byId = new Map(channels.map((c) => [c.id, { ...c, connected: isChannelConnected(c, slackChannelBinding, telegramBotConnected) }]));
 
   function closeBanner() {
     setExpanded(null);
@@ -1376,6 +1390,10 @@ export function ChannelsTab({
 
   return (
     <div>
+      {/* Channels vs. Connectors reads as one undifferentiated "integrations"
+          blob otherwise — this one-liner is the whole fix: it's how people
+          reach the agent, not what the agent can use. */}
+      <p className="fleet-tab-subtitle">Where people can message this agent</p>
       <div className="fleet-channel-grid">
         {CHANNEL_GRID_PLATFORMS.map((platform) => {
           const channel = byId.get(platform.id);
@@ -1668,21 +1686,39 @@ function ConnectorsTab({
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
   const projectId = agent?.project_id || "";
 
+  // Same one-liner treatment as ChannelsTab's own subtitle just above, kept
+  // visible across every body state (loading/empty/picker) — the whole
+  // point is telling the two tabs apart at a glance, not just once loaded.
+  const subtitle = <p className="fleet-tab-subtitle">Apps this agent can use</p>;
+
   if (!agent) {
-    return <div className="fleet-activity-skeleton" aria-label="Loading connectors"><div className="fleet-skeleton-bar" style={{ width: "70%" }} /></div>;
+    return (
+      <div>
+        {subtitle}
+        <div className="fleet-activity-skeleton" aria-label="Loading connectors"><div className="fleet-skeleton-bar" style={{ width: "70%" }} /></div>
+      </div>
+    );
   }
 
   if (!projectId) {
     return (
-      <EmptyState
-        icon={Plug}
-        title="No project assigned"
-        body="This agent has no project — connectors are shared per project. Assign a project before connecting apps."
-      />
+      <div>
+        {subtitle}
+        <EmptyState
+          icon={Plug}
+          title="No project assigned"
+          body="This agent has no project — connectors are shared per project. Assign a project before connecting apps."
+        />
+      </div>
     );
   }
 
-  return <ConnectorPicker workspaceId={workspaceId} projectId={projectId} agentId={agentId} />;
+  return (
+    <div>
+      {subtitle}
+      <ConnectorPicker workspaceId={workspaceId} projectId={projectId} agentId={agentId} />
+    </div>
+  );
 }
 
 // ── Shared: collapsed-by-default "Advanced" section ─────────────────────────

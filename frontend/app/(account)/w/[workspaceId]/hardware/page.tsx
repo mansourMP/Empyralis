@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Cpu, Server, Terminal, X } from "lucide-react";
 
@@ -44,8 +44,15 @@ export default function HardwarePage() {
   const [showManualPairing, setShowManualPairing] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = useState<{ gatewayId: string; label: string } | null>(null);
+  // "Latest call wins" — mirrors useWorkspaceGateways.refresh() in
+  // gateway-box-picker.tsx. loadRegistrations is called from several places
+  // (mount, pairing, VPS/SSH connect, remove) that can overlap; without this,
+  // an older, slower in-flight fetch resolving after a newer one can stomp
+  // good data with a stale (sometimes empty) list — the reported blank page.
+  const requestIdRef = useRef(0);
 
   const loadRegistrations = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -55,11 +62,11 @@ export default function HardwarePage() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json();
       const list = d?.items || d?.registrations || (Array.isArray(d) ? d : []);
-      setRegs(Array.isArray(list) ? list : []);
+      if (requestIdRef.current === requestId) setRegs(Array.isArray(list) ? list : []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load computers");
+      if (requestIdRef.current === requestId) setError(e instanceof Error ? e.message : "Could not load computers");
     } finally {
-      setLoading(false);
+      if (requestIdRef.current === requestId) setLoading(false);
     }
   }, [workspaceId]);
 

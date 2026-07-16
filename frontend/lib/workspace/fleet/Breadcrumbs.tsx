@@ -12,7 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 /**
  * Breadcrumbs read the URL segment chain under /w/{ws} and render one crumb per
@@ -227,8 +227,34 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
   // root crumb is gone.
   if (crumbs.length === 0) return null;
 
+  // Mobile-collapsed shape: the immediate parent (one level up — a "‹ Back"
+  // affordance, same idea as the Inbox mobile back button) plus the current
+  // (last) crumb. A one-deep chain (a top-level section like a bare
+  // "Projects" list) has no parent to go back to, so it's current-page-only.
+  const current = crumbs[crumbs.length - 1];
+  const parent = crumbs.length > 1 ? crumbs[crumbs.length - 2] : null;
+
   return (
     <nav className="fleet-breadcrumbs" aria-label="Breadcrumb">
+      <span className="fleet-breadcrumb-mobile">
+        {parent && (
+          <Link href={parent.href} className="fleet-breadcrumb-mobile-back" aria-label={`Back to ${parent.label}`}>
+            <ChevronLeft size={16} strokeWidth={2} aria-hidden />
+            {parent.label}
+          </Link>
+        )}
+        {current.pending ? (
+          <span className="fleet-breadcrumb-mobile-current" aria-label="Loading name…">
+            <span className="fleet-breadcrumb-skeleton" aria-hidden />
+          </span>
+        ) : (
+          <span className="fleet-breadcrumb-mobile-current" aria-current="page">
+            {current.icon}{current.label}
+          </span>
+        )}
+        {current.badge}
+      </span>
+
       {crumbs.map((c, i) => (
         <span key={c.key} className="fleet-breadcrumb-seg">
           {i > 0 && <ChevronRight size={13} strokeWidth={1.75} className="fleet-breadcrumb-sep" aria-hidden />}
