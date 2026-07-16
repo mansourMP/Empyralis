@@ -74,32 +74,68 @@ def _personal_channel_no_tools_session_ctx(
     *,
     runtime_context: Dict[str, Any],
     guarded: Any,
+    is_owner: bool = False,
 ) -> Dict[str, Any]:
     session_ctx = dict(runtime_context["session_ctx"])
     session_ctx.update(
         {
             "personal_channel_tool_profile": "external_no_tools",
             "tools_allowed": False,
-            # This fallback (mandate hardening report) had no authority_tier
-            # at all — a real, live gap: an unauthenticated external contact
-            # on the owner's personal bridge could reach a turn where
-            # hardware__action/memory_write are genuinely offered (the
-            # "no tools" mechanisms above don't actually block them against
-            # the current tool-assembly path), gated only by whether the
-            # mandate gate's missing-key default happened to allow it.
-            # Stamped explicitly here (never just relying on the gate's
-            # own fail-closed default) — this path never resolves a live
-            # sender identity, so it can never be provably owner.
-            "authority_tier": authority_mandate_service.TIER_AUDIENCE,
-            "external_content_guard": {
-                "wrapper_id": guarded.wrapper_id,
-                "suspicious_patterns": list(guarded.suspicious_patterns),
-                "source": guarded.metadata.source,
-                "channel": guarded.metadata.channel,
-            },
+            # This fallback (mandate hardening report) used to hard-code
+            # TIER_AUDIENCE unconditionally because it never resolved a live
+            # sender identity. It now receives is_owner from the SAME
+            # robust, non-spoofable check the primary unified path uses
+            # (personal_channels_service._is_owner_message via
+            # _enforce_dm_policy — self-chat or sender matching the
+            # channel's linked owner id, NEVER a claimed name/message text)
+            # — so a provably-owner turn gets TIER_OWNER here too. Still
+            # fails safe: is_owner defaults False -> audience, and tools
+            # stay hard-zeroed below regardless of tier (this is a no-tools
+            # call either way), so this only ever affects tone/behavior
+            # instructions inside handle_sage_chat, never tool access.
+            "authority_tier": (
+                authority_mandate_service.TIER_OWNER
+                if is_owner
+                else authority_mandate_service.TIER_AUDIENCE
+            ),
         }
     )
+    # Only genuinely external/unknown senders get the external_content_guard
+    # audit block — an owner turn was never wrapped in the first place (see
+    # the is_owner branch in _build_personal_reply below), so there is no
+    # wrapper_id/suspicious_patterns to report here.
+    if not is_owner and guarded is not None:
+        session_ctx["external_content_guard"] = {
+            "wrapper_id": guarded.wrapper_id,
+            "suspicious_patterns": list(guarded.suspicious_patterns),
+            "source": guarded.metadata.source,
+            "channel": guarded.metadata.channel,
+        }
     return session_ctx
+
+
+def _owner_provenance_message(
+    *,
+    raw_text: str,
+    display_name: Optional[str],
+    channel_label: str,
+) -> str:
+    """Clean, unwrapped provenance header for a message ROBUSTLY identified
+    as coming from the workspace OWNER's own identity — self-chat, or a
+    sender matching the channel's linked owner id (see
+    personal_channels_service._is_owner_message). Deliberately NOT the
+    same shape as external_content_guard.wrap_external_content: no
+    "SECURITY NOTICE", no <<<EXTERNAL_UNTRUSTED_CONTENT>>> markers. The
+    owner is not an external/untrusted party — wrapping their own message
+    as untrusted data (the bug this fixes) taught the model to distrust its
+    own owner's instructions. This is presentation only, never a trust
+    boundary: display_name comes from the channel's own push_name field on
+    a message already robustly confirmed to be from the owner's linked
+    identity, so it cannot be spoofed by a stranger to claim ownership.
+    """
+    name = str(display_name or "").strip() or "the workspace owner"
+    label = str(channel_label or "").strip() or "this channel"
+    return f"From: {name} (owner) · {label} · direct message\n\n{raw_text}"
 
 
 @contextmanager
@@ -133,17 +169,33 @@ def _build_personal_reply(
     push_name: Optional[str] = None,
     fallback_label: str,
     source_event_id: Optional[str] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     normalized_text = str(text or "").strip()
     if not normalized_text:
         return None
-    guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
-        surface_channel=surface_channel,
-        text=normalized_text,
-        sender=push_name or remote_jid,
-        source_event_id=source_event_id,
-        metadata={"remote_jid": str(remote_jid or "").strip()},
-    )
+    guarded = None
+    if is_owner:
+        # OWNER, robustly identified by the caller — clean provenance, no
+        # SECURITY NOTICE, no <<<EXTERNAL_UNTRUSTED_CONTENT>>> wrapper. See
+        # _build_unified_sage_personal_reply_async's matching branch (the
+        # primary path) for the full rationale; this legacy no-tools
+        # fallback needs the same fix so a silent-turn retry doesn't
+        # re-wrap the owner's own message as untrusted external content.
+        turn_message = _owner_provenance_message(
+            raw_text=normalized_text, display_name=push_name, channel_label=fallback_label,
+        )
+    else:
+        # EXTERNAL / non-owner / unknown sender — UNCHANGED prompt-injection
+        # boundary.
+        guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
+            surface_channel=surface_channel,
+            text=normalized_text,
+            sender=push_name or remote_jid,
+            source_event_id=source_event_id,
+            metadata={"remote_jid": str(remote_jid or "").strip()},
+        )
+        turn_message = guarded.text
     runtime_context = channel_lane_contract_service.build_personal_gateway_runtime_context(
         surface_channel=surface_channel,
         workspace_id=str(workspace_id or "default").strip() or "default",
@@ -155,7 +207,7 @@ def _build_personal_reply(
 
         with _without_direct_chat_runtime_tools(direct_chat_runtime_exports):
             result = direct_chat_runtime_exports.collect_direct_operator_reply(
-                message=guarded.text,
+                message=turn_message,
                 workspace_id=str(workspace_id or "default").strip() or "default",
                 requested_model="",
                 requested_provider="",
@@ -168,6 +220,7 @@ def _build_personal_reply(
                 session_ctx=_personal_channel_no_tools_session_ctx(
                     runtime_context=runtime_context,
                     guarded=guarded,
+                    is_owner=is_owner,
                 ),
             )
         # Same [SILENT]/NO_REPLY suppression as the unified path above — this
@@ -200,6 +253,7 @@ async def _build_unified_sage_personal_reply_async(
     source_event_id: Optional[str] = None,
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Route personal channel messages through the unified Sage turn adapter.
@@ -215,17 +269,48 @@ async def _build_unified_sage_personal_reply_async(
     attachments: media-pipeline attachments (image/file kinds) already
     resolved+stored by personal_channel_media_store_service — forwarded
     as-is to execute_sage_turn_for_channel.
+
+    is_owner: True ONLY when the caller has ROBUSTLY established (see
+    personal_channels_service._is_owner_message — self-chat, or a sender
+    matching the channel's own linked owner id; NEVER a claimed name or
+    message text, which is trivially spoofable) that this inbound message
+    is from the workspace owner. Owner turns get a clean, unwrapped
+    provenance header instead of external_content_guard's SECURITY
+    NOTICE/<<<EXTERNAL_UNTRUSTED_CONTENT>>> wrapper — the owner is not an
+    untrusted external party. Every other sender (non-owner DM, group
+    member, customer, or anything uncertain) keeps the EXACT prior
+    behavior: full external_content_guard wrapping, unchanged. Defaults to
+    False so any caller that hasn't threaded a real signal fails to the
+    safe/guarded path.
     """
     from server_modules.sage_turn_adapter import execute_sage_turn_for_channel
 
-    guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
-        surface_channel=surface_channel,
-        text=str(text or "").strip(),
-        sender=push_name or remote_jid,
-        source_event_id=source_event_id,
-        metadata={"remote_jid": str(remote_jid or "").strip()},
-    )
-    if not str(guarded.text or "").strip():
+    # The CLEAN raw message — never wrapped, never provenance-prefixed.
+    # This is what agent_conversation_memory persists below, regardless of
+    # which branch builds the actual turn_message sent to the model:
+    # storing the SECURITY NOTICE/wrapper-laden guarded.text bloated and
+    # garbled the durable conversation history (problem 2 of
+    # fix/owner-aware-provenance).
+    raw_text = str(text or "").strip()
+
+    if is_owner:
+        # OWNER — clean provenance + full trust. No SECURITY NOTICE, no
+        # untrusted-content wrapper markers.
+        turn_message = _owner_provenance_message(
+            raw_text=raw_text, display_name=push_name, channel_label=fallback_label,
+        )
+    else:
+        # EXTERNAL / non-owner / unknown sender — this is the
+        # prompt-injection boundary. UNCHANGED from prior behavior.
+        guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
+            surface_channel=surface_channel,
+            text=raw_text,
+            sender=push_name or remote_jid,
+            source_event_id=source_event_id,
+            metadata={"remote_jid": str(remote_jid or "").strip()},
+        )
+        turn_message = guarded.text
+    if not str(turn_message or "").strip():
         return None
 
     # ── Durable per-agent conversation memory (agent_conversation_memory) ──
@@ -251,7 +336,7 @@ async def _build_unified_sage_personal_reply_async(
             surface_channel=surface_channel,
             gateway_id=str(gateway_id or "").strip(),
             remote_jid=str(remote_jid or "").strip(),
-            message=guarded.text,
+            message=turn_message,
             push_name=push_name,
             source_event_id=source_event_id,
             agent_id=_mem_agent,
@@ -268,10 +353,17 @@ async def _build_unified_sage_personal_reply_async(
         # Record the turn so the NEXT message has continuity — the user's
         # message always (even on a silent turn), the assistant reply only when
         # it actually spoke. Best-effort: a memory write must never sink a reply.
+        # Stores raw_text (the CLEAN original message) — never turn_message,
+        # which for an external sender carries the SECURITY NOTICE and
+        # <<<EXTERNAL_UNTRUSTED_CONTENT>>> wrapper markers. Persisting the
+        # wrapped form bloated/garbled the durable history on every replay
+        # (problem 2 of fix/owner-aware-provenance); the model still sees
+        # the appropriately-provenanced/guarded turn_message for THIS turn,
+        # only the stored memory changes.
         try:
             agent_conversation_memory.append_turn(
                 workspace_id=_mem_ws, agent_id=_mem_agent,
-                conversation_key=_mem_key, role="user", content=guarded.text,
+                conversation_key=_mem_key, role="user", content=raw_text,
             )
             if reply:
                 agent_conversation_memory.append_turn(
@@ -309,6 +401,7 @@ def _build_unified_sage_personal_reply(
     source_event_id: Optional[str] = None,
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     import asyncio
     import threading
@@ -328,6 +421,7 @@ def _build_unified_sage_personal_reply(
                 source_event_id=source_event_id,
                 agent_id=agent_id,
                 attachments=attachments,
+                is_owner=is_owner,
             )
         )
 
@@ -347,6 +441,7 @@ def _build_unified_sage_personal_reply(
                     source_event_id=source_event_id,
                     agent_id=agent_id,
                     attachments=attachments,
+                    is_owner=is_owner,
                 )
             )
         except Exception as exc:
@@ -368,6 +463,7 @@ async def build_whatsapp_personal_reply_async(
     text: str,
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -379,6 +475,7 @@ async def build_whatsapp_personal_reply_async(
             push_name=push_name,
             fallback_label="WhatsApp",
             source_event_id=source_event_id,
+            is_owner=is_owner,
         )
         return unified
     except Exception as _exc:
@@ -410,6 +507,7 @@ async def build_telegram_personal_reply_async(
     text: str,
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -421,6 +519,7 @@ async def build_telegram_personal_reply_async(
             push_name=push_name,
             fallback_label="Telegram",
             source_event_id=source_event_id,
+            is_owner=is_owner,
         )
         return unified
     except Exception as _exc:
@@ -452,12 +551,21 @@ async def build_discord_personal_reply_async(
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
     linked_user_name: Optional[str] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Build a Sage reply for a Discord personal DM.
 
     Follows the same unified path as WhatsApp and Telegram personal channels.
     linked_user_name is accepted for future identity-context injection but
     not yet threaded into _build_unified_sage_personal_reply_async.
+
+    is_owner: no live caller resolves this for Discord personal DMs today
+    (see personal_channels_service — Discord DMs currently route through
+    discord_connector.py's own execute_sage_turn path, not this bridge) so
+    it defaults to False/guarded. Accepted here for signature parity with
+    the other build_*_personal_reply_async functions and so a future caller
+    that DOES resolve Discord owner identity can thread it through with no
+    further changes to this function.
     """
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -469,6 +577,7 @@ async def build_discord_personal_reply_async(
             push_name=push_name,
             fallback_label="Discord",
             source_event_id=source_event_id,
+            is_owner=is_owner,
         )
         return unified
     except Exception as _exc:
@@ -490,6 +599,7 @@ async def build_personal_channel_reply_async(
     fallback_label: str = "channel",
     source_event_id: Optional[str] = None,
     attachments: Optional[List[dict]] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -502,6 +612,7 @@ async def build_personal_channel_reply_async(
             fallback_label=fallback_label,
             source_event_id=source_event_id,
             attachments=attachments,
+            is_owner=is_owner,
         )
         return unified
     except Exception as _exc:
@@ -523,6 +634,7 @@ def build_whatsapp_personal_reply(
     linked_user_name: Optional[str] = None,
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a WhatsApp personal DM — as the specialist agent_id
     names (see execute_sage_turn_for_channel), or as Sage when agent_id is
@@ -534,6 +646,12 @@ def build_whatsapp_personal_reply(
 
     attachments: media-pipeline attachments (image/file kinds) already
     resolved+stored by personal_channel_media_store_service.
+
+    is_owner: caller-resolved via personal_channels_service._is_owner_message
+    (self-chat, or sender matching this channel's linked owner id) — see
+    _build_unified_sage_personal_reply_async's docstring for the full
+    contract. Defaults to False (guarded/external), matching every other
+    build_*_personal_reply* entry point.
     """
     unified = _build_unified_sage_personal_reply(
         surface_channel="whatsapp_personal",
@@ -546,6 +664,7 @@ def build_whatsapp_personal_reply(
         source_event_id=source_event_id,
         agent_id=agent_id,
         attachments=attachments,
+        is_owner=is_owner,
     )
     if unified is not None:
         return unified
@@ -558,6 +677,7 @@ def build_whatsapp_personal_reply(
         push_name=push_name,
         fallback_label="WhatsApp",
         source_event_id=source_event_id,
+        is_owner=is_owner,
     )
 
 
@@ -571,9 +691,10 @@ def build_telegram_personal_reply(
     source_event_id: Optional[str] = None,
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
+    is_owner: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a Telegram personal DM — see build_whatsapp_personal_reply's
-    docstring for the agent_id contract."""
+    docstring for the agent_id and is_owner contracts."""
     unified = _build_unified_sage_personal_reply(
         surface_channel="telegram_personal",
         workspace_id=workspace_id,
@@ -585,6 +706,7 @@ def build_telegram_personal_reply(
         source_event_id=source_event_id,
         agent_id=agent_id,
         attachments=attachments,
+        is_owner=is_owner,
     )
     if unified is not None:
         return unified
@@ -597,4 +719,5 @@ def build_telegram_personal_reply(
         push_name=push_name,
         fallback_label="Telegram",
         source_event_id=source_event_id,
+        is_owner=is_owner,
     )

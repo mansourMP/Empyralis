@@ -1767,6 +1767,7 @@ async def _deliver_whatsapp_personal_reply(
     trace_id: str = "",
     agent_id: str = "",
     attachments: Optional[List[Dict[str, Any]]] = None,
+    is_owner: bool = False,
 ) -> Dict[str, Any]:
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
     if reply_idempotency_key and reply_idempotency_key.startswith(WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX):
@@ -1854,6 +1855,7 @@ async def _deliver_whatsapp_personal_reply(
             linked_user_name=linked_user_name,
             agent_id=agent_id,
             attachments=attachments,
+            is_owner=is_owner,
         )
         if not reply or not str(reply.get("text") or "").strip():
             no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
@@ -2096,6 +2098,7 @@ async def _handle_whatsapp_gateway_channel_inbound(
         trace_id=trace_id,
         agent_id=agent_id,
         attachments=attachments,
+        is_owner=bool(dm_decision.get("is_owner")),
     )
 
 
@@ -2255,6 +2258,7 @@ async def _handle_telegram_gateway_channel_inbound(
             source_event_id=external_message_id,
             agent_id=agent_id,
             attachments=attachments,
+            is_owner=bool(dm_decision.get("is_owner")),
         )
         if not reply or not str(reply.get("text") or "").strip():
             no_reply_idempotency_key = f"{TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
@@ -2370,6 +2374,7 @@ async def _deliver_local_bridge_personal_reply(
     label: str,
     trace_id: str = "",
     attachments: Optional[List[Dict[str, Any]]] = None,
+    is_owner: bool = False,
 ) -> Dict[str, Any]:
     no_reply_prefix = f"{channel_key}:noreply:"
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
@@ -2404,6 +2409,7 @@ async def _deliver_local_bridge_personal_reply(
             fallback_label=label,
             source_event_id=external_message_id,
             attachments=attachments,
+            is_owner=is_owner,
         )
         if not reply or not str(reply.get("text") or "").strip():
             no_reply_idempotency_key = f"{no_reply_prefix}{external_message_id}"
@@ -2611,6 +2617,12 @@ async def _handle_local_bridge_gateway_channel_inbound(
         label=label,
         trace_id=trace_id,
         attachments=attachments,
+        # Local-bridge channels don't yet resolve a per-agent owner identity
+        # (see the dm_decision comment above) — dm_decision["is_owner"] is
+        # always False here today, but threaded through (rather than
+        # hardcoded) so this can never silently drift out of sync with
+        # _enforce_dm_policy's own logic if that gap is closed later.
+        is_owner=bool(dm_decision.get("is_owner")),
     )
 
 
@@ -3245,7 +3257,13 @@ async def handle_cloud_channel_inbound(
         )
         return {"status": "command_handled", "session_id": session_id, "reply_text": _cmd_reply[:200]}
 
-    # Build Sage reply using the existing bridge — same as Gateway path
+    # Build Sage reply using the existing bridge — same as Gateway path.
+    # is_owner intentionally NOT passed here (stays at its safe default of
+    # False/guarded): this Stage 2 cloud-session-manager path has no
+    # dmPolicy/_is_owner_message equivalent that robustly resolves owner
+    # identity the way the Gateway-based handlers below do — see
+    # HARD CONSTRAINTS in fix/owner-aware-provenance: uncertain identity
+    # must default to the guarded/external path, never to owner trust.
     reply = await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
         workspace_id=resolved_workspace_id,
         gateway_id=f"cloud:{session_id}",
