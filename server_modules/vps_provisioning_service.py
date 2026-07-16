@@ -33,6 +33,80 @@ LEGACY_DIGITALOCEAN_CLIENT_SECRET_ENV = "DIGITALOCEAN_OAUTH_CLIENT_SECRET"
 DEFAULT_DIGITALOCEAN_OAUTH_REDIRECT_URI = (
     "https://empyralis.ai/api/hardware/vps/oauth/digitalocean/callback"
 )
+
+# --- Google Cloud: "bootstrap-then-impersonate" ----------------------------
+#
+# Google is deliberately NOT modeled like DigitalOcean/Hetzner/Vultr's "paste
+# or OAuth a token, use that token for everything forever" shape. A user's own
+# Google OAuth access token expires in ~1h (7 days for a refresh token while
+# our OAuth consent screen sits in "Testing" publish status) and breaks
+# outright on the user's own password/2FA changes — unusable for a VM that
+# needs to be manageable months later. Instead:
+#
+#   1. Google OAuth consent (once) — scope cloud-platform — used ONLY to run
+#      steps 2 below as the user, then discarded. See create_google_oauth_start
+#      / complete_google_oauth_callback / _google_setup_session_access_token.
+#   2. One-time bootstrap in the user's own project (finish_google_bootstrap):
+#      enable Compute Engine -> create a dedicated empyralis-provisioner
+#      service account -> bind it a minimal custom VM-lifecycle-only role ->
+#      grant EMPYRALIS's OWN operating identity roles/iam.serviceAccountTokenCreator
+#      on that one service account. Nothing from this step is a secret worth
+#      protecting on its own — what's stored afterward is just
+#      {project_id, service_account_email}, not a credential.
+#   3. Ongoing provisioning (_provision_google, fetch_provider_plans,
+#      fetch_provider_regions, delete_recorded_vps) impersonates that service
+#      account via the IAM Credentials API's generateAccessToken, keyless,
+#      authenticating AS Empyralis's operator identity — never the end user's
+#      token (already discarded by then) and never a downloaded
+#      service-account JSON key. See _google_impersonated_access_token.
+GOOGLE_OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_OAUTH_REDIRECT_URI_ENV = "EMPYRALIS_GOOGLE_OAUTH_REDIRECT_URI"
+GOOGLE_CLOUD_CLIENT_ID_ENV = "GOOGLE_CLOUD_CLIENT_ID"
+GOOGLE_CLOUD_CLIENT_SECRET_ENV = "GOOGLE_CLOUD_CLIENT_SECRET"
+DEFAULT_GOOGLE_OAUTH_REDIRECT_URI = (
+    "https://empyralis.ai/api/hardware/vps/oauth/google/callback"
+)
+GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+# Empyralis's OWN operating GCP identity — the one every customer's bootstrap
+# grants serviceAccountTokenCreator to (step 2 above) and the one every
+# impersonated-token call authenticates as (step 3). Not a per-user value —
+# an operator credential set once on the backend host, same posture as
+# DIGITALOCEAN_CLIENT_ID/_installer_repo_token. Kept as its own long-lived
+# OAuth refresh token (never a downloaded JSON key — see the module docstring
+# above) so this file's existing refresh-token machinery (same shape as
+# _refresh_digitalocean_credentials) covers it without a new credential type.
+GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV = "GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL"
+GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV = "GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN"
+
+GOOGLE_CLOUD_RESOURCE_MANAGER_URL = "https://cloudresourcemanager.googleapis.com/v1"
+GOOGLE_CLOUD_BILLING_URL = "https://cloudbilling.googleapis.com/v1"
+GOOGLE_CLOUD_SERVICE_USAGE_URL = "https://serviceusage.googleapis.com/v1"
+GOOGLE_CLOUD_IAM_URL = "https://iam.googleapis.com/v1"
+GOOGLE_CLOUD_IAM_CREDENTIALS_URL = "https://iamcredentials.googleapis.com/v1"
+GOOGLE_CLOUD_COMPUTE_URL = "https://compute.googleapis.com/compute/v1"
+# Compute Engine's service id in the Cloud Billing Catalog API
+# (services.skus.list) — stable, documented at
+# cloud.google.com/billing/docs/how-to/catalog-api next to the "list public
+# SKUs" sample, which uses this exact same id for the same service.
+GOOGLE_CLOUD_BILLING_CATALOG_COMPUTE_SERVICE_ID = "6F81-5844-456A"
+
+GOOGLE_PROVISIONER_SA_ACCOUNT_ID = "empyralis-provisioner"
+GOOGLE_PROVISIONER_CUSTOM_ROLE_ID = "empyralisVmProvisioner"
+# GCE's boot disk is a resource sized independently of machine type (unlike
+# DO/Hetzner/Vultr, which bundle a fixed disk into each plan) — one fixed
+# default, in line with Hetzner's cx22 (~40GB) and DO's 50GB s-1vcpu-2gb.
+GOOGLE_DEFAULT_BOOT_DISK_GB = 40
+# Google's own pricing calculator's convention for turning an hourly SKU rate
+# into a monthly figure (730 = 365 * 24 / 12, i.e. the average month).
+_GOOGLE_AVERAGE_HOURS_PER_MONTH = 730
+# Curated general-purpose machine families for the size picker. GCE's full
+# catalog also includes GPU (a2/a3/g2), bare-metal (m3), and other
+# specialized families whose pricing shape (or suitability for an "Agent
+# Computer") doesn't belong in this list.
+_GOOGLE_SUPPORTED_MACHINE_FAMILIES = {"e2", "n2", "n2d", "n1"}
+
 PUBLIC_API_URL = (
     os.getenv("EMPYRALIS_PUBLIC_API_URL")
     or os.getenv("EMPYRALIS_GATEWAY_API_URL")
@@ -153,6 +227,31 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
             ProviderRegion("syd", "Sydney"),
         ),
     ),
+    "google": ProviderConfig(
+        provider="google",
+        label="Google Cloud",
+        auth_label="Google Cloud OAuth connection",
+        # Base URL only — the real instances.insert URL is
+        # project/zone-scoped and built per-call in _provision_google, unlike
+        # the other providers' account-scoped create_url.
+        create_url=GOOGLE_CLOUD_COMPUTE_URL,
+        default_region="us-central1",
+        default_size="e2-medium",
+        default_image="projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64",
+        # Empty on purpose: Google is OAuth-only, never a pasted API key (see
+        # the module docstring above) — store_vps_provider_token refuses this
+        # provider outright rather than relying on _provider_token's generic
+        # "no matching key" failure to carry that message.
+        token_keys=(),
+        regions=(
+            ProviderRegion("us-central1", "Iowa, USA"),
+            ProviderRegion("us-east1", "South Carolina, USA"),
+            ProviderRegion("us-west1", "Oregon, USA"),
+            ProviderRegion("europe-west1", "Belgium"),
+            ProviderRegion("europe-west4", "Netherlands"),
+            ProviderRegion("asia-southeast1", "Singapore"),
+        ),
+    ),
 }
 
 _STATE_LOCK = threading.Lock()
@@ -255,6 +354,94 @@ def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, 
     }
 
 
+def google_oauth_redirect_uri() -> str:
+    return (
+        os.getenv(GOOGLE_OAUTH_REDIRECT_URI_ENV) or DEFAULT_GOOGLE_OAUTH_REDIRECT_URI
+    ).strip()
+
+
+def create_google_oauth_start(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+) -> Dict[str, str]:
+    client_id = _google_client_id()
+    state_token = secrets.token_urlsafe(32)
+    state = {
+        "state": state_token,
+        "provider": "google",
+        "workspace_id": str(workspace_id or "").strip() or "default",
+        "tenant_id": str(tenant_id or "").strip() or "default",
+        "user_id": str(user_id or "").strip() or "unknown-user",
+        "created_at": _utc_now_iso(),
+    }
+    with _STATE_LOCK:
+        payload = _load_state()
+        payload.setdefault("oauth_states", {})[state_token] = state
+        _write_state(payload)
+    query = urlparse.urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": google_oauth_redirect_uri(),
+            "response_type": "code",
+            "scope": GOOGLE_CLOUD_PLATFORM_SCOPE,
+            # offline+consent: the bootstrap sequence this token is used for
+            # (create/select project, check billing, enable APIs, create a
+            # service account, set two IAM policies) is a few real HTTP round
+            # trips the user may pause partway through (e.g. to go attach a
+            # billing account in another tab) — a refresh_token means that
+            # pause can outlast the ~1h access token without forcing a second
+            # consent screen. The token (and this refresh_token) is discarded
+            # the moment finish_google_bootstrap succeeds — see
+            # _google_setup_session_access_token and
+            # complete_google_oauth_callback below. Never reused afterward.
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": state_token,
+        }
+    )
+    return {
+        "provider": "google",
+        "oauth_redirect": f"{GOOGLE_OAUTH_AUTHORIZE_URL}?{query}",
+        "redirect_uri": google_oauth_redirect_uri(),
+        "state": state_token,
+    }
+
+
+def complete_google_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
+    clean_code = str(code or "").strip()
+    clean_state = str(state or "").strip()
+    if not clean_code:
+        raise VPSProvisioningError("Google OAuth callback is missing code.")
+    if not clean_state:
+        raise VPSProvisioningError("Google OAuth callback is missing state.")
+    with _STATE_LOCK:
+        payload = _load_state()
+        state_record = dict((payload.get("oauth_states") or {}).pop(clean_state, {}) or {})
+        _write_state(payload)
+    if not state_record or str(state_record.get("provider") or "") != "google":
+        raise VPSProvisioningError("Google OAuth state is invalid or expired.")
+    token_payload = _exchange_google_oauth_code(clean_code)
+    # Deliberately NOT store_vps_provider_token: Google isn't provisionable
+    # yet at this point (no project chosen, bootstrap not run) — this is a
+    # short-lived SETUP session the rest of the bootstrap flow (
+    # list_google_projects / create_google_project / check_google_project_billing
+    # / finish_google_bootstrap) consumes and then discards, never a
+    # long-lived provider connection the way a DO token_id is.
+    setup_id = _store_google_setup_session(
+        workspace_id=str(state_record.get("workspace_id") or "default"),
+        tenant_id=str(state_record.get("tenant_id") or "default"),
+        user_id=str(state_record.get("user_id") or "unknown-user"),
+        credentials=token_payload,
+    )
+    return {
+        "provider": "google",
+        "setup_id": setup_id,
+        "workspace_id": str(state_record.get("workspace_id") or "default"),
+    }
+
+
 def store_vps_provider_token(
     *,
     provider: str,
@@ -265,10 +452,35 @@ def store_vps_provider_token(
     source: str = "api_token",
 ) -> str:
     provider_id = _normalize_provider(provider)
+    if provider_id == "google":
+        # Defense in depth for the frontend never offering this: Google is
+        # OAuth-only (see PROVIDER_CONFIGS["google"].token_keys), so there is
+        # never a pasted token to accept here — connect via
+        # create_google_oauth_start / finish_google_bootstrap instead.
+        raise ValueError('Google Cloud has no pasted API token — connect with "Sign in with Google" instead.')
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+    return _store_provider_token_record(
+        provider_id=provider_id,
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        credentials=dict(credentials or {}, access_token=token),
+        source=source,
+    )
+
+
+def _store_provider_token_record(
+    *,
+    provider_id: str,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    credentials: Mapping[str, Any],
+    source: str,
+) -> str:
     token_id = f"vps_token_{secrets.token_hex(16)}"
     now = _utc_now_iso()
-    stored_credentials = _credentials_with_expiry(dict(credentials or {}, access_token=token))
+    stored_credentials = _credentials_with_expiry(dict(credentials))
     record = {
         "token_id": token_id,
         "provider": provider_id,
@@ -349,6 +561,12 @@ def fetch_provider_plans(
         workspace_id=workspace_id,
         user_id=user_id,
     )
+    if provider_id == "google":
+        # Early return: Google's stored "credentials" are just
+        # {project_id, service_account_email}, never a bearer token
+        # _provider_token below could extract — see _google_active_token.
+        plans = _fetch_google_plans(credentials)
+        return {"provider": provider_id, "plans": [asdict(plan) for plan in plans]}
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
     if provider_id == "digitalocean":
         raw = _http_json(
@@ -470,7 +688,7 @@ def _normalize_digitalocean_regions(payload: Mapping[str, Any]) -> list[Dict[str
 # Providers we can fetch a *live* region/location list for, given a
 # connected account's token. Vultr has its own path (fetch_public_provider_regions)
 # since its region list is fetchable without any account at all.
-_LIVE_REGION_PROVIDERS = {"digitalocean", "hetzner"}
+_LIVE_REGION_PROVIDERS = {"digitalocean", "hetzner", "google"}
 
 
 def fetch_provider_regions(
@@ -480,14 +698,17 @@ def fetch_provider_regions(
     workspace_id: str,
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Live region catalog for a connected account (DigitalOcean, Hetzner).
-    DigitalOcean's OAuth grant now requests regions:read explicitly (see
-    create_digitalocean_oauth_start); Hetzner's pasted API token already
-    carries full project access. Falls back to the static curated list
-    (same one provider_catalog() serves pre-connection) for providers we
-    haven't wired a live call for (Vultr — see fetch_public_provider_regions,
-    which doesn't need an account at all), or if the live call fails — never
-    a hard error just for this.
+    """Live region catalog for a connected account (DigitalOcean, Hetzner,
+    Google). DigitalOcean's OAuth grant now requests regions:read explicitly
+    (see create_digitalocean_oauth_start); Hetzner's pasted API token already
+    carries full project access; Google's impersonated service-account token
+    (see _google_active_token) carries whatever the bootstrap's custom role
+    granted it (compute.regions.list — see _GOOGLE_SUPPORTED... role
+    permissions). Falls back to the static curated list (same one
+    provider_catalog() serves pre-connection) for providers we haven't wired
+    a live call for (Vultr — see fetch_public_provider_regions, which doesn't
+    need an account at all), or if the live call fails — never a hard error
+    just for this.
     """
     provider_id = _normalize_provider(provider)
     if provider_id not in _LIVE_REGION_PROVIDERS:
@@ -496,11 +717,15 @@ def fetch_provider_regions(
         credentials = load_vps_provider_credentials(
             token_id, provider=provider_id, workspace_id=workspace_id, user_id=user_id
         )
-        token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
-        on_unauthorized = (
-            _digitalocean_reauth_callback(token_id, credentials) if provider_id == "digitalocean" else None
-        )
-        regions = _fetch_live_regions(provider_id, token, on_unauthorized=on_unauthorized)
+        if provider_id == "google":
+            token, project_id = _google_active_token(credentials)
+            regions = _fetch_live_regions("google", token, project_id=project_id)
+        else:
+            token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+            on_unauthorized = (
+                _digitalocean_reauth_callback(token_id, credentials) if provider_id == "digitalocean" else None
+            )
+            regions = _fetch_live_regions(provider_id, token, on_unauthorized=on_unauthorized)
     except (KeyError, ValueError, VPSProvisioningError):
         regions = []
     if not regions:
@@ -516,13 +741,16 @@ def _fetch_live_regions(
     provider_id: str,
     token: str,
     *,
+    project_id: Optional[str] = None,
     on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
 ) -> list[Dict[str, str]]:
     """Raw per-provider live region/location call, normalized to
     [{id, label}, ...]. Shared by fetch_provider_regions (token_id-based,
     full envelope + static fallback on any failure) and
     _fetch_live_region_ids (provision_vps's region-validation allow-list,
-    which wants just the id set and already tolerates failure)."""
+    which wants just the id set and already tolerates failure). project_id is
+    Google-only — every other provider's regions/locations call is scoped by
+    the bearer token alone, Google's is scoped by project."""
     if provider_id == "digitalocean":
         raw = _http_json(
             "GET",
@@ -538,10 +766,21 @@ def _fetch_live_regions(
             "GET", "https://api.hetzner.cloud/v1/locations", token=token, payload=None, provider=provider_id
         )
         return _normalize_hetzner_locations(raw)
+    if provider_id == "google":
+        if not project_id:
+            return []
+        raw = _http_json(
+            "GET",
+            f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/regions",
+            token=token,
+            payload=None,
+            provider=provider_id,
+        )
+        return _normalize_google_regions(raw)
     return []
 
 
-def _fetch_live_region_ids(provider_id: str, token: str) -> set[str]:
+def _fetch_live_region_ids(provider_id: str, token: str, *, project_id: Optional[str] = None) -> set[str]:
     """Best-effort live region id set used as an ADDITIONAL allow-list on
     top of the static PROVIDER_CONFIGS list during provisioning (see
     provision_vps) — so a region the picker just showed (fetched live
@@ -550,7 +789,7 @@ def _fetch_live_region_ids(provider_id: str, token: str) -> set[str]:
     validation falls back to the static list alone, same as before live
     region data existed."""
     try:
-        return {item["id"] for item in _fetch_live_regions(provider_id, token)}
+        return {item["id"] for item in _fetch_live_regions(provider_id, token, project_id=project_id)}
     except (VPSProvisioningError, KeyError, ValueError, TypeError):
         return set()
 
@@ -566,6 +805,25 @@ def _normalize_hetzner_locations(payload: Mapping[str, Any]) -> list[Dict[str, s
             continue
         label = str(item.get("city") or item.get("description") or "").strip() or slug
         regions.append({"id": slug, "label": label})
+    return regions
+
+
+def _normalize_google_regions(payload: Mapping[str, Any]) -> list[Dict[str, str]]:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    regions: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("status") or "").strip().upper() == "DOWN":
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        # compute.regions.list's "description" is typically just the region
+        # name itself again (GCE doesn't return a friendly city label the
+        # way DO/Hetzner do) — falls back to the id either way.
+        label = str(item.get("description") or "").strip() or name
+        regions.append({"id": name, "label": label})
     return regions
 
 
@@ -669,14 +927,45 @@ def provision_vps(
     """
     provider_id = _normalize_provider(provider)
     config = PROVIDER_CONFIGS[provider_id]
-    token = _provider_token(config, credentials)
-    live_region_ids: set[str] = set()
-    if token_id and provider_id in _LIVE_REGION_PROVIDERS:
-        live_region_ids = _fetch_live_region_ids(provider_id, token)
-    resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
     resolved_size = str(size or "").strip() or config.default_size
     name = _server_name(provider_id)
     user_data = cloud_init_script(pairing_token)
+
+    if provider_id == "google":
+        # Early return: Google's credentials are {project_id,
+        # service_account_email}, not a bearer token _provider_token below
+        # could extract — the actual bearer token is a short-lived
+        # impersonated one, minted via _google_impersonated_access_token,
+        # never cached or persisted. Unlike DO/Hetzner/Vultr's
+        # _provider_token (a free local dict lookup), minting this one costs
+        # two real HTTP round trips (refresh the operator identity, then
+        # generateAccessToken) — so, to preserve the same "an invalid region
+        # never reaches a provider call" contract the tests below hold every
+        # other provider to, it's deferred until AFTER region validation
+        # rather than paid unconditionally up front. It's only minted EARLY
+        # when validation itself needs it (token_id present -> live region
+        # data requires an impersonated token to fetch with); the `token is
+        # None` check below is what makes it exactly one mint either way,
+        # never two.
+        project_id = str(credentials.get("project_id") or "").strip()
+        service_account_email = str(credentials.get("service_account_email") or "").strip()
+        if not project_id or not service_account_email:
+            raise VPSProvisioningError("Google Cloud project is not fully connected.")
+        google_token: Optional[str] = None
+        live_region_ids: set[str] = set()
+        if token_id:
+            google_token = _google_impersonated_access_token(service_account_email)
+            live_region_ids = _fetch_live_region_ids("google", google_token, project_id=project_id)
+        resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
+        if google_token is None:
+            google_token = _google_impersonated_access_token(service_account_email)
+        return _provision_google(config, google_token, project_id, resolved_region, resolved_size, name, user_data)
+
+    token = _provider_token(config, credentials)
+    live_region_ids = set()
+    if token_id and provider_id in _LIVE_REGION_PROVIDERS:
+        live_region_ids = _fetch_live_region_ids(provider_id, token)
+    resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
     if provider_id == "digitalocean":
         on_unauthorized = _digitalocean_reauth_callback(token_id, credentials) if token_id else None
         return _provision_digitalocean(
@@ -760,24 +1049,35 @@ def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
     resource_id = str(record.get("provider_resource_id") or "").strip()
     if not resource_id:
         raise VPSProvisioningError("VPS provider resource id is missing.")
-    token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
-    # This record's credentials are a point-in-time snapshot taken at
-    # provision_vps() time (see record_vps_provision), not a live pointer
-    # into the token store — it can go stale on its own schedule. Give
-    # DigitalOcean the same reactive-401 refresh as every other DO call, just
-    # persisted back into this record instead of the (possibly long-gone,
-    # disconnected) original token_id.
-    on_unauthorized = None
-    if provider_id == "digitalocean":
-        def _reauth(_vps_id: str = clean_vps_id, _credentials: Mapping[str, Any] = credentials) -> Optional[str]:
-            refreshed = _refresh_digitalocean_credentials(_credentials)
-            if refreshed is None:
-                return None
-            _update_vps_record_credentials(_vps_id, refreshed)
-            return str(refreshed.get("access_token") or "").strip() or None
+    if provider_id == "google":
+        # Early branch: Google's snapshot is {project_id,
+        # service_account_email}, not a bearer token — see
+        # _google_active_token. provider_resource_id for Google is the
+        # instance NAME (see _provision_google), not a numeric id, and
+        # deletion is project+zone-scoped rather than token-scoped alone.
+        token, project_id = _google_active_token(credentials)
+        _delete_provider_resource(
+            provider_id, token, resource_id, project_id=project_id, region=str(record.get("region") or "").strip()
+        )
+    else:
+        token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+        # This record's credentials are a point-in-time snapshot taken at
+        # provision_vps() time (see record_vps_provision), not a live pointer
+        # into the token store — it can go stale on its own schedule. Give
+        # DigitalOcean the same reactive-401 refresh as every other DO call, just
+        # persisted back into this record instead of the (possibly long-gone,
+        # disconnected) original token_id.
+        on_unauthorized = None
+        if provider_id == "digitalocean":
+            def _reauth(_vps_id: str = clean_vps_id, _credentials: Mapping[str, Any] = credentials) -> Optional[str]:
+                refreshed = _refresh_digitalocean_credentials(_credentials)
+                if refreshed is None:
+                    return None
+                _update_vps_record_credentials(_vps_id, refreshed)
+                return str(refreshed.get("access_token") or "").strip() or None
 
-        on_unauthorized = _reauth
-    _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
+            on_unauthorized = _reauth
+        _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
     with _STATE_LOCK:
         state = _load_state()
         latest = dict((state.get("vps") or {}).get(clean_vps_id) or record)
@@ -1046,6 +1346,8 @@ def _delete_provider_resource(
     resource_id: str,
     *,
     on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
+    project_id: Optional[str] = None,
+    region: Optional[str] = None,
 ) -> None:
     if provider_id == "digitalocean":
         _http_empty(
@@ -1068,6 +1370,24 @@ def _delete_provider_resource(
         _http_empty(
             "DELETE",
             f"https://api.vultr.com/v2/instances/{resource_id}",
+            token=token,
+            provider=provider_id,
+        )
+        return
+    if provider_id == "google":
+        if not project_id or not region:
+            raise VPSProvisioningError("Google Cloud project/region is required to delete this server.")
+        # Re-derives the zone from the region the same way _provision_google
+        # did at creation time (see _google_resolve_zone) — the exact zone
+        # used isn't separately persisted on the VPS record (only region is,
+        # matching every other provider's record shape). Stable in practice
+        # (zone availability essentially never changes for an already-running
+        # instance's region between create and delete) but is a known
+        # simplification worth a real-provisioning sanity check.
+        zone = _google_resolve_zone(token, project_id, region)
+        _http_empty(
+            "DELETE",
+            f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/zones/{zone}/instances/{resource_id}",
             token=token,
             provider=provider_id,
         )
@@ -1109,7 +1429,7 @@ def _resolved_record_status(record: Mapping[str, Any]) -> str:
 
 def _load_state() -> Dict[str, Any]:
     if not VPS_STATE_FILE.exists():
-        return {"v": 1, "vps": {}, "tokens": {}, "oauth_states": {}}
+        return {"v": 1, "vps": {}, "tokens": {}, "oauth_states": {}, "google_setup_sessions": {}}
     try:
         parsed = json.loads(VPS_STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -1122,6 +1442,8 @@ def _load_state() -> Dict[str, Any]:
         parsed["tokens"] = {}
     if not isinstance(parsed.get("oauth_states"), dict):
         parsed["oauth_states"] = {}
+    if not isinstance(parsed.get("google_setup_sessions"), dict):
+        parsed["google_setup_sessions"] = {}
     parsed.setdefault("v", 1)
     return parsed
 
@@ -1333,6 +1655,832 @@ def _digitalocean_reauth_callback(
     return _reauth
 
 
+# =============================================================================
+# Google Cloud: bootstrap-then-impersonate
+#
+# Everything below is new for Google — DigitalOcean/Hetzner/Vultr above are
+# untouched except for the small early-return branches added to the shared
+# entry points (fetch_provider_plans, fetch_provider_regions, provision_vps,
+# delete_recorded_vps, _delete_provider_resource, _fetch_live_regions,
+# store_vps_provider_token, _normalize_provider). See the module docstring
+# above GOOGLE_OAUTH_AUTHORIZE_URL for the three-step shape this implements.
+# =============================================================================
+
+
+def _google_client_id() -> str:
+    client_id = (os.getenv(GOOGLE_CLOUD_CLIENT_ID_ENV) or "").strip()
+    if not client_id:
+        raise VPSProvisioningError("Google Cloud OAuth client id is not configured.")
+    return client_id
+
+
+def _google_client_secret() -> str:
+    client_secret = (os.getenv(GOOGLE_CLOUD_CLIENT_SECRET_ENV) or "").strip()
+    if not client_secret:
+        raise VPSProvisioningError("Google Cloud OAuth client secret is not configured.")
+    return client_secret
+
+
+def _exchange_google_oauth_code(code: str) -> Dict[str, Any]:
+    token_payload = _http_form_json(
+        "POST",
+        GOOGLE_OAUTH_TOKEN_URL,
+        provider="google",
+        payload={
+            "grant_type": "authorization_code",
+            "client_id": _google_client_id(),
+            "client_secret": _google_client_secret(),
+            "code": code,
+            "redirect_uri": google_oauth_redirect_uri(),
+        },
+    )
+    access_token = str(token_payload.get("access_token") or "").strip()
+    if not access_token:
+        raise VPSProvisioningError("Google OAuth did not return an access token.")
+    return token_payload
+
+
+# --- Setup-session storage: the user's OAuth token, held ONLY long enough to
+# run the bootstrap sequence below, then discarded (see
+# finish_google_bootstrap / _discard_google_setup_session). Never reused for
+# ongoing VM management — that's what the impersonation section further down
+# is for. Kept in its own state bucket (google_setup_sessions) rather than
+# reusing the "tokens" bucket store_vps_provider_token writes to, since a
+# setup session is not itself a usable provider connection.
+
+
+def _store_google_setup_session(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    credentials: Mapping[str, Any],
+) -> str:
+    setup_id = f"gsetup_{secrets.token_hex(16)}"
+    now = _utc_now_iso()
+    record = {
+        "setup_id": setup_id,
+        "workspace_id": str(workspace_id or "").strip() or "default",
+        "tenant_id": str(tenant_id or "").strip() or "default",
+        "user_id": str(user_id or "").strip() or "unknown-user",
+        "credentials_ciphertext": _encrypt_secret(_credentials_with_expiry(dict(credentials))),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _STATE_LOCK:
+        state = _load_state()
+        state.setdefault("google_setup_sessions", {})[setup_id] = record
+        _write_state(state)
+    return setup_id
+
+
+def _load_google_setup_session(
+    setup_id: str, *, workspace_id: str, user_id: Optional[str] = None
+) -> Dict[str, Any]:
+    clean_id = _clean_identifier(setup_id, field_name="setup_id")
+    with _STATE_LOCK:
+        record = dict((_load_state().get("google_setup_sessions") or {}).get(clean_id) or {})
+    if not record:
+        raise KeyError(clean_id)
+    if str(record.get("workspace_id") or "").strip() != str(workspace_id or "").strip():
+        raise KeyError(clean_id)
+    if user_id and str(record.get("user_id") or "").strip() != str(user_id or "").strip():
+        raise KeyError(clean_id)
+    return record
+
+
+def _update_google_setup_session_credentials(setup_id: str, credentials: Mapping[str, Any]) -> None:
+    with _STATE_LOCK:
+        state = _load_state()
+        record = dict((state.get("google_setup_sessions") or {}).get(setup_id) or {})
+        if not record:
+            return
+        record["credentials_ciphertext"] = _encrypt_secret(dict(credentials))
+        record["updated_at"] = _utc_now_iso()
+        state.setdefault("google_setup_sessions", {})[setup_id] = record
+        _write_state(state)
+
+
+def _discard_google_setup_session(setup_id: str) -> None:
+    with _STATE_LOCK:
+        state = _load_state()
+        (state.get("google_setup_sessions") or {}).pop(setup_id, None)
+        _write_state(state)
+
+
+# Google access tokens live ~1h — refresh a few minutes early. Much shorter
+# fuse than DO's 24h buffer (_DIGITALOCEAN_TOKEN_REFRESH_BUFFER_SECONDS)
+# because the underlying token itself is much shorter-lived, and this session
+# only needs to survive one bootstrap flow, not months of ongoing use.
+_GOOGLE_USER_TOKEN_REFRESH_BUFFER_SECONDS = 5 * 60
+
+
+def _google_user_credentials_need_refresh(credentials: Mapping[str, Any]) -> bool:
+    if not str(credentials.get("refresh_token") or "").strip():
+        return False
+    expires_at = _to_int(credentials.get("access_token_expires_at"))
+    if expires_at <= 0:
+        return False
+    return int(time.time()) >= expires_at - _GOOGLE_USER_TOKEN_REFRESH_BUFFER_SECONDS
+
+
+def _refresh_google_user_credentials(credentials: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    refresh_token = str(credentials.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return None
+    try:
+        token_payload = _http_form_json(
+            "POST",
+            GOOGLE_OAUTH_TOKEN_URL,
+            provider="google",
+            payload={
+                "grant_type": "refresh_token",
+                "client_id": _google_client_id(),
+                "client_secret": _google_client_secret(),
+                "refresh_token": refresh_token,
+            },
+        )
+    except VPSProvisioningError:
+        return None
+    new_access_token = str(token_payload.get("access_token") or "").strip()
+    if not new_access_token:
+        return None
+    updated = dict(credentials)
+    updated["access_token"] = new_access_token
+    # Google does not reliably reissue refresh_token on a refresh grant —
+    # keep the existing one when it doesn't.
+    new_refresh_token = str(token_payload.get("refresh_token") or "").strip()
+    if new_refresh_token:
+        updated["refresh_token"] = new_refresh_token
+    expires_in = _to_int(token_payload.get("expires_in"))
+    if expires_in > 0:
+        updated["access_token_expires_at"] = int(time.time()) + expires_in
+    return updated
+
+
+def _google_setup_session_access_token(
+    setup_id: str, *, workspace_id: str, user_id: Optional[str] = None
+) -> str:
+    session = _load_google_setup_session(setup_id, workspace_id=workspace_id, user_id=user_id)
+    credentials = _decrypt_secret(str(session.get("credentials_ciphertext") or ""))
+    if _google_user_credentials_need_refresh(credentials):
+        refreshed = _refresh_google_user_credentials(credentials)
+        if refreshed is not None:
+            credentials = refreshed
+            _update_google_setup_session_credentials(setup_id, credentials)
+    token = str(credentials.get("access_token") or "").strip()
+    if not token:
+        raise VPSProvisioningError("Google sign-in has expired — reconnect your Google account and try again.")
+    return token
+
+
+# --- Impersonation: the ONLY path ongoing (post-bootstrap) Google Cloud
+# calls use. Authenticates as Empyralis's own operator identity (never the
+# end user's token, which is already gone by this point) to mint a
+# short-lived access token AS the customer's empyralis-provisioner service
+# account — keyless, no downloaded service-account JSON ever involved.
+
+
+def _google_operator_identity() -> str:
+    identity = (os.getenv(GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV) or "").strip()
+    if not identity:
+        raise VPSProvisioningError(
+            f"Empyralis's Google Cloud operator identity is not configured "
+            f"({GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV} unset)."
+        )
+    return identity
+
+
+def _google_operator_access_token() -> str:
+    refresh_token = (os.getenv(GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV) or "").strip()
+    if not refresh_token:
+        raise VPSProvisioningError(
+            f"Empyralis's Google Cloud operator identity is not configured "
+            f"({GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV} unset)."
+        )
+    token_payload = _http_form_json(
+        "POST",
+        GOOGLE_OAUTH_TOKEN_URL,
+        provider="google",
+        payload={
+            "grant_type": "refresh_token",
+            "client_id": _google_client_id(),
+            "client_secret": _google_client_secret(),
+            "refresh_token": refresh_token,
+        },
+    )
+    access_token = str(token_payload.get("access_token") or "").strip()
+    if not access_token:
+        raise VPSProvisioningError("Could not refresh the Google Cloud operator identity token.")
+    return access_token
+
+
+def _google_impersonated_access_token(service_account_email: str) -> str:
+    """Mint a short-lived (default 1h) access token AS the customer's
+    empyralis-provisioner service account via the IAM Credentials API's
+    generateAccessToken — requires Empyralis's operator identity to already
+    hold roles/iam.serviceAccountTokenCreator on this SA (granted once, in
+    _google_grant_operator_impersonation during finish_google_bootstrap). The
+    returned token is used for exactly one caller's worth of Compute Engine
+    calls and is never persisted anywhere."""
+    clean_email = str(service_account_email or "").strip()
+    if not clean_email:
+        raise ValueError("Google Cloud service account email is required.")
+    operator_token = _google_operator_access_token()
+    response = _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_IAM_CREDENTIALS_URL}/projects/-/serviceAccounts/{clean_email}:generateAccessToken",
+        token=operator_token,
+        payload={"scope": [GOOGLE_CLOUD_PLATFORM_SCOPE]},
+        provider="google",
+    )
+    access_token = str(response.get("accessToken") or "").strip()
+    if not access_token:
+        raise VPSProvisioningError("Google Cloud did not return an impersonated access token.")
+    return access_token
+
+
+def _google_active_token(credentials: Mapping[str, Any]) -> tuple[str, str]:
+    """Resolve a fresh impersonated bearer token + project_id from a stored
+    Google connection ({project_id, service_account_email} — see
+    finish_google_bootstrap's _store_provider_token_record call). Every
+    ongoing Google call (plans, regions, provision, delete) goes through
+    this — never _provider_token, which has nothing to extract from these
+    credentials (see PROVIDER_CONFIGS["google"].token_keys)."""
+    project_id = str(credentials.get("project_id") or "").strip()
+    service_account_email = str(credentials.get("service_account_email") or "").strip()
+    if not project_id or not service_account_email:
+        raise VPSProvisioningError("Google Cloud project is not fully connected.")
+    return _google_impersonated_access_token(service_account_email), project_id
+
+
+# --- Project selection, billing check, and the bootstrap sequence itself.
+
+
+def _google_project_id_slug(name: str) -> str:
+    base = "".join(ch if ch.isalnum() else "-" for ch in str(name or "").lower()).strip("-")
+    base = "-".join(filter(None, base.split("-")))[:22] or "empyralis"
+    if not base[:1].isalpha():
+        base = f"e-{base}"
+    return f"{base}-{secrets.token_hex(4)}"[:30]
+
+
+def list_google_projects(setup_id: str, *, workspace_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    token = _google_setup_session_access_token(setup_id, workspace_id=workspace_id, user_id=user_id)
+    raw = _http_json(
+        "GET",
+        f"{GOOGLE_CLOUD_RESOURCE_MANAGER_URL}/projects?filter={urlparse.quote('lifecycleState:ACTIVE')}",
+        token=token,
+        payload=None,
+        provider="google",
+    )
+    return {"projects": _normalize_google_projects(raw)}
+
+
+def _normalize_google_projects(payload: Mapping[str, Any]) -> list[Dict[str, str]]:
+    items = payload.get("projects") if isinstance(payload.get("projects"), list) else []
+    projects: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        project_id = str(item.get("projectId") or "").strip()
+        if not project_id:
+            continue
+        projects.append({"project_id": project_id, "name": str(item.get("name") or "").strip() or project_id})
+    return projects
+
+
+def create_google_project(
+    setup_id: str, project_name: str, *, workspace_id: str, user_id: Optional[str] = None
+) -> Dict[str, str]:
+    token = _google_setup_session_access_token(setup_id, workspace_id=workspace_id, user_id=user_id)
+    clean_name = str(project_name or "").strip() or "Empyralis Agent Computer"
+    project_id = _google_project_id_slug(clean_name)
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_RESOURCE_MANAGER_URL}/projects",
+        token=token,
+        payload={"projectId": project_id, "name": clean_name},
+        provider="google",
+    )
+    return {"project_id": project_id, "name": clean_name}
+
+
+def check_google_project_billing(
+    setup_id: str, project_id: str, *, workspace_id: str, user_id: Optional[str] = None
+) -> Dict[str, Any]:
+    clean_project_id = _clean_identifier(project_id, field_name="project_id")
+    token = _google_setup_session_access_token(setup_id, workspace_id=workspace_id, user_id=user_id)
+    raw = _http_json(
+        "GET",
+        f"{GOOGLE_CLOUD_BILLING_URL}/projects/{clean_project_id}/billingInfo",
+        token=token,
+        payload=None,
+        provider="google",
+    )
+    return {
+        "project_id": clean_project_id,
+        "billing_enabled": bool(raw.get("billingEnabled")),
+        # There is no API that attaches a billing account/card to a project —
+        # Cloud Billing's projects.updateBillingInfo call only LINKS an
+        # already-existing billing account, it never collects payment
+        # details or creates one. The console is the only place a user can
+        # actually do that; this is the fallback the frontend surfaces when
+        # billing_enabled is False.
+        "console_url": f"https://console.cloud.google.com/billing/linkedaccount?project={clean_project_id}",
+    }
+
+
+def _google_enable_compute_api(token: str, project_id: str) -> None:
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_SERVICE_USAGE_URL}/projects/{project_id}/services/compute.googleapis.com:enable",
+        token=token,
+        payload={},
+        provider="google",
+    )
+
+
+def _google_create_provisioner_service_account(token: str, project_id: str) -> str:
+    sa_email = f"{GOOGLE_PROVISIONER_SA_ACCOUNT_ID}@{project_id}.iam.gserviceaccount.com"
+    try:
+        _http_json(
+            "POST",
+            f"{GOOGLE_CLOUD_IAM_URL}/projects/{project_id}/serviceAccounts",
+            token=token,
+            payload={
+                "accountId": GOOGLE_PROVISIONER_SA_ACCOUNT_ID,
+                "serviceAccount": {"displayName": "Empyralis Agent Computer Provisioner"},
+            },
+            provider="google",
+        )
+    except VPSProvisioningError as exc:
+        if "HTTP 409" not in str(exc):
+            raise
+        # Already exists — a re-run bootstrap (e.g. retried after fixing a
+        # billing issue) reuses it instead of failing.
+    return sa_email
+
+
+# Minimal VM-lifecycle-only permission set for the empyralis-provisioner
+# custom role — deliberately excludes IAM/project-level admin permissions
+# (this SA can create/list/delete the VMs it needs to, nothing about the
+# project itself).
+_GOOGLE_PROVISIONER_ROLE_PERMISSIONS = (
+    "compute.instances.create",
+    "compute.instances.delete",
+    "compute.instances.get",
+    "compute.instances.list",
+    "compute.instances.setMetadata",
+    "compute.instances.setLabels",
+    "compute.instances.setTags",
+    "compute.disks.create",
+    "compute.disks.get",
+    "compute.images.useReadOnly",
+    "compute.networks.get",
+    "compute.networks.use",
+    "compute.subnetworks.use",
+    "compute.subnetworks.useExternalIp",
+    "compute.firewalls.create",
+    "compute.firewalls.get",
+    "compute.firewalls.list",
+    "compute.zones.get",
+    "compute.zones.list",
+    "compute.zoneOperations.get",
+    "compute.regions.get",
+    "compute.regions.list",
+    "compute.machineTypes.get",
+    "compute.machineTypes.list",
+    "compute.globalOperations.get",
+)
+
+
+def _google_bind_custom_role(token: str, project_id: str, service_account_email: str) -> None:
+    role_name = f"projects/{project_id}/roles/{GOOGLE_PROVISIONER_CUSTOM_ROLE_ID}"
+    try:
+        _http_json(
+            "POST",
+            f"{GOOGLE_CLOUD_IAM_URL}/projects/{project_id}/roles",
+            token=token,
+            payload={
+                "roleId": GOOGLE_PROVISIONER_CUSTOM_ROLE_ID,
+                "role": {
+                    "title": "Empyralis VM Provisioner",
+                    "description": (
+                        "Minimal permissions to create, list, and delete Agent Computer VMs. "
+                        "Managed by Empyralis — see empyralis.ai."
+                    ),
+                    "includedPermissions": list(_GOOGLE_PROVISIONER_ROLE_PERMISSIONS),
+                    "stage": "GA",
+                },
+            },
+            provider="google",
+        )
+    except VPSProvisioningError as exc:
+        if "HTTP 409" not in str(exc):
+            raise
+    _google_set_project_iam_binding(
+        token, project_id, role=role_name, member=f"serviceAccount:{service_account_email}"
+    )
+
+
+def _google_grant_operator_impersonation(token: str, project_id: str, service_account_email: str) -> None:
+    _google_set_service_account_iam_binding(
+        token,
+        project_id,
+        service_account_email,
+        role="roles/iam.serviceAccountTokenCreator",
+        member=f"serviceAccount:{_google_operator_identity()}",
+    )
+
+
+def _google_set_project_iam_binding(token: str, project_id: str, *, role: str, member: str) -> None:
+    policy = _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_RESOURCE_MANAGER_URL}/projects/{project_id}:getIamPolicy",
+        token=token,
+        payload={},
+        provider="google",
+    )
+    _google_add_binding(policy, role=role, member=member)
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_RESOURCE_MANAGER_URL}/projects/{project_id}:setIamPolicy",
+        token=token,
+        payload={"policy": policy},
+        provider="google",
+    )
+
+
+def _google_set_service_account_iam_binding(
+    token: str, project_id: str, service_account_email: str, *, role: str, member: str
+) -> None:
+    resource = f"projects/{project_id}/serviceAccounts/{service_account_email}"
+    policy = _http_json(
+        "POST", f"{GOOGLE_CLOUD_IAM_URL}/{resource}:getIamPolicy", token=token, payload={}, provider="google"
+    )
+    _google_add_binding(policy, role=role, member=member)
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_IAM_URL}/{resource}:setIamPolicy",
+        token=token,
+        payload={"policy": policy},
+        provider="google",
+    )
+
+
+def _google_add_binding(policy: Dict[str, Any], *, role: str, member: str) -> None:
+    """Mutates `policy` in place, adding `member` to the binding for `role`
+    (creating the binding if it doesn't exist). Read-modify-write on whatever
+    getIamPolicy just returned — including any bindings a human already set
+    up in the console — so the follow-up setIamPolicy only ever ADDS this one
+    binding rather than clobbering the rest of the policy."""
+    bindings = policy.get("bindings")
+    if not isinstance(bindings, list):
+        bindings = []
+        policy["bindings"] = bindings
+    for binding in bindings:
+        if isinstance(binding, dict) and binding.get("role") == role:
+            members = binding.get("members")
+            if not isinstance(members, list):
+                members = []
+                binding["members"] = members
+            if member not in members:
+                members.append(member)
+            return
+    bindings.append({"role": role, "members": [member]})
+
+
+def finish_google_bootstrap(
+    setup_id: str, project_id: str, *, workspace_id: str, tenant_id: str, user_id: str
+) -> Dict[str, Any]:
+    """The one-time bootstrap (step 2 of the module docstring above
+    GOOGLE_OAUTH_AUTHORIZE_URL): verify billing, enable Compute Engine,
+    create+bind a minimal-permission service account, hand Empyralis's
+    operator identity impersonation rights on it, then store {project_id,
+    service_account_email} as this workspace's Google Cloud connection and
+    discard the user's OAuth session for good. Idempotent by design (the
+    service-account-create and custom-role-create calls both tolerate 409
+    Already Exists) so a user can safely retry after fixing a billing issue
+    without side effects piling up.
+    """
+    clean_project_id = _clean_identifier(project_id, field_name="project_id")
+    token = _google_setup_session_access_token(setup_id, workspace_id=workspace_id, user_id=user_id)
+    billing = check_google_project_billing(setup_id, clean_project_id, workspace_id=workspace_id, user_id=user_id)
+    if not billing.get("billing_enabled"):
+        raise VPSProvisioningError(
+            "Attach a billing account to this Google Cloud project before continuing: "
+            f"{billing.get('console_url')}"
+        )
+    _google_enable_compute_api(token, clean_project_id)
+    sa_email = _google_create_provisioner_service_account(token, clean_project_id)
+    _google_bind_custom_role(token, clean_project_id, sa_email)
+    _google_grant_operator_impersonation(token, clean_project_id, sa_email)
+    token_id = _store_provider_token_record(
+        provider_id="google",
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        credentials={"project_id": clean_project_id, "service_account_email": sa_email},
+        source="oauth_bootstrap",
+    )
+    _discard_google_setup_session(setup_id)
+    return {
+        "provider": "google",
+        "token_id": token_id,
+        "project_id": clean_project_id,
+        "service_account_email": sa_email,
+        "workspace_id": str(workspace_id or "").strip() or "default",
+    }
+
+
+# --- Ongoing provisioning: zone resolution, instance create/delete.
+
+
+def _google_resolve_zone(token: str, project_id: str, region: str) -> str:
+    """GCE instance creation needs a ZONE, not a region — compute.regions.list
+    (used for the browsable region list, the same "region" concept every
+    other provider here has) groups zones; instances.insert needs one
+    specific zone within it. Prefers the region's first UP zone from a live
+    compute.zones.list call; falls back to the "{region}-a" naming
+    convention (true of every GCE region in practice) if that call fails or
+    matches nothing, so a transient zones.list error never blocks
+    provisioning."""
+    try:
+        raw = _http_json(
+            "GET",
+            f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/zones",
+            token=token,
+            payload=None,
+            provider="google",
+        )
+        items = raw.get("items") if isinstance(raw.get("items"), list) else []
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("status") or "").upper() != "UP":
+                continue
+            zone_region = str(item.get("region") or "").rstrip("/")
+            if not zone_region.endswith(f"/regions/{region}"):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                return name
+    except VPSProvisioningError:
+        pass
+    return f"{region}-a"
+
+
+def _provision_google(
+    config: ProviderConfig,
+    token: str,
+    project_id: str,
+    region: str,
+    size: str,
+    name: str,
+    user_data: str,
+) -> VPSResult:
+    zone = _google_resolve_zone(token, project_id, region)
+    payload = {
+        "name": name,
+        "machineType": f"zones/{zone}/machineTypes/{size}",
+        "disks": [
+            {
+                "boot": True,
+                "autoDelete": True,
+                "initializeParams": {
+                    "sourceImage": config.default_image,
+                    "diskSizeGb": str(GOOGLE_DEFAULT_BOOT_DISK_GB),
+                },
+            }
+        ],
+        "networkInterfaces": [
+            {
+                "network": "global/networks/default",
+                "accessConfigs": [{"type": "ONE_TO_ONE_NAT", "name": "External NAT"}],
+            }
+        ],
+        "metadata": {"items": [{"key": "user-data", "value": user_data}]},
+        "labels": {"app": "empyralis", "role": "agent-computer"},
+        "tags": {"items": ["empyralis", "agent-computer"]},
+    }
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/zones/{zone}/instances",
+        token=token,
+        payload=payload,
+        provider="google",
+    )
+    # instances.insert returns a zone Operation, not the Instance resource —
+    # no public IP is assigned/reported until that operation completes,
+    # unlike DO/Hetzner/Vultr's create calls which return some ip/id fields
+    # immediately even mid-provisioning. `name` (generated by _server_name
+    # before this call) is stored as provider_resource_id — GCE's
+    # instances.delete addresses an instance by NAME, not the numeric id an
+    # Operation's targetId carries, so storing the name (which this service
+    # already knows deterministically, without needing to parse the
+    # response) is what makes delete_recorded_vps work later. The
+    # "provisioning" status contract (get_vps_provision_status) already
+    # tolerates public_ip=None throughout, same as every other provider
+    # reports before its box has actually registered.
+    return VPSResult(
+        provider_resource_id=name,
+        public_ip=None,
+        region=region,
+        size=size,
+        status="provisioning",
+        provider=config.provider,
+    )
+
+
+# --- Plans: Compute Engine's machineTypes carry no price field of their own
+# (unlike DO/Hetzner/Vultr's size/plan objects) — price comes from a SEPARATE
+# catalog (Cloud Billing Catalog API, service 6F81-5844-456A) that prices CPU
+# and RAM per-core/per-GB rather than per machine type, matched to a machine
+# type only via category.resourceGroup + description text (Google publishes
+# no machine-type-keyed price list). Best-effort by nature — see
+# _normalize_google_plans's docstring for the two known simplifications.
+
+
+def _fetch_google_plans(credentials: Mapping[str, Any]) -> list[VPSPlan]:
+    token, project_id = _google_active_token(credentials)
+    machine_types_raw = _http_json(
+        "GET",
+        f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/aggregated/machineTypes",
+        token=token,
+        payload=None,
+        provider="google",
+    )
+    sku_raw = _google_fetch_compute_skus(token)
+    return _normalize_google_plans(machine_types_raw, sku_raw, region=PROVIDER_CONFIGS["google"].default_region)
+
+
+def _google_fetch_compute_skus(token: str) -> Dict[str, Any]:
+    skus: list[Dict[str, Any]] = []
+    page_token = ""
+    for _ in range(20):  # hard safety cap on pagination loops
+        url = f"{GOOGLE_CLOUD_BILLING_URL}/services/{GOOGLE_CLOUD_BILLING_CATALOG_COMPUTE_SERVICE_ID}/skus"
+        if page_token:
+            url = f"{url}?pageToken={urlparse.quote(page_token)}"
+        raw = _http_json("GET", url, token=token, payload=None, provider="google")
+        items = raw.get("skus") if isinstance(raw.get("skus"), list) else []
+        skus.extend(item for item in items if isinstance(item, Mapping))
+        page_token = str(raw.get("nextPageToken") or "").strip()
+        if not page_token:
+            break
+    return {"skus": skus}
+
+
+def _google_region_from_zone(zone_name: str) -> str:
+    # GCE zone names are always "{region}-{letter}", e.g. "us-central1-a".
+    parts = str(zone_name or "").rsplit("-", 1)
+    return parts[0] if len(parts) == 2 else ""
+
+
+def _google_machine_type_family(name: str) -> str:
+    return str(name or "").split("-")[0].strip().lower()
+
+
+def _google_dedupe_machine_types(payload: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    """aggregatedList groups machine types by zone — the same machine type
+    (identical spec everywhere it exists) shows up once per zone it's
+    available in. Dedupes by name while accumulating the set of REGIONS
+    (derived from each zone name) it's available in, the same
+    per-plan-availability shape DO/Hetzner/Vultr's normalizers already
+    populate their `regions` field with."""
+    items = payload.get("items") if isinstance(payload.get("items"), Mapping) else {}
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for zone_key, zone_value in items.items():
+        if not isinstance(zone_value, Mapping):
+            continue
+        zone_name = str(zone_key).rsplit("/", 1)[-1].strip()
+        region = _google_region_from_zone(zone_name)
+        machine_types = zone_value.get("machineTypes") if isinstance(zone_value.get("machineTypes"), list) else []
+        for machine_type in machine_types:
+            if not isinstance(machine_type, Mapping) or machine_type.get("deprecated"):
+                continue
+            name = str(machine_type.get("name") or "").strip()
+            family = _google_machine_type_family(name)
+            if not name or family not in _GOOGLE_SUPPORTED_MACHINE_FAMILIES:
+                continue
+            vcpus = _to_int(machine_type.get("guestCpus"))
+            memory_mb = _to_int(machine_type.get("memoryMb"))
+            if vcpus < 1 or memory_mb < 1024:
+                continue
+            entry = by_name.setdefault(
+                name,
+                {
+                    "name": name,
+                    "vcpus": vcpus,
+                    "memory_mb": memory_mb,
+                    "disk_gb": GOOGLE_DEFAULT_BOOT_DISK_GB,
+                    "regions": set(),
+                },
+            )
+            if region:
+                entry["regions"].add(region)
+    return list(by_name.values())
+
+
+def _google_sku_family_from_resource_group(resource_group: str) -> str:
+    # e.g. "N2Standard" -> "n2", "N2DStandard" -> "n2d", "E2Standard" -> "e2"
+    # — stripping the suffix (rather than a prefix match) avoids "n2"
+    # incorrectly matching "n2dstandard".
+    token = str(resource_group or "").strip().lower()
+    for suffix in ("standard", "custom", "highmem", "highcpu"):
+        if token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _google_sku_hourly_price(sku: Mapping[str, Any]) -> float:
+    pricing_info = sku.get("pricingInfo") if isinstance(sku.get("pricingInfo"), list) else []
+    if not pricing_info or not isinstance(pricing_info[0], Mapping):
+        return 0.0
+    expression = pricing_info[0].get("pricingExpression")
+    expression = expression if isinstance(expression, Mapping) else {}
+    tiers = expression.get("tieredRates") if isinstance(expression.get("tieredRates"), list) else []
+    if not tiers or not isinstance(tiers[0], Mapping):
+        return 0.0
+    unit_price = tiers[0].get("unitPrice")
+    unit_price = unit_price if isinstance(unit_price, Mapping) else {}
+    return _to_float(unit_price.get("units")) + _to_float(unit_price.get("nanos")) / 1_000_000_000.0
+
+
+def _google_sku_prices_by_family(payload: Mapping[str, Any], *, region: str) -> Dict[tuple[str, str], float]:
+    items = payload.get("skus") if isinstance(payload.get("skus"), list) else []
+    prices: Dict[tuple[str, str], float] = {}
+    for sku in items:
+        if not isinstance(sku, Mapping):
+            continue
+        category = sku.get("category") if isinstance(sku.get("category"), Mapping) else {}
+        if str(category.get("usageType") or "") != "OnDemand":
+            continue
+        if str(category.get("resourceFamily") or "") != "Compute":
+            continue
+        service_regions = sku.get("serviceRegions") if isinstance(sku.get("serviceRegions"), list) else []
+        if region not in service_regions:
+            continue
+        family = _google_sku_family_from_resource_group(str(category.get("resourceGroup") or ""))
+        if not family:
+            continue
+        description = str(sku.get("description") or "").lower()
+        if "core" in description:
+            kind = "cpu"
+        elif "ram" in description:
+            kind = "ram"
+        else:
+            continue
+        price = _google_sku_hourly_price(sku)
+        if price > 0:
+            prices[(family, kind)] = price
+    return prices
+
+
+def _normalize_google_plans(
+    machine_types_payload: Mapping[str, Any], sku_payload: Mapping[str, Any], *, region: str
+) -> list[VPSPlan]:
+    """Best-effort pricing, priced against ONE reference region (the
+    provider default) — like every other provider here, VPSPlan has a single
+    price_monthly, not a per-region one, but Google is the one provider where
+    the real price does vary by region. This is a starting/reference price,
+    not a region-exact one (same convention cloud pricing calculators use for
+    a headline "$X/mo" figure). Restricted to a curated set of
+    general-purpose machine families (_GOOGLE_SUPPORTED_MACHINE_FAMILIES) —
+    GCE's full catalog also includes GPU/bare-metal/memory-optimized
+    families whose pricing shape and fit for an "Agent Computer" are both
+    out of scope here.
+    """
+    machine_types = _google_dedupe_machine_types(machine_types_payload)
+    prices = _google_sku_prices_by_family(sku_payload, region=region)
+    plans: list[VPSPlan] = []
+    for entry in machine_types:
+        family = _google_machine_type_family(entry["name"])
+        cpu_price = prices.get((family, "cpu"))
+        ram_price = prices.get((family, "ram"))
+        if not cpu_price or not ram_price:
+            continue
+        vcpus = entry["vcpus"]
+        memory_mb = entry["memory_mb"]
+        monthly = round((vcpus * cpu_price + (memory_mb / 1024.0) * ram_price) * _GOOGLE_AVERAGE_HOURS_PER_MONTH, 2)
+        if monthly <= 0:
+            continue
+        plans.append(
+            VPSPlan(
+                id=entry["name"],
+                slug=entry["name"],
+                label=f"{vcpus} CPU · {_memory_label(memory_mb)} · {entry['disk_gb']}GB SSD",
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                disk_gb=entry["disk_gb"],
+                price_monthly=monthly,
+                price_label=f"${monthly:g}/mo",
+                regions=tuple(sorted(entry["regions"])),
+            )
+        )
+    return _mark_recommended(plans)
+
+
 def _normalize_digitalocean_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
     items = payload.get("sizes") if isinstance(payload.get("sizes"), list) else []
     plans: list[VPSPlan] = []
@@ -1523,7 +2671,14 @@ def _to_float(value: Any) -> float:
 
 def _normalize_provider(provider: str) -> str:
     provider_id = str(provider or "").strip().lower().replace("_", "-")
-    aliases = {"digital-ocean": "digitalocean", "do": "digitalocean", "hcloud": "hetzner"}
+    aliases = {
+        "digital-ocean": "digitalocean",
+        "do": "digitalocean",
+        "hcloud": "hetzner",
+        "gcp": "google",
+        "google-cloud": "google",
+        "googlecloud": "google",
+    }
     provider_id = aliases.get(provider_id, provider_id)
     if provider_id not in PROVIDER_CONFIGS:
         raise ValueError(f"Unsupported VPS provider: {provider_id or 'missing'}.")

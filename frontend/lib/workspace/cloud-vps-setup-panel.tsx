@@ -22,8 +22,12 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   return (await response.json()) as T;
 }
 
-export type VpsProviderId = 'digitalocean' | 'hetzner' | 'vultr';
-type VpsStep = 'provider' | 'access' | 'plans' | 'region' | 'progress';
+export type VpsProviderId = 'digitalocean' | 'hetzner' | 'vultr' | 'google';
+// google-project / google-billing are Google-only steps between 'access'
+// (Sign in with Google) and 'plans' — Google needs a project chosen and its
+// billing verified before anything is provisionable, neither of which any
+// other provider here requires (see finishGoogleBootstrap).
+type VpsStep = 'provider' | 'access' | 'plans' | 'region' | 'progress' | 'google-project' | 'google-billing';
 type VpsProgressStage = 'idle' | 'creating' | 'installing' | 'connecting' | 'connected' | 'failed';
 
 export type VpsProviderCard = {
@@ -72,6 +76,29 @@ type VpsOAuthStartResponse = {
 type VpsTokenResponse = {
   provider?: string;
   token_id?: string;
+};
+
+type GoogleProject = {
+  project_id: string;
+  name: string;
+};
+
+type GoogleProjectsPayload = {
+  projects?: GoogleProject[];
+};
+
+type GoogleBillingPayload = {
+  project_id?: string;
+  billing_enabled?: boolean;
+  console_url?: string;
+};
+
+type GoogleBootstrapPayload = {
+  provider?: string;
+  token_id?: string;
+  project_id?: string;
+  service_account_email?: string;
+  workspace_id?: string;
 };
 
 type VpsProviderRegionsPayload = {
@@ -132,9 +159,20 @@ export const CLOUD_VPS_PROVIDERS: Record<VpsProviderId, VpsProviderCard> = {
     logoSrc: '/brand-assets/infrastructure/vultr.svg',
     features: ['API token', 'Ubuntu 24.04', '25 regions'],
   },
+  google: {
+    id: 'google',
+    label: 'Google Cloud',
+    tagline: 'Your own GCP project',
+    accountMethod: 'Google sign-in',
+    // No token-paste fallback exists for Google (see the 'access' step
+    // below) — nothing to link a "create a token" affordance to.
+    tokenUrl: '',
+    logoSrc: '/brand-assets/infrastructure/google-cloud.svg',
+    features: ['OAuth only', 'Ubuntu 24.04', 'Your billing'],
+  },
 };
 
-export const CLOUD_VPS_PROVIDER_IDS: VpsProviderId[] = ['digitalocean', 'hetzner', 'vultr'];
+export const CLOUD_VPS_PROVIDER_IDS: VpsProviderId[] = ['digitalocean', 'hetzner', 'vultr', 'google'];
 
 const PROVIDERS = CLOUD_VPS_PROVIDERS;
 const PROVIDER_IDS = CLOUD_VPS_PROVIDER_IDS;
@@ -261,6 +299,21 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
   // server the user already picked, instead of landing back on the plan
   // list. See handleCreateServerClick / finishConnecting.
   const [pendingCreateAfterConnect, setPendingCreateAfterConnect] = useState(false);
+  // Google-only bootstrap state (see the module comment on VpsStep) — the
+  // 'google-project' / 'google-billing' steps between OAuth and 'plans'.
+  // googleSetupId is a short-lived server-side session id (NOT a stored
+  // provider connection — see complete_google_oauth_callback on the
+  // backend), discarded once finishGoogleBootstrap succeeds.
+  const [googleSetupId, setGoogleSetupId] = useState<string | null>(null);
+  const [googleProjects, setGoogleProjects] = useState<GoogleProject[]>([]);
+  const [loadingGoogleProjects, setLoadingGoogleProjects] = useState(false);
+  const [selectedGoogleProjectId, setSelectedGoogleProjectId] = useState('');
+  const [googleNewProjectName, setGoogleNewProjectName] = useState('');
+  const [creatingGoogleProject, setCreatingGoogleProject] = useState(false);
+  const [googleBillingEnabled, setGoogleBillingEnabled] = useState<boolean | null>(null);
+  const [googleBillingConsoleUrl, setGoogleBillingConsoleUrl] = useState('');
+  const [checkingGoogleBilling, setCheckingGoogleBilling] = useState(false);
+  const [bootstrappingGoogle, setBootstrappingGoogle] = useState(false);
 
   const provider = selectedProvider ? PROVIDERS[selectedProvider] : null;
   const selectedPlan = useMemo(
@@ -309,6 +362,12 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setProviderResourceId(null);
     setCleanupBusy(false);
     setPendingCreateAfterConnect(false);
+    setGoogleSetupId(null);
+    setGoogleProjects([]);
+    setSelectedGoogleProjectId('');
+    setGoogleNewProjectName('');
+    setGoogleBillingEnabled(null);
+    setGoogleBillingConsoleUrl('');
     if (requestedProvider) {
       setSelectedProvider(requestedProvider);
       const connection = storedConnections[requestedProvider];
@@ -326,10 +385,28 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
       if (readString(payload, 'type') !== 'empyralis:vps-oauth') {
         return;
       }
-      if (readString(payload, 'provider') !== 'digitalocean') {
+      const messageProvider = readString(payload, 'provider');
+      const callbackError = readString(payload, 'error');
+      if (messageProvider === 'google') {
+        if (callbackError) {
+          setError(callbackError);
+          return;
+        }
+        // Google's callback returns a short-lived setup_id, never a
+        // token_id — the account isn't provisionable yet (no project chosen,
+        // billing unverified). See loadGoogleProjectsStep / finishGoogleBootstrap.
+        const setupId = readString(payload, 'setup_id');
+        if (!setupId) {
+          setError('Google did not return a sign-in session.');
+          return;
+        }
+        setGoogleSetupId(setupId);
+        void loadGoogleProjectsStep(setupId);
         return;
       }
-      const callbackError = readString(payload, 'error');
+      if (messageProvider !== 'digitalocean') {
+        return;
+      }
       if (callbackError) {
         setError(callbackError);
         return;
@@ -476,6 +553,12 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setSelectedRegionId('');
     setProgressStage('idle');
     setPendingCreateAfterConnect(false);
+    setGoogleSetupId(null);
+    setGoogleProjects([]);
+    setSelectedGoogleProjectId('');
+    setGoogleNewProjectName('');
+    setGoogleBillingEnabled(null);
+    setGoogleBillingConsoleUrl('');
     const connection = connections[providerId];
     if (connection?.tokenId) {
       await prepareServerChoices(providerId, connection.tokenId);
@@ -510,6 +593,159 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
       setError(oauthError instanceof Error ? oauthError.message : 'Could not start DigitalOcean login.');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function startGoogleOAuth() {
+    setError(null);
+    setBusy(true);
+    try {
+      const payload = await requestJson<VpsOAuthStartResponse>(
+        `/api/hardware/vps/oauth/google/start?workspace_id=${encodeURIComponent(workspaceId)}`,
+      );
+      const redirect = String(payload?.oauth_redirect || '').trim();
+      if (!redirect) {
+        throw new Error('Google sign-in URL was not returned.');
+      }
+      const popup = window.open(redirect, 'empyralis-google-oauth', 'width=720,height=780');
+      if (!popup) {
+        window.location.assign(redirect);
+      } else {
+        popup.focus();
+      }
+    } catch (oauthError) {
+      setError(oauthError instanceof Error ? oauthError.message : 'Could not start Google sign-in.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Reached right after the OAuth popup posts back a setup_id (see
+  // handleVpsOAuthMessage above) — lists the Google Cloud projects that
+  // account can already see, so the user can pick one (or create a new one
+  // below) rather than Empyralis guessing.
+  async function loadGoogleProjectsStep(setupId: string) {
+    setSelectedProvider('google');
+    setStep('google-project');
+    setError(null);
+    setLoadingGoogleProjects(true);
+    try {
+      const payload = await requestJson<GoogleProjectsPayload>(
+        `/api/hardware/vps/google/projects?setup_id=${encodeURIComponent(setupId)}&workspace_id=${encodeURIComponent(workspaceId)}`,
+      );
+      const projects = Array.isArray(payload?.projects)
+        ? payload.projects.filter((project) => Boolean(project?.project_id))
+        : [];
+      setGoogleProjects(projects);
+      setSelectedGoogleProjectId(projects[0]?.project_id ?? '');
+    } catch (projectsError) {
+      setError(projectsError instanceof Error ? projectsError.message : 'Could not load your Google Cloud projects.');
+    } finally {
+      setLoadingGoogleProjects(false);
+    }
+  }
+
+  async function createNewGoogleProject() {
+    if (!googleSetupId) {
+      setError('Sign in with Google first.');
+      return;
+    }
+    const projectName = googleNewProjectName.trim();
+    if (!projectName) {
+      setError('Enter a name for the new project.');
+      return;
+    }
+    setError(null);
+    setCreatingGoogleProject(true);
+    try {
+      const payload = await requestJson<GoogleProject>('/api/hardware/vps/google/projects', {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({ workspace_id: workspaceId, setup_id: googleSetupId, project_name: projectName }),
+      });
+      const projectId = String(payload?.project_id || '').trim();
+      if (!projectId) {
+        throw new Error('Google did not return a new project id.');
+      }
+      const nextProject: GoogleProject = { project_id: projectId, name: String(payload?.name || projectName) };
+      setGoogleProjects((current) => [...current, nextProject]);
+      setSelectedGoogleProjectId(projectId);
+      setGoogleNewProjectName('');
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Could not create the Google Cloud project.');
+    } finally {
+      setCreatingGoogleProject(false);
+    }
+  }
+
+  async function checkGoogleBilling() {
+    if (!googleSetupId || !selectedGoogleProjectId) {
+      return;
+    }
+    setError(null);
+    setCheckingGoogleBilling(true);
+    try {
+      const payload = await requestJson<GoogleBillingPayload>(
+        `/api/hardware/vps/google/projects/${encodeURIComponent(selectedGoogleProjectId)}/billing`
+          + `?setup_id=${encodeURIComponent(googleSetupId)}&workspace_id=${encodeURIComponent(workspaceId)}`,
+      );
+      setGoogleBillingEnabled(Boolean(payload?.billing_enabled));
+      setGoogleBillingConsoleUrl(String(payload?.console_url || ''));
+    } catch (billingError) {
+      setGoogleBillingEnabled(null);
+      setError(billingError instanceof Error ? billingError.message : 'Could not check the billing status.');
+    } finally {
+      setCheckingGoogleBilling(false);
+    }
+  }
+
+  async function continueFromGoogleProjectStep() {
+    if (!selectedGoogleProjectId) {
+      setError('Choose a Google Cloud project first.');
+      return;
+    }
+    setStep('google-billing');
+    setGoogleBillingEnabled(null);
+    await checkGoogleBilling();
+  }
+
+  // The one-time bootstrap (enable Compute Engine, create a scoped service
+  // account, grant Empyralis impersonation rights on it — never a
+  // downloaded key) — only reachable once billing_enabled is confirmed true
+  // (see the 'google-billing' step below). Its token_id slots into the exact
+  // same saveConnection/finishConnecting path DigitalOcean's OAuth and the
+  // API-token flows already use, so plans/region/create-server work
+  // identically from here on.
+  async function finishGoogleBootstrap() {
+    if (!googleSetupId || !selectedGoogleProjectId) {
+      setError('Choose a Google Cloud project first.');
+      return;
+    }
+    setError(null);
+    setBootstrappingGoogle(true);
+    try {
+      const payload = await requestJson<GoogleBootstrapPayload>('/api/hardware/vps/google/bootstrap', {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          setup_id: googleSetupId,
+          project_id: selectedGoogleProjectId,
+        }),
+      });
+      const nextTokenId = String(payload?.token_id || '').trim();
+      if (!nextTokenId) {
+        throw new Error('Google Cloud setup did not return a stored connection.');
+      }
+      const projectLabel = googleProjects.find((project) => project.project_id === selectedGoogleProjectId)?.name
+        || selectedGoogleProjectId;
+      saveConnection('google', nextTokenId, `${projectLabel} (${selectedGoogleProjectId})`);
+      setGoogleSetupId(null);
+      await finishConnecting('google', nextTokenId);
+    } catch (bootstrapError) {
+      setError(bootstrapError instanceof Error ? bootstrapError.message : 'Could not finish Google Cloud setup.');
+    } finally {
+      setBootstrappingGoogle(false);
     }
   }
 
@@ -611,6 +847,14 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
         return;
       }
       setStep('provider');
+      return;
+    }
+    if (step === 'google-project') {
+      setStep('provider');
+      return;
+    }
+    if (step === 'google-billing') {
+      setStep('google-project');
       return;
     }
     if (step === 'plans') {
@@ -858,31 +1102,150 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
                 {`Connect to create your ${selectedPlan.label} · ${selectedPlan.price_label} server.`}
               </p>
             ) : null}
-            {provider.id === 'digitalocean' ? (
+            {provider.id === 'google' ? (
+              // No token-paste fallback for Google (see PROVIDER_CONFIGS
+              // ["google"].token_keys on the backend) — OAuth is the only
+              // path, so this step is just the sign-in button.
               <>
-                <AppButton tone="primary" type="button" onClick={() => void startDigitalOceanOAuth()} disabled={busy}>
-                  {busy ? 'Opening DigitalOcean' : 'Log in with DigitalOcean'}
+                <p className="cloud-vps-panel__note">
+                  The server is created in your own Google Cloud project — Empyralis never sees or stores your
+                  Google password, and you keep full control of billing.
+                </p>
+                <AppButton tone="primary" type="button" onClick={() => void startGoogleOAuth()} disabled={busy}>
+                  {busy ? 'Opening Google sign-in…' : 'Sign in with Google'}
                 </AppButton>
-                <p className="cloud-vps-panel__note">Or connect with a personal access token:</p>
               </>
+            ) : (
+              <>
+                {provider.id === 'digitalocean' ? (
+                  <>
+                    <AppButton tone="primary" type="button" onClick={() => void startDigitalOceanOAuth()} disabled={busy}>
+                      {busy ? 'Opening DigitalOcean' : 'Log in with DigitalOcean'}
+                    </AppButton>
+                    <p className="cloud-vps-panel__note">Or connect with a personal access token:</p>
+                  </>
+                ) : null}
+                <div className="cloud-vps-access-form">
+                  <label className="app-form-field">
+                    <span className="app-form-field__label">API Token</span>
+                    <input
+                      className="app-field"
+                      type="password"
+                      value={apiToken}
+                      onChange={(event) => setApiToken(event.target.value)}
+                      placeholder="Paste API token"
+                    />
+                  </label>
+                  <a className="cloud-vps-token-link" href={provider.tokenUrl} target="_blank" rel="noreferrer">
+                    <span>{`Create token at ${provider.label}`}</span>
+                    <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
+                  </a>
+                  <AppButton tone="primary" type="button" onClick={() => void verifyApiToken()} disabled={busy || loadingPlans}>
+                    {busy || loadingPlans ? 'Verifying token' : 'Verify token →'}
+                  </AppButton>
+                </div>
+              </>
+            )}
+            {error ? <p className="cloud-vps-panel__error">{error}</p> : null}
+          </section>
+        ) : null}
+
+        {step === 'google-project' && provider ? (
+          <section className="cloud-vps-flow-modal__content">
+            <div className="cloud-vps-panel__heading">
+              <h2>Choose a Google Cloud project</h2>
+              <p>Empyralis creates the server inside this project — you keep full ownership and billing.</p>
+            </div>
+            {loadingGoogleProjects ? <p className="cloud-vps-panel__muted">Loading your projects...</p> : null}
+            {!loadingGoogleProjects && googleProjects.length ? (
+              <div className="cloud-vps-plan-list">
+                {googleProjects.map((project) => (
+                  <button
+                    key={project.project_id}
+                    type="button"
+                    className={joinClassNames(
+                      'cloud-vps-plan-row',
+                      selectedGoogleProjectId === project.project_id && 'is-selected',
+                    )}
+                    onClick={() => setSelectedGoogleProjectId(project.project_id)}
+                  >
+                    <span className="cloud-vps-plan-row__radio" aria-hidden="true" />
+                    <strong>{project.name}</strong>
+                    <span>{project.project_id}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {!loadingGoogleProjects && !googleProjects.length ? (
+              <p className="cloud-vps-panel__muted">No existing projects on this account — create one below.</p>
             ) : null}
             <div className="cloud-vps-access-form">
               <label className="app-form-field">
-                <span className="app-form-field__label">API Token</span>
+                <span className="app-form-field__label">Or create a new project</span>
                 <input
                   className="app-field"
-                  type="password"
-                  value={apiToken}
-                  onChange={(event) => setApiToken(event.target.value)}
-                  placeholder="Paste API token"
+                  type="text"
+                  value={googleNewProjectName}
+                  onChange={(event) => setGoogleNewProjectName(event.target.value)}
+                  placeholder="Empyralis Agent Computer"
                 />
               </label>
-              <a className="cloud-vps-token-link" href={provider.tokenUrl} target="_blank" rel="noreferrer">
-                <span>{`Create token at ${provider.label}`}</span>
-                <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
-              </a>
-              <AppButton tone="primary" type="button" onClick={() => void verifyApiToken()} disabled={busy || loadingPlans}>
-                {busy || loadingPlans ? 'Verifying token' : 'Verify token →'}
+              <AppButton
+                tone="secondary"
+                type="button"
+                onClick={() => void createNewGoogleProject()}
+                disabled={creatingGoogleProject || !googleNewProjectName.trim()}
+              >
+                {creatingGoogleProject ? 'Creating project…' : 'Create new project'}
+              </AppButton>
+            </div>
+            <div className="cloud-vps-panel__footer">
+              <AppButton
+                tone="primary"
+                type="button"
+                onClick={() => void continueFromGoogleProjectStep()}
+                disabled={!selectedGoogleProjectId || loadingGoogleProjects}
+              >
+                Continue →
+              </AppButton>
+            </div>
+            {error ? <p className="cloud-vps-panel__error">{error}</p> : null}
+          </section>
+        ) : null}
+
+        {step === 'google-billing' && provider ? (
+          <section className="cloud-vps-flow-modal__content">
+            <div className="cloud-vps-panel__heading">
+              <h2>Billing account</h2>
+            </div>
+            {checkingGoogleBilling ? <p className="cloud-vps-panel__muted">Checking billing status...</p> : null}
+            {!checkingGoogleBilling && googleBillingEnabled === true ? (
+              <p className="cloud-vps-panel__note">Billing is linked to this project — ready to continue.</p>
+            ) : null}
+            {!checkingGoogleBilling && googleBillingEnabled === false ? (
+              <>
+                <p className="cloud-vps-panel__note">
+                  This project has no billing account attached yet. Google requires one before any server can be
+                  created, and there is no way for Empyralis to attach one on your behalf — it has to be done in
+                  the console.
+                </p>
+                <a className="cloud-vps-token-link" href={googleBillingConsoleUrl} target="_blank" rel="noreferrer">
+                  <span>Attach a billing account in the Google Cloud console</span>
+                  <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
+                </a>
+                <AppButton tone="secondary" type="button" onClick={() => void checkGoogleBilling()} disabled={checkingGoogleBilling}>
+                  I&rsquo;ve added billing — check again
+                </AppButton>
+              </>
+            ) : null}
+            <div className="cloud-vps-panel__footer">
+              <AppButton
+                tone="primary"
+                type="button"
+                onClick={() => void finishGoogleBootstrap()}
+                disabled={bootstrappingGoogle || checkingGoogleBilling || googleBillingEnabled !== true}
+              >
+                {bootstrappingGoogle ? 'Setting up…' : 'Continue →'}
               </AppButton>
             </div>
             {error ? <p className="cloud-vps-panel__error">{error}</p> : null}
