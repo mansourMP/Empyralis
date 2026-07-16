@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Empyralis cross-account access for Cloud VPS ("Agent Computer")
+  provisioning. Creates a single IAM role in YOUR account that Empyralis's
+  own AWS account may assume, and ONLY with the ExternalId this stack was
+  created with. No long-lived AWS credentials of yours are ever seen by
+  Empyralis: every EC2 call it makes uses short-lived (1 hour) STS session
+  credentials obtained by assuming this role. The role grants EC2 instance
+  lifecycle actions only — never IAM, S3, billing, or any other service.
+  Deleting this stack (or just this role) instantly revokes Empyralis's
+  access to this account.
+
+Parameters:
+  ExternalId:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: >-
+      Per-customer secret Empyralis generated for your workspace — pre-filled
+      by the "Connect AWS account" link from the Empyralis dashboard. Do not
+      share this value or reuse it for another AWS account: it is what scopes
+      Empyralis's AWS account to assuming ONLY this role, for ONLY your
+      Empyralis workspace (see the AssumeRolePolicyDocument Condition below).
+  EmpyralisAccountId:
+    Type: String
+    Default: "000000000000"
+    AllowedPattern: "^\\d{12}$"
+    ConstraintDescription: Must be a 12-digit AWS account id.
+    Description: >-
+      Empyralis's own AWS account id — the only AWS account this role's trust
+      policy allows to assume it. Pre-filled from the Empyralis dashboard link
+      you followed; leave as-is unless Empyralis has told you otherwise. (The
+      "000000000000" default here is a placeholder — the Empyralis operator
+      replaces it before hosting this template; if you are opening this
+      template directly rather than through an Empyralis-generated link, do
+      not run it with that placeholder still in place.)
+
+Resources:
+  EmpyralisVPSProvisionerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Fixed-role-name convention: Empyralis derives this exact ARN from
+      # nothing but your 12-digit account id (arn:aws:iam::<account>:role/
+      # EmpyralisVPSProvisioner) — you never paste an ARN back to Empyralis.
+      # This name must match AWS_CROSS_ACCOUNT_ROLE_NAME in
+      # server_modules/vps_provisioning_service.py byte-for-byte; see
+      # server_modules/tests/test_vps_provisioning_service.py's
+      # test_aws_cloudformation_template_role_name_matches_constant.
+      RoleName: EmpyralisVPSProvisioner
+      Description: >-
+        Empyralis Agent Computer provisioning role — assumed via
+        sts:AssumeRole(ExternalId) from Empyralis's own AWS account only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${EmpyralisAccountId}:root"
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "sts:ExternalId": !Ref ExternalId
+      Policies:
+        - PolicyName: EmpyralisVPSProvisioningPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Read-only discovery calls. EC2's Describe* actions do not
+              # support resource-level permissions at all — Resource "*" is
+              # the documented/required scope for every one of them:
+              # https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonec2.html
+              - Sid: EmpyralisEc2Describe
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeRegions
+                  - ec2:DescribeImages
+                  - ec2:DescribeKeyPairs
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                Resource: "*"
+              # Mutating actions needed to actually stand up (and tear down)
+              # an Agent Computer instance: create it, tag it, and ensure a
+              # key pair + security group exist for it. Also scoped to "*":
+              # EC2's resource-level permission model for RunInstances
+              # requires pre-authorizing every referenced resource type (AMI,
+              # subnet, security group, ...) by ARN ahead of time, which for
+              # a brand-new customer account with unknown VPC/subnet ids
+              # isn't practical to pre-scope. This mirrors the equivalent
+              # published cross-account templates from other "SaaS
+              # provisions EC2 in your account" products (e.g. Datadog's AWS
+              # integration template takes the same approach for its own,
+              # smaller, equivalent action set).
+              - Sid: EmpyralisEc2Manage
+                Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ec2:CreateTags
+                  - ec2:CreateKeyPair
+                  - ec2:ImportKeyPair
+                  - ec2:CreateSecurityGroup
+                  - ec2:AuthorizeSecurityGroupIngress
+                Resource: "*"
+
+Outputs:
+  RoleArn:
+    Description: >-
+      The role ARN Empyralis will assume. Empyralis derives this same ARN
+      itself from your AWS account id and the fixed role name above (see
+      RoleName), so you never need to copy this back — it's here for your own
+      reference / verification only.
+    Value: !GetAtt EmpyralisVPSProvisionerRole.Arn
+  RoleName:
+    Description: Fixed role name every Empyralis-connected AWS account uses.
+    Value: !Ref EmpyralisVPSProvisionerRole

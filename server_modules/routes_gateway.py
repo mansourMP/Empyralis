@@ -620,6 +620,28 @@ class HardwareVPSTokenRequest(BaseModel):
     credentials: Dict[str, Any] = Field(default_factory=dict)
 
 
+class GoogleVPSProjectCreateRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    setup_id: str = Field(min_length=1, max_length=192)
+    project_name: str = Field(min_length=1, max_length=160)
+
+
+class GoogleVPSBootstrapRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    setup_id: str = Field(min_length=1, max_length=192)
+    project_id: str = Field(min_length=1, max_length=64)
+
+
+class HardwareVPSAwsConnectRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    account_id: str = Field(min_length=1, max_length=32)
+
+
+class HardwareVPSAwsConfirmRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    connection_id: str = Field(min_length=1, max_length=192)
+
+
 def _gateway_api_url_for_remote_setup() -> str:
     return (
         str(os.getenv("EMPYRALIS_GATEWAY_API_URL") or "").strip()
@@ -678,14 +700,19 @@ def _remote_agent_computer_setup_command(
     )
 
 
+_VPS_OAUTH_PROVIDER_LABELS = {"digitalocean": "DigitalOcean", "google": "Google"}
+
+
 def _vps_oauth_popup_html(
     *,
+    provider: str = "digitalocean",
     result: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
 ) -> str:
+    provider_label = _VPS_OAUTH_PROVIDER_LABELS.get(provider, provider.title() or "Provider")
     payload: Dict[str, Any] = {
         "type": "empyralis:vps-oauth",
-        "provider": "digitalocean",
+        "provider": provider,
     }
     if error:
         payload["error"] = str(error)
@@ -694,7 +721,7 @@ def _vps_oauth_popup_html(
     serialized = json.dumps(payload, separators=(",", ":"))
     return f"""<!doctype html>
 <html>
-  <head><meta charset="utf-8"><title>DigitalOcean connected</title></head>
+  <head><meta charset="utf-8"><title>{provider_label} connected</title></head>
   <body>
     <script>
       const payload = {serialized};
@@ -702,7 +729,7 @@ def _vps_oauth_popup_html(
         window.opener.postMessage(payload, '*');
         window.close();
       }} else {{
-        document.body.textContent = payload.error || 'DigitalOcean connected. You can close this window.';
+        document.body.textContent = payload.error || '{provider_label} connected. You can close this window.';
       }}
     </script>
   </body>
@@ -1629,6 +1656,148 @@ async def complete_digitalocean_vps_oauth(
     return HTMLResponse(_vps_oauth_popup_html(result=result))
 
 
+@router.get("/hardware/vps/oauth/google/start")
+async def start_google_vps_oauth(
+    workspace_id: Optional[str] = None,
+    current_user=Depends(require_api_key),
+):
+    workspace = enforce_workspace_access(
+        current_user,
+        workspace_id or "default",
+        minimum_role="owner",
+    )
+    tenant_id = workspace_tenant_id(current_user, workspace)
+    user_id = str((current_user or {}).get("user_id") or "").strip() or "unknown-user"
+    try:
+        return vps_provisioning_service.create_google_oauth_start(
+            workspace_id=workspace,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/hardware/vps/oauth/google/callback", response_class=HTMLResponse)
+async def complete_google_vps_oauth(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    if error:
+        message = str(error_description or error or "Google authorization was cancelled.")
+        return HTMLResponse(_vps_oauth_popup_html(provider="google", error=message), status_code=400)
+    try:
+        result = vps_provisioning_service.complete_google_oauth_callback(
+            code=str(code or ""),
+            state=str(state or ""),
+        )
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        return HTMLResponse(_vps_oauth_popup_html(provider="google", error=str(exc)), status_code=400)
+    return HTMLResponse(_vps_oauth_popup_html(provider="google", result=result))
+
+
+@router.get("/hardware/vps/google/projects")
+async def list_google_vps_projects(
+    setup_id: str = Query(..., min_length=1),
+    workspace_id: Optional[str] = None,
+    current_user=Depends(require_api_key),
+):
+    workspace = enforce_workspace_access(
+        current_user,
+        workspace_id or "default",
+        minimum_role="owner",
+    )
+    user_id = str((current_user or {}).get("user_id") or "").strip() or None
+    try:
+        return vps_provisioning_service.list_google_projects(setup_id, workspace_id=workspace, user_id=user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Google sign-in session was not found or has expired.") from exc
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/hardware/vps/google/projects")
+async def create_google_vps_project(
+    body: GoogleVPSProjectCreateRequest,
+    current_user=Depends(require_api_key),
+):
+    workspace = enforce_workspace_access(
+        current_user,
+        body.workspace_id or "default",
+        minimum_role="owner",
+    )
+    user_id = str((current_user or {}).get("user_id") or "").strip() or None
+    try:
+        return vps_provisioning_service.create_google_project(
+            body.setup_id,
+            body.project_name,
+            workspace_id=workspace,
+            user_id=user_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Google sign-in session was not found or has expired.") from exc
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/hardware/vps/google/projects/{project_id}/billing")
+async def get_google_vps_project_billing(
+    project_id: str,
+    setup_id: str = Query(..., min_length=1),
+    workspace_id: Optional[str] = None,
+    current_user=Depends(require_api_key),
+):
+    workspace = enforce_workspace_access(
+        current_user,
+        workspace_id or "default",
+        minimum_role="owner",
+    )
+    user_id = str((current_user or {}).get("user_id") or "").strip() or None
+    try:
+        return vps_provisioning_service.check_google_project_billing(
+            setup_id,
+            project_id,
+            workspace_id=workspace,
+            user_id=user_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Google sign-in session was not found or has expired.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/hardware/vps/google/bootstrap")
+async def bootstrap_google_vps_project(
+    body: GoogleVPSBootstrapRequest,
+    current_user=Depends(require_api_key),
+):
+    workspace_id = enforce_workspace_access(
+        current_user,
+        body.workspace_id or "default",
+        minimum_role="owner",
+    )
+    tenant_id = workspace_tenant_id(current_user, workspace_id)
+    user_id = str((current_user or {}).get("user_id") or "").strip() or "unknown-user"
+    try:
+        return vps_provisioning_service.finish_google_bootstrap(
+            body.setup_id,
+            body.project_id,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Google sign-in session was not found or has expired.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/hardware/vps/tokens")
 async def create_hardware_vps_token(
     body: HardwareVPSTokenRequest,
@@ -1654,6 +1823,71 @@ async def create_hardware_vps_token(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"provider": provider_id, "token_id": token_id}
+
+
+@router.post("/hardware/vps/aws/connect")
+async def start_aws_vps_connect(
+    body: HardwareVPSAwsConnectRequest,
+    current_user=Depends(require_api_key),
+):
+    """Step 1 of the AWS cross-account IAM role flow (no API key paste, no
+    OAuth — see vps_provisioning_service's "AWS cross-account IAM role"
+    section): the customer types their 12-digit AWS account id, and this
+    hands back a pre-filled CloudFormation Quick-Create-Stack URL plus the
+    role ARN it derives from the fixed-role-name convention. Nothing is
+    trusted yet — see /hardware/vps/aws/confirm for the step that actually
+    proves the role exists."""
+    workspace_id = enforce_workspace_access(
+        current_user,
+        body.workspace_id or "default",
+        minimum_role="owner",
+    )
+    tenant_id = workspace_tenant_id(current_user, workspace_id)
+    user_id = str((current_user or {}).get("user_id") or "").strip() or "unknown-user"
+    try:
+        return vps_provisioning_service.create_aws_connect_intent(
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            account_id=body.account_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/hardware/vps/aws/confirm")
+async def confirm_aws_vps_connect(
+    body: HardwareVPSAwsConfirmRequest,
+    current_user=Depends(require_api_key),
+):
+    """Step 2: after the customer has (supposedly) run the CloudFormation
+    stack, attempt sts:AssumeRole against the role ARN + ExternalId from the
+    matching /hardware/vps/aws/connect call. Success stores a token_id the
+    rest of the VPS routes treat exactly like a DigitalOcean/Hetzner/Vultr
+    one; failure (stack not finished yet, wrong account, etc.) is safely
+    retryable — the connection_id stays valid until it expires."""
+    workspace_id = enforce_workspace_access(
+        current_user,
+        body.workspace_id or "default",
+        minimum_role="owner",
+    )
+    tenant_id = workspace_tenant_id(current_user, workspace_id)
+    user_id = str((current_user or {}).get("user_id") or "").strip() or "unknown-user"
+    try:
+        return vps_provisioning_service.confirm_aws_connection(
+            connection_id=body.connection_id,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="AWS connection request was not found or has expired.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except vps_provisioning_service.VPSProvisioningError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/hardware/vps/plans")

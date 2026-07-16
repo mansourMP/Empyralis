@@ -6,6 +6,7 @@ import os
 import secrets
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,31 @@ from urllib import request as urlrequest
 
 from server_modules import gateway_state_repository, vault_store
 from server_modules.runtime_config import EMPYRALIS_STATE_HOME
+
+# AWS has no OAuth and no pastable API token — see PROVIDER_CONFIGS["aws"]
+# and create_aws_connect_intent/confirm_aws_connection below for the
+# CloudFormation cross-account IAM role pattern this uses instead. boto3 is
+# an optional import (mirrors artifact_service.py / provider_profiles.py's
+# BedrockAdapter) so the rest of this module — and every non-AWS provider —
+# keeps working even in an environment that never installed it.
+try:
+    import boto3 as _boto3
+except Exception:  # pragma: no cover - optional dependency at runtime
+    _boto3 = None
+
+try:
+    from botocore.exceptions import BotoCoreError as _BotoCoreError
+    from botocore.exceptions import ClientError as _ClientError
+    from botocore.exceptions import NoCredentialsError as _NoCredentialsError
+except Exception:  # pragma: no cover - optional dependency at runtime
+    class _BotoCoreError(Exception):
+        pass
+
+    class _ClientError(Exception):
+        pass
+
+    class _NoCredentialsError(Exception):
+        pass
 
 
 AGENT_INSTALLER_URL_ENV = "EMPYRALIS_AGENT_INSTALLER_URL"
@@ -33,6 +59,116 @@ LEGACY_DIGITALOCEAN_CLIENT_SECRET_ENV = "DIGITALOCEAN_OAUTH_CLIENT_SECRET"
 DEFAULT_DIGITALOCEAN_OAUTH_REDIRECT_URI = (
     "https://empyralis.ai/api/hardware/vps/oauth/digitalocean/callback"
 )
+
+# --- Google Cloud: "bootstrap-then-impersonate" ----------------------------
+#
+# Google is deliberately NOT modeled like DigitalOcean/Hetzner/Vultr's "paste
+# or OAuth a token, use that token for everything forever" shape. A user's own
+# Google OAuth access token expires in ~1h (7 days for a refresh token while
+# our OAuth consent screen sits in "Testing" publish status) and breaks
+# outright on the user's own password/2FA changes — unusable for a VM that
+# needs to be manageable months later. Instead:
+#
+#   1. Google OAuth consent (once) — scope cloud-platform — used ONLY to run
+#      steps 2 below as the user, then discarded. See create_google_oauth_start
+#      / complete_google_oauth_callback / _google_setup_session_access_token.
+#   2. One-time bootstrap in the user's own project (finish_google_bootstrap):
+#      enable Compute Engine -> create a dedicated empyralis-provisioner
+#      service account -> bind it a minimal custom VM-lifecycle-only role ->
+#      grant EMPYRALIS's OWN operating identity roles/iam.serviceAccountTokenCreator
+#      on that one service account. Nothing from this step is a secret worth
+#      protecting on its own — what's stored afterward is just
+#      {project_id, service_account_email}, not a credential.
+#   3. Ongoing provisioning (_provision_google, fetch_provider_plans,
+#      fetch_provider_regions, delete_recorded_vps) impersonates that service
+#      account via the IAM Credentials API's generateAccessToken, keyless,
+#      authenticating AS Empyralis's operator identity — never the end user's
+#      token (already discarded by then) and never a downloaded
+#      service-account JSON key. See _google_impersonated_access_token.
+GOOGLE_OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_OAUTH_REDIRECT_URI_ENV = "EMPYRALIS_GOOGLE_OAUTH_REDIRECT_URI"
+GOOGLE_CLOUD_CLIENT_ID_ENV = "GOOGLE_CLOUD_CLIENT_ID"
+GOOGLE_CLOUD_CLIENT_SECRET_ENV = "GOOGLE_CLOUD_CLIENT_SECRET"
+DEFAULT_GOOGLE_OAUTH_REDIRECT_URI = (
+    "https://empyralis.ai/api/hardware/vps/oauth/google/callback"
+)
+GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+# Empyralis's OWN operating GCP identity — the one every customer's bootstrap
+# grants serviceAccountTokenCreator to (step 2 above) and the one every
+# impersonated-token call authenticates as (step 3). Not a per-user value —
+# an operator credential set once on the backend host, same posture as
+# DIGITALOCEAN_CLIENT_ID/_installer_repo_token. Kept as its own long-lived
+# OAuth refresh token (never a downloaded JSON key — see the module docstring
+# above) so this file's existing refresh-token machinery (same shape as
+# _refresh_digitalocean_credentials) covers it without a new credential type.
+GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV = "GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL"
+GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV = "GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN"
+
+GOOGLE_CLOUD_RESOURCE_MANAGER_URL = "https://cloudresourcemanager.googleapis.com/v1"
+GOOGLE_CLOUD_BILLING_URL = "https://cloudbilling.googleapis.com/v1"
+GOOGLE_CLOUD_SERVICE_USAGE_URL = "https://serviceusage.googleapis.com/v1"
+GOOGLE_CLOUD_IAM_URL = "https://iam.googleapis.com/v1"
+GOOGLE_CLOUD_IAM_CREDENTIALS_URL = "https://iamcredentials.googleapis.com/v1"
+GOOGLE_CLOUD_COMPUTE_URL = "https://compute.googleapis.com/compute/v1"
+# Compute Engine's service id in the Cloud Billing Catalog API
+# (services.skus.list) — stable, documented at
+# cloud.google.com/billing/docs/how-to/catalog-api next to the "list public
+# SKUs" sample, which uses this exact same id for the same service.
+GOOGLE_CLOUD_BILLING_CATALOG_COMPUTE_SERVICE_ID = "6F81-5844-456A"
+
+GOOGLE_PROVISIONER_SA_ACCOUNT_ID = "empyralis-provisioner"
+GOOGLE_PROVISIONER_CUSTOM_ROLE_ID = "empyralisVmProvisioner"
+# GCE's boot disk is a resource sized independently of machine type (unlike
+# DO/Hetzner/Vultr, which bundle a fixed disk into each plan) — one fixed
+# default, in line with Hetzner's cx22 (~40GB) and DO's 50GB s-1vcpu-2gb.
+GOOGLE_DEFAULT_BOOT_DISK_GB = 40
+# Google's own pricing calculator's convention for turning an hourly SKU rate
+# into a monthly figure (730 = 365 * 24 / 12, i.e. the average month).
+_GOOGLE_AVERAGE_HOURS_PER_MONTH = 730
+# Curated general-purpose machine families for the size picker. GCE's full
+# catalog also includes GPU (a2/a3/g2), bare-metal (m3), and other
+# specialized families whose pricing shape (or suitability for an "Agent
+# Computer") doesn't belong in this list.
+_GOOGLE_SUPPORTED_MACHINE_FAMILIES = {"e2", "n2", "n2d", "n1"}
+
+# --- AWS cross-account IAM role (CloudFormation) — see create_aws_connect_
+# intent/confirm_aws_connection. Operator-set, both read via os.getenv and
+# both fail gracefully (VPSProvisioningError, not a crash) when unset,
+# exactly like DIGITALOCEAN_CLIENT_ID/_SECRET above (see
+# empyralis_aws_account_id / _aws_cfn_template_url).
+EMPYRALIS_AWS_ACCOUNT_ID_ENV = "EMPYRALIS_AWS_ACCOUNT_ID"
+EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV = "EMPYRALIS_AWS_CFN_TEMPLATE_URL"
+# Fixed-role-name convention: every customer's CloudFormation stack creates
+# a role with this EXACT name (see deploy/aws/empyralis-vps-role.yaml's
+# `RoleName:` property, which must match byte-for-byte — see
+# test_aws_cloudformation_template_role_name_matches_constant), so Empyralis
+# can derive arn:aws:iam::{customerAccountId}:role/{this} from nothing but
+# the 12-digit account id the customer types in — no ARN paste-back step.
+AWS_CROSS_ACCOUNT_ROLE_NAME = "EmpyralisVPSProvisioner"
+AWS_ROLE_SESSION_NAME = "empyralis-vps-provisioning"
+# IAM/STS AssumeRole is not region-scoped; this only picks which STS/console
+# endpoint to address (and where the CloudFormation stack's own metadata
+# lives) — it has no bearing on which region the customer's EC2 instances
+# actually run in.
+AWS_STS_SIGNING_REGION = "us-east-1"
+AWS_CFN_STACK_NAME = "empyralis-vps"
+# How long a "connect AWS account" intent (ExternalId + derived role_arn)
+# stays valid for confirm_aws_connection to redeem — long enough to walk
+# through the CloudFormation console at a normal pace, short enough that an
+# abandoned intent (closed tab, never ran the stack) doesn't sit around
+# indefinitely in aws_pending state.
+AWS_PENDING_CONNECTION_TTL_SECONDS = 60 * 60
+# Public, no-AWS-credentials-needed aggregator of AWS's own published
+# On-Demand pricing (see _fetch_aws_instance_pricing) — the AWS Pricing API
+# itself only has endpoints in us-east-1/ap-south-1 and a notoriously
+# hostile-to-parse response shape; this is the same well-known workaround
+# other tooling in this space uses. Best-effort only: falls back to
+# _AWS_STATIC_MONTHLY_PRICE_USD if unreachable, same resilience contract as
+# every other live-data-with-static-fallback path in this file.
+AWS_INSTANCES_VANTAGE_URL = "https://instances.vantage.sh/instances.json"
+
 PUBLIC_API_URL = (
     os.getenv("EMPYRALIS_PUBLIC_API_URL")
     or os.getenv("EMPYRALIS_GATEWAY_API_URL")
@@ -153,6 +289,63 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
             ProviderRegion("syd", "Sydney"),
         ),
     ),
+    "google": ProviderConfig(
+        provider="google",
+        label="Google Cloud",
+        auth_label="Google Cloud OAuth connection",
+        # Base URL only — the real instances.insert URL is
+        # project/zone-scoped and built per-call in _provision_google, unlike
+        # the other providers' account-scoped create_url.
+        create_url=GOOGLE_CLOUD_COMPUTE_URL,
+        default_region="us-central1",
+        default_size="e2-medium",
+        default_image="projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64",
+        # Empty on purpose: Google is OAuth-only, never a pasted API key (see
+        # the module docstring above) — store_vps_provider_token refuses this
+        # provider outright rather than relying on _provider_token's generic
+        # "no matching key" failure to carry that message.
+        token_keys=(),
+        regions=(
+            ProviderRegion("us-central1", "Iowa, USA"),
+            ProviderRegion("us-east1", "South Carolina, USA"),
+            ProviderRegion("us-west1", "Oregon, USA"),
+            ProviderRegion("europe-west1", "Belgium"),
+            ProviderRegion("europe-west4", "Netherlands"),
+            ProviderRegion("asia-southeast1", "Singapore"),
+        ),
+    ),
+    "aws": ProviderConfig(
+        provider="aws",
+        label="Amazon Web Services",
+        auth_label="AWS cross-account IAM role (CloudFormation)",
+        # Not a REST endpoint like the other three — EC2 RunInstances is a
+        # signed SigV4 SDK call (see _provision_aws), which is exactly why
+        # AWS needs boto3 instead of the shared _http_json. Kept as a
+        # descriptive string, not a URL, purely so this field stays
+        # non-empty/self-documenting like every other provider's.
+        create_url="ec2:RunInstances",
+        default_region="us-east-1",
+        default_size="t3.small",
+        # AWS AMI ids are per-region and go stale — there is no fixed slug
+        # like DigitalOcean's "ubuntu-24-04-x64". Resolved live per-call via
+        # ec2:DescribeImages against Canonical's official account (see
+        # _resolve_aws_ami). Kept here only as a human-readable label.
+        default_image="ubuntu-noble-24.04",
+        # AWS credentials are never a single bearer token — see
+        # _store_aws_credentials / _aws_client. role_arn is listed here only
+        # so _provider_token still has a non-empty field to validate
+        # presence of before any AWS branch runs (defense in depth, not the
+        # real credential-loading path).
+        token_keys=("role_arn",),
+        regions=(
+            ProviderRegion("us-east-1", "US East (N. Virginia)"),
+            ProviderRegion("us-west-2", "US West (Oregon)"),
+            ProviderRegion("eu-west-1", "Europe (Ireland)"),
+            ProviderRegion("eu-central-1", "Europe (Frankfurt)"),
+            ProviderRegion("ap-southeast-1", "Asia Pacific (Singapore)"),
+            ProviderRegion("ap-south-1", "Asia Pacific (Mumbai)"),
+        ),
+    ),
 }
 
 _STATE_LOCK = threading.Lock()
@@ -255,6 +448,94 @@ def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, 
     }
 
 
+def google_oauth_redirect_uri() -> str:
+    return (
+        os.getenv(GOOGLE_OAUTH_REDIRECT_URI_ENV) or DEFAULT_GOOGLE_OAUTH_REDIRECT_URI
+    ).strip()
+
+
+def create_google_oauth_start(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+) -> Dict[str, str]:
+    client_id = _google_client_id()
+    state_token = secrets.token_urlsafe(32)
+    state = {
+        "state": state_token,
+        "provider": "google",
+        "workspace_id": str(workspace_id or "").strip() or "default",
+        "tenant_id": str(tenant_id or "").strip() or "default",
+        "user_id": str(user_id or "").strip() or "unknown-user",
+        "created_at": _utc_now_iso(),
+    }
+    with _STATE_LOCK:
+        payload = _load_state()
+        payload.setdefault("oauth_states", {})[state_token] = state
+        _write_state(payload)
+    query = urlparse.urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": google_oauth_redirect_uri(),
+            "response_type": "code",
+            "scope": GOOGLE_CLOUD_PLATFORM_SCOPE,
+            # offline+consent: the bootstrap sequence this token is used for
+            # (create/select project, check billing, enable APIs, create a
+            # service account, set two IAM policies) is a few real HTTP round
+            # trips the user may pause partway through (e.g. to go attach a
+            # billing account in another tab) — a refresh_token means that
+            # pause can outlast the ~1h access token without forcing a second
+            # consent screen. The token (and this refresh_token) is discarded
+            # the moment finish_google_bootstrap succeeds — see
+            # _google_setup_session_access_token and
+            # complete_google_oauth_callback below. Never reused afterward.
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": state_token,
+        }
+    )
+    return {
+        "provider": "google",
+        "oauth_redirect": f"{GOOGLE_OAUTH_AUTHORIZE_URL}?{query}",
+        "redirect_uri": google_oauth_redirect_uri(),
+        "state": state_token,
+    }
+
+
+def complete_google_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
+    clean_code = str(code or "").strip()
+    clean_state = str(state or "").strip()
+    if not clean_code:
+        raise VPSProvisioningError("Google OAuth callback is missing code.")
+    if not clean_state:
+        raise VPSProvisioningError("Google OAuth callback is missing state.")
+    with _STATE_LOCK:
+        payload = _load_state()
+        state_record = dict((payload.get("oauth_states") or {}).pop(clean_state, {}) or {})
+        _write_state(payload)
+    if not state_record or str(state_record.get("provider") or "") != "google":
+        raise VPSProvisioningError("Google OAuth state is invalid or expired.")
+    token_payload = _exchange_google_oauth_code(clean_code)
+    # Deliberately NOT store_vps_provider_token: Google isn't provisionable
+    # yet at this point (no project chosen, bootstrap not run) — this is a
+    # short-lived SETUP session the rest of the bootstrap flow (
+    # list_google_projects / create_google_project / check_google_project_billing
+    # / finish_google_bootstrap) consumes and then discards, never a
+    # long-lived provider connection the way a DO token_id is.
+    setup_id = _store_google_setup_session(
+        workspace_id=str(state_record.get("workspace_id") or "default"),
+        tenant_id=str(state_record.get("tenant_id") or "default"),
+        user_id=str(state_record.get("user_id") or "unknown-user"),
+        credentials=token_payload,
+    )
+    return {
+        "provider": "google",
+        "setup_id": setup_id,
+        "workspace_id": str(state_record.get("workspace_id") or "default"),
+    }
+
+
 def store_vps_provider_token(
     *,
     provider: str,
@@ -265,10 +546,40 @@ def store_vps_provider_token(
     source: str = "api_token",
 ) -> str:
     provider_id = _normalize_provider(provider)
+    if provider_id == "google":
+        # Defense in depth for the frontend never offering this: Google is
+        # OAuth-only (see PROVIDER_CONFIGS["google"].token_keys), so there is
+        # never a pasted token to accept here — connect via
+        # create_google_oauth_start / finish_google_bootstrap instead.
+        raise ValueError('Google Cloud has no pasted API token — connect with "Sign in with Google" instead.')
+    if provider_id == "aws":
+        raise VPSProvisioningError(
+            "AWS connects via CloudFormation, not a pasted token — "
+            "use create_aws_connect_intent / confirm_aws_connection instead."
+        )
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+    return _store_provider_token_record(
+        provider_id=provider_id,
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        credentials=dict(credentials or {}, access_token=token),
+        source=source,
+    )
+
+
+def _store_provider_token_record(
+    *,
+    provider_id: str,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    credentials: Mapping[str, Any],
+    source: str,
+) -> str:
     token_id = f"vps_token_{secrets.token_hex(16)}"
     now = _utc_now_iso()
-    stored_credentials = _credentials_with_expiry(dict(credentials or {}, access_token=token))
+    stored_credentials = _credentials_with_expiry(dict(credentials))
     record = {
         "token_id": token_id,
         "provider": provider_id,
@@ -349,6 +660,19 @@ def fetch_provider_plans(
         workspace_id=workspace_id,
         user_id=user_id,
     )
+    if provider_id == "google":
+        # Early return: Google's stored "credentials" are just
+        # {project_id, service_account_email}, never a bearer token
+        # _provider_token below could extract — see _google_active_token.
+        plans = _fetch_google_plans(credentials)
+        return {"provider": provider_id, "plans": [asdict(plan) for plan in plans]}
+    if provider_id == "aws":
+        # AWS has no bearer token to extract — _fetch_aws_plans assumes the
+        # stored cross-account role itself (role_arn + external_id) via
+        # _aws_client. See _store_aws_credentials for why this bypasses
+        # _provider_token entirely instead of joining the branches below.
+        plans = _fetch_aws_plans(credentials)
+        return {"provider": provider_id, "plans": [asdict(plan) for plan in plans]}
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
     if provider_id == "digitalocean":
         raw = _http_json(
@@ -470,7 +794,7 @@ def _normalize_digitalocean_regions(payload: Mapping[str, Any]) -> list[Dict[str
 # Providers we can fetch a *live* region/location list for, given a
 # connected account's token. Vultr has its own path (fetch_public_provider_regions)
 # since its region list is fetchable without any account at all.
-_LIVE_REGION_PROVIDERS = {"digitalocean", "hetzner"}
+_LIVE_REGION_PROVIDERS = {"digitalocean", "hetzner", "google", "aws"}
 
 
 def fetch_provider_regions(
@@ -480,14 +804,17 @@ def fetch_provider_regions(
     workspace_id: str,
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Live region catalog for a connected account (DigitalOcean, Hetzner).
-    DigitalOcean's OAuth grant now requests regions:read explicitly (see
-    create_digitalocean_oauth_start); Hetzner's pasted API token already
-    carries full project access. Falls back to the static curated list
-    (same one provider_catalog() serves pre-connection) for providers we
-    haven't wired a live call for (Vultr — see fetch_public_provider_regions,
-    which doesn't need an account at all), or if the live call fails — never
-    a hard error just for this.
+    """Live region catalog for a connected account (DigitalOcean, Hetzner,
+    Google). DigitalOcean's OAuth grant now requests regions:read explicitly
+    (see create_digitalocean_oauth_start); Hetzner's pasted API token already
+    carries full project access; Google's impersonated service-account token
+    (see _google_active_token) carries whatever the bootstrap's custom role
+    granted it (compute.regions.list — see _GOOGLE_SUPPORTED... role
+    permissions). Falls back to the static curated list (same one
+    provider_catalog() serves pre-connection) for providers we haven't wired
+    a live call for (Vultr — see fetch_public_provider_regions, which doesn't
+    need an account at all), or if the live call fails — never a hard error
+    just for this.
     """
     provider_id = _normalize_provider(provider)
     if provider_id not in _LIVE_REGION_PROVIDERS:
@@ -496,11 +823,17 @@ def fetch_provider_regions(
         credentials = load_vps_provider_credentials(
             token_id, provider=provider_id, workspace_id=workspace_id, user_id=user_id
         )
-        token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
-        on_unauthorized = (
-            _digitalocean_reauth_callback(token_id, credentials) if provider_id == "digitalocean" else None
-        )
-        regions = _fetch_live_regions(provider_id, token, on_unauthorized=on_unauthorized)
+        if provider_id == "google":
+            token, project_id = _google_active_token(credentials)
+            regions = _fetch_live_regions("google", token, project_id=project_id)
+        elif provider_id == "aws":
+            regions = _fetch_aws_regions(credentials)
+        else:
+            token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+            on_unauthorized = (
+                _digitalocean_reauth_callback(token_id, credentials) if provider_id == "digitalocean" else None
+            )
+            regions = _fetch_live_regions(provider_id, token, on_unauthorized=on_unauthorized)
     except (KeyError, ValueError, VPSProvisioningError):
         regions = []
     if not regions:
@@ -516,13 +849,16 @@ def _fetch_live_regions(
     provider_id: str,
     token: str,
     *,
+    project_id: Optional[str] = None,
     on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
 ) -> list[Dict[str, str]]:
     """Raw per-provider live region/location call, normalized to
     [{id, label}, ...]. Shared by fetch_provider_regions (token_id-based,
     full envelope + static fallback on any failure) and
     _fetch_live_region_ids (provision_vps's region-validation allow-list,
-    which wants just the id set and already tolerates failure)."""
+    which wants just the id set and already tolerates failure). project_id is
+    Google-only — every other provider's regions/locations call is scoped by
+    the bearer token alone, Google's is scoped by project."""
     if provider_id == "digitalocean":
         raw = _http_json(
             "GET",
@@ -538,10 +874,21 @@ def _fetch_live_regions(
             "GET", "https://api.hetzner.cloud/v1/locations", token=token, payload=None, provider=provider_id
         )
         return _normalize_hetzner_locations(raw)
+    if provider_id == "google":
+        if not project_id:
+            return []
+        raw = _http_json(
+            "GET",
+            f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/regions",
+            token=token,
+            payload=None,
+            provider=provider_id,
+        )
+        return _normalize_google_regions(raw)
     return []
 
 
-def _fetch_live_region_ids(provider_id: str, token: str) -> set[str]:
+def _fetch_live_region_ids(provider_id: str, token: str, *, project_id: Optional[str] = None) -> set[str]:
     """Best-effort live region id set used as an ADDITIONAL allow-list on
     top of the static PROVIDER_CONFIGS list during provisioning (see
     provision_vps) — so a region the picker just showed (fetched live
@@ -550,7 +897,7 @@ def _fetch_live_region_ids(provider_id: str, token: str) -> set[str]:
     validation falls back to the static list alone, same as before live
     region data existed."""
     try:
-        return {item["id"] for item in _fetch_live_regions(provider_id, token)}
+        return {item["id"] for item in _fetch_live_regions(provider_id, token, project_id=project_id)}
     except (VPSProvisioningError, KeyError, ValueError, TypeError):
         return set()
 
@@ -566,6 +913,25 @@ def _normalize_hetzner_locations(payload: Mapping[str, Any]) -> list[Dict[str, s
             continue
         label = str(item.get("city") or item.get("description") or "").strip() or slug
         regions.append({"id": slug, "label": label})
+    return regions
+
+
+def _normalize_google_regions(payload: Mapping[str, Any]) -> list[Dict[str, str]]:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    regions: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("status") or "").strip().upper() == "DOWN":
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        # compute.regions.list's "description" is typically just the region
+        # name itself again (GCE doesn't return a friendly city label the
+        # way DO/Hetzner do) — falls back to the id either way.
+        label = str(item.get("description") or "").strip() or name
+        regions.append({"id": name, "label": label})
     return regions
 
 
@@ -669,14 +1035,47 @@ def provision_vps(
     """
     provider_id = _normalize_provider(provider)
     config = PROVIDER_CONFIGS[provider_id]
-    token = _provider_token(config, credentials)
-    live_region_ids: set[str] = set()
-    if token_id and provider_id in _LIVE_REGION_PROVIDERS:
-        live_region_ids = _fetch_live_region_ids(provider_id, token)
-    resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
     resolved_size = str(size or "").strip() or config.default_size
     name = _server_name(provider_id)
     user_data = cloud_init_script(pairing_token)
+
+    if provider_id == "google":
+        # Early return: Google's credentials are {project_id,
+        # service_account_email}, not a bearer token _provider_token below
+        # could extract — the actual bearer token is a short-lived
+        # impersonated one, minted via _google_impersonated_access_token,
+        # never cached or persisted. Unlike DO/Hetzner/Vultr's
+        # _provider_token (a free local dict lookup), minting this one costs
+        # two real HTTP round trips (refresh the operator identity, then
+        # generateAccessToken) — so, to preserve the same "an invalid region
+        # never reaches a provider call" contract the tests below hold every
+        # other provider to, it's deferred until AFTER region validation
+        # rather than paid unconditionally up front. It's only minted EARLY
+        # when validation itself needs it (token_id present -> live region
+        # data requires an impersonated token to fetch with); the `token is
+        # None` check below is what makes it exactly one mint either way,
+        # never two.
+        project_id = str(credentials.get("project_id") or "").strip()
+        service_account_email = str(credentials.get("service_account_email") or "").strip()
+        if not project_id or not service_account_email:
+            raise VPSProvisioningError("Google Cloud project is not fully connected.")
+        google_token: Optional[str] = None
+        live_region_ids: set[str] = set()
+        if token_id:
+            google_token = _google_impersonated_access_token(service_account_email)
+            live_region_ids = _fetch_live_region_ids("google", google_token, project_id=project_id)
+        resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
+        if google_token is None:
+            google_token = _google_impersonated_access_token(service_account_email)
+        return _provision_google(config, google_token, project_id, resolved_region, resolved_size, name, user_data)
+
+    token = _provider_token(config, credentials)
+    live_region_ids = set()
+    if token_id and provider_id in _LIVE_REGION_PROVIDERS:
+        live_region_ids = (
+            _fetch_aws_region_ids(credentials) if provider_id == "aws" else _fetch_live_region_ids(provider_id, token)
+        )
+    resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
     if provider_id == "digitalocean":
         on_unauthorized = _digitalocean_reauth_callback(token_id, credentials) if token_id else None
         return _provision_digitalocean(
@@ -686,6 +1085,8 @@ def provision_vps(
         return _provision_hetzner(config, token, resolved_region, resolved_size, name, user_data)
     if provider_id == "vultr":
         return _provision_vultr(config, token, resolved_region, resolved_size, name, user_data)
+    if provider_id == "aws":
+        return _provision_aws(credentials, resolved_region, resolved_size, name, user_data)
     raise VPSProvisioningError(f"Unsupported VPS provider: {provider_id}")
 
 
@@ -760,24 +1161,42 @@ def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
     resource_id = str(record.get("provider_resource_id") or "").strip()
     if not resource_id:
         raise VPSProvisioningError("VPS provider resource id is missing.")
-    token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
-    # This record's credentials are a point-in-time snapshot taken at
-    # provision_vps() time (see record_vps_provision), not a live pointer
-    # into the token store — it can go stale on its own schedule. Give
-    # DigitalOcean the same reactive-401 refresh as every other DO call, just
-    # persisted back into this record instead of the (possibly long-gone,
-    # disconnected) original token_id.
-    on_unauthorized = None
-    if provider_id == "digitalocean":
-        def _reauth(_vps_id: str = clean_vps_id, _credentials: Mapping[str, Any] = credentials) -> Optional[str]:
-            refreshed = _refresh_digitalocean_credentials(_credentials)
-            if refreshed is None:
-                return None
-            _update_vps_record_credentials(_vps_id, refreshed)
-            return str(refreshed.get("access_token") or "").strip() or None
+    if provider_id == "google":
+        # Early branch: Google's snapshot is {project_id,
+        # service_account_email}, not a bearer token — see
+        # _google_active_token. provider_resource_id for Google is the
+        # instance NAME (see _provision_google), not a numeric id, and
+        # deletion is project+zone-scoped rather than token-scoped alone.
+        token, project_id = _google_active_token(credentials)
+        _delete_provider_resource(
+            provider_id, token, resource_id, project_id=project_id, region=str(record.get("region") or "").strip()
+        )
+    elif provider_id == "aws":
+        # No bearer token, and TerminateInstances is region-scoped (unlike
+        # the other three providers' global DELETE endpoints) — the region
+        # this box was actually created in is on the record itself (see
+        # record_vps_provision), not something _delete_provider_resource's
+        # token-based signature has anywhere to carry.
+        _delete_aws_resource(credentials, str(record.get("region") or "").strip(), resource_id)
+    else:
+        token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
+        # This record's credentials are a point-in-time snapshot taken at
+        # provision_vps() time (see record_vps_provision), not a live pointer
+        # into the token store — it can go stale on its own schedule. Give
+        # DigitalOcean the same reactive-401 refresh as every other DO call, just
+        # persisted back into this record instead of the (possibly long-gone,
+        # disconnected) original token_id.
+        on_unauthorized = None
+        if provider_id == "digitalocean":
+            def _reauth(_vps_id: str = clean_vps_id, _credentials: Mapping[str, Any] = credentials) -> Optional[str]:
+                refreshed = _refresh_digitalocean_credentials(_credentials)
+                if refreshed is None:
+                    return None
+                _update_vps_record_credentials(_vps_id, refreshed)
+                return str(refreshed.get("access_token") or "").strip() or None
 
-        on_unauthorized = _reauth
-    _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
+            on_unauthorized = _reauth
+        _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
     with _STATE_LOCK:
         state = _load_state()
         latest = dict((state.get("vps") or {}).get(clean_vps_id) or record)
@@ -1046,6 +1465,8 @@ def _delete_provider_resource(
     resource_id: str,
     *,
     on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
+    project_id: Optional[str] = None,
+    region: Optional[str] = None,
 ) -> None:
     if provider_id == "digitalocean":
         _http_empty(
@@ -1068,6 +1489,24 @@ def _delete_provider_resource(
         _http_empty(
             "DELETE",
             f"https://api.vultr.com/v2/instances/{resource_id}",
+            token=token,
+            provider=provider_id,
+        )
+        return
+    if provider_id == "google":
+        if not project_id or not region:
+            raise VPSProvisioningError("Google Cloud project/region is required to delete this server.")
+        # Re-derives the zone from the region the same way _provision_google
+        # did at creation time (see _google_resolve_zone) — the exact zone
+        # used isn't separately persisted on the VPS record (only region is,
+        # matching every other provider's record shape). Stable in practice
+        # (zone availability essentially never changes for an already-running
+        # instance's region between create and delete) but is a known
+        # simplification worth a real-provisioning sanity check.
+        zone = _google_resolve_zone(token, project_id, region)
+        _http_empty(
+            "DELETE",
+            f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/zones/{zone}/instances/{resource_id}",
             token=token,
             provider=provider_id,
         )
@@ -1109,7 +1548,7 @@ def _resolved_record_status(record: Mapping[str, Any]) -> str:
 
 def _load_state() -> Dict[str, Any]:
     if not VPS_STATE_FILE.exists():
-        return {"v": 1, "vps": {}, "tokens": {}, "oauth_states": {}}
+        return {"v": 1, "vps": {}, "tokens": {}, "oauth_states": {}, "google_setup_sessions": {}, "aws_pending": {}}
     try:
         parsed = json.loads(VPS_STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -1122,6 +1561,13 @@ def _load_state() -> Dict[str, Any]:
         parsed["tokens"] = {}
     if not isinstance(parsed.get("oauth_states"), dict):
         parsed["oauth_states"] = {}
+    if not isinstance(parsed.get("google_setup_sessions"), dict):
+        parsed["google_setup_sessions"] = {}
+    if not isinstance(parsed.get("aws_pending"), dict):
+        # Pending "connect AWS account" intents (ExternalId + derived
+        # role_arn) awaiting confirm_aws_connection — see
+        # create_aws_connect_intent. Mirrors oauth_states' shape/lifecycle.
+        parsed["aws_pending"] = {}
     parsed.setdefault("v", 1)
     return parsed
 
@@ -1333,6 +1779,1562 @@ def _digitalocean_reauth_callback(
     return _reauth
 
 
+# =============================================================================
+# Google Cloud: bootstrap-then-impersonate
+#
+# Everything below is new for Google — DigitalOcean/Hetzner/Vultr above are
+# untouched except for the small early-return branches added to the shared
+# entry points (fetch_provider_plans, fetch_provider_regions, provision_vps,
+# delete_recorded_vps, _delete_provider_resource, _fetch_live_regions,
+# store_vps_provider_token, _normalize_provider). See the module docstring
+# above GOOGLE_OAUTH_AUTHORIZE_URL for the three-step shape this implements.
+# =============================================================================
+
+
+def _google_client_id() -> str:
+    client_id = (os.getenv(GOOGLE_CLOUD_CLIENT_ID_ENV) or "").strip()
+    if not client_id:
+        raise VPSProvisioningError("Google Cloud OAuth client id is not configured.")
+    return client_id
+
+
+def _google_client_secret() -> str:
+    client_secret = (os.getenv(GOOGLE_CLOUD_CLIENT_SECRET_ENV) or "").strip()
+    if not client_secret:
+        raise VPSProvisioningError("Google Cloud OAuth client secret is not configured.")
+    return client_secret
+
+
+def _exchange_google_oauth_code(code: str) -> Dict[str, Any]:
+    token_payload = _http_form_json(
+        "POST",
+        GOOGLE_OAUTH_TOKEN_URL,
+        provider="google",
+        payload={
+            "grant_type": "authorization_code",
+            "client_id": _google_client_id(),
+            "client_secret": _google_client_secret(),
+            "code": code,
+            "redirect_uri": google_oauth_redirect_uri(),
+        },
+    )
+    access_token = str(token_payload.get("access_token") or "").strip()
+    if not access_token:
+        raise VPSProvisioningError("Google OAuth did not return an access token.")
+    return token_payload
+
+
+# --- Setup-session storage: the user's OAuth token, held ONLY long enough to
+# run the bootstrap sequence below, then discarded (see
+# finish_google_bootstrap / _discard_google_setup_session). Never reused for
+# ongoing VM management — that's what the impersonation section further down
+# is for. Kept in its own state bucket (google_setup_sessions) rather than
+# reusing the "tokens" bucket store_vps_provider_token writes to, since a
+# setup session is not itself a usable provider connection.
+
+
+def _store_google_setup_session(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    credentials: Mapping[str, Any],
+) -> str:
+    setup_id = f"gsetup_{secrets.token_hex(16)}"
+    now = _utc_now_iso()
+    record = {
+        "setup_id": setup_id,
+        "workspace_id": str(workspace_id or "").strip() or "default",
+        "tenant_id": str(tenant_id or "").strip() or "default",
+        "user_id": str(user_id or "").strip() or "unknown-user",
+        "credentials_ciphertext": _encrypt_secret(_credentials_with_expiry(dict(credentials))),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _STATE_LOCK:
+        state = _load_state()
+        state.setdefault("google_setup_sessions", {})[setup_id] = record
+        _write_state(state)
+    return setup_id
+
+
+def _load_google_setup_session(
+    setup_id: str, *, workspace_id: str, user_id: Optional[str] = None
+) -> Dict[str, Any]:
+    clean_id = _clean_identifier(setup_id, field_name="setup_id")
+    with _STATE_LOCK:
+        record = dict((_load_state().get("google_setup_sessions") or {}).get(clean_id) or {})
+    if not record:
+        raise KeyError(clean_id)
+    if str(record.get("workspace_id") or "").strip() != str(workspace_id or "").strip():
+        raise KeyError(clean_id)
+    if user_id and str(record.get("user_id") or "").strip() != str(user_id or "").strip():
+        raise KeyError(clean_id)
+    return record
+
+
+def _update_google_setup_session_credentials(setup_id: str, credentials: Mapping[str, Any]) -> None:
+    with _STATE_LOCK:
+        state = _load_state()
+        record = dict((state.get("google_setup_sessions") or {}).get(setup_id) or {})
+        if not record:
+            return
+        record["credentials_ciphertext"] = _encrypt_secret(dict(credentials))
+        record["updated_at"] = _utc_now_iso()
+        state.setdefault("google_setup_sessions", {})[setup_id] = record
+        _write_state(state)
+
+
+def _discard_google_setup_session(setup_id: str) -> None:
+    with _STATE_LOCK:
+        state = _load_state()
+        (state.get("google_setup_sessions") or {}).pop(setup_id, None)
+        _write_state(state)
+
+
+# Google access tokens live ~1h — refresh a few minutes early. Much shorter
+# fuse than DO's 24h buffer (_DIGITALOCEAN_TOKEN_REFRESH_BUFFER_SECONDS)
+# because the underlying token itself is much shorter-lived, and this session
+# only needs to survive one bootstrap flow, not months of ongoing use.
+_GOOGLE_USER_TOKEN_REFRESH_BUFFER_SECONDS = 5 * 60
+
+
+def _google_user_credentials_need_refresh(credentials: Mapping[str, Any]) -> bool:
+    if not str(credentials.get("refresh_token") or "").strip():
+        return False
+    expires_at = _to_int(credentials.get("access_token_expires_at"))
+    if expires_at <= 0:
+        return False
+    return int(time.time()) >= expires_at - _GOOGLE_USER_TOKEN_REFRESH_BUFFER_SECONDS
+
+
+def _refresh_google_user_credentials(credentials: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    refresh_token = str(credentials.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return None
+    try:
+        token_payload = _http_form_json(
+            "POST",
+            GOOGLE_OAUTH_TOKEN_URL,
+            provider="google",
+            payload={
+                "grant_type": "refresh_token",
+                "client_id": _google_client_id(),
+                "client_secret": _google_client_secret(),
+                "refresh_token": refresh_token,
+            },
+        )
+    except VPSProvisioningError:
+        return None
+    new_access_token = str(token_payload.get("access_token") or "").strip()
+    if not new_access_token:
+        return None
+    updated = dict(credentials)
+    updated["access_token"] = new_access_token
+    # Google does not reliably reissue refresh_token on a refresh grant —
+    # keep the existing one when it doesn't.
+    new_refresh_token = str(token_payload.get("refresh_token") or "").strip()
+    if new_refresh_token:
+        updated["refresh_token"] = new_refresh_token
+    expires_in = _to_int(token_payload.get("expires_in"))
+    if expires_in > 0:
+        updated["access_token_expires_at"] = int(time.time()) + expires_in
+    return updated
+
+
+def _google_setup_session_access_token(
+    setup_id: str, *, workspace_id: str, user_id: Optional[str] = None
+) -> str:
+    session = _load_google_setup_session(setup_id, workspace_id=workspace_id, user_id=user_id)
+    credentials = _decrypt_secret(str(session.get("credentials_ciphertext") or ""))
+    if _google_user_credentials_need_refresh(credentials):
+        refreshed = _refresh_google_user_credentials(credentials)
+        if refreshed is not None:
+            credentials = refreshed
+            _update_google_setup_session_credentials(setup_id, credentials)
+    token = str(credentials.get("access_token") or "").strip()
+    if not token:
+        raise VPSProvisioningError("Google sign-in has expired — reconnect your Google account and try again.")
+    return token
+
+
+# --- Impersonation: the ONLY path ongoing (post-bootstrap) Google Cloud
+# calls use. Authenticates as Empyralis's own operator identity (never the
+# end user's token, which is already gone by this point) to mint a
+# short-lived access token AS the customer's empyralis-provisioner service
+# account — keyless, no downloaded service-account JSON ever involved.
+
+
+def _google_operator_identity() -> str:
+    identity = (os.getenv(GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV) or "").strip()
+    if not identity:
+        raise VPSProvisioningError(
+            f"Empyralis's Google Cloud operator identity is not configured "
+            f"({GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV} unset)."
+        )
+    return identity
+
+
+def _google_operator_access_token() -> str:
+    refresh_token = (os.getenv(GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV) or "").strip()
+    if not refresh_token:
+        raise VPSProvisioningError(
+            f"Empyralis's Google Cloud operator identity is not configured "
+            f"({GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV} unset)."
+        )
+    token_payload = _http_form_json(
+        "POST",
+        GOOGLE_OAUTH_TOKEN_URL,
+        provider="google",
+        payload={
+            "grant_type": "refresh_token",
+            "client_id": _google_client_id(),
+            "client_secret": _google_client_secret(),
+            "refresh_token": refresh_token,
+        },
+    )
+    access_token = str(token_payload.get("access_token") or "").strip()
+    if not access_token:
+        raise VPSProvisioningError("Could not refresh the Google Cloud operator identity token.")
+    return access_token
+
+
+def _google_impersonated_access_token(service_account_email: str) -> str:
+    """Mint a short-lived (default 1h) access token AS the customer's
+    empyralis-provisioner service account via the IAM Credentials API's
+    generateAccessToken — requires Empyralis's operator identity to already
+    hold roles/iam.serviceAccountTokenCreator on this SA (granted once, in
+    _google_grant_operator_impersonation during finish_google_bootstrap). The
+    returned token is used for exactly one caller's worth of Compute Engine
+    calls and is never persisted anywhere."""
+    clean_email = str(service_account_email or "").strip()
+    if not clean_email:
+        raise ValueError("Google Cloud service account email is required.")
+    operator_token = _google_operator_access_token()
+    response = _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_IAM_CREDENTIALS_URL}/projects/-/serviceAccounts/{clean_email}:generateAccessToken",
+        token=operator_token,
+        payload={"scope": [GOOGLE_CLOUD_PLATFORM_SCOPE]},
+        provider="google",
+    )
+    access_token = str(response.get("accessToken") or "").strip()
+    if not access_token:
+        raise VPSProvisioningError("Google Cloud did not return an impersonated access token.")
+    return access_token
+
+
+def _google_active_token(credentials: Mapping[str, Any]) -> tuple[str, str]:
+    """Resolve a fresh impersonated bearer token + project_id from a stored
+    Google connection ({project_id, service_account_email} — see
+    finish_google_bootstrap's _store_provider_token_record call). Every
+    ongoing Google call (plans, regions, provision, delete) goes through
+    this — never _provider_token, which has nothing to extract from these
+    credentials (see PROVIDER_CONFIGS["google"].token_keys)."""
+    project_id = str(credentials.get("project_id") or "").strip()
+    service_account_email = str(credentials.get("service_account_email") or "").strip()
+    if not project_id or not service_account_email:
+        raise VPSProvisioningError("Google Cloud project is not fully connected.")
+    return _google_impersonated_access_token(service_account_email), project_id
+
+
+# --- Project selection, billing check, and the bootstrap sequence itself.
+
+
+def _google_project_id_slug(name: str) -> str:
+    base = "".join(ch if ch.isalnum() else "-" for ch in str(name or "").lower()).strip("-")
+    base = "-".join(filter(None, base.split("-")))[:22] or "empyralis"
+    if not base[:1].isalpha():
+        base = f"e-{base}"
+    return f"{base}-{secrets.token_hex(4)}"[:30]
+
+
+def list_google_projects(setup_id: str, *, workspace_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    token = _google_setup_session_access_token(setup_id, workspace_id=workspace_id, user_id=user_id)
+    raw = _http_json(
+        "GET",
+        f"{GOOGLE_CLOUD_RESOURCE_MANAGER_URL}/projects?filter={urlparse.quote('lifecycleState:ACTIVE')}",
+        token=token,
+        payload=None,
+        provider="google",
+    )
+    return {"projects": _normalize_google_projects(raw)}
+
+
+def _normalize_google_projects(payload: Mapping[str, Any]) -> list[Dict[str, str]]:
+    items = payload.get("projects") if isinstance(payload.get("projects"), list) else []
+    projects: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        project_id = str(item.get("projectId") or "").strip()
+        if not project_id:
+            continue
+        projects.append({"project_id": project_id, "name": str(item.get("name") or "").strip() or project_id})
+    return projects
+
+
+def create_google_project(
+    setup_id: str, project_name: str, *, workspace_id: str, user_id: Optional[str] = None
+) -> Dict[str, str]:
+    token = _google_setup_session_access_token(setup_id, workspace_id=workspace_id, user_id=user_id)
+    clean_name = str(project_name or "").strip() or "Empyralis Agent Computer"
+    project_id = _google_project_id_slug(clean_name)
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_RESOURCE_MANAGER_URL}/projects",
+        token=token,
+        payload={"projectId": project_id, "name": clean_name},
+        provider="google",
+    )
+    return {"project_id": project_id, "name": clean_name}
+
+
+def check_google_project_billing(
+    setup_id: str, project_id: str, *, workspace_id: str, user_id: Optional[str] = None
+) -> Dict[str, Any]:
+    clean_project_id = _clean_identifier(project_id, field_name="project_id")
+    token = _google_setup_session_access_token(setup_id, workspace_id=workspace_id, user_id=user_id)
+    raw = _http_json(
+        "GET",
+        f"{GOOGLE_CLOUD_BILLING_URL}/projects/{clean_project_id}/billingInfo",
+        token=token,
+        payload=None,
+        provider="google",
+    )
+    return {
+        "project_id": clean_project_id,
+        "billing_enabled": bool(raw.get("billingEnabled")),
+        # There is no API that attaches a billing account/card to a project —
+        # Cloud Billing's projects.updateBillingInfo call only LINKS an
+        # already-existing billing account, it never collects payment
+        # details or creates one. The console is the only place a user can
+        # actually do that; this is the fallback the frontend surfaces when
+        # billing_enabled is False.
+        "console_url": f"https://console.cloud.google.com/billing/linkedaccount?project={clean_project_id}",
+    }
+
+
+def _google_enable_compute_api(token: str, project_id: str) -> None:
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_SERVICE_USAGE_URL}/projects/{project_id}/services/compute.googleapis.com:enable",
+        token=token,
+        payload={},
+        provider="google",
+    )
+
+
+def _google_create_provisioner_service_account(token: str, project_id: str) -> str:
+    sa_email = f"{GOOGLE_PROVISIONER_SA_ACCOUNT_ID}@{project_id}.iam.gserviceaccount.com"
+    try:
+        _http_json(
+            "POST",
+            f"{GOOGLE_CLOUD_IAM_URL}/projects/{project_id}/serviceAccounts",
+            token=token,
+            payload={
+                "accountId": GOOGLE_PROVISIONER_SA_ACCOUNT_ID,
+                "serviceAccount": {"displayName": "Empyralis Agent Computer Provisioner"},
+            },
+            provider="google",
+        )
+    except VPSProvisioningError as exc:
+        if "HTTP 409" not in str(exc):
+            raise
+        # Already exists — a re-run bootstrap (e.g. retried after fixing a
+        # billing issue) reuses it instead of failing.
+    return sa_email
+
+
+# Minimal VM-lifecycle-only permission set for the empyralis-provisioner
+# custom role — deliberately excludes IAM/project-level admin permissions
+# (this SA can create/list/delete the VMs it needs to, nothing about the
+# project itself).
+_GOOGLE_PROVISIONER_ROLE_PERMISSIONS = (
+    "compute.instances.create",
+    "compute.instances.delete",
+    "compute.instances.get",
+    "compute.instances.list",
+    "compute.instances.setMetadata",
+    "compute.instances.setLabels",
+    "compute.instances.setTags",
+    "compute.disks.create",
+    "compute.disks.get",
+    "compute.images.useReadOnly",
+    "compute.networks.get",
+    "compute.networks.use",
+    "compute.subnetworks.use",
+    "compute.subnetworks.useExternalIp",
+    "compute.firewalls.create",
+    "compute.firewalls.get",
+    "compute.firewalls.list",
+    "compute.zones.get",
+    "compute.zones.list",
+    "compute.zoneOperations.get",
+    "compute.regions.get",
+    "compute.regions.list",
+    "compute.machineTypes.get",
+    "compute.machineTypes.list",
+    "compute.globalOperations.get",
+)
+
+
+def _google_bind_custom_role(token: str, project_id: str, service_account_email: str) -> None:
+    role_name = f"projects/{project_id}/roles/{GOOGLE_PROVISIONER_CUSTOM_ROLE_ID}"
+    try:
+        _http_json(
+            "POST",
+            f"{GOOGLE_CLOUD_IAM_URL}/projects/{project_id}/roles",
+            token=token,
+            payload={
+                "roleId": GOOGLE_PROVISIONER_CUSTOM_ROLE_ID,
+                "role": {
+                    "title": "Empyralis VM Provisioner",
+                    "description": (
+                        "Minimal permissions to create, list, and delete Agent Computer VMs. "
+                        "Managed by Empyralis — see empyralis.ai."
+                    ),
+                    "includedPermissions": list(_GOOGLE_PROVISIONER_ROLE_PERMISSIONS),
+                    "stage": "GA",
+                },
+            },
+            provider="google",
+        )
+    except VPSProvisioningError as exc:
+        if "HTTP 409" not in str(exc):
+            raise
+    _google_set_project_iam_binding(
+        token, project_id, role=role_name, member=f"serviceAccount:{service_account_email}"
+    )
+
+
+def _google_grant_operator_impersonation(token: str, project_id: str, service_account_email: str) -> None:
+    _google_set_service_account_iam_binding(
+        token,
+        project_id,
+        service_account_email,
+        role="roles/iam.serviceAccountTokenCreator",
+        member=f"serviceAccount:{_google_operator_identity()}",
+    )
+
+
+def _google_set_project_iam_binding(token: str, project_id: str, *, role: str, member: str) -> None:
+    policy = _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_RESOURCE_MANAGER_URL}/projects/{project_id}:getIamPolicy",
+        token=token,
+        payload={},
+        provider="google",
+    )
+    _google_add_binding(policy, role=role, member=member)
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_RESOURCE_MANAGER_URL}/projects/{project_id}:setIamPolicy",
+        token=token,
+        payload={"policy": policy},
+        provider="google",
+    )
+
+
+def _google_set_service_account_iam_binding(
+    token: str, project_id: str, service_account_email: str, *, role: str, member: str
+) -> None:
+    resource = f"projects/{project_id}/serviceAccounts/{service_account_email}"
+    policy = _http_json(
+        "POST", f"{GOOGLE_CLOUD_IAM_URL}/{resource}:getIamPolicy", token=token, payload={}, provider="google"
+    )
+    _google_add_binding(policy, role=role, member=member)
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_IAM_URL}/{resource}:setIamPolicy",
+        token=token,
+        payload={"policy": policy},
+        provider="google",
+    )
+
+
+def _google_add_binding(policy: Dict[str, Any], *, role: str, member: str) -> None:
+    """Mutates `policy` in place, adding `member` to the binding for `role`
+    (creating the binding if it doesn't exist). Read-modify-write on whatever
+    getIamPolicy just returned — including any bindings a human already set
+    up in the console — so the follow-up setIamPolicy only ever ADDS this one
+    binding rather than clobbering the rest of the policy."""
+    bindings = policy.get("bindings")
+    if not isinstance(bindings, list):
+        bindings = []
+        policy["bindings"] = bindings
+    for binding in bindings:
+        if isinstance(binding, dict) and binding.get("role") == role:
+            members = binding.get("members")
+            if not isinstance(members, list):
+                members = []
+                binding["members"] = members
+            if member not in members:
+                members.append(member)
+            return
+    bindings.append({"role": role, "members": [member]})
+
+
+def finish_google_bootstrap(
+    setup_id: str, project_id: str, *, workspace_id: str, tenant_id: str, user_id: str
+) -> Dict[str, Any]:
+    """The one-time bootstrap (step 2 of the module docstring above
+    GOOGLE_OAUTH_AUTHORIZE_URL): verify billing, enable Compute Engine,
+    create+bind a minimal-permission service account, hand Empyralis's
+    operator identity impersonation rights on it, then store {project_id,
+    service_account_email} as this workspace's Google Cloud connection and
+    discard the user's OAuth session for good. Idempotent by design (the
+    service-account-create and custom-role-create calls both tolerate 409
+    Already Exists) so a user can safely retry after fixing a billing issue
+    without side effects piling up.
+    """
+    clean_project_id = _clean_identifier(project_id, field_name="project_id")
+    token = _google_setup_session_access_token(setup_id, workspace_id=workspace_id, user_id=user_id)
+    billing = check_google_project_billing(setup_id, clean_project_id, workspace_id=workspace_id, user_id=user_id)
+    if not billing.get("billing_enabled"):
+        raise VPSProvisioningError(
+            "Attach a billing account to this Google Cloud project before continuing: "
+            f"{billing.get('console_url')}"
+        )
+    _google_enable_compute_api(token, clean_project_id)
+    sa_email = _google_create_provisioner_service_account(token, clean_project_id)
+    _google_bind_custom_role(token, clean_project_id, sa_email)
+    _google_grant_operator_impersonation(token, clean_project_id, sa_email)
+    token_id = _store_provider_token_record(
+        provider_id="google",
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        credentials={"project_id": clean_project_id, "service_account_email": sa_email},
+        source="oauth_bootstrap",
+    )
+    _discard_google_setup_session(setup_id)
+    return {
+        "provider": "google",
+        "token_id": token_id,
+        "project_id": clean_project_id,
+        "service_account_email": sa_email,
+        "workspace_id": str(workspace_id or "").strip() or "default",
+    }
+
+
+# --- Ongoing provisioning: zone resolution, instance create/delete.
+
+
+def _google_resolve_zone(token: str, project_id: str, region: str) -> str:
+    """GCE instance creation needs a ZONE, not a region — compute.regions.list
+    (used for the browsable region list, the same "region" concept every
+    other provider here has) groups zones; instances.insert needs one
+    specific zone within it. Prefers the region's first UP zone from a live
+    compute.zones.list call; falls back to the "{region}-a" naming
+    convention (true of every GCE region in practice) if that call fails or
+    matches nothing, so a transient zones.list error never blocks
+    provisioning."""
+    try:
+        raw = _http_json(
+            "GET",
+            f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/zones",
+            token=token,
+            payload=None,
+            provider="google",
+        )
+        items = raw.get("items") if isinstance(raw.get("items"), list) else []
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("status") or "").upper() != "UP":
+                continue
+            zone_region = str(item.get("region") or "").rstrip("/")
+            if not zone_region.endswith(f"/regions/{region}"):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                return name
+    except VPSProvisioningError:
+        pass
+    return f"{region}-a"
+
+
+def _provision_google(
+    config: ProviderConfig,
+    token: str,
+    project_id: str,
+    region: str,
+    size: str,
+    name: str,
+    user_data: str,
+) -> VPSResult:
+    zone = _google_resolve_zone(token, project_id, region)
+    payload = {
+        "name": name,
+        "machineType": f"zones/{zone}/machineTypes/{size}",
+        "disks": [
+            {
+                "boot": True,
+                "autoDelete": True,
+                "initializeParams": {
+                    "sourceImage": config.default_image,
+                    "diskSizeGb": str(GOOGLE_DEFAULT_BOOT_DISK_GB),
+                },
+            }
+        ],
+        "networkInterfaces": [
+            {
+                "network": "global/networks/default",
+                "accessConfigs": [{"type": "ONE_TO_ONE_NAT", "name": "External NAT"}],
+            }
+        ],
+        "metadata": {"items": [{"key": "user-data", "value": user_data}]},
+        "labels": {"app": "empyralis", "role": "agent-computer"},
+        "tags": {"items": ["empyralis", "agent-computer"]},
+    }
+    _http_json(
+        "POST",
+        f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/zones/{zone}/instances",
+        token=token,
+        payload=payload,
+        provider="google",
+    )
+    # instances.insert returns a zone Operation, not the Instance resource —
+    # no public IP is assigned/reported until that operation completes,
+    # unlike DO/Hetzner/Vultr's create calls which return some ip/id fields
+    # immediately even mid-provisioning. `name` (generated by _server_name
+    # before this call) is stored as provider_resource_id — GCE's
+    # instances.delete addresses an instance by NAME, not the numeric id an
+    # Operation's targetId carries, so storing the name (which this service
+    # already knows deterministically, without needing to parse the
+    # response) is what makes delete_recorded_vps work later. The
+    # "provisioning" status contract (get_vps_provision_status) already
+    # tolerates public_ip=None throughout, same as every other provider
+    # reports before its box has actually registered.
+    return VPSResult(
+        provider_resource_id=name,
+        public_ip=None,
+        region=region,
+        size=size,
+        status="provisioning",
+        provider=config.provider,
+    )
+
+
+# --- Plans: Compute Engine's machineTypes carry no price field of their own
+# (unlike DO/Hetzner/Vultr's size/plan objects) — price comes from a SEPARATE
+# catalog (Cloud Billing Catalog API, service 6F81-5844-456A) that prices CPU
+# and RAM per-core/per-GB rather than per machine type, matched to a machine
+# type only via category.resourceGroup + description text (Google publishes
+# no machine-type-keyed price list). Best-effort by nature — see
+# _normalize_google_plans's docstring for the two known simplifications.
+
+
+def _fetch_google_plans(credentials: Mapping[str, Any]) -> list[VPSPlan]:
+    token, project_id = _google_active_token(credentials)
+    machine_types_raw = _http_json(
+        "GET",
+        f"{GOOGLE_CLOUD_COMPUTE_URL}/projects/{project_id}/aggregated/machineTypes",
+        token=token,
+        payload=None,
+        provider="google",
+    )
+    sku_raw = _google_fetch_compute_skus(token)
+    return _normalize_google_plans(machine_types_raw, sku_raw, region=PROVIDER_CONFIGS["google"].default_region)
+
+
+def _google_fetch_compute_skus(token: str) -> Dict[str, Any]:
+    skus: list[Dict[str, Any]] = []
+    page_token = ""
+    for _ in range(20):  # hard safety cap on pagination loops
+        url = f"{GOOGLE_CLOUD_BILLING_URL}/services/{GOOGLE_CLOUD_BILLING_CATALOG_COMPUTE_SERVICE_ID}/skus"
+        if page_token:
+            url = f"{url}?pageToken={urlparse.quote(page_token)}"
+        raw = _http_json("GET", url, token=token, payload=None, provider="google")
+        items = raw.get("skus") if isinstance(raw.get("skus"), list) else []
+        skus.extend(item for item in items if isinstance(item, Mapping))
+        page_token = str(raw.get("nextPageToken") or "").strip()
+        if not page_token:
+            break
+    return {"skus": skus}
+
+
+def _google_region_from_zone(zone_name: str) -> str:
+    # GCE zone names are always "{region}-{letter}", e.g. "us-central1-a".
+    parts = str(zone_name or "").rsplit("-", 1)
+    return parts[0] if len(parts) == 2 else ""
+
+
+def _google_machine_type_family(name: str) -> str:
+    return str(name or "").split("-")[0].strip().lower()
+
+
+def _google_dedupe_machine_types(payload: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    """aggregatedList groups machine types by zone — the same machine type
+    (identical spec everywhere it exists) shows up once per zone it's
+    available in. Dedupes by name while accumulating the set of REGIONS
+    (derived from each zone name) it's available in, the same
+    per-plan-availability shape DO/Hetzner/Vultr's normalizers already
+    populate their `regions` field with."""
+    items = payload.get("items") if isinstance(payload.get("items"), Mapping) else {}
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for zone_key, zone_value in items.items():
+        if not isinstance(zone_value, Mapping):
+            continue
+        zone_name = str(zone_key).rsplit("/", 1)[-1].strip()
+        region = _google_region_from_zone(zone_name)
+        machine_types = zone_value.get("machineTypes") if isinstance(zone_value.get("machineTypes"), list) else []
+        for machine_type in machine_types:
+            if not isinstance(machine_type, Mapping) or machine_type.get("deprecated"):
+                continue
+            name = str(machine_type.get("name") or "").strip()
+            family = _google_machine_type_family(name)
+            if not name or family not in _GOOGLE_SUPPORTED_MACHINE_FAMILIES:
+                continue
+            vcpus = _to_int(machine_type.get("guestCpus"))
+            memory_mb = _to_int(machine_type.get("memoryMb"))
+            if vcpus < 1 or memory_mb < 1024:
+                continue
+            entry = by_name.setdefault(
+                name,
+                {
+                    "name": name,
+                    "vcpus": vcpus,
+                    "memory_mb": memory_mb,
+                    "disk_gb": GOOGLE_DEFAULT_BOOT_DISK_GB,
+                    "regions": set(),
+                },
+            )
+            if region:
+                entry["regions"].add(region)
+    return list(by_name.values())
+
+
+def _google_sku_family_from_resource_group(resource_group: str) -> str:
+    # e.g. "N2Standard" -> "n2", "N2DStandard" -> "n2d", "E2Standard" -> "e2"
+    # — stripping the suffix (rather than a prefix match) avoids "n2"
+    # incorrectly matching "n2dstandard".
+    token = str(resource_group or "").strip().lower()
+    for suffix in ("standard", "custom", "highmem", "highcpu"):
+        if token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _google_sku_hourly_price(sku: Mapping[str, Any]) -> float:
+    pricing_info = sku.get("pricingInfo") if isinstance(sku.get("pricingInfo"), list) else []
+    if not pricing_info or not isinstance(pricing_info[0], Mapping):
+        return 0.0
+    expression = pricing_info[0].get("pricingExpression")
+    expression = expression if isinstance(expression, Mapping) else {}
+    tiers = expression.get("tieredRates") if isinstance(expression.get("tieredRates"), list) else []
+    if not tiers or not isinstance(tiers[0], Mapping):
+        return 0.0
+    unit_price = tiers[0].get("unitPrice")
+    unit_price = unit_price if isinstance(unit_price, Mapping) else {}
+    return _to_float(unit_price.get("units")) + _to_float(unit_price.get("nanos")) / 1_000_000_000.0
+
+
+def _google_sku_prices_by_family(payload: Mapping[str, Any], *, region: str) -> Dict[tuple[str, str], float]:
+    items = payload.get("skus") if isinstance(payload.get("skus"), list) else []
+    prices: Dict[tuple[str, str], float] = {}
+    for sku in items:
+        if not isinstance(sku, Mapping):
+            continue
+        category = sku.get("category") if isinstance(sku.get("category"), Mapping) else {}
+        if str(category.get("usageType") or "") != "OnDemand":
+            continue
+        if str(category.get("resourceFamily") or "") != "Compute":
+            continue
+        service_regions = sku.get("serviceRegions") if isinstance(sku.get("serviceRegions"), list) else []
+        if region not in service_regions:
+            continue
+        family = _google_sku_family_from_resource_group(str(category.get("resourceGroup") or ""))
+        if not family:
+            continue
+        description = str(sku.get("description") or "").lower()
+        if "core" in description:
+            kind = "cpu"
+        elif "ram" in description:
+            kind = "ram"
+        else:
+            continue
+        price = _google_sku_hourly_price(sku)
+        if price > 0:
+            prices[(family, kind)] = price
+    return prices
+
+
+def _normalize_google_plans(
+    machine_types_payload: Mapping[str, Any], sku_payload: Mapping[str, Any], *, region: str
+) -> list[VPSPlan]:
+    """Best-effort pricing, priced against ONE reference region (the
+    provider default) — like every other provider here, VPSPlan has a single
+    price_monthly, not a per-region one, but Google is the one provider where
+    the real price does vary by region. This is a starting/reference price,
+    not a region-exact one (same convention cloud pricing calculators use for
+    a headline "$X/mo" figure). Restricted to a curated set of
+    general-purpose machine families (_GOOGLE_SUPPORTED_MACHINE_FAMILIES) —
+    GCE's full catalog also includes GPU/bare-metal/memory-optimized
+    families whose pricing shape and fit for an "Agent Computer" are both
+    out of scope here.
+    """
+    machine_types = _google_dedupe_machine_types(machine_types_payload)
+    prices = _google_sku_prices_by_family(sku_payload, region=region)
+    plans: list[VPSPlan] = []
+    for entry in machine_types:
+        family = _google_machine_type_family(entry["name"])
+        cpu_price = prices.get((family, "cpu"))
+        ram_price = prices.get((family, "ram"))
+        if not cpu_price or not ram_price:
+            continue
+        vcpus = entry["vcpus"]
+        memory_mb = entry["memory_mb"]
+        monthly = round((vcpus * cpu_price + (memory_mb / 1024.0) * ram_price) * _GOOGLE_AVERAGE_HOURS_PER_MONTH, 2)
+        if monthly <= 0:
+            continue
+        plans.append(
+            VPSPlan(
+                id=entry["name"],
+                slug=entry["name"],
+                label=f"{vcpus} CPU · {_memory_label(memory_mb)} · {entry['disk_gb']}GB SSD",
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                disk_gb=entry["disk_gb"],
+                price_monthly=monthly,
+                price_label=f"${monthly:g}/mo",
+                regions=tuple(sorted(entry["regions"])),
+            )
+        )
+    return _mark_recommended(plans)
+
+
+# --- AWS cross-account IAM role (CloudFormation) --------------------------
+#
+# AWS has no OAuth and nothing worth pasting as an "API token" (a long-lived
+# AWS access key is exactly the kind of standing secret this whole file
+# otherwise avoids storing for DO/Hetzner/Vultr's OAuth paths). Instead this
+# mirrors the industry-standard cross-account pattern (Datadog, Vantage,
+# etc.): the customer runs a small CloudFormation template — hosted by
+# Empyralis, referenced by URL — that creates an IAM role in *their* account
+# trusting *Empyralis's* account, gated on a per-customer ExternalId. From
+# then on, every AWS call in this file assumes that role via STS for
+# short-lived (1 hour) credentials; nothing long-lived is ever stored.
+#
+# Flow:
+#   1. create_aws_connect_intent — customer types their 12-digit account id;
+#      we generate a random ExternalId, derive the expected role ARN via the
+#      fixed-role-name convention, and hand back a pre-filled CloudFormation
+#      Quick-Create-Stack URL. Nothing is trusted yet — the role doesn't
+#      exist in AWS until the customer runs the stack.
+#   2. The customer opens that URL (frontend, new tab) and runs the stack.
+#   3. confirm_aws_connection — we attempt sts:AssumeRole against the
+#      derived ARN + ExternalId. Success proves the role exists with the
+#      right trust policy; failure means the stack isn't done yet (or
+#      failed), and the customer can just retry. On success we additionally
+#      call sts:GetCallerIdentity on the assumed session and check its
+#      Account matches what the customer typed — defense against a stale or
+#      mistyped account id resolving somewhere unexpected.
+
+
+def empyralis_aws_account_id() -> str:
+    """Empyralis's own AWS account id — the only account the CloudFormation
+    template's trust policy allows to assume the customer's role. Surfaced
+    to the frontend so a customer can cross-check it against what the
+    CloudFormation console shows before running the stack. Fails gracefully
+    (VPSProvisioningError, not a crash) when unset, exactly like
+    _digitalocean_client_id — this is operator setup, not end-user input."""
+    account_id = (os.getenv(EMPYRALIS_AWS_ACCOUNT_ID_ENV) or "").strip()
+    if not account_id:
+        raise VPSProvisioningError(
+            f"AWS is not configured on this backend ({EMPYRALIS_AWS_ACCOUNT_ID_ENV} is unset)."
+        )
+    return account_id
+
+
+def _aws_cfn_template_url() -> str:
+    template_url = (os.getenv(EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV) or "").strip()
+    if not template_url:
+        raise VPSProvisioningError(
+            f"AWS is not configured on this backend ({EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV} is unset)."
+        )
+    return template_url
+
+
+def _validate_aws_account_id(value: str) -> str:
+    account_id = str(value or "").strip()
+    if not account_id.isdigit() or len(account_id) != 12:
+        raise ValueError("AWS account id must be exactly 12 digits.")
+    return account_id
+
+
+def aws_role_arn_for_account(account_id: str) -> str:
+    """Fixed-role-name convention: derive the role ARN Empyralis will assume
+    from nothing but the customer's account id, so the customer never pastes
+    an ARN back — see AWS_CROSS_ACCOUNT_ROLE_NAME."""
+    return f"arn:aws:iam::{_validate_aws_account_id(account_id)}:role/{AWS_CROSS_ACCOUNT_ROLE_NAME}"
+
+
+def _aws_quick_create_url(*, external_id: str, template_url: str, empyralis_account_id: str) -> str:
+    # CloudFormation's console is a hash-routed SPA — `region=` is an
+    # ordinary query param, but everything past the `#` (including its own
+    # nested `?`-delimited query string) is fragment state the console JS
+    # reads client-side. param_ExternalId pre-fills that NoEcho parameter
+    # field; param_EmpyralisAccountId pre-fills the trust-policy account id
+    # too, so the operator only has to keep EMPYRALIS_AWS_ACCOUNT_ID current
+    # in one place (this env var) rather than also hand-editing the hosted
+    # template's Parameters.Default every time — the template's own default
+    # is just a fallback for anyone who opens it directly.
+    fragment_query = urlparse.urlencode(
+        {
+            "templateURL": template_url,
+            "stackName": AWS_CFN_STACK_NAME,
+            "param_ExternalId": external_id,
+            "param_EmpyralisAccountId": empyralis_account_id,
+        }
+    )
+    return (
+        f"https://{AWS_STS_SIGNING_REGION}.console.aws.amazon.com/cloudformation/home"
+        f"?region={AWS_STS_SIGNING_REGION}#/stacks/create/review?{fragment_query}"
+    )
+
+
+def create_aws_connect_intent(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    account_id: str,
+) -> Dict[str, Any]:
+    clean_account_id = _validate_aws_account_id(account_id)
+    empyralis_account_id = empyralis_aws_account_id()
+    template_url = _aws_cfn_template_url()
+    external_id = str(uuid.uuid4())
+    role_arn = aws_role_arn_for_account(clean_account_id)
+    connection_id = f"vps_aws_pending_{secrets.token_hex(16)}"
+    record = {
+        "connection_id": connection_id,
+        "account_id": clean_account_id,
+        "external_id": external_id,
+        "role_arn": role_arn,
+        "workspace_id": str(workspace_id or "").strip() or "default",
+        "tenant_id": str(tenant_id or "").strip() or "default",
+        "user_id": str(user_id or "").strip() or "unknown-user",
+        "created_at": _utc_now_iso(),
+    }
+    with _STATE_LOCK:
+        payload = _load_state()
+        payload.setdefault("aws_pending", {})[connection_id] = record
+        _write_state(payload)
+    return {
+        "provider": "aws",
+        "connection_id": connection_id,
+        "account_id": clean_account_id,
+        "external_id": external_id,
+        "role_arn": role_arn,
+        "role_name": AWS_CROSS_ACCOUNT_ROLE_NAME,
+        "empyralis_account_id": empyralis_account_id,
+        "quick_create_url": _aws_quick_create_url(
+            external_id=external_id, template_url=template_url, empyralis_account_id=empyralis_account_id
+        ),
+    }
+
+
+def confirm_aws_connection(
+    *,
+    connection_id: str,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    clean_connection_id = _clean_identifier(connection_id, field_name="connection_id")
+    with _STATE_LOCK:
+        payload = _load_state()
+        pending = dict((payload.get("aws_pending") or {}).get(clean_connection_id) or {})
+    if not pending:
+        raise KeyError(clean_connection_id)
+    if str(pending.get("workspace_id") or "").strip() != str(workspace_id or "").strip():
+        raise KeyError(clean_connection_id)
+    if user_id and str(pending.get("user_id") or "").strip() != str(user_id or "").strip():
+        raise KeyError(clean_connection_id)
+    created_at = _parse_iso(str(pending.get("created_at") or ""))
+    if (
+        created_at is not None
+        and (datetime.now(timezone.utc) - created_at).total_seconds() > AWS_PENDING_CONNECTION_TTL_SECONDS
+    ):
+        _pop_aws_pending(clean_connection_id)
+        raise VPSProvisioningError("This AWS connection request expired. Start over and reconnect.")
+
+    role_arn = str(pending.get("role_arn") or "").strip()
+    external_id = str(pending.get("external_id") or "").strip()
+    account_id = str(pending.get("account_id") or "").strip()
+    temp_credentials = _assume_aws_role(role_arn, external_id)
+    _verify_aws_caller_identity(temp_credentials, expected_account_id=account_id)
+
+    token_id = _store_aws_credentials(
+        workspace_id=str(pending.get("workspace_id") or workspace_id or "default"),
+        tenant_id=str(pending.get("tenant_id") or tenant_id or "default"),
+        user_id=str(pending.get("user_id") or user_id or "unknown-user"),
+        credentials={"role_arn": role_arn, "external_id": external_id, "account_id": account_id},
+    )
+    _pop_aws_pending(clean_connection_id)
+    return {"provider": "aws", "token_id": token_id, "account_id": account_id}
+
+
+def _pop_aws_pending(connection_id: str) -> None:
+    with _STATE_LOCK:
+        payload = _load_state()
+        payload.setdefault("aws_pending", {}).pop(connection_id, None)
+        _write_state(payload)
+
+
+def _store_aws_credentials(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    credentials: Mapping[str, Any],
+) -> str:
+    """AWS's own store path — deliberately NOT store_vps_provider_token,
+    which normalizes a single bearer secret via _provider_token(). AWS has
+    no bearer secret to normalize: the stored credential is a (role_arn,
+    external_id, account_id) triple, useless on its own without a live
+    sts:AssumeRole against the customer's account on every single call (see
+    _aws_client) — there is no "the secret" to extract the way there is for
+    the other three providers."""
+    token_id = f"vps_token_{secrets.token_hex(16)}"
+    now = _utc_now_iso()
+    record = {
+        "token_id": token_id,
+        "provider": "aws",
+        "workspace_id": str(workspace_id or "").strip() or "default",
+        "tenant_id": str(tenant_id or "").strip() or "default",
+        "user_id": str(user_id or "").strip() or "unknown-user",
+        "source": "cloudformation",
+        "credentials_ciphertext": _encrypt_secret(dict(credentials)),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _STATE_LOCK:
+        state = _load_state()
+        state.setdefault("tokens", {})[token_id] = record
+        _write_state(state)
+    return token_id
+
+
+def _assume_aws_role(role_arn: str, external_id: str) -> Dict[str, str]:
+    """The AssumeRole wrapper every AWS call in this file goes through (via
+    _aws_client) — Empyralis's own ambient AWS credentials (boto3's normal
+    resolution chain: environment, instance profile, shared config — never
+    anything this file reads or stores itself) call sts:AssumeRole against
+    the CUSTOMER's role, scoped by the ExternalId only that customer's stack
+    was created with. Returns short-lived (1 hour) session credentials;
+    nothing here is ever persisted."""
+    if _boto3 is None:
+        raise VPSProvisioningError("boto3 is not installed; AWS VPS support requires the boto3 package.")
+    if not role_arn or not external_id:
+        raise ValueError("AWS role_arn and external_id are required.")
+    try:
+        sts_client = _boto3.client("sts", region_name=AWS_STS_SIGNING_REGION)
+        response = sts_client.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName=AWS_ROLE_SESSION_NAME,
+            ExternalId=external_id,
+            DurationSeconds=3600,
+        )
+    except _NoCredentialsError as exc:
+        raise VPSProvisioningError(
+            "Empyralis's own AWS credentials are not configured on this backend — "
+            "set them (environment or instance profile) before connecting customer AWS accounts."
+        ) from exc
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(
+            f"Could not assume the Empyralis VPS role in the customer's AWS account: {exc}"
+        ) from exc
+    creds = response.get("Credentials") if isinstance(response, Mapping) else None
+    creds = creds if isinstance(creds, Mapping) else {}
+    access_key_id = str(creds.get("AccessKeyId") or "").strip()
+    secret_access_key = str(creds.get("SecretAccessKey") or "").strip()
+    session_token = str(creds.get("SessionToken") or "").strip()
+    if not access_key_id or not secret_access_key or not session_token:
+        raise VPSProvisioningError("AWS did not return temporary credentials for the assumed role.")
+    return {
+        "aws_access_key_id": access_key_id,
+        "aws_secret_access_key": secret_access_key,
+        "aws_session_token": session_token,
+    }
+
+
+def _verify_aws_caller_identity(temp_credentials: Mapping[str, str], *, expected_account_id: str) -> None:
+    """Defense against a stale/mistyped account id happening to still
+    resolve an assumable role somewhere unexpected: after AssumeRole
+    succeeds, independently confirm the assumed session's own account
+    matches what the customer typed, via sts:GetCallerIdentity."""
+    if _boto3 is None:
+        raise VPSProvisioningError("boto3 is not installed; AWS VPS support requires the boto3 package.")
+    try:
+        sts_client = _boto3.client(
+            "sts",
+            region_name=AWS_STS_SIGNING_REGION,
+            aws_access_key_id=temp_credentials["aws_access_key_id"],
+            aws_secret_access_key=temp_credentials["aws_secret_access_key"],
+            aws_session_token=temp_credentials["aws_session_token"],
+        )
+        identity = sts_client.get_caller_identity()
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"Could not verify the assumed AWS role's identity: {exc}") from exc
+    actual_account = str((identity or {}).get("Account") or "").strip()
+    if actual_account != str(expected_account_id or "").strip():
+        raise VPSProvisioningError(
+            "The assumed AWS role belongs to a different account than expected. Reconnect and try again."
+        )
+
+
+def _aws_client(service_name: str, credentials: Mapping[str, Any], *, region: str):
+    """Every AWS service call in this file goes through here: resolve
+    role_arn/external_id from the stored credential, assume the role fresh
+    (see _assume_aws_role — short-lived, never cached across requests), and
+    build a boto3 client scoped to `region` from the resulting session
+    credentials."""
+    if _boto3 is None:
+        raise VPSProvisioningError("boto3 is not installed; AWS VPS support requires the boto3 package.")
+    role_arn = str(credentials.get("role_arn") or "").strip()
+    external_id = str(credentials.get("external_id") or "").strip()
+    if not role_arn or not external_id:
+        raise ValueError("AWS role_arn and external_id are required.")
+    temp_credentials = _assume_aws_role(role_arn, external_id)
+    try:
+        return _boto3.client(
+            service_name,
+            region_name=region,
+            aws_access_key_id=temp_credentials["aws_access_key_id"],
+            aws_secret_access_key=temp_credentials["aws_secret_access_key"],
+            aws_session_token=temp_credentials["aws_session_token"],
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"Could not create an AWS {service_name} client: {exc}") from exc
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+# --- AWS regions ------------------------------------------------------------
+
+_AWS_REGION_LABELS: Dict[str, str] = {
+    "us-east-1": "US East (N. Virginia)",
+    "us-east-2": "US East (Ohio)",
+    "us-west-1": "US West (N. California)",
+    "us-west-2": "US West (Oregon)",
+    "eu-west-1": "Europe (Ireland)",
+    "eu-west-2": "Europe (London)",
+    "eu-west-3": "Europe (Paris)",
+    "eu-central-1": "Europe (Frankfurt)",
+    "eu-north-1": "Europe (Stockholm)",
+    "ap-southeast-1": "Asia Pacific (Singapore)",
+    "ap-southeast-2": "Asia Pacific (Sydney)",
+    "ap-south-1": "Asia Pacific (Mumbai)",
+    "ap-northeast-1": "Asia Pacific (Tokyo)",
+    "ap-northeast-2": "Asia Pacific (Seoul)",
+    "sa-east-1": "South America (São Paulo)",
+    "ca-central-1": "Canada (Central)",
+}
+
+
+def _fetch_aws_regions(credentials: Mapping[str, Any]) -> list[Dict[str, str]]:
+    ec2 = _aws_client("ec2", credentials, region=PROVIDER_CONFIGS["aws"].default_region)
+    try:
+        response = ec2.describe_regions(
+            Filters=[{"Name": "opt-in-status", "Values": ["opt-in-not-required", "opted-in"]}]
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not list regions: {exc}") from exc
+    items = response.get("Regions") if isinstance(response, Mapping) else None
+    return _normalize_aws_regions(items or [])
+
+
+def _normalize_aws_regions(items: Iterable[Mapping[str, Any]]) -> list[Dict[str, str]]:
+    regions: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        region_name = str(item.get("RegionName") or "").strip()
+        if not region_name:
+            continue
+        regions.append({"id": region_name, "label": _AWS_REGION_LABELS.get(region_name, region_name)})
+    regions.sort(key=lambda entry: entry["id"])
+    return regions
+
+
+def _fetch_aws_region_ids(credentials: Mapping[str, Any]) -> set[str]:
+    """Mirrors _fetch_live_region_ids's never-raises contract for the other
+    live-region providers — provision_vps's live-region allow-list must
+    never hard-fail provisioning just because this best-effort fetch did."""
+    try:
+        return {item["id"] for item in _fetch_aws_regions(credentials)}
+    except (VPSProvisioningError, KeyError, ValueError, TypeError):
+        return set()
+
+
+# --- AWS plans (instance types + pricing) -----------------------------------
+
+# Curated candidate list, mirroring the small hand-picked set every other
+# provider effectively offers (DO/Hetzner/Vultr's own catalogs are much
+# larger than what actually gets shown) — general-purpose burstable
+# instances sized for an always-on agent-computer workload, not a
+# from-scratch enumeration of EC2's hundreds of instance types.
+_AWS_CANDIDATE_INSTANCE_TYPES: tuple[str, ...] = (
+    "t3.micro",
+    "t3.small",
+    "t3.medium",
+    "t3.large",
+    "t3.xlarge",
+    "t3.2xlarge",
+)
+# T3 instances are EBS-only — unlike DO/Hetzner/Vultr, AWS does not bundle a
+# fixed local disk size per instance type; the root volume is provisioned
+# separately (see _provision_aws's BlockDeviceMappings). This fixed size is
+# both what gets displayed per plan AND what actually gets attached, so the
+# two can never drift apart.
+_AWS_DEFAULT_ROOT_VOLUME_GB = 40
+# Static USD/month fallback (on-demand, us-east-1, Linux) for when the live
+# instances.vantage.sh aggregator is unreachable — approximate published AWS
+# list prices (hourly x ~730h/mo). Not a substitute for real-time billing
+# data; see _fetch_aws_instance_pricing.
+_AWS_STATIC_MONTHLY_PRICE_USD: Dict[str, float] = {
+    "t3.micro": 7.59,
+    "t3.small": 15.18,
+    "t3.medium": 30.37,
+    "t3.large": 60.74,
+    "t3.xlarge": 121.47,
+    "t3.2xlarge": 242.94,
+}
+
+
+def _fetch_aws_plans(credentials: Mapping[str, Any]) -> list[VPSPlan]:
+    ec2 = _aws_client("ec2", credentials, region=PROVIDER_CONFIGS["aws"].default_region)
+    try:
+        response = ec2.describe_instance_types(InstanceTypes=list(_AWS_CANDIDATE_INSTANCE_TYPES))
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not list instance types: {exc}") from exc
+    items = response.get("InstanceTypes") if isinstance(response, Mapping) else None
+    pricing = _fetch_aws_instance_pricing()
+    return _normalize_aws_plans(items or [], pricing)
+
+
+def _normalize_aws_plans(
+    instance_types: Iterable[Mapping[str, Any]],
+    pricing: Mapping[str, float],
+) -> list[VPSPlan]:
+    plans: list[VPSPlan] = []
+    for item in instance_types:
+        if not isinstance(item, Mapping):
+            continue
+        slug = str(item.get("InstanceType") or "").strip()
+        if not slug:
+            continue
+        vcpu_info = item.get("VCpuInfo") if isinstance(item.get("VCpuInfo"), Mapping) else {}
+        memory_info = item.get("MemoryInfo") if isinstance(item.get("MemoryInfo"), Mapping) else {}
+        vcpus = _to_int(vcpu_info.get("DefaultVCpus"))
+        memory_mb = _to_int(memory_info.get("SizeInMiB"))
+        if vcpus < 1 or memory_mb < 1024:
+            continue
+        price = _to_float(pricing.get(slug))
+        if price <= 0:
+            continue
+        plans.append(
+            VPSPlan(
+                id=slug,
+                slug=slug,
+                label=f"{vcpus} CPU · {_memory_label(memory_mb)} · {_AWS_DEFAULT_ROOT_VOLUME_GB}GB SSD",
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                disk_gb=_AWS_DEFAULT_ROOT_VOLUME_GB,
+                price_monthly=price,
+                price_label=f"${price:g}/mo",
+                # Specs were fetched against a single reference region
+                # (see _fetch_aws_plans) rather than threaded through per-
+                # region like DigitalOcean's — empty means "not threaded
+                # through yet", the same convention every normalizer here
+                # already uses for that state (see VPSPlan.regions).
+            )
+        )
+    return _mark_recommended(plans)
+
+
+def _fetch_aws_instance_pricing() -> Dict[str, float]:
+    try:
+        raw = _fetch_vantage_pricing_raw()
+    except Exception:
+        return dict(_AWS_STATIC_MONTHLY_PRICE_USD)
+    pricing: Dict[str, float] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        slug = str(item.get("instance_type") or "").strip()
+        if slug not in _AWS_CANDIDATE_INSTANCE_TYPES:
+            continue
+        hourly = _aws_vantage_hourly_price(item)
+        if hourly > 0:
+            pricing[slug] = round(hourly * 730, 2)
+    return pricing or dict(_AWS_STATIC_MONTHLY_PRICE_USD)
+
+
+def _aws_vantage_hourly_price(item: Mapping[str, Any]) -> float:
+    pricing = item.get("pricing") if isinstance(item.get("pricing"), Mapping) else {}
+    region_pricing = pricing.get("us-east-1") if isinstance(pricing.get("us-east-1"), Mapping) else {}
+    linux_pricing = region_pricing.get("linux") if isinstance(region_pricing.get("linux"), Mapping) else {}
+    return _to_float(linux_pricing.get("ondemand"))
+
+
+def _fetch_vantage_pricing_raw() -> Any:
+    """Isolated to its own function (rather than reusing _http_json, which
+    asserts a top-level JSON *object*) purely because instances.vantage.sh
+    returns a top-level JSON *array* — and so this is easy to monkeypatch in
+    tests the same way _http_json already is elsewhere in this file."""
+    request = urlrequest.Request(
+        AWS_INSTANCES_VANTAGE_URL,
+        method="GET",
+        headers={"Accept": "application/json", "User-Agent": "Empyralis-VPS-Provisioner/1.0"},
+    )
+    with urlrequest.urlopen(request, timeout=30) as response:
+        body = response.read().decode("utf-8")
+    return json.loads(body) if body else []
+
+
+# --- AWS provisioning / deletion --------------------------------------------
+
+_AWS_UBUNTU_OWNER_ID = "099720109477"  # Canonical's official AWS account.
+_AWS_UBUNTU_NAME_FILTER = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+_AWS_SECURITY_GROUP_NAME = "empyralis-agent-computer"
+_AWS_KEY_PAIR_NAME = "empyralis-agent-computer"
+
+
+def _resolve_aws_ami(ec2: Any) -> tuple[str, str]:
+    """Returns (image_id, root_device_name). AWS AMI ids are per-region and
+    go stale — there is no fixed slug like DigitalOcean's
+    "ubuntu-24-04-x64" — so this resolves the current Ubuntu 24.04 (Noble)
+    AMI live via ec2:DescribeImages against Canonical's own account, picking
+    the most recently published match. The root device name is read back
+    from the AMI itself (not assumed to be /dev/sda1) so
+    BlockDeviceMappings' volume-size override in _provision_aws actually
+    lands on the AMI's real root volume instead of silently no-op'ing."""
+    try:
+        response = ec2.describe_images(
+            Owners=[_AWS_UBUNTU_OWNER_ID],
+            Filters=[
+                {"Name": "name", "Values": [_AWS_UBUNTU_NAME_FILTER]},
+                {"Name": "state", "Values": ["available"]},
+                {"Name": "architecture", "Values": ["x86_64"]},
+                {"Name": "virtualization-type", "Values": ["hvm"]},
+            ],
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not resolve the Ubuntu AMI: {exc}") from exc
+    images = response.get("Images") if isinstance(response, Mapping) else []
+    candidates = [img for img in images if isinstance(img, Mapping) and str(img.get("ImageId") or "").strip()]
+    if not candidates:
+        raise VPSProvisioningError("aws provisioning failed: no Ubuntu 24.04 AMI found in this region.")
+    newest = max(candidates, key=lambda img: str(img.get("CreationDate") or ""))
+    image_id = str(newest["ImageId"]).strip()
+    root_device_name = str(newest.get("RootDeviceName") or "/dev/sda1").strip() or "/dev/sda1"
+    return image_id, root_device_name
+
+
+def _resolve_aws_network(ec2: Any) -> tuple[str, str]:
+    """Returns (vpc_id, subnet_id) — a fresh AWS account isn't guaranteed to
+    still have its default VPC (it can be deleted), so this prefers the
+    default VPC/subnet but falls back to the first available one of each
+    rather than assuming either exists."""
+    vpc_id = _first_resource_id(
+        ec2, "describe_vpcs", "Vpcs", "VpcId", filters=[{"Name": "is-default", "Values": ["true"]}]
+    ) or _first_resource_id(ec2, "describe_vpcs", "Vpcs", "VpcId")
+    if not vpc_id:
+        raise VPSProvisioningError(
+            "aws provisioning failed: no VPC is available in this account/region. Create a VPC first."
+        )
+    subnet_id = _first_resource_id(
+        ec2,
+        "describe_subnets",
+        "Subnets",
+        "SubnetId",
+        filters=[{"Name": "vpc-id", "Values": [vpc_id]}, {"Name": "default-for-az", "Values": ["true"]}],
+    ) or _first_resource_id(ec2, "describe_subnets", "Subnets", "SubnetId", filters=[{"Name": "vpc-id", "Values": [vpc_id]}])
+    if not subnet_id:
+        raise VPSProvisioningError(f"aws provisioning failed: no subnet is available in VPC {vpc_id}.")
+    return vpc_id, subnet_id
+
+
+def _first_resource_id(
+    ec2: Any,
+    method_name: str,
+    items_key: str,
+    id_key: str,
+    *,
+    filters: Optional[list[Dict[str, Any]]] = None,
+) -> str:
+    try:
+        method = getattr(ec2, method_name)
+        response = method(Filters=filters) if filters else method()
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: {method_name} failed: {exc}") from exc
+    items = response.get(items_key) if isinstance(response, Mapping) else []
+    for item in items or []:
+        if isinstance(item, Mapping):
+            value = str(item.get(id_key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _ensure_aws_security_group(ec2: Any, vpc_id: str) -> str:
+    try:
+        response = ec2.describe_security_groups(
+            Filters=[
+                {"Name": "group-name", "Values": [_AWS_SECURITY_GROUP_NAME]},
+                {"Name": "vpc-id", "Values": [vpc_id]},
+            ]
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not list security groups: {exc}") from exc
+    groups = response.get("SecurityGroups") if isinstance(response, Mapping) else []
+    for group in groups or []:
+        if isinstance(group, Mapping):
+            group_id = str(group.get("GroupId") or "").strip()
+            if group_id:
+                return group_id
+    try:
+        created = ec2.create_security_group(
+            GroupName=_AWS_SECURITY_GROUP_NAME,
+            Description=(
+                "Empyralis Agent Computer - outbound install/pairing traffic; "
+                "inbound SSH open for operator debugging only, no key pair is retained."
+            ),
+            VpcId=vpc_id,
+            TagSpecifications=[{"ResourceType": "security-group", "Tags": [{"Key": "app", "Value": "empyralis"}]}],
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not create a security group: {exc}") from exc
+    group_id = str(created.get("GroupId") or "").strip() if isinstance(created, Mapping) else ""
+    if not group_id:
+        raise VPSProvisioningError("aws provisioning failed: security group creation did not return a group id.")
+    try:
+        ec2.authorize_security_group_ingress(
+            GroupId=group_id,
+            IpPermissions=[
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0", "Description": "SSH (operator debugging)"}],
+                }
+            ],
+        )
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: could not authorize security group ingress: {exc}") from exc
+    return group_id
+
+
+def _ensure_aws_key_pair(ec2: Any) -> Optional[str]:
+    """Ensures an EC2 key pair exists so the instance has one attached (some
+    consoles/tooling expect it) — the private key material CreateKeyPair
+    returns is intentionally discarded: never stored, never logged.
+    Empyralis never authenticates over SSH to agent-computer boxes; pairing
+    happens entirely over the cloud-init -> HTTPS callback (see
+    cloud_init_script). Best-effort: returns None (no KeyName attached, and
+    RunInstances works fine without one) rather than failing provisioning
+    outright if key-pair management errors out."""
+    try:
+        ec2.describe_key_pairs(KeyNames=[_AWS_KEY_PAIR_NAME])
+        return _AWS_KEY_PAIR_NAME
+    except (_ClientError, _BotoCoreError):
+        pass
+    try:
+        ec2.create_key_pair(KeyName=_AWS_KEY_PAIR_NAME, KeyType="ed25519", KeyFormat="pem")
+        return _AWS_KEY_PAIR_NAME
+    except (_ClientError, _BotoCoreError):
+        return None
+
+
+def _provision_aws(
+    credentials: Mapping[str, Any],
+    region: str,
+    size: str,
+    name: str,
+    user_data: str,
+) -> VPSResult:
+    ec2 = _aws_client("ec2", credentials, region=region)
+    image_id, root_device_name = _resolve_aws_ami(ec2)
+    vpc_id, subnet_id = _resolve_aws_network(ec2)
+    security_group_id = _ensure_aws_security_group(ec2, vpc_id)
+    key_name = _ensure_aws_key_pair(ec2)
+    run_kwargs: Dict[str, Any] = {
+        "ImageId": image_id,
+        "InstanceType": size,
+        "MinCount": 1,
+        "MaxCount": 1,
+        # Plain text — botocore base64-encodes `blob`-typed params (like
+        # RunInstances' UserData) itself; unlike Vultr's raw-HTTP path below,
+        # this must NOT be pre-encoded or cloud-init receives double-encoded
+        # garbage.
+        "UserData": user_data,
+        "NetworkInterfaces": [
+            {
+                "DeviceIndex": 0,
+                "SubnetId": subnet_id,
+                "AssociatePublicIpAddress": True,
+                "Groups": [security_group_id],
+            }
+        ],
+        "BlockDeviceMappings": [
+            {
+                "DeviceName": root_device_name,
+                "Ebs": {"VolumeSize": _AWS_DEFAULT_ROOT_VOLUME_GB, "VolumeType": "gp3", "DeleteOnTermination": True},
+            }
+        ],
+        "TagSpecifications": [
+            {
+                "ResourceType": "instance",
+                "Tags": [
+                    {"Key": "Name", "Value": name},
+                    {"Key": "app", "Value": "empyralis"},
+                    {"Key": "role", "Value": "agent-computer"},
+                ],
+            }
+        ],
+    }
+    if key_name:
+        run_kwargs["KeyName"] = key_name
+    try:
+        response = ec2.run_instances(**run_kwargs)
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws provisioning failed: {exc}") from exc
+    instances = response.get("Instances") if isinstance(response, Mapping) else []
+    instance = instances[0] if instances and isinstance(instances[0], Mapping) else {}
+    resource_id = str(instance.get("InstanceId") or "").strip()
+    if not resource_id:
+        raise VPSProvisioningError("aws did not return a created instance id.")
+    return VPSResult(
+        provider_resource_id=resource_id,
+        public_ip=str(instance.get("PublicIpAddress") or "").strip() or None,
+        region=region,
+        size=size,
+        status="provisioning",
+        provider="aws",
+    )
+
+
+def _delete_aws_resource(credentials: Mapping[str, Any], region: str, resource_id: str) -> None:
+    resolved_region = str(region or "").strip() or PROVIDER_CONFIGS["aws"].default_region
+    ec2 = _aws_client("ec2", credentials, region=resolved_region)
+    try:
+        ec2.terminate_instances(InstanceIds=[resource_id])
+    except (_ClientError, _BotoCoreError) as exc:
+        raise VPSProvisioningError(f"aws cleanup failed: {exc}") from exc
+
+
 def _normalize_digitalocean_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
     items = payload.get("sizes") if isinstance(payload.get("sizes"), list) else []
     plans: list[VPSPlan] = []
@@ -1523,7 +3525,17 @@ def _to_float(value: Any) -> float:
 
 def _normalize_provider(provider: str) -> str:
     provider_id = str(provider or "").strip().lower().replace("_", "-")
-    aliases = {"digital-ocean": "digitalocean", "do": "digitalocean", "hcloud": "hetzner"}
+    aliases = {
+        "digital-ocean": "digitalocean",
+        "do": "digitalocean",
+        "hcloud": "hetzner",
+        "gcp": "google",
+        "google-cloud": "google",
+        "googlecloud": "google",
+        "amazon": "aws",
+        "amazon-web-services": "aws",
+        "ec2": "aws",
+    }
     provider_id = aliases.get(provider_id, provider_id)
     if provider_id not in PROVIDER_CONFIGS:
         raise ValueError(f"Unsupported VPS provider: {provider_id or 'missing'}.")

@@ -25726,6 +25726,31 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   text-underline-offset: 3px;
 }
 
+/* AWS "connect account" step: label/value reference rows for the derived
+   role ARN, external id, and Empyralis's own account id — shown so the
+   customer can cross-check what's pre-filled in the CloudFormation console
+   against what Empyralis's UI says it generated. */
+.cloud-vps-aws-detail {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+}
+
+.cloud-vps-aws-detail dt {
+  color: var(--app-text-tertiary);
+  font-size: var(--app-font-13);
+}
+
+.cloud-vps-aws-detail dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--app-text-primary);
+  font-family: var(--app-font-mono);
+  font-size: var(--app-font-13);
+  word-break: break-all;
+}
+
 .cloud-vps-plan-row {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto auto;
