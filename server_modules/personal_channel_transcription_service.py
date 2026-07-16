@@ -3,13 +3,18 @@
 Deliberately separate from ``multimodal_provider_service.transcribe_audio_bytes``:
 that function is wired to *platform* credentials only (``OPENAI_API_KEY`` /
 ``ELEVENLABS_API_KEY`` read straight from the process environment — see its
-``_normalized_openai_api_key()``). Personal-channel voice notes must transcribe
-using the *workspace's own* configured provider (BYOK), resolved exactly the
-way every other direct-chat call in this codebase resolves credentials:
-``direct_chat_provider_service.direct_chat_credentials(workspace_id, "openai")``.
-Reusing the platform-only helper would either ignore a workspace's own key or
-leak platform credentials into workspaces that never configured any — so this
-module calls OpenAI's Whisper endpoint directly with the resolved BYOK key
+``_normalized_openai_api_key()``). Personal-channel voice notes transcribe
+using the *agent's own* configured provider — resolved through
+``agent_capability_service``'s speech_to_text capability (byok_api or
+platform_credits, per-agent — see the fleet Capabilities tab), falling back
+to the workspace-level ``direct_chat_provider_service.direct_chat_credentials
+(workspace_id, "openai")`` lookup this module used exclusively before
+per-agent capability config existed. That fallback is exact-behavior-preserving
+for every call site that can't yet supply an agent_id (e.g. the local-bridge
+channel path) and for any agent that has never touched its Capabilities tab.
+Reusing the platform-only helper would either ignore a configured key or leak
+platform credentials into workspaces/agents that never configured any — so
+this module calls OpenAI's Whisper endpoint directly with the resolved key
 instead.
 
 Never raises for "no provider configured" or "call failed" — every entry
@@ -38,13 +43,33 @@ MAX_TRANSCRIBE_AUDIO_BYTES = 24 * 1024 * 1024
 UNAVAILABLE_TEXT = "[Voice message — transcription unavailable]"
 
 
-def _resolve_openai_api_key(workspace_id: str) -> Optional[str]:
-    """BYOK lookup — the workspace's own configured OpenAI credentials.
+async def _resolve_openai_api_key(workspace_id: str, agent_id: str = "") -> Optional[str]:
+    """Per-agent BYOK/platform-credits first (agent_capability_service's
+    speech_to_text capability), falling back to the workspace-level lookup
+    this module used exclusively before per-agent capability config existed.
 
-    Returns None (never raises) when the workspace has no usable OpenAI
-    credential, which the caller treats as "STT not configured" and
-    degrades gracefully, per this feature's contract.
+    Returns None (never raises) when nothing usable resolves, which the
+    caller treats as "STT not configured" and degrades gracefully, per this
+    feature's contract.
     """
+    clean_agent_id = str(agent_id or "").strip()
+    if clean_agent_id:
+        try:
+            from server_modules import agent_capability_service as _cap_svc
+
+            resolution = await _cap_svc.resolve_agent_capability_provider_by_id(
+                workspace_id=workspace_id, agent_id=clean_agent_id, capability=_cap_svc.SPEECH_TO_TEXT,
+            )
+            if resolution.available:
+                resolved_key = str((resolution.credentials or {}).get("api_key") or "").strip()
+                if resolved_key:
+                    return resolved_key
+        except Exception:
+            logger.warning(
+                "transcription: capability resolution failed for workspace=%s agent=%s — falling back to workspace lookup",
+                workspace_id, agent_id, exc_info=True,
+            )
+
     try:
         from server_modules.direct_chat_provider_service import direct_chat_credentials
 
@@ -71,8 +96,13 @@ async def transcribe_voice_bytes(
     audio_bytes: bytes,
     mime_type: str = "audio/ogg",
     filename: str = "voice-message",
+    agent_id: str = "",
 ) -> Dict[str, Any]:
-    """Transcribe one voice/audio attachment using the workspace's own OpenAI key.
+    """Transcribe one voice/audio attachment using the agent's own configured
+    key (falling back to the workspace-level one — see
+    _resolve_openai_api_key's docstring). `agent_id` is optional: omitting it
+    (or passing one with no capability_config) resolves exactly the way this
+    function always did, unchanged.
 
     Returns ``{"ok": True, "transcript": str, "provider": "openai", "model": str}``
     on success, or ``{"ok": False, "error": str}`` on any failure (including
@@ -83,7 +113,7 @@ async def transcribe_voice_bytes(
     if len(audio_bytes) > MAX_TRANSCRIBE_AUDIO_BYTES:
         return {"ok": False, "error": "audio_too_large"}
 
-    api_key = _resolve_openai_api_key(workspace_id)
+    api_key = await _resolve_openai_api_key(workspace_id, agent_id)
     if not api_key:
         return {"ok": False, "error": "stt_provider_not_configured"}
 

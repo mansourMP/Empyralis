@@ -2069,6 +2069,7 @@ async def _resolve_specialist_toolset(
     tools: set[str] = set()
     raw_toggles: dict[str, bool] = {}
     mandate_audience_tools: list[str] = []
+    capability_providers: frozenset[str] = frozenset()
     try:
         from server_modules import agent_bindings_repository as _bind
         rows = await _bind.list_agent_connector_bindings(
@@ -2106,6 +2107,27 @@ async def _resolve_specialist_toolset(
         raw_audience_tools = mandate.get("audience_tools")
         if isinstance(raw_audience_tools, list):
             mandate_audience_tools = [str(t) for t in raw_audience_tools]
+        # Capability-gated tools (image_generation today; video_generation
+        # once live — see agent_capability_service.py): which of these
+        # resolve to a working provider for THIS agent right now. Consulted
+        # by _specialist_tool_allowed/_filter_registry_for_specialist INSTEAD
+        # OF tool_toggles for any tool whose capability_id is tool-gated — a
+        # resolved provider IS the enable, no separate toggle (see the
+        # founder's brief / docs/OpenClaw.md's OpenClaw-parity research).
+        try:
+            from server_modules import agent_capability_service as _cap_svc
+
+            capability_config = meta.get("capability_config") if isinstance(meta, dict) and isinstance(meta.get("capability_config"), dict) else {}
+            capability_secrets = meta.get("capability_secrets") if isinstance(meta, dict) and isinstance(meta.get("capability_secrets"), dict) else {}
+            capability_providers = _cap_svc.resolved_capability_ids(
+                workspace_id=workspace_id, agent_id=aid,
+                capability_config=capability_config, capability_secrets=capability_secrets,
+                only=_cap_svc.TOOL_GATED_CAPABILITIES,
+            )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "specialist toolset: capability resolution failed for %s — capability tools stay hidden", aid, exc_info=True
+            )
     except Exception:
         logging.getLogger(__name__).warning(
             "specialist toolset: install bundle load failed for %s — core-only", aid, exc_info=True
@@ -2116,6 +2138,7 @@ async def _resolve_specialist_toolset(
         "tools": tools,
         "raw_tool_toggles": raw_toggles,
         "mandate_audience_tools": mandate_audience_tools,
+        "capability_providers": capability_providers,
     }
 
 
@@ -2152,16 +2175,41 @@ def _core_tool_allowed(name: str, toolset: dict[str, Any]) -> bool:
     return True
 
 
+def _capability_gate_for_tool(tool_name: str) -> str:
+    """The tool-gated capability id this tool belongs to (image_generation,
+    ...), or "" if it isn't capability-gated at all. Looks up the
+    ToolDescriptor's capability_id (skills_service.py) rather than the
+    connector-prefix scheme _specialist_tool_allowed otherwise uses —
+    capability-gated tools bypass that scheme entirely (see callers)."""
+    try:
+        from server_modules import agent_capability_service as _cap_svc
+
+        descriptor = _sage_skills_service.tool_descriptor_for_name(str(tool_name or "").strip())
+        capability_id = str(getattr(descriptor, "capability_id", "") or "").strip().lower() if descriptor else ""
+        return capability_id if capability_id in _cap_svc.TOOL_GATED_CAPABILITIES else ""
+    except Exception:
+        return ""
+
+
 def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
     """True when a specialist bound to ``toolset`` may call ``tool_name``.
 
-    Allowed = a core tool whose toggle (if any) isn't explicitly off, an
-    explicitly-toggled tool, or a connector tool (``{connector}__{action}``)
-    whose connector is bound.
+    Capability-gated tools (generate_image today) are decided SOLELY by
+    whether that capability resolved a working provider for this agent
+    (toolset["capability_providers"], built in _resolve_specialist_toolset) —
+    no tool_toggles/connector check applies to them, matching "a resolved
+    provider IS the enable, no separate toggle" (see agent_capability_service.py).
+
+    Everything else: allowed = a core tool whose toggle (if any) isn't
+    explicitly off, an explicitly-toggled tool, or a connector tool
+    (``{connector}__{action}``) whose connector is bound.
     """
     name = str(tool_name or "").strip()
     if not name:
         return False
+    capability_gate = _capability_gate_for_tool(name)
+    if capability_gate:
+        return capability_gate in toolset.get("capability_providers", frozenset())
     if name in toolset.get("core", set()):
         return _core_tool_allowed(name, toolset)
     if name in toolset.get("tools", set()):
@@ -2178,7 +2226,11 @@ def _filter_registry_for_specialist(registry: Any, toolset: dict[str, Any]) -> l
     for entry in registry or []:
         name = str(getattr(entry, "tool_name", "") or "").strip()
         connector = str(getattr(entry, "connector_id", "") or "").strip().lower()
-        if name in toolset.get("core", set()):
+        capability_gate = _capability_gate_for_tool(name)
+        if capability_gate:
+            if capability_gate in toolset.get("capability_providers", frozenset()):
+                kept.append(entry)
+        elif name in toolset.get("core", set()):
             if _core_tool_allowed(name, toolset):
                 kept.append(entry)
         elif name in toolset.get("tools", set()):

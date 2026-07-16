@@ -993,6 +993,15 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="image",
             action_id="generate",
             description="Generate one or more images from a prompt and save them locally.",
+            # Capability-gated (agent_capability_service.py): this tool only
+            # reaches a specialist's toolset when image_generation resolves
+            # to a working provider for THAT agent — see
+            # sage_agent_runtime_service._resolve_specialist_toolset /
+            # _specialist_tool_allowed, which check this id against
+            # resolved_capability_ids(). capability_id also feeds
+            # capability_registry's risk/approval metadata as it does for
+            # http_request/computer_control.* below.
+            capability_id="image_generation",
             parameters={
                 "type": "object",
                 "properties": {
@@ -3897,14 +3906,60 @@ def execute_single_direct_tool_call(
     except Exception:
         pass
     if connector_id == "image" and action_id == "generate":
+        from server_modules import agent_capability_service
+
+        # Empty agent_id == master/Sage's own turn (same convention as
+        # sage_agent_runtime_service._acting_install_id) — resolved against
+        # Sage's own capability_config, not silently shared with specialists.
+        capability_agent_id = str(session_metadata.get("agent_id") or "").strip()
+        resolution = callbacks.run_async_tool_call(
+            agent_capability_service.resolve_agent_capability_provider_by_id(
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                agent_id=capability_agent_id,
+                capability=agent_capability_service.IMAGE_GENERATION,
+            )
+        )
+        if not resolution.available:
+            raise RuntimeError(
+                resolution.message
+                or "Image generation isn't set up for this agent yet — add a provider on its Capabilities tab."
+            )
+
+        # The resolved provider is the source of truth for which backend
+        # serves this call — a BYOK/platform key for "stability" must never
+        # silently route to OpenAI just because the LLM's tool-call defaulted
+        # to "dall-e-3" (the schema's enum default). Same-provider model
+        # choice (dall-e-3 vs dall-e-2) still passes through untouched.
+        requested_model = str(argument_payload.get("model") or "").strip().lower()
+        if resolution.provider == "stability":
+            effective_model = "stable-diffusion"
+        else:
+            effective_model = requested_model if requested_model in {"dall-e-3", "dall-e-2"} else "dall-e-3"
+
         saved_images = run_generate_image(
             prompt=argument_payload.get("prompt") or "",
-            model=argument_payload.get("model") or "dall-e-3",
+            model=effective_model,
             size=argument_payload.get("size") or "1024x1024",
             quality=argument_payload.get("quality") or "standard",
             n=argument_payload.get("n") or 1,
             save_to=argument_payload.get("save_to"),
+            api_key=str((resolution.credentials or {}).get("api_key") or "") or None,
         )
+        if resolution.billing_mode == "platform_credits":
+            try:
+                callbacks.run_async_tool_call(
+                    agent_capability_service.meter_platform_capability_usage(
+                        tenant_id=tenant_id,
+                        workspace_id=str(workspace_id or "default").strip() or "default",
+                        agent_id=capability_agent_id,
+                        capability=agent_capability_service.IMAGE_GENERATION,
+                        provider=resolution.provider,
+                        metadata={"n": len(saved_images), "model": effective_model},
+                    )
+                )
+            except Exception:
+                pass
         return "\n".join(
             [f"Generated {len(saved_images)} image(s):", *[f"{tool_index}. {path}" for tool_index, path in enumerate(saved_images, start=1)]]
         ).strip()

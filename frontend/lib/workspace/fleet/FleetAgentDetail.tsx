@@ -21,6 +21,7 @@ import {
   Sparkles,
   Square,
   Trash2,
+  Wand2,
   Wrench,
   X,
   type LucideIcon,
@@ -38,6 +39,7 @@ import {
   useFleetAgentChannels,
   useFleetAgentConnectors,
   useFleetAgentTools,
+  useFleetAgentCapabilities,
   useFleetAgentSchedule,
   previewFleetAgentSchedule,
   createFleetAgentSchedule,
@@ -46,6 +48,7 @@ import {
   type FleetAgentActivity,
   type FleetChannel,
   type FleetTool,
+  type FleetCapability,
   type FleetScheduleItem,
 } from "./fleet-data";
 import { deriveStatus, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, type AgentStatusTone } from "./fleet-presentation";
@@ -136,7 +139,7 @@ function isChannelConnected(channel: Pick<FleetChannel, "id" | "connected">, sla
   return channel.connected;
 }
 
-type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "chat";
+type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "capabilities" | "chat";
 
 // "model" sits right after "overview" (was 7th of 8, second-to-last) — a
 // live complaint was "where is the button that says choose the model and
@@ -152,6 +155,7 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
   { id: "tools", label: "Tools", icon: Wrench },
+  { id: "capabilities", label: "Capabilities", icon: Wand2 },
   { id: "hardware", label: "Hardware", icon: Cpu },
   { id: "memory", label: "Memory", icon: Brain },
 ];
@@ -392,6 +396,9 @@ export function FleetAgentDetail({
           )}
           {activeTab === "tools" && (
             <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
+          )}
+          {activeTab === "capabilities" && (
+            <CapabilitiesTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
           )}
           {activeTab === "hardware" && (
             <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
@@ -1926,6 +1933,244 @@ function ToolsTab({
           </div>
         </Disclosure>
       )}
+    </div>
+  );
+}
+
+// ── Capabilities (image/video generation, TTS/STT) ─────────────────────────
+// See server_modules/agent_capability_service.py for the resolver this
+// surfaces, and its module docstring for the full "which 4 pre-existing
+// pieces this unifies" audit. Same platform_credits/byok_api spectrum the
+// Model tab already uses for the chat model, one level down — no separate
+// enable toggle here: choosing a provider that resolves IS the enable, so
+// image_generation's tool (generate_image) just appears in this agent's
+// toolset the moment a provider below shows "Ready".
+
+function CapabilityRow({
+  capability, busy, keyDraft, onKeyDraftChange, onModeChange, onSaveKey, onClearKey,
+}: {
+  capability: FleetCapability;
+  busy: boolean;
+  keyDraft: string;
+  onKeyDraftChange: (value: string) => void;
+  onModeChange: (mode: ProviderMode, provider: string) => void;
+  onSaveKey: (provider: string) => void;
+  onClearKey: () => void;
+}) {
+  const [provider, setProvider] = useState(capability.provider);
+  // "Peek" at the byok_api key-entry UI without saving anything until the
+  // key is actually submitted — switching TO platform_credits saves
+  // immediately (nothing else to configure); switching to "your own key"
+  // just reveals the field. Resynced whenever the server state changes
+  // (after a save, or switching agents) so this never drifts from truth.
+  const [uiMode, setUiMode] = useState<ProviderMode>(capability.mode);
+  useEffect(() => {
+    setUiMode(capability.mode);
+    setProvider(capability.provider);
+  }, [capability.mode, capability.provider]);
+
+  const selectedOption = capability.providers.find((p) => p.id === provider) || capability.providers[0];
+  const stubbed = selectedOption ? !selectedOption.live : false;
+
+  return (
+    <div className="fleet-toggle-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ minWidth: 0 }}>
+          <div className="fleet-toggle-row-label">{capability.label}</div>
+          <div className="fleet-toggle-row-desc">
+            {capability.available
+              ? `Ready — ${MODE_LABELS[capability.mode]} · ${selectedOption?.label || capability.provider}`
+              : capability.message || "Not configured yet."}
+          </div>
+          {!capability.tool_gated && (
+            <div className="fleet-toggle-row-desc">Used automatically — no separate tool to enable.</div>
+          )}
+        </div>
+        <span
+          className={`fleet-badge${capability.available ? "" : " fleet-badge--muted"}`}
+          style={{ marginLeft: 0, flexShrink: 0 }}
+        >
+          {capability.available ? "Ready" : stubbed ? "Coming soon" : "Not configured"}
+        </span>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <select
+          className="fleet-wizard-input"
+          style={{ maxWidth: 240, width: "auto" }}
+          value={provider}
+          disabled={busy}
+          onChange={(e) => {
+            const next = e.currentTarget.value;
+            setProvider(next);
+            if (uiMode === "platform_credits") onModeChange("platform_credits", next);
+          }}
+        >
+          {capability.providers.map((p) => (
+            <option key={p.id} value={p.id}>{p.label}{p.live ? "" : " (coming soon)"}</option>
+          ))}
+        </select>
+
+        <div style={{ display: "inline-flex", gap: 6 }} role="tablist" aria-label={`${capability.label} mode`}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={uiMode === "platform_credits"}
+            className={`fleet-btn${uiMode === "platform_credits" ? " fleet-btn--accent" : ""}`}
+            disabled={busy}
+            onClick={() => { setUiMode("platform_credits"); onModeChange("platform_credits", provider); }}
+          >
+            {MODE_LABELS.platform_credits}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={uiMode === "byok_api"}
+            className={`fleet-btn${uiMode === "byok_api" ? " fleet-btn--accent" : ""}`}
+            disabled={busy}
+            onClick={() => setUiMode("byok_api")}
+          >
+            {MODE_LABELS.byok_api}
+          </button>
+        </div>
+      </div>
+
+      {uiMode === "byok_api" && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            type="password"
+            className="fleet-wizard-input"
+            style={{ maxWidth: 320 }}
+            placeholder={capability.has_byok_key && capability.mode === "byok_api" ? "Key saved — paste a new one to replace it" : "Paste your API key"}
+            value={keyDraft}
+            disabled={busy}
+            onChange={(e) => onKeyDraftChange(e.currentTarget.value)}
+          />
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--accent"
+            disabled={busy || !keyDraft.trim()}
+            onClick={() => onSaveKey(provider)}
+          >
+            {busy ? "Saving…" : "Save key"}
+          </button>
+          {capability.has_byok_key && capability.mode === "byok_api" && (
+            <button type="button" className="fleet-btn" disabled={busy} onClick={onClearKey}>
+              Remove key
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CapabilitiesTab({
+  workspaceId, agentId,
+}: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
+  const { capabilities, isMaster, loading, refresh } = useFleetAgentCapabilities(workspaceId, agentId);
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+
+  async function saveMode(capabilityId: string, mode: ProviderMode, provider: string) {
+    setPending(capabilityId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { capability_config: { [capabilityId]: { mode, provider } } } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update this capability.");
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function saveKey(capabilityId: string, provider: string) {
+    const apiKey = (keyDrafts[capabilityId] || "").trim();
+    if (!apiKey) return;
+    setPending(capabilityId);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-capabilities/key?agent_id=${encodeURIComponent(agentId)}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify({ capability: capabilityId, provider, api_key: apiKey }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      setKeyDrafts((cur) => ({ ...cur, [capabilityId]: "" }));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save this key.");
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function clearKey(capabilityId: string) {
+    setPending(capabilityId);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-capabilities/key?agent_id=${encodeURIComponent(agentId)}&capability=${encodeURIComponent(capabilityId)}`,
+        {
+          method: "DELETE",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("DELETE", {}),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not remove this key.");
+    } finally {
+      setPending(null);
+    }
+  }
+
+  if (loading) {
+    return <div className="fleet-activity-skeleton" aria-label="Loading capabilities"><div className="fleet-skeleton-bar" style={{ width: "60%" }} /></div>;
+  }
+
+  if (isMaster) {
+    return (
+      <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
+        This is the operator agent — its capabilities resolve the same way (platform credits by default), but aren&apos;t gated behind a toggle here since it already has unrestricted tool access.
+      </p>
+    );
+  }
+
+  return (
+    <div className="fleet-config">
+      <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+        Choose a provider for each capability — platform credits, or your own API key. Once a provider resolves, this agent can use it right away; there&apos;s no separate on/off switch.
+      </p>
+      {capabilities.map((cap) => (
+        <CapabilityRow
+          key={cap.id}
+          capability={cap}
+          busy={pending === cap.id}
+          keyDraft={keyDrafts[cap.id] || ""}
+          onKeyDraftChange={(v) => setKeyDrafts((cur) => ({ ...cur, [cap.id]: v }))}
+          onModeChange={(mode, provider) => saveMode(cap.id, mode, provider)}
+          onSaveKey={(provider) => saveKey(cap.id, provider)}
+          onClearKey={() => clearKey(cap.id)}
+        />
+      ))}
+      {error && <p className="fleet-channel-expand-error">{error}</p>}
     </div>
   );
 }

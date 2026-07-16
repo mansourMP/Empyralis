@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from server_modules.agent_turn import AgentTurnRequest, TurnActor
+from server_modules import agent_capability_service
 from server_modules import authority_mandate_service
 from server_modules import direct_tool_execution_service
 from server_modules import no_provider_service
@@ -1133,6 +1134,179 @@ class SkillsServiceTests(unittest.TestCase):
         self.assertEqual(payload["execution_environment"], "local_gateway")
         self.assertIn("Agent Computer offline", payload["summary"])
         execute_hardware_mock.assert_not_called()
+
+
+class GenerateImageCapabilityResolutionTests(unittest.TestCase):
+    """execute_single_direct_tool_call's image/generate branch — must resolve
+    THIS agent's capability provider (not read platform env keys blindly),
+    route the resolved provider's key into tools_image_gen.generate_image,
+    and meter platform_credits usage. Uses the REAL parse_tool_name (not
+    SkillsServiceTests._execution_callbacks' simplified stub, which doesn't
+    special-case "generate_image" -> ("image", "generate") the way
+    direct_chat_operator_binding_service.parse_tool_name does) and a REAL
+    run_async_tool_call bridge (asyncio.run) since this code path, unlike
+    the fire-and-forget ledger writes most other tests exercise, actually
+    consumes the coroutine's return value."""
+
+    def _callbacks(self, **overrides) -> direct_tool_execution_service.DirectToolExecutionCallbacks:
+        from server_modules.direct_chat_operator_binding_service import parse_tool_name as _real_parse_tool_name
+
+        base = dict(
+            compact_step_detail=lambda v: None,
+            titleize_direct_step_token=lambda v: str(v or ""),
+            run_async_tool_call=lambda coro: asyncio.run(coro),
+            parse_tool_name=_real_parse_tool_name,
+            tool_arguments_payload=lambda a: dict(a) if isinstance(a, dict) else {},
+            parse_json_object_loose=lambda s: {},
+            safe_positive_int=lambda v, d=0: d,
+            normalize_reasoning_effort=lambda s: None,
+            build_direct_local_tool_config=lambda c, a, args: ("", {}),
+            format_direct_local_tool_result=lambda r: str(r),
+            build_direct_tool_config=lambda c, a, i: {},
+            format_direct_tool_result=lambda r: str(r),
+            llm_task=lambda *a, **k: None,
+            web_search=lambda q: [],
+            web_fetch=lambda u: "",
+            search_memory_notebook=lambda *a, **k: None,
+            get_memory_notebook_excerpt=lambda *a, **k: None,
+        )
+        base.update(overrides)
+        return direct_tool_execution_service.DirectToolExecutionCallbacks(**base)
+
+    def test_resolves_per_agent_provider_and_threads_the_key_through(self):
+        resolution = agent_capability_service.CapabilityResolution(
+            capability="image_generation", available=True, mode="byok_api",
+            provider="openai", credentials={"api_key": "sk-agent-own-key"}, billing_mode="byok_api",
+        )
+        with (
+            patch(
+                "server_modules.agent_capability_service.resolve_agent_capability_provider_by_id",
+                new=AsyncMock(return_value=resolution),
+            ),
+            patch("server_modules.tools_image_gen.generate_image", return_value=["/tmp/out.png"]) as mock_generate,
+            patch("server_modules.activity_ledger_service.append_execution_activity", new=AsyncMock()),
+        ):
+            result = skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "generate_image", "arguments": {"prompt": "a red fox"}},
+                workspace_id="ws-1", thread_id="thread-1",
+                session_ctx={"agent_id": "agent-x", "tenant_id": "t1", "authority_tier": "owner"},
+                callbacks=self._callbacks(),
+            )
+        self.assertIn("Generated 1 image(s)", result)
+        _, kwargs = mock_generate.call_args
+        self.assertEqual(kwargs["api_key"], "sk-agent-own-key")
+        self.assertEqual(kwargs["model"], "dall-e-3")
+
+    def test_stability_provider_forces_stable_diffusion_model_regardless_of_llm_request(self):
+        """The resolved provider is the source of truth for which backend
+        serves the call — a stability-configured agent must never silently
+        route to OpenAI just because the tool schema's model enum defaults
+        (or the LLM explicitly asked for) dall-e-3."""
+        resolution = agent_capability_service.CapabilityResolution(
+            capability="image_generation", available=True, mode="platform_credits",
+            provider="stability", credentials={"api_key": "sk-platform-stability"}, billing_mode="platform_credits",
+        )
+        with (
+            patch(
+                "server_modules.agent_capability_service.resolve_agent_capability_provider_by_id",
+                new=AsyncMock(return_value=resolution),
+            ),
+            patch("server_modules.tools_image_gen.generate_image", return_value=["/tmp/out.png"]) as mock_generate,
+            patch("server_modules.agent_capability_service.meter_platform_capability_usage", new=AsyncMock()) as mock_meter,
+            patch("server_modules.activity_ledger_service.append_execution_activity", new=AsyncMock()),
+        ):
+            skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "generate_image", "arguments": {"prompt": "x", "model": "dall-e-3"}},
+                workspace_id="ws-1", thread_id="thread-1",
+                session_ctx={"agent_id": "agent-x", "tenant_id": "t1", "authority_tier": "owner"},
+                callbacks=self._callbacks(),
+            )
+        _, kwargs = mock_generate.call_args
+        self.assertEqual(kwargs["model"], "stable-diffusion")
+        self.assertEqual(kwargs["api_key"], "sk-platform-stability")
+        # platform_credits billing_mode -> usage gets metered.
+        mock_meter.assert_awaited_once()
+        _, meter_kwargs = mock_meter.call_args
+        self.assertEqual(meter_kwargs["provider"], "stability")
+        self.assertEqual(meter_kwargs["agent_id"], "agent-x")
+
+    def test_byok_calls_are_never_metered(self):
+        resolution = agent_capability_service.CapabilityResolution(
+            capability="image_generation", available=True, mode="byok_api",
+            provider="openai", credentials={"api_key": "sk-agent-own"}, billing_mode="byok_api",
+        )
+        with (
+            patch(
+                "server_modules.agent_capability_service.resolve_agent_capability_provider_by_id",
+                new=AsyncMock(return_value=resolution),
+            ),
+            patch("server_modules.tools_image_gen.generate_image", return_value=["/tmp/out.png"]),
+            patch("server_modules.agent_capability_service.meter_platform_capability_usage", new=AsyncMock()) as mock_meter,
+            patch("server_modules.activity_ledger_service.append_execution_activity", new=AsyncMock()),
+        ):
+            skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "generate_image", "arguments": {"prompt": "x"}},
+                workspace_id="ws-1", thread_id="thread-1",
+                session_ctx={"agent_id": "agent-x", "tenant_id": "t1", "authority_tier": "owner"},
+                callbacks=self._callbacks(),
+            )
+        mock_meter.assert_not_awaited()
+
+    def test_unresolved_capability_raises_a_clean_actionable_error_not_a_platform_key_exception(self):
+        resolution = agent_capability_service.CapabilityResolution(
+            capability="image_generation", available=False, mode="byok_api", provider="openai",
+            credentials={}, billing_mode="", reason="byok_key_missing",
+            message="Add your OpenAI (DALL-E) API key for Image generation.",
+        )
+        with (
+            patch(
+                "server_modules.agent_capability_service.resolve_agent_capability_provider_by_id",
+                new=AsyncMock(return_value=resolution),
+            ),
+            patch("server_modules.tools_image_gen.generate_image") as mock_generate,
+            patch("server_modules.activity_ledger_service.append_execution_activity", new=AsyncMock()),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                skills_service.execute_single_direct_tool_call(
+                    tool_call={"name": "generate_image", "arguments": {"prompt": "x"}},
+                    workspace_id="ws-1", thread_id="thread-1",
+                    session_ctx={"agent_id": "agent-x", "tenant_id": "t1", "authority_tier": "owner"},
+                    callbacks=self._callbacks(),
+                )
+        self.assertIn("Add your OpenAI", str(ctx.exception))
+        mock_generate.assert_not_called()
+
+    def test_sage_own_turn_resolves_with_empty_agent_id_not_specialist_bleed(self):
+        """No agent_id in session_ctx == Sage's own turn (matches
+        sage_agent_runtime_service._acting_install_id's convention) — must
+        resolve against Sage's OWN capability_config via the master-install
+        path, never a specialist's."""
+        resolution = agent_capability_service.CapabilityResolution(
+            capability="image_generation", available=True, mode="platform_credits",
+            provider="openai", credentials={"api_key": "sk-platform"}, billing_mode="platform_credits",
+        )
+        captured_agent_id = {}
+
+        async def _fake_resolve(*, workspace_id, tenant_id, agent_id, capability):
+            captured_agent_id["value"] = agent_id
+            return resolution
+
+        with (
+            patch(
+                "server_modules.agent_capability_service.resolve_agent_capability_provider_by_id",
+                new=_fake_resolve,
+            ),
+            patch("server_modules.tools_image_gen.generate_image", return_value=["/tmp/out.png"]),
+            patch("server_modules.agent_capability_service.meter_platform_capability_usage", new=AsyncMock()),
+            patch("server_modules.activity_ledger_service.append_execution_activity", new=AsyncMock()),
+        ):
+            skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "generate_image", "arguments": {"prompt": "x"}},
+                workspace_id="ws-1", thread_id="thread-1",
+                session_ctx={"authority_tier": "owner"},  # no agent_id at all -> Sage's own turn
+                callbacks=self._callbacks(),
+            )
+        self.assertEqual(captured_agent_id["value"], "")
 
 
 class AuthorityMandateGateTests(unittest.TestCase):

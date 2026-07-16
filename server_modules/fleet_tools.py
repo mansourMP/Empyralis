@@ -29,6 +29,7 @@ _ALLOWED_CONFIGURE_KEYS = {
     "subagents_enabled", "hardware_access", "model_config", "display_name",
     "purpose_preset", "instructions", "context_policy", "tool_toggles",
     "preferred_gateway_id", "telegram_first_contact_reply", "mandate",
+    "capability_config",
 }
 _MAX_MANDATE_AUDIENCE_TOOLS = 200
 _MAX_INSTRUCTIONS_CHARS = 8000
@@ -956,6 +957,20 @@ async def fleet_get_agent_tools(
         # skill_registry.enforcement_tool_name.
         enforcement_id = skill_registry.enforcement_tool_name(d.id)
         descriptor = skills_service.tool_descriptor_for_name(enforcement_id)
+        # Capability-gated tools (generate_image today — see
+        # agent_capability_service.py) are decided SOLELY by whether their
+        # capability resolved a provider for this agent
+        # (_specialist_tool_allowed bypasses tool_toggles for these
+        # entirely) — listing one here with a toggle that has zero runtime
+        # effect would be exactly the lying-toggle facade the comment below
+        # already guards against for core tools. They live on the
+        # Capabilities tab instead.
+        capability_id = str(getattr(descriptor, "capability_id", "") or "").strip().lower() if descriptor is not None else ""
+        if capability_id:
+            from server_modules import agent_capability_service as _cap_svc
+
+            if capability_id in _cap_svc.TOOL_GATED_CAPABILITIES:
+                continue
         tools.append({
             "id": enforcement_id,
             "label": d.label,
@@ -992,6 +1007,126 @@ async def fleet_get_agent_tools(
     _toggleable_ids = {t["id"] for t in tools}
     core_tools = sorted(name for name in _core_direct_tool_names() if name not in _toggleable_ids)
     return {"ok": True, "tools": tools, "core_tools": core_tools, "agent_id": agent_id, "is_master": is_master}
+
+
+# ── Capabilities (image/video generation, TTS/STT) ─────────────────────────
+# See agent_capability_service.py for the resolver this surfaces. This tab is
+# the per-agent analog of the Model tab's provider/mode picker, one level
+# down (capability instead of "the" chat model) — same
+# platform_credits/byok_api spectrum, no separate enable toggle: choosing a
+# provider that resolves IS the enable (see FleetAgentDetail.tsx's
+# CapabilitiesTab / ToolsTab's identical isMaster convention below).
+
+async def fleet_get_agent_capabilities(
+    *, workspace_id: str, tenant_id: str = "default", agent_id: str,
+) -> Dict[str, Any]:
+    """Resolved capability state for every capability, for this agent. Never
+    returns key material — has_byok_key is a boolean, never the ciphertext."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules import agent_capability_service as _cap_svc
+
+    try:
+        bundle = await repo.get_workspace_agent_install_bundle(
+            agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+        )
+    except Exception:
+        bundle = None
+
+    if not bundle:
+        return {"ok": True, "capabilities": [], "agent_id": agent_id}
+
+    bundle_dict = dict(bundle)
+    is_master = resolve_agent_role(bundle_dict) == OPERATOR_ROLE
+    meta = bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {}
+    capability_config = meta.get("capability_config") if isinstance(meta.get("capability_config"), dict) else {}
+    capability_secrets = meta.get("capability_secrets") if isinstance(meta.get("capability_secrets"), dict) else {}
+    capabilities = _cap_svc.agent_capability_state_payload(
+        workspace_id=workspace_id, agent_id=agent_id,
+        capability_config=capability_config, capability_secrets=capability_secrets,
+    )
+    return {"ok": True, "capabilities": capabilities, "agent_id": agent_id, "is_master": is_master}
+
+
+async def fleet_set_agent_capability_key(
+    *, workspace_id: str, tenant_id: str = "default", agent_id: str,
+    capability: str, provider: str, api_key: str,
+) -> Dict[str, Any]:
+    """Store one BYOK key for one capability, scoped to this agent only, and
+    switch that capability to byok_api/this provider (pasting a key IS
+    choosing "your own API key" for it — no separate mode toggle to also
+    flip). Encrypts before writing; the key is never returned or logged."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules import agent_capability_service as _cap_svc
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+    try:
+        secret_patch = _cap_svc.store_capability_secret_patch(capability=capability, provider=provider, api_key=api_key)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    cap = _cap_svc.canonical_capability(capability)
+
+    bundle = await repo.get_workspace_agent_install_bundle(agent_id, tenant_id=tenant_id, workspace_id=workspace_id)
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+    bundle_dict = dict(bundle)
+    meta = dict(bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {})
+
+    next_secrets = dict(meta.get("capability_secrets") or {})
+    next_secrets[cap] = secret_patch
+    meta["capability_secrets"] = next_secrets
+
+    next_config = dict(meta.get("capability_config") or {})
+    next_config[cap] = {"mode": "byok_api", "provider": secret_patch["provider"]}
+    meta["capability_config"] = next_config
+
+    await repo.update_workspace_agent_install(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id, metadata=meta,
+    )
+    await _ledger_fleet_action(
+        action="capability_key_set", actor_id="owner", workspace_id=workspace_id,
+        target_agent_id=agent_id, status="ok",
+        metadata={"capability": cap, "provider": secret_patch["provider"]},
+    )
+    return {"ok": True, "capability": cap, "provider": secret_patch["provider"], "mode": "byok_api"}
+
+
+async def fleet_clear_agent_capability_key(
+    *, workspace_id: str, tenant_id: str = "default", agent_id: str, capability: str,
+) -> Dict[str, Any]:
+    """Remove a stored BYOK key for one capability and fall back to
+    platform_credits (byok_api with no key left behind would just resolve to
+    a confusing "add your key" dead end)."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules import agent_capability_service as _cap_svc
+
+    cap = _cap_svc.canonical_capability(capability)
+    if cap not in _cap_svc.ALL_CAPABILITIES:
+        return {"ok": False, "error": f"Unknown capability '{capability}'."}
+
+    bundle = await repo.get_workspace_agent_install_bundle(agent_id, tenant_id=tenant_id, workspace_id=workspace_id)
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+    bundle_dict = dict(bundle)
+    meta = dict(bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {})
+
+    next_secrets = dict(meta.get("capability_secrets") or {})
+    next_secrets.pop(cap, None)
+    meta["capability_secrets"] = next_secrets
+
+    next_config = dict(meta.get("capability_config") or {})
+    provider = str((next_config.get(cap) or {}).get("provider") or _cap_svc.DEFAULT_PROVIDER_BY_CAPABILITY.get(cap, ""))
+    next_config[cap] = {"mode": "platform_credits", "provider": provider}
+    meta["capability_config"] = next_config
+
+    await repo.update_workspace_agent_install(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id, metadata=meta,
+    )
+    await _ledger_fleet_action(
+        action="capability_key_cleared", actor_id="owner", workspace_id=workspace_id,
+        target_agent_id=agent_id, status="ok", metadata={"capability": cap},
+    )
+    return {"ok": True, "capability": cap, "mode": "platform_credits"}
 
 
 async def fleet_configure_agent(
@@ -1255,6 +1390,22 @@ async def fleet_configure_agent(
             _next_hardware_access = requested
         if "model_config" in clean_patch:
             meta["model_config"] = dict(clean_patch["model_config"] or {})
+        if "capability_config" in clean_patch:
+            # Per-capability MERGE, not wholesale replace (unlike model_config,
+            # which is a single object — capability_config has 4 independent
+            # sub-keys, so saving image_generation must not silently clobber
+            # an already-configured text_to_speech). Never carries secret
+            # material — see agent_capability_service.py's module docstring;
+            # BYOK keys go through fleet_set_agent_capability_key instead.
+            from server_modules import agent_capability_service as _cap_svc
+
+            try:
+                clean_capability_patch = _cap_svc.validate_capability_config_patch(clean_patch["capability_config"])
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            next_capability_config = dict(meta.get("capability_config") or {})
+            next_capability_config.update(clean_capability_patch)
+            meta["capability_config"] = next_capability_config
         _next_tool_toggles: Optional[Dict[str, bool]] = None
         if "tool_toggles" in clean_patch:
             raw_toggles = clean_patch["tool_toggles"]

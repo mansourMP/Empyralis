@@ -122,6 +122,141 @@ class SpecialistToolsetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e.tool_name for e in kept], ["slack__post"])
 
 
+# ── Capability-gated tools (image_generation today) ─────────────────────────
+# generate_image is decided SOLELY by whether its capability resolved a
+# working provider for this agent — no tool_toggles/connector check applies
+# to it at all (see agent_capability_service.py's "no separate enable
+# toggle" contract, and skills_service.py's generate_image ToolDescriptor,
+# which now carries capability_id="image_generation").
+
+
+class CapabilityGatedToolsetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resolve_specialist_toolset_includes_capability_providers(self):
+        bundle = {
+            "tool_toggles": {},
+            "install_metadata": {
+                "capability_config": {"image_generation": {"mode": "byok_api", "provider": "openai"}},
+                "capability_secrets": {},  # no key stored -> won't resolve
+            },
+        }
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(workspace_id="ws-1", tenant_id="t1", agent_install_id="install-x")
+        self.assertIn("capability_providers", ts)
+        # byok_api configured but no key stored -> does not resolve.
+        self.assertNotIn("image_generation", ts["capability_providers"])
+
+    async def test_generate_image_hidden_when_capability_toggle_is_on_but_provider_unresolved(self):
+        """The tool_toggles switch is now IRRELEVANT to generate_image — even
+        an explicit True does nothing without a resolved provider. Proves
+        "no separate enable toggle" isn't just a slogan."""
+        bundle = {
+            "tool_toggles": {"generate_image": True},
+            "install_metadata": {},
+        }
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ),
+            patch.dict("os.environ", {}, clear=False),
+        ):
+            import os
+            os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop("STABILITY_API_KEY", None)
+            ts = await sage._resolve_specialist_toolset(workspace_id="ws-1", tenant_id="t1", agent_install_id="install-x")
+        self.assertFalse(sage._specialist_tool_allowed("generate_image", ts))
+
+    async def test_generate_image_visible_when_capability_resolves_with_no_toggle_at_all(self):
+        """The flip side: a resolved provider makes the tool available even
+        though tool_toggles never mentions it — no separate toggle needed."""
+        bundle = {
+            "tool_toggles": {},  # generate_image never toggled on
+            "install_metadata": {},
+        }
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ),
+            patch.dict("os.environ", {"OPENAI_API_KEY": "sk-platform"}, clear=False),
+            patch(
+                "server_modules.entitlements_service.hosted_sage_ai_access_state_for_workspace_id",
+                return_value={"allowed": True},
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(workspace_id="ws-1", tenant_id="t1", agent_install_id="install-x")
+        self.assertIn("image_generation", ts["capability_providers"])
+        self.assertTrue(sage._specialist_tool_allowed("generate_image", ts))
+
+    def test_capability_gate_for_tool_identifies_generate_image_only(self):
+        self.assertEqual(sage._capability_gate_for_tool("generate_image"), "image_generation")
+        self.assertEqual(sage._capability_gate_for_tool("web__search"), "")
+        self.assertEqual(sage._capability_gate_for_tool("http_request"), "")  # capability_id set, but not tool-gated
+        self.assertEqual(sage._capability_gate_for_tool(""), "")
+
+    def test_specialist_tool_allowed_ignores_toggles_and_connectors_for_capability_gated_tools(self):
+        # Even with generate_image explicitly toggled on AND its
+        # "connector" bound, an unresolved capability still blocks it —
+        # capability resolution is the ONLY signal consulted.
+        ts = {
+            "core": set(), "tools": {"generate_image"}, "connectors": {"image"},
+            "raw_tool_toggles": {"generate_image": True}, "capability_providers": frozenset(),
+        }
+        self.assertFalse(sage._specialist_tool_allowed("generate_image", ts))
+
+    def test_registry_filter_gates_generate_image_by_capability_not_bindings(self):
+        class _Entry:
+            def __init__(self, name, connector):
+                self.tool_name = name
+                self.connector_id = connector
+
+        registry = [_Entry("generate_image", "image"), _Entry("slack__post", "slack")]
+        ts_unresolved = {"core": set(), "tools": set(), "connectors": {"image", "slack"}, "capability_providers": frozenset()}
+        kept_unresolved = sage._filter_registry_for_specialist(registry, ts_unresolved)
+        # "image" connector bound is irrelevant — generate_image needs a
+        # resolved capability, not a connector binding.
+        self.assertEqual([e.tool_name for e in kept_unresolved], ["slack__post"])
+
+        ts_resolved = {"core": set(), "tools": set(), "connectors": set(), "capability_providers": frozenset({"image_generation"})}
+        kept_resolved = sage._filter_registry_for_specialist(registry, ts_resolved)
+        self.assertEqual([e.tool_name for e in kept_resolved], ["generate_image"])
+
+    async def test_toolset_fail_safe_leaves_capability_providers_empty(self):
+        """Extends test_toolset_fail_safe_is_core_only above: when the bundle
+        lookup blows up, capability-gated tools must fail closed too, not
+        just core/connector/tools."""
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(workspace_id="ws-1", tenant_id="t1", agent_install_id="install-x")
+        self.assertEqual(ts.get("capability_providers"), frozenset())
+        self.assertFalse(sage._specialist_tool_allowed("generate_image", ts))
+
+
 # ── 2. Mid-turn memory-write namespace isolation ────────────────────────────
 
 
