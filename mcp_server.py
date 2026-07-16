@@ -3,8 +3,18 @@
 Two MCP surfaces in Empyralis:
 
 1. **Empyralis AS an MCP server** (this file) — external AI clients (Claude Code,
-   Claude Desktop, ChatGPT) connect TO Empyralis at ``/mcp`` to call platform tools.
-   Auth: per-workspace API key (bearer token).
+   Claude Desktop, Claude web/mobile Connectors, ChatGPT) connect TO Empyralis
+   at ``/mcp`` to call platform tools. Two auth paths, both resolved through
+   ``_resolve_workspace`` below:
+     - Per-workspace bearer API key (``server_modules/mcp_server_auth.py``) —
+       the original path; Claude Code CLI depends on it.
+     - OAuth 2.1 (``server_modules/mcp_oauth_provider.py``), opt-in via
+       ``EMPYRALIS_MCP_OAUTH_ENABLED=true`` — lets Claude add Empyralis as a
+       one-click Connector. The mcp SDK (``mcp.server.auth``) supplies PKCE,
+       dynamic client registration (RFC 7591), and authorization/protected-
+       resource metadata (RFC 8414/9728); ``mcp_oauth_provider.py`` supplies
+       the storage and the consent screen tied to the existing dashboard
+       session (``server_modules/auth.py``).
 
 2. **Empyralis as an MCP client** — Empyralis connects TO 30+ external MCP
    services (Gmail, GitHub, Slack, Notion, etc.) via ``mcp_registry_service.py``.
@@ -47,9 +57,11 @@ from fastapi import FastAPI
 
 try:
     from mcp.server.fastmcp import Context, FastMCP
+    from mcp.types import ToolAnnotations
 except Exception:
     FastMCP = None  # type: ignore[assignment]
     Context = None  # type: ignore[assignment]
+    ToolAnnotations = None  # type: ignore[assignment]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -78,12 +90,66 @@ _WRITE_ENABLED_GLOBAL = os.getenv("EMPYRALIS_MCP_WRITE_ENABLED", "").strip().low
     "1", "true", "yes",
 }  # Global emergency off-switch — when false, ALL write tools are blocked regardless of per-key settings.
 
+_MCP_OAUTH_ENABLED = os.getenv("EMPYRALIS_MCP_OAUTH_ENABLED", "").strip().lower() in {
+    "1", "true", "yes",
+}  # Opt-in: an internet-facing OAuth authorization server is a bigger surface
+   # than the existing bearer-key path, so it stays off until explicitly enabled
+   # (and reviewed) per deployment, even though the legacy bearer-key path
+   # always works regardless of this flag.
+
+# Set by _build_mcp_server() when EMPYRALIS_MCP_OAUTH_ENABLED is on and a public
+# base URL is configured. None means OAuth is not wired in — mount_empyralist_mcp
+# then mounts only the plain (legacy-bearer-key-only) streamable HTTP app, same
+# as before this feature existed.
+oauth_provider: Any = None
+
+
+def _resolve_public_base_url() -> str:
+    for key in ("EMPYRALIS_PUBLIC_BASE_URL", "PUBLIC_BASE_URL"):
+        base = str(os.getenv(key) or "").strip().rstrip("/")
+        if base:
+            return base
+    return ""
+
 
 # ── API key resolution ──────────────────────────────────────────────────
 
 
 async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
-    """Extract ``{workspace_id, writes_enabled}`` from the MCP request's Authorization header."""
+    """Extract ``{workspace_id, writes_enabled}`` from the authenticated MCP request.
+
+    Prefers the mcp SDK's verified access token (populated by its
+    AuthContextMiddleware whenever ``_build_mcp_server`` wired an
+    ``auth_server_provider`` in — see ``mcp_oauth_provider.py``). This single
+    path serves BOTH real OAuth-issued tokens and legacy per-workspace bearer
+    API keys, because ``EmpyralisOAuthProvider.load_access_token`` itself
+    tries the OAuth tables first and falls back to
+    ``mcp_server_auth.resolve_workspace_from_api_key`` — so a legacy key
+    keeps working unchanged once OAuth is enabled.
+
+    Falls back to manually parsing the Authorization header (this function's
+    entire pre-OAuth behavior, unchanged) when no auth_server_provider is
+    configured at all — e.g. ``EMPYRALIS_MCP_OAUTH_ENABLED`` unset.
+    """
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        access_token = get_access_token()
+    except Exception:
+        access_token = None
+
+    if access_token is not None:
+        workspace_id = str(getattr(access_token, "workspace_id", "") or "").strip()
+        if workspace_id:
+            from server_modules.mcp_oauth_provider import SCOPE_WRITE
+
+            scopes = set(getattr(access_token, "scopes", None) or [])
+            return {
+                "workspace_id": workspace_id,
+                "writes_enabled": SCOPE_WRITE in scopes,
+                "scopes": scopes,
+            }
+
     auth = ""
     try:
         headers = getattr(getattr(ctx, "request_context", None), "request", None)
@@ -143,9 +209,50 @@ async def _ledger_mcp_call(workspace_id: str, tool_name: str, ok: bool, **extra:
 
 
 def _build_mcp_server() -> FastMCP | None:
+    global oauth_provider
     if FastMCP is None:
         return None
-    return FastMCP(EMPYRALIST_MCP_NAME)
+
+    auth_kwargs: Dict[str, Any] = {}
+    if _MCP_OAUTH_ENABLED:
+        base_url = _resolve_public_base_url()
+        if not base_url:
+            LOGGER.warning(
+                "EMPYRALIS_MCP_OAUTH_ENABLED is set but no public base URL is configured "
+                "(EMPYRALIS_PUBLIC_BASE_URL / PUBLIC_BASE_URL) — MCP OAuth connector stays "
+                "disabled; the legacy bearer-key path still works."
+            )
+        else:
+            try:
+                from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+
+                from server_modules import mcp_oauth_provider
+
+                resource_server_url = f"{base_url}{EMPYRALIST_MCP_PATH}"
+                provider = mcp_oauth_provider.EmpyralisOAuthProvider(
+                    issuer_url=base_url, resource_server_url=resource_server_url,
+                )
+                auth_kwargs["auth_server_provider"] = provider
+                auth_kwargs["auth"] = AuthSettings(
+                    issuer_url=base_url,
+                    resource_server_url=resource_server_url,
+                    client_registration_options=ClientRegistrationOptions(
+                        enabled=True,
+                        valid_scopes=list(mcp_oauth_provider.SCOPES),
+                        default_scopes=list(mcp_oauth_provider.DEFAULT_SCOPES),
+                    ),
+                    revocation_options=RevocationOptions(enabled=True),
+                )
+                oauth_provider = provider
+            except Exception:
+                LOGGER.exception(
+                    "Failed to configure MCP OAuth provider — falling back to legacy "
+                    "bearer-key-only auth for this process."
+                )
+                oauth_provider = None
+                auth_kwargs = {}
+
+    return FastMCP(EMPYRALIST_MCP_NAME, **auth_kwargs)
 
 
 empyralist_mcp = _build_mcp_server()
@@ -185,7 +292,10 @@ if empyralist_mcp is not None:
 
     # ── Read + chat tools (always live) ──────────────────────────────
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="List Projects",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
     async def empyralis_list_projects(ctx: Context) -> Dict[str, Any]:
         """List the projects (client/company groupings of agents) in your workspace."""
         r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
@@ -197,7 +307,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_list_projects", True, project_count=len(projects))
         return {"ok": True, "projects": projects}
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="List Agents",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
     async def empyralis_list_agents(ctx: Context) -> Dict[str, Any]:
         """List agents in your workspace, each enriched with its project name,
         connected channels, and connected connectors."""
@@ -227,7 +340,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_list_agents", True, agent_count=len(agents))
         return {"ok": True, "agents": agents}
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Get Agent Activity",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
     async def empyralis_get_agent_activity(
         agent_id: str, limit: int = 20, ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -242,7 +358,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_get_agent_activity", True, agent_id=agent_id)
         return {"ok": True, **result}
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Get Agent Conversations",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
     async def empyralis_get_agent_conversations(
         agent_id: str, limit: int = 20, ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -272,7 +391,10 @@ if empyralist_mcp is not None:
     # a deliberate agent-selection design; until then the dead tools are gone
     # rather than advertised-but-crashing.
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Chat with Sage",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
     async def empyralis_chat(message: str, agent_id: str = "", ctx: Context = None) -> Dict[str, Any]:
         """Send a message through the full Empyralis turn (triage, ledger, AI)."""
         r = await _resolve(ctx); ws = _ws(r)
@@ -292,7 +414,10 @@ if empyralist_mcp is not None:
 
     # ── Write tools (gated per-key + global off-switch) ──────────────
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Create Project",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
     async def empyralis_create_project(
         name: str, description: str = "", ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -309,7 +434,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_create_project", True, project_id=project.get("id"))
         return {"ok": True, "project": project}
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Create Agent",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
     async def empyralis_create_agent(
         name: str, project_id: str = "", instructions: str = "",
         purpose_preset: str = "", ctx: Context = None,
@@ -339,7 +467,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_create_agent", result.get("ok", False), agent_id=agent_id, project_id=assigned_project)
         return result
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Configure Agent",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+    )
     async def empyralis_configure_agent(
         agent_id: str, patch: Dict[str, Any], ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -352,7 +483,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_configure_agent", result.get("ok", False), agent_id=agent_id)
         return result
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Message Agent",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
     async def empyralis_message_agent(
         agent_id: str, message: str, ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -365,7 +499,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_message_agent", result.get("ok", False), agent_id=agent_id)
         return result
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Assign Channel Bot",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+    )
     async def empyralis_assign_channel_bot(
         agent_id: str, channel: str, token: str, ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -392,7 +529,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_assign_channel_bot", True, agent_id=agent_id, channel=ch)
         return {"ok": True, "channel": ch, "binding": result}
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Release Channel Bot",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+    )
     async def empyralis_release_channel_bot(
         agent_id: str, channel: str, ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -418,7 +558,10 @@ if empyralist_mcp is not None:
         await _ledger_mcp_call(ws, "empyralis_release_channel_bot", True, agent_id=agent_id, channel=ch)
         return {"ok": True, "channel": ch, **(result if isinstance(result, dict) else {})}
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Connect Connector",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
     async def empyralis_connect_connector(
         provider: str, ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -427,11 +570,7 @@ if empyralist_mcp is not None:
         r = await _resolve(ctx); _check_write(r); ws = _ws(r)
         from types import SimpleNamespace
         from server_modules import connection_oauth_service
-        base = ""
-        for key in ("EMPYRALIS_PUBLIC_BASE_URL", "PUBLIC_BASE_URL"):
-            base = str(os.getenv(key) or "").strip().rstrip("/")
-            if base:
-                break
+        base = _resolve_public_base_url()
         shim_request = SimpleNamespace(base_url=(base + "/") if base else "http://localhost:8001/")
         try:
             started = connection_oauth_service.start_oauth(
@@ -446,7 +585,10 @@ if empyralist_mcp is not None:
         return {"ok": True, "provider": provider, "authorization_url": url,
                 "instructions": "Open authorization_url in a browser to grant access."}
 
-    @empyralist_mcp.tool()
+    @empyralist_mcp.tool(
+        title="Trigger Test Turn",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
     async def empyralis_trigger_test_turn(
         agent_id: str, message: str, ctx: Context = None,
     ) -> Dict[str, Any]:
@@ -474,7 +616,46 @@ if empyralist_mcp is not None:
 def mount_empyralist_mcp(app: FastAPI) -> None:
     if empyralist_mcp is None:
         return
-    app.mount(EMPYRALIST_MCP_PATH, empyralist_mcp.streamable_http_app())
+    sub_app = empyralist_mcp.streamable_http_app()
+
+    if oauth_provider is None:
+        app.mount(EMPYRALIST_MCP_PATH, sub_app)
+        return
+
+    # streamable_http_app() bundles the OAuth authorization-server routes
+    # (/authorize, /token, /register, /revoke, /.well-known/oauth-authorization-server)
+    # and the RFC 9728 protected-resource-metadata route into the SAME
+    # Starlette app as the MCP protocol route (see
+    # mcp.server.fastmcp.server.FastMCP.streamable_http_app). Two problems
+    # with just mounting that whole app under EMPYRALIST_MCP_PATH:
+    #   1. RFC 8414/9728 client discovery expects those routes at the public
+    #      origin root — our issuer_url has no path component (see
+    #      _build_mcp_server) — not nested under /mcp/authorize etc, which a
+    #      spec-following client never requests.
+    #   2. It would leave a second, *live* copy of /register reachable at
+    #      /mcp/register that the POST /register rate limiter below — which
+    #      only guards the literal path "/register" — would never see.
+    # So: build a protocol-only Starlette app (same route + same bearer-auth
+    # middleware the SDK built, needed for get_access_token() in tool
+    # handlers) for the /mcp mount, and re-register everything else directly
+    # on the app root, where discovery actually looks and the rate limiter
+    # actually guards.
+    from starlette.applications import Starlette
+
+    from server_modules import mcp_oauth_provider
+
+    protocol_path = empyralist_mcp.settings.streamable_http_path
+    protocol_routes = [r for r in sub_app.routes if getattr(r, "path", None) == protocol_path]
+    oauth_routes = [r for r in sub_app.routes if getattr(r, "path", None) != protocol_path]
+
+    protocol_app = Starlette(routes=protocol_routes, middleware=sub_app.user_middleware)
+    app.mount(EMPYRALIST_MCP_PATH, protocol_app)
+
+    for route in oauth_routes:
+        app.router.routes.append(route)
+
+    mcp_oauth_provider.register_consent_routes(app, oauth_provider)
+    mcp_oauth_provider.register_register_rate_limit_guard(app)
 
 
 @asynccontextmanager
