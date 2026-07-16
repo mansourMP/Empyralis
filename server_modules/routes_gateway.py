@@ -1659,10 +1659,23 @@ async def create_hardware_vps_token(
 @router.get("/hardware/vps/plans")
 async def get_hardware_vps_plans(
     provider: str = Query(..., min_length=1),
-    token_id: str = Query(..., min_length=1),
+    token_id: Optional[str] = Query(default=None),
     workspace_id: Optional[str] = None,
     current_user=Depends(require_api_key),
 ):
+    try:
+        provider_id = vps_provisioning_service.resolve_provider_options(provider, None, None)["provider"]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    clean_token_id = str(token_id or "").strip()
+    if not clean_token_id:
+        # No connected account yet — only Vultr publishes plans/prices
+        # without auth (see fetch_public_provider_plans), which is what lets
+        # the picker show real prices before the "connect account" step.
+        try:
+            return vps_provisioning_service.fetch_public_provider_plans(provider_id)
+        except vps_provisioning_service.VPSProvisioningError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     workspace = enforce_workspace_access(
         current_user,
         workspace_id or "default",
@@ -1671,8 +1684,8 @@ async def get_hardware_vps_plans(
     user_id = str((current_user or {}).get("user_id") or "").strip() or None
     try:
         return vps_provisioning_service.fetch_provider_plans(
-            provider,
-            token_id=token_id,
+            provider_id,
+            token_id=clean_token_id,
             workspace_id=workspace,
             user_id=user_id,
         )
@@ -1733,15 +1746,16 @@ async def provision_hardware_vps(
     pairing_token = str(pairing.get("pairing_token") or "").strip()
     if not pairing_token:
         raise HTTPException(status_code=500, detail="Gateway pairing token was not created.")
+    resolved_token_id = str(body.token_id or "").strip() or None
     try:
         credentials = (
             vps_provisioning_service.load_vps_provider_credentials(
-                str(body.token_id or ""),
+                resolved_token_id,
                 provider=resolved["provider"],
                 workspace_id=workspace_id,
                 user_id=user_id,
             )
-            if str(body.token_id or "").strip()
+            if resolved_token_id
             else body.credentials
         )
         result = vps_provisioning_service.provision_vps(
@@ -1750,6 +1764,7 @@ async def provision_hardware_vps(
             resolved["region"],
             resolved["size"],
             pairing_token,
+            token_id=resolved_token_id,
         )
         vps_provisioning_service.record_vps_provision(
             vps_id=vps_id,
@@ -1817,11 +1832,14 @@ async def get_hardware_vps_regions(
             raise HTTPException(status_code=404, detail="VPS provider credential was not found.") from exc
         except vps_provisioning_service.VPSProvisioningError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-    catalog = vps_provisioning_service.provider_catalog()
-    item = catalog.get(provider_id)
-    if not isinstance(item, dict):
-        raise HTTPException(status_code=404, detail="VPS provider was not found.")
-    return item
+    # No connected account yet (still on the 'provider' picker step, or
+    # browsing Vultr pre-connect — see the frontend's pre-connect browsing
+    # step). fetch_public_provider_regions is a safe drop-in for the old
+    # provider_catalog() lookup here — same field set for every provider,
+    # it just additionally prefers Vultr's live public region data when
+    # available and never raises for a provider resolve_provider_options
+    # already validated above.
+    return vps_provisioning_service.fetch_public_provider_regions(provider_id)
 
 
 @router.get("/hardware/vps/{vps_id}/status")

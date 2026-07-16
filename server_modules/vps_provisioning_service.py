@@ -5,10 +5,11 @@ import json
 import os
 import secrets
 import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
@@ -132,6 +133,7 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
             ProviderRegion("hel1", "Helsinki, Finland"),
             ProviderRegion("ash", "Ashburn, USA"),
             ProviderRegion("hil", "Hillsboro, USA"),
+            ProviderRegion("sin", "Singapore"),
         ),
     ),
     "vultr": ProviderConfig(
@@ -202,7 +204,17 @@ def create_digitalocean_oauth_start(
             "client_id": client_id,
             "redirect_uri": digitalocean_oauth_redirect_uri(),
             "response_type": "code",
-            "scope": "read write",
+            # Granular scopes, not the old "read write" alias — DO's current
+            # scopes reference (docs.digitalocean.com/reference/api/scopes/)
+            # replaced free-form read/write with per-resource scopes plus
+            # api:read/api:write aliases for "everything this role can see".
+            # This app only ever creates/deletes droplets and reads
+            # regions/sizes (see provision_vps, fetch_provider_plans,
+            # fetch_provider_regions, _delete_provider_resource) — request
+            # exactly that instead of api:read/api:write's full-account
+            # access. Each scope is documented at
+            # docs.digitalocean.com/reference/api/scopes/<resource>/.
+            "scope": "droplet:create droplet:delete regions:read sizes:read",
             "state": state_token,
         }
     )
@@ -256,6 +268,7 @@ def store_vps_provider_token(
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
     token_id = f"vps_token_{secrets.token_hex(16)}"
     now = _utc_now_iso()
+    stored_credentials = _credentials_with_expiry(dict(credentials or {}, access_token=token))
     record = {
         "token_id": token_id,
         "provider": provider_id,
@@ -263,7 +276,7 @@ def store_vps_provider_token(
         "tenant_id": str(tenant_id or "").strip() or "default",
         "user_id": str(user_id or "").strip() or "unknown-user",
         "source": str(source or "api_token").strip() or "api_token",
-        "credentials_ciphertext": _encrypt_secret(dict(credentials or {}, access_token=token)),
+        "credentials_ciphertext": _encrypt_secret(stored_credentials),
         "created_at": now,
         "updated_at": now,
     }
@@ -272,6 +285,22 @@ def store_vps_provider_token(
         state.setdefault("tokens", {})[token_id] = record
         _write_state(state)
     return token_id
+
+
+def _credentials_with_expiry(credentials: Mapping[str, Any]) -> Dict[str, Any]:
+    """Stamp an absolute access_token_expires_at (epoch seconds) onto OAuth
+    credentials that carry a relative expires_in — DigitalOcean's access
+    tokens expire in 30 days (expires_in=2592000) and nothing else records
+    when that clock started. A pasted API token (Hetzner/Vultr/manual DO PAT)
+    never has expires_in, so this is a no-op for those — they're static
+    tokens with no refresh cycle. See _digitalocean_credentials_need_refresh
+    for how this gets used."""
+    result = dict(credentials)
+    if "access_token_expires_at" not in result:
+        expires_in = _to_int(result.get("expires_in"))
+        if expires_in > 0:
+            result["access_token_expires_at"] = int(time.time()) + expires_in
+    return result
 
 
 def load_vps_provider_credentials(
@@ -293,7 +322,17 @@ def load_vps_provider_credentials(
         raise KeyError(clean_token_id)
     if user_id and str(record.get("user_id") or "").strip() != str(user_id or "").strip():
         raise KeyError(clean_token_id)
-    return _decrypt_secret(str(record.get("credentials_ciphertext") or ""))
+    credentials = _decrypt_secret(str(record.get("credentials_ciphertext") or ""))
+    # Proactive refresh: DigitalOcean's 30-day access token would otherwise
+    # sit untouched in credentials_ciphertext until it 401s (the defect this
+    # closes — see _digitalocean_reauth_callback for the reactive backstop
+    # that still catches it if this fell through for any reason).
+    if provider_id == "digitalocean" and _digitalocean_credentials_need_refresh(credentials):
+        refreshed = _refresh_digitalocean_credentials(credentials)
+        if refreshed is not None:
+            credentials = refreshed
+            _update_stored_token_credentials(clean_token_id, credentials)
+    return credentials
 
 
 def fetch_provider_plans(
@@ -312,7 +351,14 @@ def fetch_provider_plans(
     )
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
     if provider_id == "digitalocean":
-        raw = _http_json("GET", "https://api.digitalocean.com/v2/sizes", token=token, payload=None, provider=provider_id)
+        raw = _http_json(
+            "GET",
+            "https://api.digitalocean.com/v2/sizes",
+            token=token,
+            payload=None,
+            provider=provider_id,
+            on_unauthorized=_digitalocean_reauth_callback(token_id, credentials),
+        )
         plans = _normalize_digitalocean_plans(raw)
     elif provider_id == "hetzner":
         raw = _http_json("GET", "https://api.hetzner.cloud/v1/server_types", token=token, payload=None, provider=provider_id)
@@ -326,6 +372,75 @@ def fetch_provider_plans(
         "provider": provider_id,
         "plans": [asdict(plan) for plan in plans],
     }
+
+
+def fetch_public_provider_plans(provider: str) -> Dict[str, Any]:
+    """Plan catalog fetched with NO stored/connected credential — lets the
+    picker show a user real prices before they've connected a provider
+    account (see the frontend's pre-connect browsing step). Only Vultr
+    publishes plans without authentication: verified live against the real
+    APIs — GET https://api.vultr.com/v2/plans returns 200 with no
+    Authorization header, while DigitalOcean's /v2/sizes and Hetzner's
+    /v1/server_types both return 401 unauthenticated. Raises
+    VPSProvisioningError for every other provider; callers should treat
+    that as "connect an account first", not retry.
+    """
+    provider_id = _normalize_provider(provider)
+    if provider_id != "vultr":
+        raise VPSProvisioningError(
+            f"{PROVIDER_CONFIGS[provider_id].label} has no public plan catalog; connect an account first."
+        )
+    raw = _http_json("GET", "https://api.vultr.com/v2/plans?type=vc2", token=None, payload=None, provider=provider_id)
+    return {"provider": provider_id, "plans": [asdict(plan) for plan in _normalize_vultr_plans(raw)]}
+
+
+def fetch_public_provider_regions(provider: str) -> Dict[str, Any]:
+    """Region catalog fetched with no stored/connected credential — a safe
+    drop-in for provider_catalog()[provider_id] (same field set: provider,
+    label, auth_label, default_region, default_size, regions) used by the
+    picker's pre-connect "provider" step and region-browsing step alike.
+    For Vultr, prefers its live public /v2/regions data (same
+    no-auth-required story as fetch_public_provider_plans above) over the
+    static curated list; every other provider gets exactly the static entry,
+    identical to what provider_catalog() has always served pre-connection.
+    Never raises for a valid provider — region browsing should never
+    hard-fail, mirroring fetch_provider_regions's existing contract."""
+    provider_id = _normalize_provider(provider)
+    config = PROVIDER_CONFIGS[provider_id]
+    entry: Dict[str, Any] = {
+        "provider": provider_id,
+        "label": config.label,
+        "auth_label": config.auth_label,
+        "default_region": config.default_region,
+        "default_size": config.default_size,
+        "regions": [asdict(region) for region in config.regions],
+    }
+    if provider_id != "vultr":
+        return entry
+    try:
+        raw = _http_json("GET", "https://api.vultr.com/v2/regions", token=None, payload=None, provider=provider_id)
+        live_regions = _normalize_vultr_regions(raw)
+    except VPSProvisioningError:
+        live_regions = []
+    if live_regions:
+        entry["regions"] = live_regions
+    return entry
+
+
+def _normalize_vultr_regions(payload: Mapping[str, Any]) -> list[Dict[str, str]]:
+    items = payload.get("regions") if isinstance(payload.get("regions"), list) else []
+    regions: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        slug = str(item.get("id") or "").strip()
+        if not slug:
+            continue
+        city = str(item.get("city") or "").strip()
+        country = str(item.get("country") or "").strip()
+        label = f"{city}, {country}" if city and country else (city or country or slug)
+        regions.append({"id": slug, "label": label})
+    return regions
 
 
 def _static_provider_regions(provider_id: str) -> Dict[str, Any]:
@@ -352,6 +467,12 @@ def _normalize_digitalocean_regions(payload: Mapping[str, Any]) -> list[Dict[str
     return regions
 
 
+# Providers we can fetch a *live* region/location list for, given a
+# connected account's token. Vultr has its own path (fetch_public_provider_regions)
+# since its region list is fetchable without any account at all.
+_LIVE_REGION_PROVIDERS = {"digitalocean", "hetzner"}
+
+
 def fetch_provider_regions(
     provider: str,
     *,
@@ -359,25 +480,27 @@ def fetch_provider_regions(
     workspace_id: str,
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Live region catalog. DigitalOcean's OAuth grant is already `read write`
-    (its only scope option — see create_digitalocean_oauth_start), which
-    already covers GET /v2/regions, so no re-auth is needed for accounts
-    connected before this existed. Falls back to the static curated list
+    """Live region catalog for a connected account (DigitalOcean, Hetzner).
+    DigitalOcean's OAuth grant now requests regions:read explicitly (see
+    create_digitalocean_oauth_start); Hetzner's pasted API token already
+    carries full project access. Falls back to the static curated list
     (same one provider_catalog() serves pre-connection) for providers we
-    haven't wired a live regions call for yet, or if the live call fails —
-    never a hard error just for this."""
+    haven't wired a live call for (Vultr — see fetch_public_provider_regions,
+    which doesn't need an account at all), or if the live call fails — never
+    a hard error just for this.
+    """
     provider_id = _normalize_provider(provider)
-    if provider_id != "digitalocean":
+    if provider_id not in _LIVE_REGION_PROVIDERS:
         return _static_provider_regions(provider_id)
     try:
         credentials = load_vps_provider_credentials(
             token_id, provider=provider_id, workspace_id=workspace_id, user_id=user_id
         )
         token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
-        raw = _http_json(
-            "GET", "https://api.digitalocean.com/v2/regions", token=token, payload=None, provider=provider_id
+        on_unauthorized = (
+            _digitalocean_reauth_callback(token_id, credentials) if provider_id == "digitalocean" else None
         )
-        regions = _normalize_digitalocean_regions(raw)
+        regions = _fetch_live_regions(provider_id, token, on_unauthorized=on_unauthorized)
     except (KeyError, ValueError, VPSProvisioningError):
         regions = []
     if not regions:
@@ -389,16 +512,84 @@ def fetch_provider_regions(
     }
 
 
+def _fetch_live_regions(
+    provider_id: str,
+    token: str,
+    *,
+    on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
+) -> list[Dict[str, str]]:
+    """Raw per-provider live region/location call, normalized to
+    [{id, label}, ...]. Shared by fetch_provider_regions (token_id-based,
+    full envelope + static fallback on any failure) and
+    _fetch_live_region_ids (provision_vps's region-validation allow-list,
+    which wants just the id set and already tolerates failure)."""
+    if provider_id == "digitalocean":
+        raw = _http_json(
+            "GET",
+            "https://api.digitalocean.com/v2/regions",
+            token=token,
+            payload=None,
+            provider=provider_id,
+            on_unauthorized=on_unauthorized,
+        )
+        return _normalize_digitalocean_regions(raw)
+    if provider_id == "hetzner":
+        raw = _http_json(
+            "GET", "https://api.hetzner.cloud/v1/locations", token=token, payload=None, provider=provider_id
+        )
+        return _normalize_hetzner_locations(raw)
+    return []
+
+
+def _fetch_live_region_ids(provider_id: str, token: str) -> set[str]:
+    """Best-effort live region id set used as an ADDITIONAL allow-list on
+    top of the static PROVIDER_CONFIGS list during provisioning (see
+    provision_vps) — so a region the picker just showed (fetched live
+    moments earlier) is never rejected just because it's missing from the
+    hardcoded fallback tuple. Never raises: any failure here just means
+    validation falls back to the static list alone, same as before live
+    region data existed."""
+    try:
+        return {item["id"] for item in _fetch_live_regions(provider_id, token)}
+    except (VPSProvisioningError, KeyError, ValueError, TypeError):
+        return set()
+
+
+def _normalize_hetzner_locations(payload: Mapping[str, Any]) -> list[Dict[str, str]]:
+    items = payload.get("locations") if isinstance(payload.get("locations"), list) else []
+    regions: list[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        slug = str(item.get("name") or "").strip()
+        if not slug:
+            continue
+        label = str(item.get("city") or item.get("description") or "").strip() or slug
+        regions.append({"id": slug, "label": label})
+    return regions
+
+
 def resolve_provider_options(
     provider: str,
     region: Optional[str],
     size: Optional[str],
 ) -> Dict[str, str]:
+    """Normalize provider/region/size for request handling. Defaults an
+    empty region/size but does NOT reject a region merely for being absent
+    from the static PROVIDER_CONFIGS list — this function has no
+    credentials to check the live catalog with, and providers add regions
+    over time (see fetch_provider_regions). provision_vps() is the
+    authoritative region gate: it validates against static ∪ live data
+    (fetching live data when it has a connected account to fetch it with)
+    right before the actual provider API call, so a genuinely bad region
+    still can never reach the provider — it just fails a little later than
+    it used to, after resolving here.
+    """
     provider_id = _normalize_provider(provider)
     config = PROVIDER_CONFIGS[provider_id]
     return {
         "provider": provider_id,
-        "region": _validate_region(config, region),
+        "region": str(region or "").strip() or config.default_region,
         "size": str(size or "").strip() or config.default_size,
     }
 
@@ -463,16 +654,34 @@ def provision_vps(
     region: Optional[str],
     size: Optional[str],
     pairing_token: str,
+    *,
+    token_id: Optional[str] = None,
 ) -> VPSResult:
+    """token_id is optional and purely additive: when the caller has one (the
+    real app flow always does — see routes_gateway.provision_hardware_vps),
+    it unlocks (a) validating `region` against the LIVE catalog in addition
+    to the static PROVIDER_CONFIGS list, so a region the picker just showed
+    can never be rejected here, and (b) a DigitalOcean reactive-401 refresh
+    on the actual create-droplet call. Neither behavior triggers without a
+    token_id, which keeps direct callers (tests, or any future caller that
+    only has raw credentials) on the exact same static-only, no-extra-HTTP
+    behavior as before this existed.
+    """
     provider_id = _normalize_provider(provider)
     config = PROVIDER_CONFIGS[provider_id]
     token = _provider_token(config, credentials)
-    resolved_region = _validate_region(config, region)
+    live_region_ids: set[str] = set()
+    if token_id and provider_id in _LIVE_REGION_PROVIDERS:
+        live_region_ids = _fetch_live_region_ids(provider_id, token)
+    resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
     resolved_size = str(size or "").strip() or config.default_size
     name = _server_name(provider_id)
     user_data = cloud_init_script(pairing_token)
     if provider_id == "digitalocean":
-        return _provision_digitalocean(config, token, resolved_region, resolved_size, name, user_data)
+        on_unauthorized = _digitalocean_reauth_callback(token_id, credentials) if token_id else None
+        return _provision_digitalocean(
+            config, token, resolved_region, resolved_size, name, user_data, on_unauthorized=on_unauthorized
+        )
     if provider_id == "hetzner":
         return _provision_hetzner(config, token, resolved_region, resolved_size, name, user_data)
     if provider_id == "vultr":
@@ -552,7 +761,23 @@ def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
     if not resource_id:
         raise VPSProvisioningError("VPS provider resource id is missing.")
     token = _provider_token(PROVIDER_CONFIGS[provider_id], credentials)
-    _delete_provider_resource(provider_id, token, resource_id)
+    # This record's credentials are a point-in-time snapshot taken at
+    # provision_vps() time (see record_vps_provision), not a live pointer
+    # into the token store — it can go stale on its own schedule. Give
+    # DigitalOcean the same reactive-401 refresh as every other DO call, just
+    # persisted back into this record instead of the (possibly long-gone,
+    # disconnected) original token_id.
+    on_unauthorized = None
+    if provider_id == "digitalocean":
+        def _reauth(_vps_id: str = clean_vps_id, _credentials: Mapping[str, Any] = credentials) -> Optional[str]:
+            refreshed = _refresh_digitalocean_credentials(_credentials)
+            if refreshed is None:
+                return None
+            _update_vps_record_credentials(_vps_id, refreshed)
+            return str(refreshed.get("access_token") or "").strip() or None
+
+        on_unauthorized = _reauth
+    _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
     with _STATE_LOCK:
         state = _load_state()
         latest = dict((state.get("vps") or {}).get(clean_vps_id) or record)
@@ -579,6 +804,8 @@ def _provision_digitalocean(
     size: str,
     name: str,
     user_data: str,
+    *,
+    on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
 ) -> VPSResult:
     payload = {
         "name": name,
@@ -597,6 +824,7 @@ def _provision_digitalocean(
         token=token,
         payload=payload,
         provider=config.provider,
+        on_unauthorized=on_unauthorized,
     )
     droplet = response.get("droplet") if isinstance(response.get("droplet"), dict) else {}
     resource_id = str(droplet.get("id") or "").strip()
@@ -694,9 +922,10 @@ def _http_json(
     method: str,
     url: str,
     *,
-    token: str,
+    token: Optional[str],
     payload: Optional[Mapping[str, Any]],
     provider: str,
+    on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload is not None else None
     request = urlrequest.Request(
@@ -704,7 +933,7 @@ def _http_json(
         data=body,
         method=method,
         headers={
-            "Authorization": f"Bearer {token}",
+            **({"Authorization": f"Bearer {token}"} if token else {}),
             **({"Content-Type": "application/json"} if body is not None else {}),
             "Accept": "application/json",
             "User-Agent": "Empyralis-VPS-Provisioner/1.0",
@@ -714,6 +943,20 @@ def _http_json(
         with urlrequest.urlopen(request, timeout=30) as response:
             response_body = response.read().decode("utf-8")
     except urlerror.HTTPError as exc:
+        if exc.code == 401 and on_unauthorized is not None:
+            # Reactive refresh-and-retry backstop (see
+            # _digitalocean_reauth_callback) for whenever the proactive
+            # check in load_vps_provider_credentials didn't already catch
+            # an expiring token — clock skew, an early provider-side
+            # revocation, a proactive refresh that failed transiently, etc.
+            # Retried once, with on_unauthorized omitted, so a second 401
+            # raises normally instead of looping.
+            try:
+                refreshed_token = on_unauthorized()
+            except Exception:
+                refreshed_token = None
+            if refreshed_token:
+                return _http_json(method, url, token=refreshed_token, payload=payload, provider=provider)
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise VPSProvisioningError(f"{provider} provisioning failed: HTTP {exc.code} {detail}") from exc
     except urlerror.URLError as exc:
@@ -768,6 +1011,7 @@ def _http_empty(
     *,
     token: str,
     provider: str,
+    on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
 ) -> None:
     request = urlrequest.Request(
         url,
@@ -782,19 +1026,34 @@ def _http_empty(
         with urlrequest.urlopen(request, timeout=30) as response:
             response.read()
     except urlerror.HTTPError as exc:
+        if exc.code == 401 and on_unauthorized is not None:
+            try:
+                refreshed_token = on_unauthorized()
+            except Exception:
+                refreshed_token = None
+            if refreshed_token:
+                _http_empty(method, url, token=refreshed_token, provider=provider)
+                return
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise VPSProvisioningError(f"{provider} cleanup failed: HTTP {exc.code} {detail}") from exc
     except urlerror.URLError as exc:
         raise VPSProvisioningError(f"{provider} cleanup failed: {exc.reason}") from exc
 
 
-def _delete_provider_resource(provider_id: str, token: str, resource_id: str) -> None:
+def _delete_provider_resource(
+    provider_id: str,
+    token: str,
+    resource_id: str,
+    *,
+    on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
+) -> None:
     if provider_id == "digitalocean":
         _http_empty(
             "DELETE",
             f"https://api.digitalocean.com/v2/droplets/{resource_id}",
             token=token,
             provider=provider_id,
+            on_unauthorized=on_unauthorized,
         )
         return
     if provider_id == "hetzner":
@@ -961,6 +1220,119 @@ def _exchange_digitalocean_oauth_code(code: str) -> Dict[str, Any]:
     return token_payload
 
 
+# DO's access tokens live 30 days (expires_in=2592000 on both the initial
+# grant and every refresh response) — refresh a day early rather than racing
+# the exact expiry instant.
+_DIGITALOCEAN_TOKEN_REFRESH_BUFFER_SECONDS = 24 * 60 * 60
+
+
+def _digitalocean_credentials_need_refresh(credentials: Mapping[str, Any]) -> bool:
+    if not str(credentials.get("refresh_token") or "").strip():
+        return False
+    expires_at = _to_int(credentials.get("access_token_expires_at"))
+    if expires_at <= 0:
+        # Predates this fix (stored before access_token_expires_at was
+        # captured), or a raw personal access token that happens to have a
+        # refresh_token-shaped key some other way — nothing to judge
+        # proactively either way. A genuinely expired token still gets
+        # caught reactively by the on_unauthorized retry on the actual API
+        # call (see _digitalocean_reauth_callback).
+        return False
+    return int(time.time()) >= expires_at - _DIGITALOCEAN_TOKEN_REFRESH_BUFFER_SECONDS
+
+
+def _refresh_digitalocean_credentials(credentials: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """POST grant_type=refresh_token to DO's OAuth token endpoint (same
+    /v1/oauth/token endpoint as the initial exchange — DO's refresh response
+    is documented as "the same format as the original access token grant").
+    Returns an updated credentials mapping, or None if there's no
+    refresh_token to use, DO isn't configured, or the call fails — callers
+    fall back to the existing (possibly already-expired) token and let the
+    ordinary HTTP 401 surface, exactly as it did before this existed."""
+    refresh_token = str(credentials.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return None
+    try:
+        token_payload = _http_form_json(
+            "POST",
+            DIGITALOCEAN_OAUTH_TOKEN_URL,
+            provider="digitalocean",
+            payload={
+                "grant_type": "refresh_token",
+                "client_id": _digitalocean_client_id(),
+                "client_secret": _digitalocean_client_secret(),
+                "refresh_token": refresh_token,
+            },
+        )
+    except VPSProvisioningError:
+        return None
+    new_access_token = str(token_payload.get("access_token") or "").strip()
+    if not new_access_token:
+        return None
+    updated = dict(credentials)
+    updated["access_token"] = new_access_token
+    # DO may or may not rotate the refresh_token on use; keep the existing
+    # one if the response didn't include a new one.
+    new_refresh_token = str(token_payload.get("refresh_token") or "").strip()
+    if new_refresh_token:
+        updated["refresh_token"] = new_refresh_token
+    expires_in = _to_int(token_payload.get("expires_in"))
+    if expires_in > 0:
+        updated["access_token_expires_at"] = int(time.time()) + expires_in
+    return updated
+
+
+def _update_stored_token_credentials(token_id: str, credentials: Mapping[str, Any]) -> None:
+    """Persist a refreshed credential back into the token store (state["tokens"][token_id])
+    — the store that load_vps_provider_credentials / fetch_provider_plans /
+    fetch_provider_regions / provision_vps all read from."""
+    with _STATE_LOCK:
+        state = _load_state()
+        record = dict((state.get("tokens") or {}).get(token_id) or {})
+        if not record:
+            return
+        record["credentials_ciphertext"] = _encrypt_secret(dict(credentials))
+        record["updated_at"] = _utc_now_iso()
+        state.setdefault("tokens", {})[token_id] = record
+        _write_state(state)
+
+
+def _update_vps_record_credentials(vps_id: str, credentials: Mapping[str, Any]) -> None:
+    """Persist a refreshed credential back into a VPS record's own snapshot
+    (state["vps"][vps_id]) — the separate, point-in-time credentials copy
+    delete_recorded_vps reads from (see record_vps_provision)."""
+    with _STATE_LOCK:
+        state = _load_state()
+        record = dict((state.get("vps") or {}).get(vps_id) or {})
+        if not record:
+            return
+        record["credentials_ciphertext"] = _encrypt_secret(dict(credentials))
+        record["updated_at"] = _utc_now_iso()
+        state.setdefault("vps", {})[vps_id] = record
+        _write_state(state)
+
+
+def _digitalocean_reauth_callback(
+    token_id: Optional[str], credentials: Mapping[str, Any]
+) -> Optional[Callable[[], Optional[str]]]:
+    """Build an on_unauthorized callback for _http_json/_http_empty: on a
+    real HTTP 401, refresh once via DO's refresh_token grant and persist the
+    result back to the token store, returning the new access token so the
+    caller can retry. Returns None (no callback at all) without a token_id,
+    since there'd be nowhere to persist a refreshed credential to."""
+    if not token_id:
+        return None
+
+    def _reauth() -> Optional[str]:
+        refreshed = _refresh_digitalocean_credentials(credentials)
+        if refreshed is None:
+            return None
+        _update_stored_token_credentials(token_id, refreshed)
+        return str(refreshed.get("access_token") or "").strip() or None
+
+    return _reauth
+
+
 def _normalize_digitalocean_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
     items = payload.get("sizes") if isinstance(payload.get("sizes"), list) else []
     plans: list[VPSPlan] = []
@@ -1020,9 +1392,32 @@ def _normalize_hetzner_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
                 disk_gb=disk_gb,
                 price_monthly=price,
                 price_label=f"€{price:g}/mo",
+                regions=_hetzner_plan_regions(item),
             )
         )
     return _mark_recommended(plans)
+
+
+def _hetzner_plan_regions(item: Mapping[str, Any]) -> tuple[str, ...]:
+    """Location slugs this server type is actually available in. Hetzner's
+    GET /v1/server_types response added a per-type `locations` array (2025-
+    09-24 changelog: "per-location server types") — each entry is shaped
+    like a GET /v1/locations object (id/name/description/country/city/...)
+    plus `available`/`recommended`/`deprecation`. Empty means the field
+    wasn't present on this response at all — treated the same as
+    DigitalOcean's empty regions tuple: no restriction threaded through,
+    not "available nowhere"."""
+    raw_locations = item.get("locations") if isinstance(item.get("locations"), list) else []
+    slugs: list[str] = []
+    for entry in raw_locations:
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("available") is False:
+            continue
+        slug = str(entry.get("name") or "").strip()
+        if slug:
+            slugs.append(slug)
+    return tuple(slugs)
 
 
 def _normalize_vultr_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
@@ -1038,6 +1433,8 @@ def _normalize_vultr_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
         slug = str(item.get("id") or "").strip()
         if not slug or vcpus < 1 or memory_mb < 1024 or price <= 0:
             continue
+        raw_locations = item.get("locations") if isinstance(item.get("locations"), list) else []
+        regions = tuple(str(r).strip() for r in raw_locations if str(r).strip())
         plans.append(
             VPSPlan(
                 id=slug,
@@ -1048,6 +1445,7 @@ def _normalize_vultr_plans(payload: Mapping[str, Any]) -> list[VPSPlan]:
                 disk_gb=disk_gb,
                 price_monthly=price,
                 price_label=f"${price:g}/mo",
+                regions=regions,
             )
         )
     return _mark_recommended(plans)
@@ -1078,6 +1476,14 @@ def _mark_recommended(plans: list[VPSPlan]) -> list[VPSPlan]:
             price_monthly=plan.price_monthly,
             price_label=plan.price_label,
             recommended=plan.id == recommended_id,
+            # regions has a dataclass default of () — omitting it here (as
+            # this rebuild previously did) silently wiped out every plan's
+            # region-availability list on its way out of every normalizer,
+            # since they all funnel through this function last. That made
+            # the whole plan->region threading feature (DigitalOcean's
+            # existing "regions" field on /v2/sizes, and Hetzner's/Vultr's
+            # new equivalents) dead on arrival.
+            regions=plan.regions,
         )
         for plan in sorted_plans
     ]
@@ -1124,9 +1530,16 @@ def _normalize_provider(provider: str) -> str:
     return provider_id
 
 
-def _validate_region(config: ProviderConfig, region: Optional[str]) -> str:
+def _validate_region(
+    config: ProviderConfig,
+    region: Optional[str],
+    *,
+    live_region_ids: Optional[Iterable[str]] = None,
+) -> str:
     resolved = str(region or "").strip() or config.default_region
     allowed = {item.id for item in config.regions}
+    if live_region_ids:
+        allowed |= {str(r).strip() for r in live_region_ids if str(r).strip()}
     if resolved not in allowed:
         raise ValueError(
             f"Unsupported {config.label} region '{resolved}'. Choose one of: {', '.join(sorted(allowed))}."

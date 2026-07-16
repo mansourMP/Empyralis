@@ -256,6 +256,11 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
   const [vpsId, setVpsId] = useState<string | null>(null);
   const [providerResourceId, setProviderResourceId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
+  // Set when "Create server" is clicked while browsing pre-connect (Vultr) —
+  // routes the connect step's success handler straight into creating the
+  // server the user already picked, instead of landing back on the plan
+  // list. See handleCreateServerClick / finishConnecting.
+  const [pendingCreateAfterConnect, setPendingCreateAfterConnect] = useState(false);
 
   const provider = selectedProvider ? PROVIDERS[selectedProvider] : null;
   const selectedPlan = useMemo(
@@ -303,6 +308,7 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setVpsId(null);
     setProviderResourceId(null);
     setCleanupBusy(false);
+    setPendingCreateAfterConnect(false);
     if (requestedProvider) {
       setSelectedProvider(requestedProvider);
       const connection = storedConnections[requestedProvider];
@@ -335,7 +341,7 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
       }
       const accountLabel = readString(payload, 'account_email', 'email', 'account_name') || 'DigitalOcean account';
       saveConnection('digitalocean', nextTokenId, accountLabel);
-      void prepareServerChoices('digitalocean', nextTokenId);
+      void finishConnecting('digitalocean', nextTokenId);
     }
     window.addEventListener('message', handleVpsOAuthMessage);
     return () => window.removeEventListener('message', handleVpsOAuthMessage);
@@ -367,18 +373,28 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
       setTokenId('');
       setPlans([]);
       setSelectedPlanId('');
+      setPendingCreateAfterConnect(false);
       setStep('access');
     }
   }
 
+  // nextTokenId === '' means "no connected account yet" — only Vultr's
+  // plans/regions are reachable without one (verified live: GET
+  // https://api.vultr.com/v2/plans and /v2/regions both return 200 with no
+  // Authorization header; DigitalOcean's /v2/sizes+/v2/regions and
+  // Hetzner's /v1/server_types+/v1/locations all 401 unauthenticated). The
+  // backend already knows this (see fetch_public_provider_plans /
+  // fetch_public_provider_regions) — omitting token_id/workspace_id here
+  // just asks for whatever it can serve without credentials, same as the
+  // 'provider' step already implicitly relied on for regions.
   async function loadRegions(providerId: VpsProviderId, nextTokenId: string): Promise<VpsRegion[]> {
     setLoadingRegions(true);
     setError(null);
     try {
-      const payload = await requestJson<VpsProviderRegionsPayload>(
-        `/api/hardware/vps/regions?provider=${encodeURIComponent(providerId)}`
-        + `&token_id=${encodeURIComponent(nextTokenId)}&workspace_id=${encodeURIComponent(workspaceId)}`,
-      );
+      const query = nextTokenId
+        ? `provider=${encodeURIComponent(providerId)}&token_id=${encodeURIComponent(nextTokenId)}&workspace_id=${encodeURIComponent(workspaceId)}`
+        : `provider=${encodeURIComponent(providerId)}`;
+      const payload = await requestJson<VpsProviderRegionsPayload>(`/api/hardware/vps/regions?${query}`);
       const nextRegions = normalizeRegions(payload);
       if (!nextRegions.length) {
         throw new Error('Regions are unavailable for this provider.');
@@ -400,9 +416,10 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setLoadingPlans(true);
     setError(null);
     try {
-      const payload = await requestJson<VpsProviderPlansPayload>(
-        `/api/hardware/vps/plans?provider=${encodeURIComponent(providerId)}&token_id=${encodeURIComponent(nextTokenId)}&workspace_id=${encodeURIComponent(workspaceId)}`,
-      );
+      const query = nextTokenId
+        ? `provider=${encodeURIComponent(providerId)}&token_id=${encodeURIComponent(nextTokenId)}&workspace_id=${encodeURIComponent(workspaceId)}`
+        : `provider=${encodeURIComponent(providerId)}`;
+      const payload = await requestJson<VpsProviderPlansPayload>(`/api/hardware/vps/plans?${query}`);
       const nextPlans = normalizePlans(payload);
       if (!nextPlans.length) {
         throw new Error('Plans are unavailable for this provider.');
@@ -435,6 +452,20 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     }
   }
 
+  // Vultr only: browse real plans/regions/prices with no connected account
+  // at all — the founder principle is provider -> region -> hardware ->
+  // PRICE -> provision without hunting for API keys, and Vultr's public
+  // endpoints are what make skipping straight to real prices possible.
+  // DigitalOcean/Hetzner have no public price data (see loadPlans/
+  // loadRegions above), so they keep the connect-first flow below.
+  async function browseProviderPreConnect(providerId: VpsProviderId) {
+    setStep('plans');
+    const [nextPlans] = await Promise.all([loadPlans(providerId, ''), loadRegions(providerId, '')]);
+    if (!nextPlans.length) {
+      setStep('access');
+    }
+  }
+
   async function selectProvider(providerId: VpsProviderId) {
     setSelectedProvider(providerId);
     setApiToken('');
@@ -444,12 +475,17 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     setRegions([]);
     setSelectedRegionId('');
     setProgressStage('idle');
+    setPendingCreateAfterConnect(false);
     const connection = connections[providerId];
     if (connection?.tokenId) {
       await prepareServerChoices(providerId, connection.tokenId);
       return;
     }
     setTokenId('');
+    if (providerId === 'vultr') {
+      await browseProviderPreConnect(providerId);
+      return;
+    }
     setStep('access');
   }
 
@@ -506,7 +542,7 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
         throw new Error('Stored provider credential id was not returned.');
       }
       saveConnection(selectedProvider, nextTokenId, `${PROVIDERS[selectedProvider].label} account`);
-      await prepareServerChoices(selectedProvider, nextTokenId);
+      await finishConnecting(selectedProvider, nextTokenId);
     } catch (tokenError) {
       setError(tokenError instanceof Error ? tokenError.message : 'Could not verify provider account.');
     } finally {
@@ -514,8 +550,66 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     }
   }
 
+  // Called once an account is connected (OAuth callback or "Verify token"),
+  // regardless of how we got to the 'access' step. Normal case: the user
+  // hadn't picked anything yet, so land on 'plans' the way it's always
+  // worked. Pending-create case: the user already picked a plan + region
+  // while browsing pre-connect (Vultr) and clicked "Create server", which is
+  // what sent them here — resume that instead of making them pick again.
+  async function finishConnecting(providerId: VpsProviderId, nextTokenId: string) {
+    if (pendingCreateAfterConnect) {
+      setPendingCreateAfterConnect(false);
+      await refreshChoicesThenCreate(providerId, nextTokenId);
+      return;
+    }
+    await prepareServerChoices(providerId, nextTokenId);
+  }
+
+  // Re-fetches plans/regions with the now-real account token (the
+  // pre-connect public catalog and the authenticated one can differ —
+  // promotional/free plans, account-specific availability) while preserving
+  // the plan + region the user already chose if it's still valid, then
+  // creates the server. Explicit overrides are passed straight into
+  // createServer() rather than relying on selectedPlanId/selectedRegionId/
+  // tokenId state, which wouldn't be updated yet in THIS closure — state
+  // setters schedule a re-render, they don't mutate the variables already
+  // captured here.
+  async function refreshChoicesThenCreate(providerId: VpsProviderId, nextTokenId: string) {
+    setSelectedProvider(providerId);
+    setTokenId(nextTokenId);
+    const previousPlanId = selectedPlanId;
+    const previousRegionId = selectedRegionId;
+    const [nextPlans, nextRegions] = await Promise.all([
+      loadPlans(providerId, nextTokenId),
+      loadRegions(providerId, nextTokenId),
+    ]);
+    if (!nextPlans.length) {
+      setStep('access');
+      return;
+    }
+    const effectivePlanId = nextPlans.some((plan) => plan.id === previousPlanId)
+      ? previousPlanId
+      : (nextPlans.find((plan) => plan.recommended)?.id ?? nextPlans[0].id);
+    const effectivePlan = nextPlans.find((plan) => plan.id === effectivePlanId) ?? null;
+    const effectivePlanRegions = effectivePlan?.regions ?? [];
+    const allowedRegionIds = effectivePlanRegions.length ? new Set(effectivePlanRegions) : null;
+    const regionStillValid = nextRegions.some((region) => region.id === previousRegionId)
+      && (!allowedRegionIds || allowedRegionIds.has(previousRegionId));
+    const fallbackRegion = nextRegions.find((region) => !allowedRegionIds || allowedRegionIds.has(region.id));
+    const effectiveRegionId = regionStillValid ? previousRegionId : (fallbackRegion?.id ?? nextRegions[0]?.id ?? '');
+    setSelectedPlanId(effectivePlanId);
+    setSelectedRegionId(effectiveRegionId);
+    setStep('region');
+    await createServer({ tokenId: nextTokenId, planId: effectivePlanId, regionId: effectiveRegionId });
+  }
+
   function goBack() {
     if (step === 'access') {
+      if (pendingCreateAfterConnect) {
+        setPendingCreateAfterConnect(false);
+        setStep('region');
+        return;
+      }
       setStep('provider');
       return;
     }
@@ -528,23 +622,45 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     }
   }
 
-  async function createServer() {
+  // Reached from the 'region' step's button: if the account isn't connected
+  // yet (pre-connect Vultr browsing), send the user to connect first and
+  // resume creation automatically once they do — "connect only right before
+  // the Create Server click" rather than forcing it up front.
+  function handleCreateServerClick() {
+    if (!tokenId) {
+      setPendingCreateAfterConnect(true);
+      setStep('access');
+      return;
+    }
+    void createServer();
+  }
+
+  // Accepts explicit overrides so refreshChoicesThenCreate can hand it
+  // freshly-fetched values in the same tick it computed them, rather than
+  // relying on selectedPlanId/selectedRegionId/tokenId state — those
+  // wouldn't have re-rendered into this closure yet. The plain "Create
+  // server" button click (handleCreateServerClick) calls this with no
+  // overrides, which keeps reading current state exactly as before.
+  async function createServer(overrides?: { tokenId?: string; planId?: string; regionId?: string }) {
+    const effectiveTokenId = overrides?.tokenId ?? tokenId;
+    const effectivePlanId = overrides?.planId ?? selectedPlanId;
+    const effectiveRegionId = overrides?.regionId ?? selectedRegionId;
     if (!selectedProvider) {
       setError('Choose a provider first.');
       setStep('provider');
       return;
     }
-    if (!tokenId) {
+    if (!effectiveTokenId) {
       setError('Connect the provider account first.');
       setStep('access');
       return;
     }
-    if (!selectedPlanId) {
+    if (!effectivePlanId) {
       setError('Choose a plan first.');
       setStep('plans');
       return;
     }
-    if (!selectedRegionId) {
+    if (!effectiveRegionId) {
       setError('Choose a region first.');
       setStep('region');
       return;
@@ -563,9 +679,9 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
         body: JSON.stringify({
           workspace_id: workspaceId,
           provider: selectedProvider,
-          token_id: tokenId,
-          region: selectedRegionId,
-          size: selectedPlanId,
+          token_id: effectiveTokenId,
+          region: effectiveRegionId,
+          size: effectivePlanId,
           runtime_access_mode: 'full_access',
           autonomous_agent_setup_warning_acknowledged: true,
           metadata: {
@@ -737,6 +853,11 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
               </span>
               <h2>{`Connect your ${provider.label} account`}</h2>
             </div>
+            {pendingCreateAfterConnect && selectedPlan ? (
+              <p className="cloud-vps-panel__note">
+                {`Connect to create your ${selectedPlan.label} · ${selectedPlan.price_label} server.`}
+              </p>
+            ) : null}
             {provider.id === 'digitalocean' ? (
               <>
                 <AppButton tone="primary" type="button" onClick={() => void startDigitalOceanOAuth()} disabled={busy}>
@@ -826,8 +947,17 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
               <p className="cloud-vps-panel__note">{`${selectedPlan.label} · ${selectedPlan.price_label}`}</p>
             ) : null}
             <div className="cloud-vps-panel__footer">
-              <AppButton tone="primary" type="button" onClick={() => void createServer()} disabled={busy || loadingRegions || !selectedRegionId}>
-                {busy ? 'Creating server' : 'Create server →'}
+              <AppButton
+                tone="primary"
+                type="button"
+                onClick={handleCreateServerClick}
+                disabled={busy || loadingRegions || !selectedRegionId}
+              >
+                {busy
+                  ? 'Creating server'
+                  : tokenId
+                    ? 'Create server →'
+                    : `Connect ${provider.label} & create →`}
               </AppButton>
             </div>
             {error ? <p className="cloud-vps-panel__error">{error}</p> : null}
