@@ -228,17 +228,35 @@ async def _build_unified_sage_personal_reply_async(
     if not str(guarded.text or "").strip():
         return None
 
+    # ── Durable per-agent conversation memory (agent_conversation_memory) ──
+    # Load recent history BEFORE the turn and hand it to the runtime; persist
+    # this exchange AFTER. Per-agent JSONL, fsync'd, survives restarts — the
+    # fix for the control-plane thread store being dead under SQLite-fallback
+    # prod (every backend restart wiped the in-memory-only turns since
+    # ~2026-06-24, so agents "forgot" everything mid-conversation).
+    from server_modules import agent_conversation_memory
+    _mem_ws = str(workspace_id or "default").strip() or "default"
+    _mem_agent = str(agent_id or "").strip()
+    _mem_key = f"{surface_channel}:{str(remote_jid or '').strip()}"
+    try:
+        _mem_prior = agent_conversation_memory.load_recent_turns(
+            workspace_id=_mem_ws, agent_id=_mem_agent, conversation_key=_mem_key,
+        )
+    except Exception:
+        _mem_prior = []
+
     try:
         result = await execute_sage_turn_for_channel(
-            workspace_id=str(workspace_id or "default").strip() or "default",
+            workspace_id=_mem_ws,
             surface_channel=surface_channel,
             gateway_id=str(gateway_id or "").strip(),
             remote_jid=str(remote_jid or "").strip(),
             message=guarded.text,
             push_name=push_name,
             source_event_id=source_event_id,
-            agent_id=str(agent_id or "").strip(),
+            agent_id=_mem_agent,
             attachments=list(attachments) if attachments else None,
+            channel_prior_messages=_mem_prior,
         )
         # Suppress the runtime's [SILENT]/NO_REPLY sentinels via the shared
         # filter — the personal-channel path (unlike direct_chat/hosted)
@@ -247,6 +265,21 @@ async def _build_unified_sage_personal_reply_async(
         # most messages aren't for the agent). None here → every handler's
         # existing empty-reply skip path fires (no outbound, no dispatch).
         reply = filter_outbound_reply(str((result or {}).get("message") or "").strip())
+        # Record the turn so the NEXT message has continuity — the user's
+        # message always (even on a silent turn), the assistant reply only when
+        # it actually spoke. Best-effort: a memory write must never sink a reply.
+        try:
+            agent_conversation_memory.append_turn(
+                workspace_id=_mem_ws, agent_id=_mem_agent,
+                conversation_key=_mem_key, role="user", content=guarded.text,
+            )
+            if reply:
+                agent_conversation_memory.append_turn(
+                    workspace_id=_mem_ws, agent_id=_mem_agent,
+                    conversation_key=_mem_key, role="assistant", content=reply,
+                )
+        except Exception:
+            pass
         if reply:
             return {
                 "text": reply,

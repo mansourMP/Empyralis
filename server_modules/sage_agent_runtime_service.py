@@ -3572,6 +3572,7 @@ async def handle_sage_chat(
     thread_id: str = "sage-main",
     request_id: str = "",
     specialist_context: Any = None,
+    channel_prior_messages: list | None = None,
 ) -> dict:
     # Phase 4: when specialist_context is set, this turn runs as a specialist
     # (its persona, model/provider binding, and memory namespace) instead of the
@@ -4011,7 +4012,17 @@ async def handle_sage_chat(
             prior_messages=[],
         )
     prompt_diagnostics = instruction_bundle.diagnostics
-    prior_messages = instruction_bundle.prior_messages or []
+    # Channel turns carry their OWN durable conversation history via
+    # agent_conversation_memory (per-agent JSONL, fsync'd, survives restart).
+    # The control-plane thread store the bundle reads from is dead under
+    # SQLite-fallback prod (Postgres-only schema → tables never created →
+    # in-memory-only turns wiped on every restart), so when a channel supplies
+    # its own recall we trust it over the (empty) bundle. Web chat passes None
+    # and keeps the pre-existing bundle behavior unchanged.
+    if channel_prior_messages is not None:
+        prior_messages = list(channel_prior_messages)
+    else:
+        prior_messages = instruction_bundle.prior_messages or []
     if prompt_diagnostics.get("included_root_files") or prompt_diagnostics.get("available_memory_file_count"):
         used_context.append("workspace_context_files")
     if int(prompt_diagnostics.get("capability_count") or 0) > 0:

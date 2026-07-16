@@ -55,6 +55,10 @@ async def execute_sage_turn(
     request_id: str = "",
     # Phase 4: when set, the turn runs as this specialist (persona/model/memory).
     specialist_context: Any = None,
+    # Durable per-agent conversation recall the channel wrapper loaded from
+    # agent_conversation_memory; forwarded verbatim to handle_sage_chat, which
+    # trusts it over the (dead-under-SQLite) control-plane thread store.
+    channel_prior_messages: Optional[List[dict]] = None,
     # ── Option 2: Pre-built task (data-structure handoff for Option B) ──
     task: Optional[NormalizedSageTurn] = None,
 ) -> SageTurnResult:
@@ -268,6 +272,7 @@ async def execute_sage_turn(
         thread_id=resolved_thread_id,
         request_id=request_id,
         specialist_context=specialist_context,
+        channel_prior_messages=channel_prior_messages,
     )
 
     # Build canonical AI & Setup link — backend is the single source of truth
@@ -303,6 +308,7 @@ async def execute_sage_turn_for_channel(
     current_user: Optional[dict] = None,
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
+    channel_prior_messages: Optional[List[dict]] = None,
 ) -> Dict[str, Any]:
     """
     Channel-originated Sage turn (used by Path B: gateway personal channels).
@@ -355,6 +361,7 @@ async def execute_sage_turn_for_channel(
         channel_sender_name=_coerce_text(push_name),
         attachments=list(attachments) if attachments else None,
         specialist_context=specialist_context,
+        channel_prior_messages=channel_prior_messages,
     )
 
     return sage_result.as_dict()
