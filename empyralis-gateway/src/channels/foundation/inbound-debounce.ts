@@ -36,22 +36,25 @@ import type { GatewayChannelInboundPayload } from "../../protocol/types";
 export const DEFAULT_INBOUND_DEBOUNCE_WINDOW_MS = 2_000;
 
 /** Minimal timer surface so tests can drive the window with a manual clock
- *  instead of real time. Defaults to setTimeout/clearTimeout (unref'd). */
+ *  instead of real time. Defaults to a plain, ref'd setTimeout/clearTimeout —
+ *  see defaultScheduler on why the flush timer must NOT be unref'd. */
 export interface DebounceScheduler {
   set: (fn: () => void, ms: number) => unknown;
   clear: (handle: unknown) => void;
 }
 
 const defaultScheduler: DebounceScheduler = {
-  set: (fn, ms) => {
-    const handle = setTimeout(fn, ms);
-    // A pending coalesce timer must never keep the gateway process alive on
-    // its own — same unref pattern used for the LLM/CLI timers elsewhere.
-    if (typeof (handle as { unref?: () => void }).unref === "function") {
-      (handle as { unref: () => void }).unref();
-    }
-    return handle;
-  },
+  // IMPORTANT: do NOT unref() this timer. Unlike the LLM/CLI *timeout* timers
+  // elsewhere (which fire a "give up" side effect that must not hold the
+  // process open), this timer fires the debounce FLUSH — the one and only
+  // thing that publishes the user's coalesced message to the backend. An
+  // unref'd timer is skipped by libuv whenever it is the only remaining handle
+  // on the event loop, so at the quiet ~2s point right after a burst the flush
+  // would silently never run and the message would never be published (the
+  // exact production regression this module shipped with). The timer clears
+  // itself the instant it fires, so keeping it ref'd only holds the loop for
+  // the short debounce window.
+  set: (fn, ms) => setTimeout(fn, ms),
   clear: (handle) => {
     if (handle !== undefined && handle !== null) {
       clearTimeout(handle as ReturnType<typeof setTimeout>);
@@ -150,7 +153,7 @@ export class InboundDebouncer {
   private readonly scheduler: DebounceScheduler;
   private readonly shouldBypass: (payload: GatewayChannelInboundPayload) => boolean;
   private readonly coalesce: (payloads: GatewayChannelInboundPayload[]) => GatewayChannelInboundPayload;
-  private readonly onError?: (error: unknown) => void;
+  private readonly onError: (error: unknown) => void;
   private readonly pending = new Map<string, PendingConversation>();
 
   constructor(options: InboundDebouncerOptions) {
@@ -159,7 +162,11 @@ export class InboundDebouncer {
     this.scheduler = options.scheduler ?? defaultScheduler;
     this.shouldBypass = options.shouldBypass ?? defaultShouldBypass;
     this.coalesce = options.coalesce ?? coalesceInboundPayloads;
-    this.onError = options.onError;
+    // Default to LOUD, not silent: a failure to publish a coalesced inbound
+    // message means the user's turn silently never runs — never swallow it.
+    this.onError = options.onError ?? ((error) => {
+      console.error("[inbound-debounce] failed to publish coalesced inbound message:", error);
+    });
   }
 
   /** Number of conversations currently holding a buffered burst — for tests. */
@@ -219,7 +226,7 @@ export class InboundDebouncer {
     try {
       coalesced = this.coalesce(entry.payloads);
     } catch (error) {
-      this.onError?.(error);
+      this.onError(error);
       return;
     }
     void this.invokePublish(coalesced);
@@ -244,7 +251,7 @@ export class InboundDebouncer {
     try {
       await this.publish(payload);
     } catch (error) {
-      this.onError?.(error);
+      this.onError(error);
     }
   }
 }
