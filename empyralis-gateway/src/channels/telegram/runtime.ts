@@ -6,6 +6,9 @@ import pino from "pino";
 import { GatewayStateDb } from "../../state/db";
 import { redactCredentials } from "../foundation/credential-redactor";
 import { DraftManager, normalizeChannelOutboundOperation } from "../foundation/draft-manager";
+import { chunkMessage, TELEGRAM_MESSAGE_LIMIT } from "../foundation/message-chunker";
+import { renderMarkdownToTelegramHtml, type TelegramParseMode } from "../foundation/channel-markdown";
+import { DEFAULT_INBOUND_DEBOUNCE_WINDOW_MS, InboundDebouncer } from "../foundation/inbound-debounce";
 import type {
   GatewayChannelInboundPayload,
   GatewayChannelMediaKind,
@@ -59,6 +62,10 @@ export interface TelegramAdapterClient {
     remoteJid: string,
     text: string,
     replyToExternalMessageId?: string,
+    /** Passed to GramJS as `parseMode` when the text is rendered markdown
+     *  (HTML). Omitted for plain text so a message with no formatting sends
+     *  exactly as before. */
+    parseMode?: TelegramParseMode,
   ) => Promise<Record<string, unknown> | undefined>;
   /** Sends one media attachment (image/voice/audio/video/file). Optional so
    *  existing adapter mocks (and any future adapter that only ever supports
@@ -443,6 +450,14 @@ export class TelegramPersonalRuntime {
   private reconnectAttempts = 0;
   private readonly draftManager = new DraftManager();
   /**
+   * Coalesces a rapid burst of inbound messages on one chat into a single
+   * published channel.inbound event (one agent turn → one reply) instead of
+   * one turn per message. Started typing (below) is untouched by this — it
+   * fires the instant a message is admitted, before the debouncer, and
+   * persists across the whole coalesce window.
+   */
+  private readonly inboundDebouncer: InboundDebouncer;
+  /**
    * Typing sessions started on inbound receipt (see startTypingForChat),
    * keyed by remoteJid, waiting to be claimed and stopped by whichever
    * sendFinalOutbound() call eventually dispatches that chat's reply.
@@ -461,6 +476,10 @@ export class TelegramPersonalRuntime {
     this.outboundStore = new TelegramOutboundStore(db);
     this.publisher = dependencies.publisher;
     this.adapter = dependencies.adapter;
+    this.inboundDebouncer = new InboundDebouncer({
+      windowMs: DEFAULT_INBOUND_DEBOUNCE_WINDOW_MS,
+      publish: (payload) => this.publishInbound(payload),
+    });
   }
 
   requestedCapabilities(): string[] {
@@ -600,6 +619,8 @@ export class TelegramPersonalRuntime {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // Drop any buffered inbound burst (don't publish after teardown).
+    this.inboundDebouncer.dispose();
     await Promise.resolve(this.client?.disconnect?.());
     this.client = null;
   }
@@ -663,11 +684,9 @@ export class TelegramPersonalRuntime {
     if (!idempotencyKey || !remoteJid || (!text && rawMediaItems.length === 0)) {
       throw new Error("channel.outbound requires idempotency_key, remote_jid, and text or media.");
     }
-    if (text.length > 4096) {
-      throw new Error(
-        `Telegram message exceeds maximum length of 4096 characters (got ${text.length}).`,
-      );
-    }
+    // A reply longer than Telegram's 4096-char ceiling is split into sequential
+    // messages at natural boundaries (see sendTelegramTextChunks) rather than
+    // rejected — so a long agent turn still lands instead of erroring.
     // Validate/normalize every media item up front — a malformed item
     // (unknown kind, missing source) rejects the whole call before any send
     // is attempted, instead of partially delivering and then throwing.
@@ -735,7 +754,7 @@ export class TelegramPersonalRuntime {
         });
       }
       if (text) {
-        response = await client.sendMessage(remoteJid, text, replyTo);
+        response = await this.sendTelegramTextChunks(client, remoteJid, text, replyTo);
       }
       const mapped = mapTelegramOutboundResult(
         {
@@ -755,6 +774,47 @@ export class TelegramPersonalRuntime {
     } finally {
       await typing.stop();
     }
+  }
+
+  /**
+   * Sends a text reply as one or more messages: chunked at natural boundaries
+   * when it exceeds Telegram's 4096-char ceiling, each chunk rendered from
+   * markdown to Telegram HTML (parse_mode) so bold/italic/code/links show as
+   * real formatting. Only the first chunk threads to the incoming message; the
+   * rest follow it. If Telegram ever rejects a chunk's HTML, that chunk is
+   * resent as plain text rather than failing the whole reply. Returns the
+   * first chunk's send result (the primary reply id used for the mapped
+   * outbound result).
+   */
+  private async sendTelegramTextChunks(
+    client: TelegramAdapterClient,
+    remoteJid: string,
+    text: string,
+    replyTo: string | undefined,
+  ): Promise<Record<string, unknown> | undefined> {
+    const chunks = chunkMessage(text, TELEGRAM_MESSAGE_LIMIT);
+    let primaryResponse: Record<string, unknown> | undefined;
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      const chunkReplyTo = index === 0 ? replyTo : undefined;
+      const rendered = renderMarkdownToTelegramHtml(chunk);
+      let response: Record<string, unknown> | undefined;
+      try {
+        response = await client.sendMessage(remoteJid, rendered.text, chunkReplyTo, rendered.parseMode);
+      } catch (error) {
+        if (rendered.parseMode) {
+          // The generated HTML was rejected (malformed entity, etc.) — fall
+          // back to the original plain text so the reply still lands.
+          response = await client.sendMessage(remoteJid, chunk, chunkReplyTo);
+        } else {
+          throw error;
+        }
+      }
+      if (index === 0) {
+        primaryResponse = response;
+      }
+    }
+    return primaryResponse;
   }
 
   private async connectClient(): Promise<void> {
@@ -918,8 +978,12 @@ export class TelegramPersonalRuntime {
     if (!mapped || mapped.message.from_me) {
       return;
     }
+    // Typing starts NOW (before the debouncer) so the indicator is live for
+    // the whole coalesce window and the agent's think-time — see
+    // startTypingForChat. The publish itself is coalesced: a burst of rapid
+    // messages becomes one channel.inbound event / one agent turn / one reply.
     this.startTypingForChat(mapped.message.remote_jid);
-    await this.publishInbound(mapped);
+    this.inboundDebouncer.admit(mapped);
   }
 
   private async publishInbound(payload: GatewayChannelInboundPayload): Promise<void> {
@@ -1265,11 +1329,17 @@ export class TelegramPersonalRuntime {
             setMessageHandler: (handler) => {
               messageHandler = handler;
             },
-            sendMessage: async (remoteJid, text, replyToExternalMessageId) => {
+            sendMessage: async (remoteJid, text, replyToExternalMessageId, parseMode) => {
               const sendArgs: Record<string, unknown> = { message: text };
               const numericReplyTo = Number.parseInt(String(replyToExternalMessageId || "").trim(), 10);
               if (replyToExternalMessageId) {
                 sendArgs.replyTo = Number.isFinite(numericReplyTo) ? numericReplyTo : replyToExternalMessageId;
+              }
+              // GramJS maps the "html" string to its bundled HTMLParser
+              // (Utils.sanitizeParseMode). Omitted entirely for plain text so
+              // an unformatted message goes out exactly as it did before.
+              if (parseMode) {
+                sendArgs.parseMode = parseMode;
               }
               const sent = await client.sendMessage(remoteJid, sendArgs);
               return {
