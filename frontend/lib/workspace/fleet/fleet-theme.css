@@ -4566,7 +4566,17 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-badge--muted { opacity: 0.55; }
 
 /* WORK split view */
-.fleet-work-split { display: flex; height: 100%; min-height: 0; }
+/* flex:1;min-width:0 -- inert (a no-op) in WorkTab's own usage, where the
+   parent is .fleet-detail-body, a plain overflow:auto block rather than a
+   flex container, so these flex-item properties have nothing to apply to.
+   Load-bearing for ConversationsView.tsx's top-level usage though: there
+   the parent is .fleet-content--split, a ROW-direction flex container, so
+   width is the MAIN axis (governed by flex-grow, unlike align-items:
+   stretch's cross-axis default that a COLUMN-direction parent would give
+   for free) -- without flex:1 this shrinks to fit its content's min-width
+   instead of filling the viewport, overflowing on mobile in particular
+   (measured: 507px in a 375px viewport before this fix). */
+.fleet-work-split { display: flex; height: 100%; min-height: 0; flex: 1; min-width: 0; }
 .fleet-work-list {
   width: 300px; flex-shrink: 0; border-right: 1px solid var(--border);
   overflow-y: auto; display: flex; flex-direction: column;

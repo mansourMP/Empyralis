@@ -18,6 +18,7 @@ import {
   Inbox,
   LayoutGrid,
   MessageSquare,
+  MessagesSquare,
   Moon,
   Plug,
   Radio,
@@ -198,9 +199,10 @@ export function FleetCommandPalette({
     }));
 
     // Mirrors the rail's own destinations (PrimaryRail's RAIL_ITEMS) — the
-    // same four, in the same order.
+    // same five, in the same order.
     const goToActions: Action[] = [
       { id: "go-inbox", label: "Inbox", group: "Go to", icon: Inbox, run: () => go(`${base}/inbox`) },
+      { id: "go-conversations", label: "Conversations", group: "Go to", icon: MessagesSquare, run: () => go(`${base}/conversations`) },
       { id: "go-projects", label: "Projects", group: "Go to", icon: FolderKanban, run: () => go(`${base}/projects`) },
       { id: "go-agents", label: "Agents", group: "Go to", icon: Bot, run: () => go(`${base}/agents`) },
       { id: "go-hardware", label: "Hardware", group: "Go to", icon: Cpu, run: () => go(`${base}/hardware`) },

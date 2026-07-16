@@ -259,6 +259,7 @@ from server_modules.routes_workflows import router as workflows_router
 from server_modules.routes_doctor import router as doctor_router
 from server_modules.routes_sage_telegram_hosted import router as sage_telegram_hosted_router
 from server_modules.routes_fleet import router as fleet_router
+from server_modules.routes_conversations import router as conversations_router
 from server_modules.connectors.discord_bot_runtime_service import DiscordBotRuntimeService
 
 
@@ -403,6 +404,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(doctor_router)
 app.include_router(sage_telegram_hosted_router, prefix="/api")
 app.include_router(fleet_router, prefix="")
+app.include_router(conversations_router, prefix="")
 
 
 def _runtime_cli_args() -> argparse.Namespace:
