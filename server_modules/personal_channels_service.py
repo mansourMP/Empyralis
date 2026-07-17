@@ -2137,6 +2137,17 @@ async def _handle_telegram_gateway_channel_inbound(
         raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
     if bool(message.get("from_me")):
         return {"ignored": True, "reason": "from_me", "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY}
+    # Group gate: skip group messages unless mentioned or replying to Sage.
+    # The Gateway-side filter (runtime.ts) is the primary gate; this is a
+    # backend safety net in case the Gateway bypasses it for any reason —
+    # identical contract to the WhatsApp handler above.
+    if bool(message.get("is_group")):
+        if not bool(message.get("is_mentioned")) and not bool(message.get("is_reply_to_sage")):
+            return {
+                "ignored": True,
+                "reason": "group_no_mention",
+                "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY,
+            }
     # Resolved BEFORE the sync below — see the WhatsApp handler's identical
     # comment above for why the ordering matters.
     agent_id = _resolve_agent_id_for_inbound(gateway_id, TELEGRAM_PERSONAL_CHANNEL_KEY)
@@ -2275,8 +2286,12 @@ async def _handle_telegram_gateway_channel_inbound(
             is_owner=bool(dm_decision.get("is_owner")),
         )
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
-        # be sent into a channel (DM or group — Telegram personal has NO
-        # group/mention gate, so this is the only backstop for group turns).
+        # be sent into a channel (DM or group — a group turn only reaches
+        # this point after already passing the mention/reply gate above, but
+        # that gate is about WHETHER to run a turn at all, not about what a
+        # turn is allowed to reply with, so this backstop still applies to
+        # every reply unconditionally). filter_channel_outbound_reply() is
+        # the backstop here regardless of what the bridge service returned.
         _raw_reply_text = str((reply or {}).get("text") or "").strip()
         _safe_reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
         if not _safe_reply_text:
@@ -2560,6 +2575,21 @@ async def _handle_local_bridge_gateway_channel_inbound(
         raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
     if bool(message.get("from_me")):
         return {"ignored": True, "reason": "from_me", "channel_key": channel_key}
+    # Group gate: skip group messages unless mentioned or replying to Sage.
+    # The Gateway-side filter (local-bridge-runtime.ts's pollInboundEvents)
+    # is the primary gate; this is a backend safety net in case the Gateway
+    # bypasses it for any reason — identical contract to the WhatsApp/
+    # Telegram handlers. Whether is_group/is_mentioned/is_reply_to_sage are
+    # ever true here depends on the specific bridge (signal-cli-bridge.ts,
+    # bluebubbles-bridge.ts, or a third-party WeChat bridge) actually
+    # computing them — see local-bridge-runtime.ts's mapInboundEvent.
+    if bool(message.get("is_group")):
+        if not bool(message.get("is_mentioned")) and not bool(message.get("is_reply_to_sage")):
+            return {
+                "ignored": True,
+                "reason": "group_no_mention",
+                "channel_key": channel_key,
+            }
     inbound, created = personal_channels_repository.record_inbound_message(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=channel_key,

@@ -466,6 +466,14 @@ export class TelegramPersonalRuntime {
     string,
     { typing: TelegramTypingKeepalive; startedAt: number; client: TelegramAdapterClient }
   >();
+  /**
+   * External message IDs this runtime has sent, used to resolve
+   * is_reply_to_sage (someone replying to a message Sage sent counts as
+   * "addressed" in a group, same as an explicit @mention) — mirrors
+   * WhatsApp runtime.ts's identically-named/purposed field exactly. Capped
+   * so a long-lived connection can't grow this unboundedly.
+   */
+  private sentMessageIds = new Set<string>();
 
   constructor(
     private readonly db: GatewayStateDb,
@@ -770,6 +778,13 @@ export class TelegramPersonalRuntime {
         idempotencyKey,
         String(mapped.external_message_id || "").trim() || undefined,
       );
+      // Track sent message ID for reply-to detection in group gate — mirrors
+      // WhatsApp runtime.ts's sendFinalOutbound exactly.
+      const sentId = String(mapped.external_message_id || "").trim();
+      if (sentId) {
+        this.sentMessageIds.add(sentId);
+        if (this.sentMessageIds.size > 500) this.sentMessageIds.clear();
+      }
       return mapped;
     } finally {
       await typing.stop();
@@ -976,6 +991,15 @@ export class TelegramPersonalRuntime {
   private async handleInboundMessage(message: TelegramInboundMessage): Promise<void> {
     const mapped = mapTelegramInboundMessage(message);
     if (!mapped || mapped.message.from_me) {
+      return;
+    }
+    // Resolve is_reply_to_sage: the replied-to message was sent by Sage —
+    // mirrors WhatsApp runtime.ts's handleMessagesUpsert exactly.
+    if (mapped.message.is_group && mapped.message.quoted_stanza_id) {
+      mapped.message.is_reply_to_sage = this.sentMessageIds.has(String(mapped.message.quoted_stanza_id));
+    }
+    // Group gate: skip group messages unless mentioned or replying to Sage.
+    if (mapped.message.is_group && !mapped.message.is_mentioned && !mapped.message.is_reply_to_sage) {
       return;
     }
     // Typing starts NOW (before the debouncer) so the indicator is live for
@@ -1278,6 +1302,31 @@ export class TelegramPersonalRuntime {
               || String(sender?.username ?? chat?.title ?? "").trim()
               || undefined
             );
+            // Group/mention/reply detection — all three are server-computed
+            // GramJS/MTProto signals, not locally re-derived:
+            //  - isPrivate is a synchronous getter for PeerUser peers (DMs
+            //    AND self-chat/Saved Messages, both peerId === your own
+            //    user) and, for PeerChannel peers (supergroup vs broadcast
+            //    channel), depends on the chat entity's own `broadcast` flag
+            //    — which the getChat() call above already resolved, so
+            //    reading it here (not before) gives a real answer instead of
+            //    the getter's "undefined" ambiguous case. !isPrivate errs
+            //    toward treating "unknown chat type" as a group (safer
+            //    default — see message-mapper.ts's TelegramInboundMessage
+            //    doc: this is the same fail-closed posture WhatsApp/local
+            //    bridges use).
+            //  - rawMessage.mentioned is Telegram's own "you were addressed"
+            //    bit (true for an explicit @mention AND for a reply to a
+            //    message you sent) — a genuine MTProto flag, not text
+            //    parsing. is_reply_to_sage is ALSO independently resolved
+            //    below (sentMessageIds) for parity with WhatsApp's
+            //    contract; the two signals are OR'd by the gate either way.
+            //  - replyTo.replyToMsgId is the id of the message being
+            //    replied to, if any — handleInboundMessage compares it
+            //    against sentMessageIds to resolve is_reply_to_sage.
+            const isGroup = !event?.isPrivate;
+            const isMentioned = Boolean(rawMessage?.mentioned);
+            const replyToExternalMessageId = String(rawMessage?.replyTo?.replyToMsgId ?? "").trim() || undefined;
             let media: TelegramInboundMediaItem[] | undefined;
             if (classification) {
               // Never let a download/disk-write failure sink the whole
@@ -1308,6 +1357,9 @@ export class TelegramPersonalRuntime {
               ).toISOString(),
               fromMe: Boolean(rawMessage?.out),
               media,
+              isGroup,
+              isMentioned,
+              replyToExternalMessageId,
             });
           },
           NewMessage ? new NewMessage({ incoming: true }) : undefined,

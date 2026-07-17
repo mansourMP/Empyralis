@@ -348,6 +348,18 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
           if (!this.rememberInboundEvent(eventKey)) {
             continue;
           }
+          // Group gate: skip group messages unless mentioned or replying to
+          // Sage — same contract as WhatsApp/Telegram (see their runtime.ts
+          // handleMessagesUpsert/handleInboundMessage). The event is still
+          // remembered (above) so a gated message isn't re-fetched and
+          // re-evaluated on every subsequent poll. Whether this ever
+          // actually fires depends entirely on the third-party bridge
+          // (signal-cli-bridge.ts / bluebubbles-bridge.ts / a WeChat bridge)
+          // populating is_group/is_mentioned/is_reply_to_sage in its
+          // /events JSON — see mapInboundEvent below.
+          if (event.message.is_group && !event.message.is_mentioned && !event.message.is_reply_to_sage) {
+            continue;
+          }
           await this.publisher.publishEvent("channel.inbound", event);
           this.lastEventAt = event.message.received_at;
         }
@@ -376,6 +388,12 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
         text,
         received_at: String(item.received_at || "").trim() || new Date().toISOString(),
         from_me: item.from_me === true,
+        // Optional — absent/false unless the bridge behind this HTTP
+        // contract actually computes them (see the two first-party bridges
+        // in ../bridges/ for the reference implementation of each field).
+        is_group: item.is_group === true,
+        is_mentioned: item.is_mentioned === true,
+        is_reply_to_sage: item.is_reply_to_sage === true,
       },
     };
   }
