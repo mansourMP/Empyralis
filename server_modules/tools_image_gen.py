@@ -115,10 +115,10 @@ def _download_binary(url: str) -> bytes:
         return response.content
 
 
-def _openai_client() -> OpenAI:
-    api_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
-    if api_key:
-        return OpenAI(api_key=api_key)
+def _openai_client(*, api_key: Optional[str] = None) -> OpenAI:
+    resolved_key = str(api_key or os.getenv("OPENAI_API_KEY") or "").strip()
+    if resolved_key:
+        return OpenAI(api_key=resolved_key)
     return OpenAI()
 
 
@@ -131,8 +131,9 @@ def _generate_with_openai(
     n: int,
     save_to: Optional[str],
     client: Optional[Any] = None,
+    api_key: Optional[str] = None,
 ) -> List[str]:
-    effective_client = client or _openai_client()
+    effective_client = client or _openai_client(api_key=api_key)
     payload: Dict[str, Any] = {
         "model": model,
         "prompt": prompt,
@@ -167,9 +168,10 @@ def _generate_with_stability(
     size: str,
     n: int,
     save_to: Optional[str],
+    api_key: Optional[str] = None,
 ) -> List[str]:
     targets = _target_paths(save_to, count=n, prompt=prompt)
-    stability_key = str(os.getenv("STABILITY_API_KEY") or "").strip()
+    stability_key = str(api_key or os.getenv("STABILITY_API_KEY") or "").strip()
     if stability_key:
         width, height = size.split("x", 1)
         saved: List[str] = []
@@ -219,6 +221,11 @@ def generate_image(
     n: Any = 1,
     save_to: Any = None,
     client: Optional[Any] = None,
+    # Per-agent resolved credential (agent_capability_service.py). When
+    # omitted, falls back to the platform env vars (OPENAI_API_KEY /
+    # STABILITY_API_KEY) exactly as before — unchanged behavior for any
+    # caller that hasn't been threaded through the capability resolver yet.
+    api_key: Optional[str] = None,
 ) -> List[str]:
     normalized_prompt = str(prompt or "").strip()
     if not normalized_prompt:
@@ -250,10 +257,12 @@ def generate_image(
             n=image_count,
             save_to=normalized_save_to,
             client=client,
+            api_key=api_key,
         )
     return _generate_with_stability(
         prompt=normalized_prompt,
         size=normalized_size,
         n=image_count,
         save_to=normalized_save_to,
+        api_key=api_key,
     )

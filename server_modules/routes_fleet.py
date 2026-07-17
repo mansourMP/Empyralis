@@ -1184,3 +1184,90 @@ async def fleet_agent_tools(
         return manifest
     except Exception as exc:
         return {"ok": False, "error": str(exc), "tools": []}
+
+
+# ── Per-agent Capabilities (image/video generation, TTS/STT) ───────────────
+# See agent_capability_service.py for the resolver + storage model. Same
+# platform_credits/byok_api spectrum fleet-provider-constants.ts's
+# ProviderMode already defines for the chat model, one level down. Flat API
+# keys only (no OAuth) — see docs/OpenClaw.md for why this deliberately
+# skips connection_oauth_service.py / mcp_registry_service.py.
+
+@router.get("/api/w/{workspace_id}/fleet/agent-capabilities")
+async def fleet_agent_capabilities(
+    request: Request,
+    workspace_id: str,
+    agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Per-agent capability catalog + resolved state (agent detail →
+    Capabilities tab). Never returns key material."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    from server_modules.fleet_tools import fleet_get_agent_capabilities
+
+    try:
+        return await fleet_get_agent_capabilities(
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "capabilities": []}
+
+
+class FleetSetAgentCapabilityKeyRequest(BaseModel):
+    capability: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    api_key: str = Field(min_length=1)
+
+
+@router.post("/api/w/{workspace_id}/fleet/agent-capabilities/key")
+async def fleet_set_agent_capability_key_route(
+    request: Request,
+    workspace_id: str,
+    body: FleetSetAgentCapabilityKeyRequest,
+    agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Save a BYOK API key for one capability, scoped to this agent only.
+    Encrypts server-side before storing; the key is never echoed back."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_set_agent_capability_key
+
+    try:
+        result = await fleet_set_agent_capability_key(
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+            capability=body.capability,
+            provider=body.provider,
+            api_key=body.api_key,
+        )
+        return result
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/agent-capabilities/key")
+async def fleet_clear_agent_capability_key_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str = Query(..., description="Agent install ID"),
+    capability: str = Query(..., description="Capability id, e.g. image_generation"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Remove a stored BYOK key for one capability and fall back to
+    platform_credits."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_clear_agent_capability_key
+
+    try:
+        result = await fleet_clear_agent_capability_key(
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+            capability=capability,
+        )
+        return result
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}

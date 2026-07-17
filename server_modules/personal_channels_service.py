@@ -1705,6 +1705,7 @@ async def _process_inbound_media_for_turn(
                 audio_bytes=voice_record.get("raw_bytes") or b"",
                 mime_type=str(voice_record.get("mime_type") or "audio/ogg"),
                 filename=str(voice_record.get("filename") or "voice-message"),
+                agent_id=agent_id,
             )
             voice_text = _stt.format_voice_message_text(transcription)
         except Exception:

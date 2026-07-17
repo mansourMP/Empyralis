@@ -534,6 +534,84 @@ export function useFleetAgentTools(workspaceId: string, agentId: string | null) 
   return { tools, coreTools, isMaster, loading, refresh };
 }
 
+// ── Capabilities (image/video generation, TTS/STT) ──────────────────────────
+// See server_modules/agent_capability_service.py for the resolver this
+// surfaces. Same platform_credits/byok_api spectrum
+// fleet-provider-constants.ts's ProviderMode already defines for the chat
+// model, one level down (capability instead of "the" model) — no separate
+// enable toggle, a resolved provider IS the enable.
+
+export type FleetCapabilityProvider = {
+  id: string;
+  label: string;
+  supports_platform_credits: boolean;
+  supports_byok: boolean;
+  // False = registered but not wired to a live adapter yet (stubbed for
+  // this pass — see the module docstring in agent_capability_service.py).
+  live: boolean;
+};
+
+export type FleetCapability = {
+  id: string;
+  label: string;
+  mode: "platform_credits" | "byok_api";
+  provider: string;
+  // Whether this capability currently resolves to a usable provider for
+  // THIS agent — the same signal that gates the capability's tool (if any)
+  // into the agent's toolset.
+  available: boolean;
+  billing_mode: string;
+  reason: string;
+  message: string;
+  has_byok_key: boolean;
+  // Whether this capability gates an LLM-callable tool's presence (true for
+  // image_generation/video_generation today) vs. a passive pipeline
+  // capability with no toggle of its own (speech_to_text, wired into the
+  // channel voice pipeline instead).
+  tool_gated: boolean;
+  providers: FleetCapabilityProvider[];
+};
+
+export function useFleetAgentCapabilities(workspaceId: string, agentId: string | null) {
+  const [capabilities, setCapabilities] = useState<FleetCapability[]>([]);
+  const [isMaster, setIsMaster] = useState(false);
+  const [loading, setLoading] = useState(false);
+  // Same agentId-switch race guard as useFleetAgentTools/useFleetAgentChannels
+  // above — a slow in-flight fetch for the previous agent must not overwrite
+  // the new agent's data.
+  const abortRef = useRef<AbortController | null>(null);
+
+  const refresh = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    if (!agentId) { setCapabilities([]); return; }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/w/${workspaceId}/fleet/agent-capabilities?agent_id=${encodeURIComponent(agentId)}`,
+        { signal: controller.signal },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setCapabilities(data.capabilities || []);
+      setIsMaster(Boolean(data.is_master));
+    } catch (e) {
+      if (!(e instanceof Error && e.name === "AbortError")) setCapabilities([]);
+    } finally {
+      if (abortRef.current === controller) setLoading(false);
+    }
+  }, [workspaceId, agentId]);
+
+  useEffect(() => {
+    void refresh();
+    return () => { abortRef.current?.abort(); };
+  }, [refresh]);
+
+  return { capabilities, isMaster, loading, refresh };
+}
+
 // ── Schedule (Part U2) — when an agent wakes on its own ────────────────────
 
 export type FleetScheduleItem = {

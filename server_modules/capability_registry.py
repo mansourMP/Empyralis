@@ -645,6 +645,51 @@ CAPABILITY_REGISTRY: Dict[str, CapabilityContract] = {
         allowed_environments=["local_companion"],
         artifact_outputs=["text/plain", "application/json"],
     ),
+    # Media capabilities (image/video generation, TTS/STT) — per-agent,
+    # provider-resolved (see agent_capability_service.py). requires_approval
+    # stays False for all four: that matches generate_image's existing
+    # unconditional behavior (no approval prompt today), so adding this
+    # contract doesn't newly gate a call the platform already allowed.
+    "image_generation": _contract(
+        "image_generation",
+        "Generate Image",
+        risk_level="medium",
+        requires_approval=False,
+        reversible=True,
+        required_os_permissions=[],
+        allowed_environments=["hosted", "local_companion"],
+        artifact_outputs=["image/png"],
+    ),
+    "video_generation": _contract(
+        "video_generation",
+        "Generate Video",
+        risk_level="medium",
+        requires_approval=False,
+        reversible=True,
+        required_os_permissions=[],
+        allowed_environments=["hosted", "local_companion"],
+        artifact_outputs=["video/mp4"],
+    ),
+    "text_to_speech": _contract(
+        "text_to_speech",
+        "Text To Speech",
+        risk_level="low",
+        requires_approval=False,
+        reversible=True,
+        required_os_permissions=[],
+        allowed_environments=["hosted", "local_companion"],
+        artifact_outputs=["audio/mpeg"],
+    ),
+    "speech_to_text": _contract(
+        "speech_to_text",
+        "Speech To Text",
+        risk_level="low",
+        requires_approval=False,
+        reversible=True,
+        required_os_permissions=[],
+        allowed_environments=["hosted", "local_companion"],
+        artifact_outputs=["text/plain"],
+    ),
     # Compatibility tool ids retained as aliases so existing runtime paths can
     # resolve through the canonical registry during migration.
     "computer_control": _contract(

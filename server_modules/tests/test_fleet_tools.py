@@ -146,6 +146,31 @@ class FleetGetAgentToolsCanonicalIdTests(unittest.TestCase):
         self.assertTrue(all(t["enabled"] for t in result["tools"]))
 
 
+class FleetGetAgentToolsExcludesCapabilityGatedToolsTests(unittest.TestCase):
+    """generate_image (capability_id="image_generation") must NOT appear in
+    the Tools tab's toggle list — its toggle would have zero runtime effect
+    now that _specialist_tool_allowed decides it solely via capability
+    resolution (see sage_agent_runtime_service.py), and a toggle with no
+    effect is exactly the "lying toggle" facade this file's own comments
+    already guard against for core tools. It lives on the Capabilities tab
+    instead (fleet_get_agent_capabilities)."""
+
+    def test_generate_image_is_absent_from_the_tools_list(self):
+        bundle = {"install_metadata": {"role": "specialist"}, "tool_toggles": {"generate_image": True}}
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            AsyncMock(return_value=bundle),
+        ):
+            result = _run(
+                fleet_tools.fleet_get_agent_tools(workspace_id="ws-1", tenant_id="tenant-1", agent_id="ainstall-1")
+            )
+        self.assertTrue(result["ok"])
+        ids = {t["id"] for t in result["tools"]}
+        self.assertNotIn("generate_image", ids)
+        # An unrelated tool is unaffected.
+        self.assertIn("web__search", ids)
+
+
 class FleetGetAgentToolsMandateStateTests(unittest.TestCase):
     """Customer access (Part 10 Authority Mandate) surfaced on the Tools tab:
     audience_safe is the platform's own manifest default (never toggleable),
@@ -917,6 +942,269 @@ class FleetListAgentsHardwareStatusIntegrationTests(unittest.TestCase):
         healthy = by_id["agent-healthy"]
         self.assertEqual(healthy["hardware_status"], "online")
         self.assertIsNone(healthy["hardware_status_reason"])
+
+
+# ── Capabilities (image/video generation, TTS/STT) ─────────────────────────
+# See server_modules/agent_capability_service.py for the resolver these
+# endpoints surface, and setUpModule below for why _vault_passphrase is
+# patched (real encryption, no dependency on the compiled Rust kernel binary
+# — mirrors test_agent_capability_service.py's identical setup).
+
+from server_modules import vault_store as _vault_store_mod  # noqa: E402
+
+_TEST_VAULT_PASSPHRASE = "test-fixed-passphrase-for-fleet-tools-capability-tests"
+_capability_vault_passphrase_patcher = None
+
+
+def setUpModule():
+    global _capability_vault_passphrase_patcher
+    _capability_vault_passphrase_patcher = patch.object(
+        _vault_store_mod, "_vault_passphrase", return_value=_TEST_VAULT_PASSPHRASE,
+    )
+    _capability_vault_passphrase_patcher.start()
+
+
+def tearDownModule():
+    if _capability_vault_passphrase_patcher is not None:
+        _capability_vault_passphrase_patcher.stop()
+
+
+class FleetConfigureAgentCapabilityConfigTests(unittest.TestCase):
+    """fleet_configure_agent's capability_config patch handling — must MERGE
+    per-capability (unlike model_config's wholesale replace), validate
+    through agent_capability_service, and never accept secret material."""
+
+    @staticmethod
+    def _bundle(metadata=None):
+        return {"id": "agent-x", "install_metadata": dict(metadata or {})}
+
+    def test_saving_one_capability_does_not_clobber_an_already_configured_other(self):
+        existing_meta = {"capability_config": {"speech_to_text": {"mode": "byok_api", "provider": "openai"}}}
+        captured = {}
+
+        async def _capture_update(agent_id, **kwargs):
+            captured.update(kwargs)
+            return self._bundle(existing_meta)
+
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle(existing_meta)),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(side_effect=_capture_update),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1", workspace_id="ws-1", agent_id="agent-x",
+                    patch={"capability_config": {"image_generation": {"mode": "platform_credits", "provider": "openai"}}},
+                )
+            )
+        self.assertTrue(result["ok"])
+        saved_capability_config = captured["metadata"]["capability_config"]
+        self.assertEqual(saved_capability_config["image_generation"], {"mode": "platform_credits", "provider": "openai"})
+        # The pre-existing speech_to_text entry must survive untouched.
+        self.assertEqual(saved_capability_config["speech_to_text"], {"mode": "byok_api", "provider": "openai"})
+
+    def test_rejects_unknown_capability(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1", workspace_id="ws-1", agent_id="agent-x",
+                    patch={"capability_config": {"not_a_capability": {"mode": "byok_api"}}},
+                )
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("error", result)
+
+    def test_rejects_unsupported_mode(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1", workspace_id="ws-1", agent_id="agent-x",
+                    # cli_subscription/local don't apply to flat-API-key media providers.
+                    patch={"capability_config": {"image_generation": {"mode": "cli_subscription"}}},
+                )
+            )
+        self.assertFalse(result["ok"])
+
+
+class FleetGetAgentCapabilitiesTests(unittest.TestCase):
+    def test_returns_resolved_state_for_all_four_capabilities(self):
+        bundle = {
+            "id": "agent-x",
+            "install_metadata": {"role": "specialist"},
+        }
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=bundle),
+        ):
+            result = _run(
+                fleet_tools.fleet_get_agent_capabilities(workspace_id="ws-1", tenant_id="t1", agent_id="agent-x")
+            )
+        self.assertTrue(result["ok"])
+        ids = {c["id"] for c in result["capabilities"]}
+        self.assertEqual(ids, {"image_generation", "video_generation", "text_to_speech", "speech_to_text"})
+        self.assertFalse(result["is_master"])
+
+    def test_master_agent_is_flagged(self):
+        bundle = {"id": "sage-install", "install_metadata": {"role": "operator"}}
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=bundle),
+        ):
+            result = _run(
+                fleet_tools.fleet_get_agent_capabilities(workspace_id="ws-1", tenant_id="t1", agent_id="sage-install")
+            )
+        self.assertTrue(result["is_master"])
+
+    def test_unknown_agent_returns_empty_list_not_an_error(self):
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=None),
+        ):
+            result = _run(
+                fleet_tools.fleet_get_agent_capabilities(workspace_id="ws-1", tenant_id="t1", agent_id="ghost")
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["capabilities"], [])
+
+
+class FleetSetAgentCapabilityKeyTests(unittest.TestCase):
+    """Saving a BYOK key: encrypts, scopes to this agent's OWN metadata row,
+    and flips mode to byok_api as a side effect (pasting a key IS choosing
+    "your own API key" — no separate mode toggle to also flip)."""
+
+    @staticmethod
+    def _bundle(metadata=None):
+        return {"id": "agent-x", "install_metadata": dict(metadata or {})}
+
+    def test_saves_encrypted_key_and_switches_to_byok_api(self):
+        captured = {}
+
+        async def _capture_update(agent_id, **kwargs):
+            captured.update(kwargs)
+            return self._bundle(kwargs.get("metadata"))
+
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(side_effect=_capture_update),
+            ),
+            patch.object(fleet_tools, "_ledger_fleet_action", new=AsyncMock()),
+        ):
+            result = _run(
+                fleet_tools.fleet_set_agent_capability_key(
+                    workspace_id="ws-1", tenant_id="t1", agent_id="agent-x",
+                    capability="image_generation", provider="openai", api_key="sk-owner-pasted-key",
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "byok_api")
+        saved_meta = captured["metadata"]
+        self.assertEqual(saved_meta["capability_config"]["image_generation"], {"mode": "byok_api", "provider": "openai"})
+        # The raw key must never appear anywhere in what gets persisted.
+        self.assertNotIn("sk-owner-pasted-key", str(saved_meta))
+        self.assertIn("ciphertext", saved_meta["capability_secrets"]["image_generation"])
+
+    def test_rejects_provider_not_valid_for_capability(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_set_agent_capability_key(
+                    workspace_id="ws-1", tenant_id="t1", agent_id="agent-x",
+                    capability="image_generation", provider="elevenlabs", api_key="sk-x",
+                )
+            )
+        self.assertFalse(result["ok"])
+
+    def test_unknown_agent_is_a_clean_error_not_a_crash(self):
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=None),
+        ):
+            result = _run(
+                fleet_tools.fleet_set_agent_capability_key(
+                    workspace_id="ws-1", tenant_id="t1", agent_id="ghost",
+                    capability="image_generation", provider="openai", api_key="sk-x",
+                )
+            )
+        self.assertFalse(result["ok"])
+
+
+class FleetClearAgentCapabilityKeyTests(unittest.TestCase):
+    def test_removes_secret_and_resets_to_platform_credits(self):
+        existing_meta = {
+            "capability_config": {"image_generation": {"mode": "byok_api", "provider": "openai"}},
+            "capability_secrets": {"image_generation": {"provider": "openai", "ciphertext": "orion.v2:...", "updated_at": "t"}},
+        }
+        captured = {}
+
+        async def _capture_update(agent_id, **kwargs):
+            captured.update(kwargs)
+            return {"id": "agent-x", "install_metadata": kwargs.get("metadata")}
+
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value={"id": "agent-x", "install_metadata": existing_meta}),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(side_effect=_capture_update),
+            ),
+            patch.object(fleet_tools, "_ledger_fleet_action", new=AsyncMock()),
+        ):
+            result = _run(
+                fleet_tools.fleet_clear_agent_capability_key(
+                    workspace_id="ws-1", tenant_id="t1", agent_id="agent-x", capability="image_generation",
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "platform_credits")
+        saved_meta = captured["metadata"]
+        self.assertNotIn("image_generation", saved_meta["capability_secrets"])
+        self.assertEqual(saved_meta["capability_config"]["image_generation"]["mode"], "platform_credits")
+
+    def test_unknown_capability_is_a_clean_error(self):
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value={"id": "agent-x", "install_metadata": {}}),
+        ):
+            result = _run(
+                fleet_tools.fleet_clear_agent_capability_key(
+                    workspace_id="ws-1", tenant_id="t1", agent_id="agent-x", capability="not_real",
+                )
+            )
+        self.assertFalse(result["ok"])
 
 
 if __name__ == "__main__":
