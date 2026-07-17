@@ -19,6 +19,7 @@ from server_modules import (
     secret_redaction_service,
     security_audit_service,
 )
+from server_modules.channel_adapter import filter_channel_outbound_reply
 
 _logger = logging.getLogger(__name__)
 
@@ -1858,7 +1859,15 @@ async def _deliver_whatsapp_personal_reply(
             attachments=attachments,
             is_owner=is_owner,
         )
-        if not reply or not str(reply.get("text") or "").strip():
+        # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
+        # be sent into a channel (DM or group). filter_channel_outbound_reply()
+        # is the backstop here regardless of what the bridge service returned
+        # — it catches [SILENT] markers AND any text matching a known
+        # platform status/error string, so a turn error/quota denial/timeout
+        # can never masquerade as a deliverable reply.
+        _raw_reply_text = str((reply or {}).get("text") or "").strip()
+        _safe_reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
+        if not _safe_reply_text:
             no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
@@ -1874,7 +1883,11 @@ async def _deliver_whatsapp_personal_reply(
                 gateway_id=gateway_id,
                 channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
                 provider=WHATSAPP_PERSONAL_PROVIDER,
-                detail="Automatic WhatsApp personal reply was skipped because Sage returned no reply.",
+                detail=(
+                    "Automatic WhatsApp personal reply was skipped because Sage returned no reply."
+                    if not _raw_reply_text
+                    else "Automatic WhatsApp personal reply was suppressed: a hardcoded status/error message may never reach a channel."
+                ),
                 metadata={"remote_jid": remote_jid, "inbound_external_message_id": external_message_id},
                 trace_id=trace_id,
                 idempotency_key=f"personal_channel.whatsapp.automatic_reply.skipped:{gateway_id}:{external_message_id}",
@@ -1887,7 +1900,7 @@ async def _deliver_whatsapp_personal_reply(
             agent_id=agent_id,
             idempotency_key=idempotency_key,
             remote_jid=remote_jid,
-            text=str(reply.get("text") or "").strip(),
+            text=_safe_reply_text,
             reply_to_external_message_id=external_message_id,
             metadata={"reply_source": str(reply.get("source") or "").strip() or None},
         )
@@ -2261,7 +2274,12 @@ async def _handle_telegram_gateway_channel_inbound(
             attachments=attachments,
             is_owner=bool(dm_decision.get("is_owner")),
         )
-        if not reply or not str(reply.get("text") or "").strip():
+        # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
+        # be sent into a channel (DM or group — Telegram personal has NO
+        # group/mention gate, so this is the only backstop for group turns).
+        _raw_reply_text = str((reply or {}).get("text") or "").strip()
+        _safe_reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
+        if not _safe_reply_text:
             no_reply_idempotency_key = f"{TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
@@ -2277,7 +2295,11 @@ async def _handle_telegram_gateway_channel_inbound(
                 gateway_id=gateway_id,
                 channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
                 provider=TELEGRAM_PERSONAL_PROVIDER,
-                detail="Automatic Telegram personal reply was skipped because Sage returned no reply.",
+                detail=(
+                    "Automatic Telegram personal reply was skipped because Sage returned no reply."
+                    if not _raw_reply_text
+                    else "Automatic Telegram personal reply was suppressed: a hardcoded status/error message may never reach a channel."
+                ),
                 metadata={"remote_jid": remote_jid, "inbound_external_message_id": external_message_id},
                 trace_id=trace_id,
                 idempotency_key=f"personal_channel.telegram.automatic_reply.skipped:{gateway_id}:{external_message_id}",
@@ -2290,7 +2312,7 @@ async def _handle_telegram_gateway_channel_inbound(
             agent_id=agent_id,
             idempotency_key=idempotency_key,
             remote_jid=remote_jid,
-            text=str(reply.get("text") or "").strip(),
+            text=_safe_reply_text,
             reply_to_external_message_id=external_message_id,
             metadata={"reply_source": str(reply.get("source") or "").strip() or None},
         )
@@ -2412,7 +2434,11 @@ async def _deliver_local_bridge_personal_reply(
             attachments=attachments,
             is_owner=is_owner,
         )
-        if not reply or not str(reply.get("text") or "").strip():
+        # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
+        # be sent into a channel (DM or group).
+        _raw_reply_text = str((reply or {}).get("text") or "").strip()
+        _safe_reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
+        if not _safe_reply_text:
             no_reply_idempotency_key = f"{no_reply_prefix}{external_message_id}"
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
@@ -2427,7 +2453,11 @@ async def _deliver_local_bridge_personal_reply(
                 gateway_id=gateway_id,
                 channel_key=channel_key,
                 provider=provider,
-                detail=f"Automatic {label} personal reply was skipped because Sage returned no reply.",
+                detail=(
+                    f"Automatic {label} personal reply was skipped because Sage returned no reply."
+                    if not _raw_reply_text
+                    else f"Automatic {label} personal reply was suppressed: a hardcoded status/error message may never reach a channel."
+                ),
                 metadata={"remote_jid": remote_jid, "inbound_external_message_id": external_message_id},
                 trace_id=trace_id,
                 idempotency_key=f"personal_channel.{channel_key}.automatic_reply.skipped:{gateway_id}:{external_message_id}",
@@ -2439,7 +2469,7 @@ async def _deliver_local_bridge_personal_reply(
             channel_key=channel_key,
             idempotency_key=idempotency_key,
             remote_jid=remote_jid,
-            text=str(reply.get("text") or "").strip(),
+            text=_safe_reply_text,
             reply_to_external_message_id=external_message_id,
             metadata={"reply_source": str(reply.get("source") or "").strip() or None},
         )
@@ -3274,7 +3304,12 @@ async def handle_cloud_channel_inbound(
         source_event_id=external_message_id,
     )
 
-    if not reply or not str(reply.get("text") or "").strip():
+    # ABSOLUTE RULE: no hardcoded platform status/error message may EVER be
+    # sent into a channel (DM or group) — filter_channel_outbound_reply()
+    # is the backstop regardless of what the bridge service returned.
+    _raw_reply_text = str((reply or {}).get("text") or "").strip()
+    reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
+    if not reply_text:
         return {
             "status": "no_reply",
             "session_id": session_id,
@@ -3282,7 +3317,6 @@ async def handle_cloud_channel_inbound(
         }
 
     # Dispatch the reply to the cloud session manager
-    reply_text = str(reply.get("text") or "").strip()
     dispatch_result = await dispatch_cloud_channel_outbound(
         session_id=session_id,
         text=reply_text,

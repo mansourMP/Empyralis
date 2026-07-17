@@ -1,22 +1,29 @@
 """
 Sage reply dispatcher — the SINGLE owner of ALL channel reliability logic.
 
-Every channel (Telegram, Discord, Slack, personal bridges, web) routes
-its outbound reply through dispatch_sage_reply().  This guarantees:
+Every channel (Telegram, Discord, Slack, personal bridges) routes its
+outbound reply through dispatch_sage_reply().  This guarantees:
 
-  - Guaranteed response (NEVER silence — fallback on empty/error/suppressed)
-  - Error classification (AI limit vs attention vs generic — ONE copy)
+  - No hardcoded status/error/failure message EVER reaches a channel (DM
+    or group) — on a turn error, quota denial, timeout, or empty result,
+    the channel gets NOTHING; the failure is logged and surfaced on the
+    dashboard/activity feed via durability_signal instead. See
+    channel_adapter.filter_channel_outbound_reply() and
+    platform_event.CHANNEL_SUPPRESSED_TEXTS.
   - Message splitting (at channel.max_message_length, paragraph-aware)
   - Typing lifecycle (start → AI turn → stop in finally)
   - Format fallback (formatted first, plain-text retry on parse error)
-  - [SILENT] suppression (via shared filter_outbound_reply)
 
 Architecture:
   Channel wrapper → dispatch_command() → dispatch_sage_reply()
-  → (typing + execute_sage_turn + classify + split + send)
+  → (typing + execute_sage_turn + filter + split + send)
 
 The channel wrapper owns: parse inbound, resolve workspace, resolve media.
 The dispatcher owns: EVERYTHING after that.
+
+Web chat is a SEPARATE path (sage_chat_api.py calls handle_sage_chat()
+directly) and is intentionally not routed through here — it may still show
+the user what went wrong.
 """
 
 from __future__ import annotations
@@ -27,12 +34,8 @@ import time
 from typing import Any, Optional
 
 from server_modules.channel_transport import ChannelTransport
-from server_modules.platform_event import GUARANTEED_FALLBACK
 
 _logger = logging.getLogger(__name__)
-
-# ── Shared constants ──
-_GUARANTEED_FALLBACK = GUARANTEED_FALLBACK.channel_text
 
 # ── Per-channel turn serialization ──────────────────────────────────────
 # Channel paths (Telegram, Discord, Slack, etc.) bypass the web session
@@ -206,12 +209,16 @@ async def dispatch_sage_reply(
       1. Typing indicator shown during AI processing
       2. execute_sage_turn() called (unified ingress)
       3. Typing stopped (in finally)
-      4. Error classified via classify_error()
-      5. Reply filtered via filter_outbound_reply()
-      6. If empty/suppressed → guaranteed fallback sent
-      7. Message auto-split at transport.max_message_length
-      8. Formatted first, plain-text retry on parse failure
-      9. NEVER returns without sending at least one message
+      4. Reply filtered via filter_channel_outbound_reply() — [SILENT]
+         markers AND any hardcoded platform status/error string are both
+         suppressed before anything is sent
+      5. If empty/error/suppressed → the channel gets NOTHING; the failure
+         is logged and surfaced on the dashboard/activity feed instead
+      6. Message auto-split at transport.max_message_length
+      7. Formatted first, plain-text retry on parse failure
+
+    Returns True only if a real, non-suppressed reply was actually
+    delivered — it does NOT guarantee a message is sent.
 
     Args:
         transport: Channel transport (Telegram, Discord, Slack, etc.)
@@ -230,7 +237,7 @@ async def dispatch_sage_reply(
         True if at least one message was sent to the user.
     """
     from server_modules.sage_turn_adapter import execute_sage_turn
-    from server_modules.channel_adapter import filter_outbound_reply
+    from server_modules.channel_adapter import filter_channel_outbound_reply
 
     sent_any = False
 
@@ -319,25 +326,65 @@ async def dispatch_sage_reply(
                 await transport.stop_typing()
 
     # ── Build reply from result ──
+    # ABSOLUTE RULE: no hardcoded platform status/error/failure message may
+    # EVER reach a channel — DM or group. filter_channel_outbound_reply()
+    # suppresses both [SILENT]/NO_REPLY markers AND any text matching a
+    # known platform status/error string (quota denial, provider failure,
+    # cli_subscription failure, the "nothing to say" fallback, etc.) —
+    # regardless of whether it arrived via result.error or embedded
+    # directly in result.message. On suppression the channel gets nothing;
+    # the failure is logged and surfaced on the dashboard/activity feed.
     reply = str(result.message or "").strip() if result else ""
-    setup_hint = _build_setup_hint(workspace_id)
+    channel_safe_reply = filter_channel_outbound_reply(reply) if reply else None
 
-    if reply and filter_outbound_reply(reply) is not None:
-        # Normal success path
-        await _send(reply, reply_to_id=reply_to_id)
+    from server_modules import durability_signal
+
+    attempted_real_send = False
+    if channel_safe_reply is not None:
+        attempted_real_send = True
+        await _send(channel_safe_reply, reply_to_id=reply_to_id)
     elif result and result.error:
-        # Error captured in result (not raised)
-        classified = classify_error(str(result.error), raw_error=str(result.error))
-        await _send(classified + setup_hint, reply_to_id=reply_to_id)
+        _logger.warning(
+            "dispatch_sage_reply: turn error suppressed from channel (workspace=%s channel=%s): %s",
+            workspace_id, channel_origin, result.error,
+        )
+        durability_signal.capture_durability_failure(
+            f"channel turn error suppressed for workspace={workspace_id} channel={channel_origin}",
+            workspace_id=workspace_id,
+            channel=channel_origin,
+            event_class="channel_error_suppressed",
+            action="turn_error",
+            summary=str(result.error)[:500],
+        )
+    elif reply:
+        # Non-empty reply, but it matched a known platform status/error
+        # string (e.g. TOOLS_LIMITED_NO_REPLY, a cli_subscription failure
+        # returned as a "successful" message with error=None) — still must
+        # never reach the channel.
+        _logger.warning(
+            "dispatch_sage_reply: status/error-flavored reply suppressed from channel (workspace=%s channel=%s)",
+            workspace_id, channel_origin,
+        )
+        durability_signal.capture_durability_failure(
+            f"channel status reply suppressed for workspace={workspace_id} channel={channel_origin}",
+            workspace_id=workspace_id,
+            channel=channel_origin,
+            event_class="channel_error_suppressed",
+            action="status_reply",
+            summary=reply[:500],
+        )
     else:
-        # GUARANTEED RESPONSE: reply empty with no error
-        await _send(_GUARANTEED_FALLBACK, reply_to_id=reply_to_id)
+        # Turn genuinely produced nothing and reported no error — stay
+        # silent rather than announce "no response could be produced".
+        _logger.info(
+            "dispatch_sage_reply: empty turn — nothing sent to channel (workspace=%s channel=%s)",
+            workspace_id, channel_origin,
+        )
 
-    # ── If STILL nothing sent (send primitives all failed after retries),
-    #    surface loudly: this is a channel-delivery dead-letter, not just a log ──
-    if not sent_any:
-        from server_modules import durability_signal
-
+    # ── If we HAD a legitimate reply and STILL nothing sent (send
+    #    primitives all failed after retries), surface loudly: this is a
+    #    genuine channel-delivery dead-letter, not intentional silence ──
+    if attempted_real_send and not sent_any:
         durability_signal.capture_durability_failure(
             f"channel reply delivery for workspace={workspace_id} channel={channel_origin}",
             workspace_id=workspace_id,
@@ -365,13 +412,15 @@ async def dispatch_sage_reply_safe(
     """Like dispatch_sage_reply() but catches ALL exceptions.
 
     Use this when the caller absolutely must not raise (e.g. webhook
-    handlers that need to return HTTP 200).  If the AI turn itself
-    throws, classify the exception and send the classified error reply.
+    handlers that need to return HTTP 200).
 
-    NEVER returns without sending at least one message.
+    ABSOLUTE RULE: no hardcoded status/error message may EVER reach a
+    channel. If the AI turn itself throws, the exception is logged and
+    surfaced on the dashboard/activity feed via durability_signal — the
+    channel receives NOTHING. This intentionally does NOT guarantee a
+    message is sent; it guarantees the caller never raises and the channel
+    never sees a canned error string.
     """
-    setup_hint = _build_setup_hint(workspace_id)
-
     try:
         return await dispatch_sage_reply(
             transport=transport,
@@ -387,25 +436,21 @@ async def dispatch_sage_reply_safe(
         )
     except Exception as exc:
         _logger.exception(
-            "dispatch_sage_reply_safe: unhandled exception for workspace=%s channel=%s",
+            "dispatch_sage_reply_safe: unhandled exception suppressed from channel (workspace=%s channel=%s)",
             workspace_id, channel_origin,
         )
 
-        # ── Last-resort: classify + send via transport directly ──
-        classified = classify_error(str(exc), raw_error=str(exc))
-        text = classified + setup_hint
+        from server_modules import durability_signal
 
-        sent = False
-        try:
-            chunks = split_long_message(text, transport.max_message_length)
-            for chunk in chunks:
-                if await _send_one_chunk(transport, chunk, reply_to_id=reply_to_id):
-                    sent = True
-        except Exception:
-            _logger.critical(
-                "dispatch_sage_reply_safe: even last-resort send failed for workspace=%s channel=%s",
-                workspace_id, channel_origin,
-            )
+        durability_signal.capture_durability_failure(
+            f"dispatch_sage_reply_safe unhandled exception for workspace={workspace_id} channel={channel_origin}",
+            exc,
+            workspace_id=workspace_id,
+            channel=channel_origin,
+            event_class="channel_error_suppressed",
+            action="unhandled_exception",
+            summary=str(exc)[:500],
+        )
 
         # ── Stop typing on exception (typing may not have stopped if
         #     the exception happened before the try/finally in dispatch) ──
@@ -415,4 +460,4 @@ async def dispatch_sage_reply_safe(
             except Exception:
                 pass
 
-        return sent
+        return False

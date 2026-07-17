@@ -732,19 +732,28 @@ class TelegramIngressService:
                 workspace_id=resolved_workspace_id,
             )
         except _entitlements_module().EntitlementDeniedError as exc:
-            if chat_id:
-                self.send_message(
-                    bot_token=bot_token,
-                    chat_id=chat_id,
-                    text=str(exc.message or "Telegram access is not included in this workspace plan."),
-                    workspace_id=resolved_workspace_id,
-                    action=str(exc.reason or "telegram_channel_unavailable"),
-                    connector_id=connector_id,
-                    parent_message_id=inbound_message_id or None,
-                    profile=profile,
-                    trace_id=f"tgent:{chat_id}:{int(envelope.get('update_id') or 0)}",
-                    source_event_id=None,
-                )
+            # ABSOLUTE RULE: no hardcoded status/error message may EVER be
+            # sent into a channel (DM or group) — an entitlement/plan denial
+            # is exactly this class of message. Log it to the activity feed
+            # only, same pattern whatsapp_ingress_service.py already uses
+            # for the identical EntitlementDeniedError — the channel gets
+            # nothing.
+            self.record_channel_event(
+                channel="telegram",
+                direction="system",
+                event_type="error",
+                text=str(exc.message or "Telegram access is not included in this workspace plan."),
+                workspace_id=resolved_workspace_id,
+                session_key=chat_id,
+                session_id=chat_id,
+                parent_id=inbound_message_id or None,
+                action="entitlement_denied",
+                metadata={
+                    "connector_id": connector_id,
+                    "reason": str(exc.reason or "telegram_channel_unavailable"),
+                    "update_id": int(envelope.get("update_id") or 0),
+                },
+            )
             return {
                 "handled": True,
                 "processed": False,

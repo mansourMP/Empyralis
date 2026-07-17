@@ -7,7 +7,6 @@ import logging as _logging
 _logger = _logging.getLogger(__name__)
 
 from server_modules.sage_command_dispatcher import (  # noqa: E402
-    SAGE_ERROR_REPLY,
     classify_error,
 )
 from server_modules.error_notification import classify_error_notification  # noqa: E402
@@ -23,11 +22,44 @@ def _build_error_reply_dict(
     *,
     extra: dict | None = None,
 ) -> dict:
-    """Build a classified error return dict with notification payload."""
+    """Build a SILENT error result for a personal channel turn.
+
+    ABSOLUTE RULE: no hardcoded status/error message may EVER be sent into
+    a channel (DM or group). "text" is intentionally left empty here — every
+    caller in personal_channels_service.py already treats an empty "text" as
+    "no reply" and skips the channel send (marking the inbound message
+    processed with an audit event, status="skipped"). The classified message
+    is kept under "error_text"/"notification" for logging and any future
+    dashboard rendering only — callers must never resurrect a channel-bound
+    string from those keys.
+
+    The failure itself is still logged (server logs) and surfaced loudly via
+    durability_signal (dashboard/activity feed) so it isn't silently lost —
+    it just never reaches the human on the other end of the channel.
+    """
     _exc_str = str(exc)
+    _classified = classify_error(_exc_str, raw_error=_exc_str)
+    _logger.warning(
+        "personal channel turn failed for workspace=%s — suppressed from channel: %s",
+        workspace_id, _exc_str,
+    )
+    try:
+        from server_modules import durability_signal
+
+        durability_signal.capture_durability_failure(
+            f"personal channel turn error suppressed for workspace={workspace_id}",
+            exc,
+            workspace_id=workspace_id,
+            event_class="channel_error_suppressed",
+            action="turn_error",
+            summary=_exc_str[:500],
+        )
+    except Exception:
+        pass
     result: dict = {
-        "text": classify_error(_exc_str, raw_error=_exc_str),
+        "text": "",
         "source": "error_classifier",
+        "error_text": _classified,
         "notification": classify_error_notification(
             _exc_str, raw_error=_exc_str,
         ).as_dict(),
@@ -479,23 +511,14 @@ async def build_whatsapp_personal_reply_async(
         )
         return unified
     except Exception as _exc:
-        _logger.warning(
-            "WhatsApp turn failed for workspace=%s: %s",
-            workspace_id, _exc
-        )
-        # Try cloud-session dispatch if available (same pattern as Telegram),
-        # otherwise return classified error for Gateway delivery.
-        _session_id = str(gateway_id or "").replace("cloud:", "", 1).strip()
-        if _session_id and remote_jid:
-            try:
-                from server_modules.personal_channels_service import dispatch_cloud_channel_outbound as _cs_dispatch
-                await _cs_dispatch(
-                    session_id=_session_id,
-                    text=classify_error(str(_exc), raw_error=str(_exc)),
-                    remote_jid=remote_jid,
-                )
-            except Exception:
-                pass
+        # ABSOLUTE RULE: no hardcoded status/error message may EVER be sent
+        # into a channel. This used to also fire a direct cloud-session
+        # dispatch of the classified error text — that bypassed every
+        # reply object and every filter and sent a canned string straight
+        # into the channel (DM or group). _build_error_reply_dict() below
+        # already logs + surfaces this on the dashboard/activity feed and
+        # returns text="" so the caller treats it as no-reply. Do not
+        # resurrect a channel send here.
         return _build_error_reply_dict(_exc, workspace_id)
 
 
@@ -523,22 +546,13 @@ async def build_telegram_personal_reply_async(
         )
         return unified
     except Exception as _exc:
-        _logger.warning(
-            "CSM turn failed for workspace=%s: %s",
-            workspace_id, _exc
-        )
-        # Extract session_id from gateway_id (format: "cloud:{session_id}")
-        _session_id = str(gateway_id or "").replace("cloud:", "", 1).strip()
-        if _session_id and remote_jid:
-            try:
-                from server_modules.personal_channels_service import dispatch_cloud_channel_outbound as _cs_dispatch
-                await _cs_dispatch(
-                    session_id=_session_id,
-                    text=SAGE_ERROR_REPLY,
-                    remote_jid=remote_jid,
-                )
-            except Exception:
-                pass
+        # ABSOLUTE RULE: no hardcoded status/error message may EVER be sent
+        # into a channel. This used to also fire a direct cloud-session
+        # dispatch of SAGE_ERROR_REPLY — that bypassed every reply object
+        # and every filter and sent a canned string straight into the
+        # channel (DM or group). Log + surface on the dashboard/activity
+        # feed instead; the channel gets nothing.
+        _build_error_reply_dict(_exc, workspace_id)
         return None
 
 

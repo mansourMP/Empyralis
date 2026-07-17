@@ -721,3 +721,57 @@ RUN_SUMMARY_MAP: dict[str, PlatformEvent] = {
     "run_timeout": RUN_TIMEOUT,
     "scope_missing": AI_SCOPE_MISSING,
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Channel suppression — which PlatformEvents may ever reach a channel
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# ABSOLUTE RULE (2026-07-18 incident): no hardcoded status/error/failure
+# message may EVER be sent into a channel — Telegram, WhatsApp, Discord,
+# Signal, iMessage, WeChat, Slack, DM or GROUP. On any turn error, quota
+# denial, entitlement block, or timeout, the channel gets NOTHING; the
+# failure is logged and surfaced on the dashboard/activity feed only. Web
+# chat / dashboard surfaces are exempt from this — they may still render
+# these events as UI cards (see PlatformEvent.to_intervention()).
+#
+# Default posture is DENY: every PlatformEvent defined in this module is
+# channel-suppressed UNLESS its code is explicitly listed in
+# CHANNEL_SAFE_CODES below. That allowlist holds ONLY direct responses to
+# an explicit user command (/compact, /new, /main, /memory, /help) — never
+# a failure/degradation notice. A new PlatformEvent added later is
+# suppressed in channels by default until someone deliberately allowlists
+# it — silence-by-default, not leak-by-default.
+#
+# See server_modules.channel_adapter.filter_channel_outbound_reply(), the
+# single choke point that applies this suppression at every channel send.
+
+CHANNEL_SAFE_CODES: frozenset[str] = frozenset({
+    SAGE_COMPACTED.code,
+    SAGE_COMPACT_NOT_NEEDED.code,
+    SAGE_NEW_SESSION.code,
+    SAGE_MAIN_RETURN.code,
+    SAGE_NO_MEMORIES.code,
+    SAGE_HELP.code,
+})
+
+
+def _all_platform_events() -> tuple[PlatformEvent, ...]:
+    return tuple(value for value in globals().values() if isinstance(value, PlatformEvent))
+
+
+# Rendered channel_text -> suppressed. Matched on the rendered string
+# (rather than the originating PlatformEvent object) because most call
+# sites only have the string left by the time they reach the channel-send
+# boundary — the object identity is long gone.
+CHANNEL_SUPPRESSED_TEXTS: frozenset[str] = frozenset(
+    event.channel_text.strip()
+    for event in _all_platform_events()
+    if event.code not in CHANNEL_SAFE_CODES and event.channel_text.strip()
+)
+
+
+def is_channel_suppressed_text(text: str) -> bool:
+    """True if *text* is a hardcoded platform status/error string that must
+    never reach a channel send — see the module docstring above."""
+    return str(text or "").strip() in CHANNEL_SUPPRESSED_TEXTS

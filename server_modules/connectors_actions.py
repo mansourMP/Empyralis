@@ -6,6 +6,7 @@ from server_modules import runtime_config as config
 from server_modules import secrets_broker, tool_broker
 from server_modules import shared as shared
 from server_modules import runtime_common as common
+from server_modules.channel_adapter import filter_channel_outbound_reply
 from server_modules.connectors.github_connector import (
     build_run_goal_from_event as github_build_run_goal_from_event,
     event_matches_connector as github_event_matches_connector,
@@ -1197,11 +1198,25 @@ async def slack_events_webhook(request: Request):
                 # route_inbound_channel_message already ran the agent turn and
                 # computed a real reply — previously nothing sent it back to
                 # Slack (the agent answered, the customer just never saw it).
-                reply_text = str(route_payload.get("reply") or "").strip()
+                # ABSOLUTE RULE: no hardcoded platform status/error message
+                # may EVER be sent into a channel — Slack channels are
+                # inherently multi-person. filter_channel_outbound_reply()
+                # catches a status/error string smuggled in as a
+                # "successful" reply (route_inbound_channel_message never
+                # surfaces result.error on its success path).
+                reply_text = filter_channel_outbound_reply(route_payload.get("reply"))
                 if reply_text:
                     try:
                         slack_send_channel_message(secret, channel_id, reply_text)
                     except Exception as exc:
+                        # Pre-existing bug fixed in passing: `logging` was
+                        # referenced here with no import in scope, so a send
+                        # failure raised NameError instead of just logging a
+                        # warning — crashing the whole webhook handler (caught
+                        # by the outer except → HTTP 400) instead of
+                        # continuing to the next connector row.
+                        import logging
+
                         logging.getLogger(__name__).warning(
                             "slack_events_webhook: reply send failed for channel=%s: %s", channel_id, exc
                         )
@@ -1364,7 +1379,6 @@ async def discord_webhook(request: Request):
                 try:
                     from server_modules.sage_command_dispatcher import dispatch_command
                     from server_modules.sage_turn_adapter import execute_sage_turn
-                    from server_modules.channel_adapter import filter_outbound_reply
 
                     _dm_user_id = str(parsed.get("user_id") or "").strip()
                     _dm_text = str(parsed.get("text") or "").strip()
@@ -1395,7 +1409,9 @@ async def discord_webhook(request: Request):
                         )
                         _sage_reply = str(_sage_result.message or "").strip()
                         if _sage_reply:
-                            _filtered = filter_outbound_reply(_sage_reply)
+                            # ABSOLUTE RULE: no hardcoded platform status/error
+                            # message may EVER be sent into a channel.
+                            _filtered = filter_channel_outbound_reply(_sage_reply)
                             if _filtered:
                                 discord_send_dm(
                                     credentials=dict(secret),
@@ -1441,14 +1457,20 @@ async def discord_webhook(request: Request):
                 if not triggered_run_id:
                     triggered_run_id = str(route_payload.get("run_id") or "").strip()
                 if not triggered_reply:
-                    triggered_reply = str(route_payload.get("reply") or "").strip()
+                    # ABSOLUTE RULE: no hardcoded platform status/error
+                    # message may EVER be sent into a channel — an
+                    # interaction response is still a message the bot posts
+                    # into the channel/DM, even when ephemeral (flags=64).
+                    triggered_reply = filter_channel_outbound_reply(route_payload.get("reply")) or ""
                 # Interactions reply via the type:4 response below (Discord's
                 # own mechanism for that request shape) — but a plain guild
                 # MESSAGE_CREATE ("event") has no such response channel, so the
                 # agent's real, already-computed reply was previously just
                 # discarded here. Send it as a normal channel message.
                 if parsed.get("kind") != "interaction":
-                    reply_text = str(route_payload.get("reply") or "").strip()
+                    # Discord GUILD channels are inherently multi-person —
+                    # same absolute rule applies.
+                    reply_text = filter_channel_outbound_reply(route_payload.get("reply"))
                     channel_id = str(parsed.get("channel_id") or "").strip()
                     if reply_text and channel_id:
                         try:

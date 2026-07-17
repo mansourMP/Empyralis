@@ -164,9 +164,12 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         self.assertEqual(result["trace_id"], "trace-smoke-1")
         self.assertEqual(result["text"], "unified sage reply")
 
-    def test_whatsapp_async_exception_returns_classified_error(self) -> None:
-        """On exception, build_whatsapp_personal_reply_async returns
-        classified error text, not None."""
+    def test_whatsapp_async_exception_returns_silent_text_with_classification_logged_only(self) -> None:
+        """ABSOLUTE RULE (2026-07-18 incident): on exception, text must be
+        empty — a classified error string must never be sendable into a
+        channel. The classification survives only under error_text (for
+        logging/dashboard use), never under "text" (the field every
+        delivery call site treats as sendable)."""
         async def run_case():
             with patch(
                 "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
@@ -182,13 +185,13 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
 
         result = asyncio.run(run_case())
         self.assertIsNotNone(result)
-        self.assertIsNotNone(result["text"])
-        self.assertIn("rate limited", str(result["text"]).lower())
+        self.assertEqual(result["text"], "")
+        self.assertIn("rate limited", str(result["error_text"]).lower())
         self.assertEqual(result["source"], "error_classifier")
 
-    def test_discord_async_exception_returns_classified_error(self) -> None:
-        """On exception, build_discord_personal_reply_async returns
-        classified error text, not None."""
+    def test_discord_async_exception_returns_silent_text_with_classification_logged_only(self) -> None:
+        """ABSOLUTE RULE: on exception, text must be empty, never a
+        classified error string that a DM/channel send site could deliver."""
         async def run_case():
             with patch(
                 "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
@@ -203,13 +206,16 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
 
         result = asyncio.run(run_case())
         self.assertIsNotNone(result)
-        self.assertIsNotNone(result["text"])
-        self.assertIn("authentication", str(result["text"]).lower())
+        self.assertEqual(result["text"], "")
+        # Pre-existing assertion bug fixed in passing: classify_error's
+        # 401/"unauthorized" bucket (is_platform_credits defaults True)
+        # actually renders as "needs attention", not "authentication".
+        self.assertIn("needs attention", str(result["error_text"]).lower())
         self.assertEqual(result["source"], "error_classifier")
 
-    def test_personal_channel_async_exception_returns_classified_error(self) -> None:
-        """On exception, build_personal_channel_reply_async returns
-        classified error text for Gateway delivery."""
+    def test_personal_channel_async_exception_returns_silent_text_with_classification_logged_only(self) -> None:
+        """ABSOLUTE RULE: on exception, text must be empty, never a
+        classified error string forwarded for Gateway delivery."""
         async def run_case():
             with patch(
                 "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
@@ -226,8 +232,8 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
 
         result = asyncio.run(run_case())
         self.assertIsNotNone(result)
-        self.assertIsNotNone(result["text"])
-        self.assertIn("unreachable", str(result["text"]).lower())
+        self.assertEqual(result["text"], "")
+        self.assertIn("unreachable", str(result["error_text"]).lower())
         self.assertEqual(result["source"], "error_classifier")
 
 

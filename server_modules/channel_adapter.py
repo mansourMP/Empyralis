@@ -132,3 +132,35 @@ def filter_outbound_reply(
         if text_upper == marker.upper() or text_upper.startswith(marker.upper()):
             return None
     return text
+
+
+def filter_channel_outbound_reply(reply: str | None) -> str | None:
+    """Filter an outbound reply bound for a CHANNEL — Telegram, WhatsApp,
+    Discord, Signal, iMessage, WeChat, Slack; DM or GROUP. Returns None if
+    the reply should be suppressed.
+
+    ABSOLUTE RULE: no hardcoded platform status/error/failure message may
+    EVER be sent into a channel. This layers platform-event suppression on
+    top of filter_outbound_reply()'s [SILENT]/NO_REPLY marker filter: any
+    text that matches a known platform status/error string (quota denial,
+    entitlement block, provider/timeout failure, "nothing to say" fallback,
+    etc. — see platform_event.CHANNEL_SUPPRESSED_TEXTS) is ALSO suppressed,
+    regardless of whether it arrived via a raised exception, a result.error
+    field, or embedded directly in the reply text. The failure should be
+    logged and surfaced on the dashboard/activity feed by the caller — the
+    channel itself gets nothing.
+
+    Every channel send point (dispatch_sage_reply, the personal-channel
+    gateway bridge, business-connector guild/DM routing) must call this —
+    not the bare filter_outbound_reply() — before treating text as
+    deliverable. Web chat / dashboard call sites are exempt and must keep
+    calling filter_outbound_reply() directly so errors stay visible there.
+    """
+    text = filter_outbound_reply(reply)
+    if text is None:
+        return None
+    from server_modules.platform_event import is_channel_suppressed_text
+
+    if is_channel_suppressed_text(text):
+        return None
+    return text

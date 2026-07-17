@@ -971,6 +971,7 @@ async def _handle_dm_via_gateway(message: Any) -> None:
         return
 
     _reply: str = ""
+    _workspace_id: str = ""
     try:
         # ── /pair <code> — link Discord user to workspace ──
         _pair_match = re.match(r"^/pair\s+(\S+)", _text)
@@ -1039,13 +1040,35 @@ async def _handle_dm_via_gateway(message: Any) -> None:
             )
             _raw = str(_result.message or "").strip()
             if _raw:
-                from server_modules.channel_adapter import filter_outbound_reply as _filt
+                # ABSOLUTE RULE: no hardcoded platform status/error message
+                # may EVER be sent into a channel. filter_channel_outbound_reply
+                # (not the bare filter_outbound_reply) also catches a
+                # status/error string smuggled in as a "successful" reply
+                # (e.g. TOOLS_LIMITED_NO_REPLY, a cli_subscription failure).
+                from server_modules.channel_adapter import filter_channel_outbound_reply as _filt
                 _reply = _filt(_raw) or ""
     except Exception as _exc:
         _hdlr_log.getLogger("discord_bot").warning(
-            "DM gateway handler failed: %s", _exc
+            "DM gateway handler failed for workspace=%s: %s", _workspace_id, _exc
         )
-        _reply = "Something went wrong. Please try again."
+        # ABSOLUTE RULE: no hardcoded status/error message may EVER be sent
+        # into a channel — log + surface on the dashboard/activity feed,
+        # but the DM gets nothing (never "Something went wrong...").
+        try:
+            from server_modules import durability_signal
+
+            durability_signal.capture_durability_failure(
+                f"discord DM turn error suppressed for workspace={_workspace_id}",
+                _exc,
+                workspace_id=_workspace_id,
+                channel="discord_personal",
+                event_class="channel_error_suppressed",
+                action="turn_error",
+                summary=str(_exc)[:500],
+            )
+        except Exception:
+            pass
+        _reply = ""
 
     if _reply:
         try:
