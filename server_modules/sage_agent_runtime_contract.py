@@ -62,6 +62,14 @@ class SageTurnResult:
     provider: str = ""
     model: Optional[str] = None
     ai_setup_url: str = ""
+    # Outbound attachments (image/voice/audio/video/file) the turn wants sent
+    # alongside `message` — populated by the send_image tool and by
+    # generate_image's channel-context auto-attach (see skills_service.py's
+    # execute_single_direct_tool_call). Each item is shaped
+    # {kind, source_path|source_url, mime_type?, caption?, as_voice?},
+    # matching gateway_protocol_service.dispatch_channel_outbound's media
+    # contract. Empty for every turn that never called a media-producing tool.
+    media: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -79,6 +87,7 @@ class SageTurnResult:
             "provider": self.provider,
             "model": self.model,
             "ai_setup_url": self.ai_setup_url,
+            "media": list(self.media),
         }
 
 

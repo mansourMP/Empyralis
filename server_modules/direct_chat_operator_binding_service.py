@@ -240,6 +240,8 @@ def parse_tool_name(tool_name: str) -> tuple[str, str]:
         return "http", "request"
     if token == "generate_image":
         return "image", "generate"
+    if token == "send_image":
+        return "messaging", "send_image"
     if token == "memory_search":
         return "memory", "search"
     if token == "memory_read":

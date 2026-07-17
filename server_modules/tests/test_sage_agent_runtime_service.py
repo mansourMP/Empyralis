@@ -780,6 +780,64 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
         self.assertEqual(stream_kwargs["session_ctx"]["agent_turn_request"]["policy_context"]["agent_scope"], "sage")
         self.assertEqual(stream_kwargs["session_ctx"]["agent_turn_request"]["policy_context"]["agent_id"], "sage_main_agent")
 
+    def test_main_sage_chat_surfaces_media_queued_by_a_tool_call(self):
+        """End-to-end plumbing proof: a tool call that appends to
+        session_ctx["pending_outbound_media"] (exactly what
+        skills_service.execute_single_direct_tool_call's send_image handler
+        and generate_image's auto-attach do — see
+        _run_sage_action_loop_v3's session_ctx construction) must surface as
+        handle_sage_chat's "media" response key. The real tool executor
+        isn't invoked here (stream_provider_backed_direct_chat is mocked, as
+        in test_main_sage_chat_executes_web_search_tool above) — this test's
+        side_effect stands in for it by mutating the SAME session_ctx object
+        the mock receives, the same way the real executor does via the
+        ThreadPoolExecutor hop in direct_chat_generation_service.py."""
+        media_item = {"kind": "image", "source_path": "/tmp/fox.png", "mime_type": "image/png"}
+        stream_events = [
+            self._trace(
+                "tool.started",
+                tool_call_id="call-send-image-1",
+                data={"tool_name": "send_image", "args_preview": {"path_or_url": "/tmp/fox.png"}},
+            ),
+            self._trace(
+                "tool.result",
+                tool_call_id="call-send-image-1",
+                data={"status": "ok", "summary": "Queued image to send: /tmp/fox.png"},
+            ),
+            {"type": "final", "payload": {"reply": "Sent!", "actions": [], "error": ""}},
+        ]
+
+        def _fake_stream(*_args, **kwargs):
+            session_ctx = kwargs.get("session_ctx")
+            self.assertIsInstance(session_ctx, dict)
+            self.assertEqual(session_ctx.get("pending_outbound_media"), [])
+            session_ctx["pending_outbound_media"].append(media_item)
+            return iter(stream_events)
+
+        with (
+            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
+            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback"),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", side_effect=_fake_stream),
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            result = _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1",
+                message="send me that fox picture",
+                channel_origin="whatsapp_personal",
+            ))
+
+        self.assertEqual(result["message"], "Sent!")
+        self.assertEqual(result["media"], [media_item])
+
     def test_main_sage_chat_operator_loop_does_not_block_backend_event_loop(self):
         stream_events = [
             {"type": "final", "payload": {"reply": "done", "actions": [], "error": ""}},
@@ -1328,6 +1386,38 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             self.assertEqual(len(failed_calls), 1)
             self.assertEqual(failed_calls[0].kwargs.get("status"), "failed")
             self.assertTrue(str(failed_calls[0].kwargs.get("trace_id") or "").strip())
+
+
+class SanitizeAgentReplySendImageTests(unittest.TestCase):
+    """send_image's leaked-tool-call sanitization — previously missing from
+    _KNOWN_TOOL_PREFIXES, so a model that leaked raw
+    'send_image(path_or_url="...")'-shaped text into its reply (instead of
+    a real tool call) would ship that syntax straight to the user in the
+    chat. generate_image was already covered before this fix; send_image
+    was not."""
+
+    def test_known_tool_prefixes_includes_send_image(self):
+        self.assertIn("send_image", sage_agent_runtime_service._KNOWN_TOOL_PREFIXES)
+
+    def test_sanitizes_leaked_parenthesized_call(self):
+        leaked = 'Sure, one sec.\nsend_image(path_or_url="fox.png", caption="here")\nAll done!'
+        cleaned = sage_agent_runtime_service.sanitize_agent_reply(leaked)
+        self.assertNotIn("send_image(", cleaned)
+        self.assertIn("Sure, one sec.", cleaned)
+        self.assertIn("All done!", cleaned)
+
+    def test_sanitizes_leaked_space_separated_call(self):
+        leaked = 'Here you go.\nsend_image path_or_url="fox.png"\nEnjoy!'
+        cleaned = sage_agent_runtime_service.sanitize_agent_reply(leaked)
+        self.assertNotIn("send_image", cleaned)
+        self.assertIn("Here you go.", cleaned)
+        self.assertIn("Enjoy!", cleaned)
+
+    def test_real_prose_mentioning_send_image_is_untouched(self):
+        # Sanity check against over-eager stripping: a normal sentence that
+        # happens to contain the word "image" must survive intact.
+        clean_text = "I generated an image and sent it over — let me know if you want another."
+        self.assertEqual(sage_agent_runtime_service.sanitize_agent_reply(clean_text), clean_text)
 
 
 class SageTaskRouteDecisionTests(unittest.TestCase):

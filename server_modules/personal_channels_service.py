@@ -282,6 +282,7 @@ class _WhatsAppPersonalChannelHandler(PersonalChannelHandler):
         text: str,
         idempotency_key: str,
         reply_to_external_message_id: Optional[str] = None,
+        media: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         return await send_whatsapp_personal_message(
             gateway_id=gateway_id,
@@ -290,6 +291,7 @@ class _WhatsAppPersonalChannelHandler(PersonalChannelHandler):
             text=text,
             idempotency_key=idempotency_key,
             reply_to_external_message_id=reply_to_external_message_id,
+            media=media,
         )
 
     def get_view(self, gateway_id: str) -> Dict[str, Any]:
@@ -378,6 +380,7 @@ class _TelegramPersonalChannelHandler(PersonalChannelHandler):
         text: str,
         idempotency_key: str,
         reply_to_external_message_id: Optional[str] = None,
+        media: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         return await send_telegram_personal_message(
             gateway_id=gateway_id,
@@ -386,6 +389,7 @@ class _TelegramPersonalChannelHandler(PersonalChannelHandler):
             text=text,
             idempotency_key=idempotency_key,
             reply_to_external_message_id=reply_to_external_message_id,
+            media=media,
         )
 
     def get_view(self, gateway_id: str) -> Dict[str, Any]:
@@ -480,6 +484,7 @@ class _LocalBridgePersonalChannelHandler(PersonalChannelHandler):
         text: str,
         idempotency_key: str,
         reply_to_external_message_id: Optional[str] = None,
+        media: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         return await send_local_bridge_personal_message(
             gateway_id=gateway_id,
@@ -490,6 +495,7 @@ class _LocalBridgePersonalChannelHandler(PersonalChannelHandler):
             text=text,
             idempotency_key=idempotency_key,
             reply_to_external_message_id=reply_to_external_message_id,
+            media=media,
         )
 
     def get_view(self, gateway_id: str) -> Dict[str, Any]:
@@ -1857,7 +1863,11 @@ async def _deliver_whatsapp_personal_reply(
             attachments=attachments,
             is_owner=is_owner,
         )
-        if not reply or not str(reply.get("text") or "").strip():
+        reply_media = list((reply or {}).get("media") or [])
+        # A media-only reply (send_image/generate_image queued an attachment
+        # but the model had nothing more to say) still has something to
+        # deliver — only skip when there is genuinely neither text nor media.
+        if not reply or (not str(reply.get("text") or "").strip() and not reply_media):
             no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
@@ -1888,7 +1898,10 @@ async def _deliver_whatsapp_personal_reply(
             remote_jid=remote_jid,
             text=str(reply.get("text") or "").strip(),
             reply_to_external_message_id=external_message_id,
-            metadata={"reply_source": str(reply.get("source") or "").strip() or None},
+            metadata={
+                "reply_source": str(reply.get("source") or "").strip() or None,
+                "media": reply_media or None,
+            },
         )
 
     if str(outbound.get("status") or "").strip() == "delivered":
@@ -1919,6 +1932,11 @@ async def _deliver_whatsapp_personal_reply(
         # as robotic on Telegram/WhatsApp. An explicit "reply to X" send
         # (send_whatsapp_personal_message) still honors a caller-supplied id.
         reply_to_external_message_id=None,
+        # Read back from the stored outbound row (not the `reply` var above)
+        # so this also carries media on the idempotent-replay path, where
+        # `outbound` came from get_outbound_message() and `reply` was never
+        # rebuilt this call.
+        media=list((outbound.get("metadata") or {}).get("media") or []),
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
@@ -2260,7 +2278,11 @@ async def _handle_telegram_gateway_channel_inbound(
             attachments=attachments,
             is_owner=bool(dm_decision.get("is_owner")),
         )
-        if not reply or not str(reply.get("text") or "").strip():
+        reply_media = list((reply or {}).get("media") or [])
+        # A media-only reply (send_image/generate_image queued an attachment
+        # but the model had nothing more to say) still has something to
+        # deliver — only skip when there is genuinely neither text nor media.
+        if not reply or (not str(reply.get("text") or "").strip() and not reply_media):
             no_reply_idempotency_key = f"{TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
@@ -2291,7 +2313,10 @@ async def _handle_telegram_gateway_channel_inbound(
             remote_jid=remote_jid,
             text=str(reply.get("text") or "").strip(),
             reply_to_external_message_id=external_message_id,
-            metadata={"reply_source": str(reply.get("source") or "").strip() or None},
+            metadata={
+                "reply_source": str(reply.get("source") or "").strip() or None,
+                "media": reply_media or None,
+            },
         )
 
     if str(outbound.get("status") or "").strip() == "delivered":
@@ -2322,6 +2347,11 @@ async def _handle_telegram_gateway_channel_inbound(
         # as robotic on Telegram/WhatsApp. An explicit "reply to X" send
         # (send_telegram_personal_message) still honors a caller-supplied id.
         reply_to_external_message_id=None,
+        # Read back from the stored outbound row (not the `reply` var above)
+        # so this also carries media on the idempotent-replay path, where
+        # `outbound` came from get_outbound_message() and `reply` was never
+        # rebuilt this call.
+        media=list((outbound.get("metadata") or {}).get("media") or []),
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),
@@ -2411,7 +2441,11 @@ async def _deliver_local_bridge_personal_reply(
             attachments=attachments,
             is_owner=is_owner,
         )
-        if not reply or not str(reply.get("text") or "").strip():
+        reply_media = list((reply or {}).get("media") or [])
+        # A media-only reply (send_image/generate_image queued an attachment
+        # but the model had nothing more to say) still has something to
+        # deliver — only skip when there is genuinely neither text nor media.
+        if not reply or (not str(reply.get("text") or "").strip() and not reply_media):
             no_reply_idempotency_key = f"{no_reply_prefix}{external_message_id}"
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
@@ -2440,7 +2474,10 @@ async def _deliver_local_bridge_personal_reply(
             remote_jid=remote_jid,
             text=str(reply.get("text") or "").strip(),
             reply_to_external_message_id=external_message_id,
-            metadata={"reply_source": str(reply.get("source") or "").strip() or None},
+            metadata={
+                "reply_source": str(reply.get("source") or "").strip() or None,
+                "media": reply_media or None,
+            },
         )
 
     if str(outbound.get("status") or "").strip() == "delivered":
@@ -2470,6 +2507,11 @@ async def _deliver_local_bridge_personal_reply(
         # as robotic. An explicit "reply to X" send
         # (send_local_bridge_personal_message) still honors a caller-supplied id.
         reply_to_external_message_id=None,
+        # Read back from the stored outbound row (not the `reply` var above)
+        # so this also carries media on the idempotent-replay path, where
+        # `outbound` came from get_outbound_message() and `reply` was never
+        # rebuilt this call.
+        media=list((outbound.get("metadata") or {}).get("media") or []),
     )
     delivered = personal_channels_repository.mark_outbound_delivered(
         gateway_id=str(gateway_id or "").strip(),

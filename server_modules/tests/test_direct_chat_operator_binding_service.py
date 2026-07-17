@@ -102,6 +102,11 @@ class DirectChatOperatorBindingServiceTests(unittest.TestCase):
         self.assertEqual(service.parse_tool_name("memory_list_versions"), ("memory", "list_versions"))
         self.assertEqual(service.parse_tool_name("memory_rollback_version"), ("memory", "rollback_version"))
         self.assertEqual(service.parse_tool_name("telegram__send"), ("telegram", "send"))
+        # send_image has no "__" separator (like generate_image before it) so
+        # it needs its own explicit branch — without one it falls through to
+        # the "__" split and raises "Unsupported direct chat tool 'send_image'"
+        # before skills_service.execute_single_direct_tool_call ever sees it.
+        self.assertEqual(service.parse_tool_name("send_image"), ("messaging", "send_image"))
 
     def test_build_direct_tool_execution_callbacks_reads_underscored_namespace(self) -> None:
         callbacks = service.build_direct_tool_execution_callbacks(

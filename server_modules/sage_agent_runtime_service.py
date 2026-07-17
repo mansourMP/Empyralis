@@ -1755,7 +1755,7 @@ def _normalized_sage_action_loop_message(message: str, prior_messages: list[dict
 _KNOWN_TOOL_PREFIXES = (
     "memory_", "browser__", "computer__", "file__", "shell__",
     "screenshot__", "hardware__", "web__", "sage_service__",
-    "http_request", "generate_image", "llm__task",
+    "http_request", "generate_image", "llm__task", "send_image",
 )
 
 
@@ -2681,6 +2681,7 @@ async def _run_sage_action_loop_v3(
             "raw_final_payload": {},
             "trace_events": [],
             "tool_progress_messages": [],
+            "media": [],
         }
 
     _specialist_toolset = None
@@ -2784,6 +2785,16 @@ async def _run_sage_action_loop_v3(
             "channel_origin": channel_origin or "sage",
         },
         "sender_id": actor_user_id or "",
+        # Outbound-media accumulator: send_image and generate_image's
+        # channel-context auto-attach (skills_service.py's
+        # execute_single_direct_tool_call) append media items here as they
+        # run. session_ctx is threaded BY REFERENCE all the way down to the
+        # tool executor (same dict object, across the ThreadPoolExecutor hop
+        # in direct_chat_generation_service.py — CPython threads share
+        # memory, so a mutation there is visible here once the loop below
+        # returns). Read back after the loop completes; never reassigned,
+        # only appended to, so the reference stays valid across the hop.
+        "pending_outbound_media": [],
         "agent_turn_request": {
             "tenant_id": tenant_id or "default",
             "workspace_id": workspace_id,
@@ -2854,6 +2865,14 @@ async def _run_sage_action_loop_v3(
         ),
     )
     if daily_operator_result is not None:
+        # Daily-operator recipes execute tools through the same session_ctx
+        # closure as the main loop below, so a stray generate_image/send_image
+        # call from within a recipe still lands in the shared accumulator —
+        # merge it in defensively even though no shipped recipe calls those
+        # tools today.
+        _recipe_pending_media = session_ctx.get("pending_outbound_media")
+        if _recipe_pending_media:
+            return {**daily_operator_result, "media": list(_recipe_pending_media)}
         return daily_operator_result
 
     availability_payload = {
@@ -2981,6 +3000,7 @@ async def _run_sage_action_loop_v3(
         "raw_final_payload": final_payload,
         "trace_events": collected["trace_events"],
         "tool_progress_messages": collected.get("tool_progress_messages", []),
+        "media": list(session_ctx.get("pending_outbound_media") or []),
     }
 
 
@@ -4680,6 +4700,7 @@ async def handle_sage_chat(
             "proof_log": proof_log_payload,
             "proof_log_id": proof_log_id,
             "ai_setup_url": f"/w/{normalized_workspace_id}{_SAGE_AI_SETUP_PATH}",
+            "media": list(action_result.get("media") or []),
         }
 
     # ── B2: Overflow error recovery ──

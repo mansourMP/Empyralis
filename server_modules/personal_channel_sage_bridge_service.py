@@ -350,6 +350,12 @@ async def _build_unified_sage_personal_reply_async(
         # most messages aren't for the agent). None here → every handler's
         # existing empty-reply skip path fires (no outbound, no dispatch).
         reply = filter_outbound_reply(str((result or {}).get("message") or "").strip())
+        # Outbound attachments queued by send_image / generate_image's
+        # auto-attach this turn (see sage_agent_runtime_service.py's
+        # session_ctx["pending_outbound_media"] and SageTurnResult.media).
+        # Threaded through even on an otherwise-empty reply — a media-only
+        # turn ("send me that photo back") must not be treated as silence.
+        media = list((result or {}).get("media") or [])
         # Record the turn so the NEXT message has continuity — the user's
         # message always (even on a silent turn), the assistant reply only when
         # it actually spoke. Best-effort: a memory write must never sink a reply.
@@ -372,11 +378,19 @@ async def _build_unified_sage_personal_reply_async(
                 )
         except Exception:
             pass
-        if reply:
+        # A media-only turn (no text, but send_image/generate_image queued an
+        # attachment) still counts as "something to deliver" — only a truly
+        # empty turn (no text AND no media) falls through to None/skipped.
+        # `reply or ""`: filter_outbound_reply returns None (not "") for
+        # empty/suppressed text, and every downstream reader of this dict's
+        # "text" key expects a string it can safely .strip() — a media-only
+        # reply is the one new case that can reach here with reply is None.
+        if reply or media:
             return {
-                "text": reply,
+                "text": reply or "",
                 "source": "sage_turn_adapter",
                 "trace_id": (result or {}).get("trace_id", ""),
+                "media": media,
                 "raw": dict(result or {}),
             }
     except Exception as _exc:
