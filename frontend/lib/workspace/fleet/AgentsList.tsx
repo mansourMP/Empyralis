@@ -370,14 +370,7 @@ function AgentRow({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const stopped = Boolean(agent.stopped?.active);
   const st = deriveStatus(agent.hardware_status || "unknown", stopped, Boolean(agent.current_run_id));
-  // Sentence case ("customer facing" -> "Customer facing"), not Title Case —
-  // the badge used to rely on CSS text-transform:capitalize for this, which
-  // (a) title-cases every word, not just the first, and (b) silently never
-  // applied at all here since ::first-letter doesn't run inside a flex
-  // container (.fleet-badge is inline-flex). Doing it once in JS sidesteps
-  // both problems.
-  const presetRaw = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
-  const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
+  const preset = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
   const initial = (agent.label || "A").charAt(0).toUpperCase();
   const tint = tintForAgent(agent, index);
   const avatarStyle = {

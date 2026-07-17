@@ -1,32 +1,21 @@
 /* ============================================================================
    Fleet UI theme — tokenized, light + dark, 4px grid, Linear-grade density.
-   Accent is one reserved BLUE (theme-tokens --accent), used almost never:
-   the single primary action and the active nav item, full stop. Hover is
-   always a neutral wash (--rail-active/--bg-card-hover); selected/active is
-   a neutral background + a font-weight bump, optionally a thin accent
-   LEFT-border where it's a genuine exclusive picker (the active rail item).
-   No accent fills on badges, chips, toggles, or list rows. Near-neutral
-   grayscale otherwise; the other surviving hues are --brand-clay on the rail
-   logo mark and the per-agent/per-project identity tints (TINTS in
-   fleet-presentation.ts — a separate vocabulary from the accent, never used
-   for interactive state). Semantic status (online/offline/working/error)
-   is its own vocabulary too — color there is information, not decoration.
-   Sans throughout. Type/space/motion scales are the shared tokens from
-   theme-tokens.css. Motion: 150ms ease-out on hover/panel-open only. No
-   spin, no bounce.
+   Accent is a restrained indigo (theme-tokens --accent), used only on
+   interactive/selected states. Near-neutral grayscale otherwise; the other
+   surviving hue is --brand-clay on the rail logo mark. Sans throughout.
+   Type/space/motion scales are the shared tokens from theme-tokens.css.
+   Motion: 150ms ease-out on hover/panel-open only. No spin, no bounce.
 
    Shell: a flat canvas (--bg-canvas) with the rail sitting bare on it and the
-   content column floating as a bordered panel (--bg-panel, --radius-control)
-   with an 8px top/right/bottom gutter — the Linear floating-panel structure.
+   content column floating as a bordered 8px-radius panel (--bg-panel) with an
+   8px top/right/bottom gutter — the Linear floating-panel structure.
 
-   Type scale (Inter; weights 400 / 500 ONLY — no 600/700 in UI chrome):
+   Type scale (Inter; weights 400 / 500, 550 for titles):
      11 caption, 12 meta, 13 body + rail, 14 emphasis, 15 empty-title, 18 h1
    Spacing scale: 4 8 12 16 20 24 28 32 40 48 56 64
    Icon sizes: 14 (inline), 16 (small, rail), 20 (empty-state tile)
-   Radii: control 6, card 8, pill 999 — shared theme-tokens values, no local
-   fleet override (there used to be one, bumping these to 10/14; removed —
-   tighter reads calmer and matches Linear's own measured 4-6px controls).
-   Row heights: 28 (rail item), card padding 14 16 (user-specified density).
+   Radii:  control 8, card 12, pill 999, panel 8
+   Row heights: 30 (rail), card padding 14 16 (user-specified density).
    ========================================================================== */
 
 .fleet-root {
@@ -37,11 +26,11 @@
      (San Francisco on macOS) — so the build never depends on a font fetch. */
   --fleet-font: var(--font-inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
 
-  /* Radii: no local override — this surface reads var(--radius-control)/
-     var(--radius-card) straight from theme-tokens.css (6px/8px) like every
-     other surface does. A fleet-local bump to 10px/14px used to live here;
-     removed on purpose, tighter is the Linear-calm target, and one set of
-     radius tokens for the whole app is one fewer thing to keep in sync. */
+  /* Softer, Linear-grade radii — overridden here (not in the shared
+     theme-tokens.css) so the bump is scoped to the fleet surface only and
+     doesn't reflow the legacy chrome that reads the same token names. */
+  --radius-control: 10px;
+  --radius-card: 14px;
 
   /* Floating-panel elevation for surfaces that need to read as an inset,
      "lifted" island rather than a flush, bolted-on rectangle (the right
@@ -708,14 +697,13 @@ a.fleet-breadcrumb:hover {
   background: var(--rail-active);
   /* text-primary, not the muted text-secondary — a single small glyph at low
      contrast is genuinely hard to tell apart from its neighbors (M/N, O/0)
-     at 28px; full contrast keeps it legible without reaching for a heavier
-     weight (UI Contract §1: 400/500 only, no 600/700 in UI chrome). */
+     at 28px; full contrast plus a firmer weight keeps it legible. */
   color: var(--text-primary);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 12px;
-  font-weight: var(--weight-medium);
+  font-weight: 600;
 }
 
 .fleet-rail-owner-text {
@@ -1147,13 +1135,10 @@ a.fleet-breadcrumb:hover {
   border-color: var(--border);
 }
 
-/* Open/active toolbar icon (filter-and-sort popover open, properties panel
-   open) — a neutral filled state, not an accent one: this is a view toggle,
-   not a primary action or the active nav item. */
 .fleet-icon-btn.is-active {
-  background: var(--bg-inset);
-  color: var(--text-primary);
-  border-color: var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent-ring);
 }
 
 .fleet-toolbar-popover {
@@ -1208,24 +1193,15 @@ a.fleet-breadcrumb:hover {
   background: var(--bg-card-hover);
 }
 
-/* Selected = neutral fill + a font-weight bump (Linear's own picker
-   treatment), not accent text — this is a genuine exclusive picker (one
-   sort order, one filter value at a time) but even here the accent stays
-   reserved; the fill + weight is enough to read as "current". */
 .fleet-toolbar-popover-option.is-selected {
-  background: var(--bg-inset);
-  color: var(--text-primary);
-  font-weight: var(--weight-medium);
-}
-.fleet-toolbar-popover-option.is-selected:hover {
-  background: var(--bg-card-hover);
+  color: var(--accent);
 }
 
 .fleet-toolbar-popover-option-check {
   width: 14px;
   flex-shrink: 0;
   display: inline-flex;
-  color: var(--text-primary);
+  color: var(--accent);
 }
 
 /* ── UI Phase 4: collapsible right panel (Linear properties-panel pattern) ── */
@@ -1853,7 +1829,7 @@ a.fleet-breadcrumb:hover {
   font-family: inherit;
   font-size: 13px;
   font-weight: 500;
-  height: 28px;
+  height: 30px;
   padding: 0 12px;
   border-radius: var(--radius-control);
   border: 1px solid var(--border);
@@ -1878,34 +1854,23 @@ a.fleet-breadcrumb:hover {
   cursor: default;
 }
 
-/* Primary — the one button that carries the accent, and it does so
-   quietly: a neutral card surface with an accent hairline + accent label,
-   never a saturated fill. "New agent" and every other app-wide primary
-   action (Save, Create key, …) read this way — restrained, not a loud
-   color block. */
+/* Primary — solid accent fill, Linear-style. */
 .fleet-btn--accent {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--bg-card);
+  border-color: transparent;
+  color: var(--accent-contrast);
+  background: var(--accent);
 }
 
 .fleet-btn--accent:hover:not(:disabled) {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--accent-hover);
+  border-color: transparent;
+  color: var(--accent-contrast);
 }
 
 .fleet-btn-plus {
   font-size: 16px;
   line-height: 1;
   color: var(--text-secondary);
-}
-
-/* Match the plus glyph to the accent button's own label color instead of
-   the default muted tone — a gray "+" next to an accent "New agent" label
-   read as two different buttons stacked on top of each other. */
-.fleet-btn--accent .fleet-btn-plus {
-  color: inherit;
 }
 
 /* ── Pair Telegram panel (first-run CTA) ─────────────────────────────────── */
@@ -4285,21 +4250,18 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 .fleet-agent-stop-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
 .fleet-agent-stop-btn:disabled { opacity: 0.5; }
-/* A circular identity avatar (Linear/Slack "person" convention), not a
-   rounded-square icon-chip — an agent has a name and a personality, so it
-   reads as a team member, not a decorative glyph-in-a-card. */
 .fleet-agent-avatar {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   background: var(--tile-bg, var(--rail-active));
   color: var(--tile-fg, var(--text-secondary));
-  font-size: 11px;
-  font-weight: var(--weight-medium);
+  font-size: 12px;
+  font-weight: var(--weight-semibold);
 }
 .fleet-agent-cell-agent-text {
   display: flex;
@@ -4362,9 +4324,8 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   min-width: 26px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: var(--bg-inset);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
+  background: var(--accent-soft);
+  color: var(--accent);
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -4657,15 +4618,8 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   font-size: var(--text-2xs); font-weight: var(--weight-medium);
   border: 1px solid var(--border); color: var(--text-secondary);
 }
-.fleet-badge--lock { color: var(--text-secondary); border-color: var(--border-strong); background: var(--bg-inset); }
-/* No text-transform: capitalize here on purpose — that title-cases every
-   word ("Customer Facing"), not just the first, which the type contract
-   forbids. AgentsList.tsx sentence-cases the `preset` string once in JS
-   instead ("Customer facing"), so this class renders it exactly as given. */
-.fleet-badge--preset {
-  background: var(--bg-inset);
-  border-color: transparent;
-}
+.fleet-badge--lock { color: var(--accent); border-color: var(--accent-ring); background: var(--accent-soft); }
+.fleet-badge--preset { text-transform: capitalize; background: var(--bg-inset); border-color: transparent; }
 /* Customer access control (Tools tab) — a badge doubling as a button for the
    two toggleable states ("Granted by you" / "Owner only"); "Safe by
    default" stays a plain non-interactive span. */
@@ -4926,9 +4880,9 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    base .fleet-badge's own margin-left is exactly the gap it needs next to
    the "Sage" crumb text (the breadcrumb row has no flex `gap` to supply it). */
 .fleet-badge--operator {
-  color: var(--text-secondary);
-  border-color: var(--border-strong);
-  background: var(--bg-inset);
+  color: var(--accent);
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
 }
 .fleet-sage-chat-list {
   flex: 1;

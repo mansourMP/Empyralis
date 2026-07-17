@@ -184,36 +184,10 @@ Ask Sage launcher, the help bubble, and any future floating action button:
   to make room.
 - **Hairline lists, not cards.** A list row is a `border-bottom` hairline
   in a flat list, not a bordered/shadowed card per row.
-- **One accent, almost never used.** A single accent color (`--accent`, a
-  calm unambiguous BLUE, `oklch(57% 0.155 259)` ≈ `#3a75d1` — never violet
-  or indigo) is the only saturated color in product chrome. It's reserved
-  for at most two things: the single primary action on a page, and the
-  active top-level nav item (as a thin left-border, never a fill). It is
-  NOT a general "interactive/selected" color — that phrasing used to be
-  this rule's loophole and is exactly how purple ended up on badges, chips,
-  toggles, and list rows. Concretely:
-  - Hover, on anything, is a neutral wash (`--rail-active` /
-    `--bg-card-hover`), never an accent tint.
-  - Selected/active (a toolbar toggle, a picker option, a filter) is a
-    neutral fill (`--bg-inset`) plus a font-weight bump (400→500), never
-    accent text or an accent background — including inside an otherwise
-    "exclusive picker" like a sort-by list.
-  - Badges, chips, and pills (preset tags, channel tags, access badges)
-    are neutral (`--bg-inset`/`--border`/`--text-secondary`), full stop.
-  - Keyboard focus rings and roving-focus highlights (`:focus-visible`,
-    the rail's `j`/`k` highlight) are exempt — they're a11y affordances,
-    not resting decoration, and conventionally use the accent everywhere.
-  - Semantic status (online/offline/working/stopped/error/degraded) is a
-    separate vocabulary (`--online-*`/`--offline-*`/etc.) and is never
-    "the accent," even though it's also saturated color in chrome.
-  Every other surface is near-neutral grayscale.
-- **Identity avatars are circles, not rounded-square icon chips.** A
-  person/agent identity mark (an initial-letter avatar for an agent, a
-  user) is a full circle (`border-radius: 999px`) — the Slack/Linear/Gmail
-  "team member" convention. A rounded-square tinted tile with a glyph
-  inside is reserved for non-identity icon marks (a project's icon+tint,
-  an icon button) — never reuse the square-chip shape for something meant
-  to read as "a who," not "a what."
+- **One accent.** A single accent color (`--accent`, the violet-indigo
+  `oklch(56.7% 0.158 286)`) is the only saturated color in product chrome,
+  used for interactive/selected state only. Every other surface is
+  near-neutral grayscale.
 - **Monochrome motion, ≤200ms.** Transitions are opacity/transform only,
   ease-out, capped at 200ms (the shared tokens run 100-180ms). No spring,
   no bounce, no overshoot.
