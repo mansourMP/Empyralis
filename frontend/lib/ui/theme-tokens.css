@@ -5,10 +5,15 @@
    Both the fleet UI (fleet-theme.css) and legacy chrome surfaces
    (chrome.css) read these variables instead of defining their own colors.
 
-   The palette is a near-neutral grayscale with a single restrained indigo
-   accent (--accent, one base hex with derived hover/strong/soft/muted/ring
-   steps) and the --brand-clay mark exception. Kept intentionally sparse so
-   the accent only reads on interactive/selected states, not everywhere.
+   The palette is a near-neutral grayscale with a single reserved accent —
+   a calm, unambiguous BLUE (--accent, one base OKLCH value with derived
+   hover/strong/soft/muted/ring steps) — and the --brand-clay mark exception.
+   The accent appears almost never: the single primary action and the active
+   nav item, full stop. No accent fills on badges, chips, toggles, list rows,
+   or hover states — those are neutral washes (--rail-active, --bg-card-hover)
+   with a font-weight bump, not color. Semantic status (online, offline,
+   working, error) is a separate vocabulary (--online-text, --offline-dot,
+   and friends), never "the accent".
    ========================================================================== */
 
 /* ── Scale tokens (theme-independent) ────────────────────────────────────────
@@ -46,9 +51,11 @@
   --space-14: 3.5rem;   /* 56 */
   --space-16: 4rem;     /* 64 */
 
-  /* Radii + control heights */
-  --radius-control: 8px;
-  --radius-card: 12px;
+  /* Radii + control heights — tight, Linear-measured (4-6px controls). Not
+     8/12 (too soft — reads as a generic rounded-SaaS default) and definitely
+     not the 10/14 the fleet surface used to bump these to locally. */
+  --radius-control: 6px;
+  --radius-card: 8px;
   --radius-pill: 999px;
   --h-control-sm: 2rem;     /* 32px */
   --h-control-md: 2.25rem;  /* 36px */
@@ -82,12 +89,14 @@ html[data-theme="dark"] {
   --panel-shadow: none;
 
   --text-primary: #f4f4f5;
-  --text-secondary: #a1a1aa;
+  --text-secondary: #c9ced6;
   --text-muted: #71717a;
 
-  /* Accent — restrained indigo. One base hex; every step is derived from it,
-     so re-tuning the whole ramp means changing a single value. */
-  --accent: oklch(56.7% 0.158 286);  /* distinct violet-indigo — not Linear's literal #5e6ad2 */
+  /* Accent — one calm, unambiguous BLUE. One base OKLCH value; every step is
+     derived from it, so re-tuning the whole ramp means changing a single
+     value. Deliberately not violet/indigo — see the token-source comment
+     above: this hue reads as unmistakably blue at every derived step. */
+  --accent: oklch(57% 0.155 259);  /* ≈ #3a75d1 */
   --accent-hover: color-mix(in oklch, var(--accent) 84%, #ffffff 16%);
   --accent-strong: color-mix(in oklch, var(--accent) 78%, #ffffff 22%);
   --accent-contrast: #ffffff;
@@ -134,9 +143,9 @@ html[data-theme="light"] {
   --text-secondary: #52525b;
   --text-muted: #a1a1aa;
 
-  /* Accent — same restrained indigo, tuned to darken (not lighten) on hover
-     so it stays legible against light surfaces. */
-  --accent: oklch(56.7% 0.158 286);  /* distinct violet-indigo — not Linear's literal #5e6ad2 */
+  /* Accent — same calm blue, tuned to darken (not lighten) on hover so it
+     stays legible against light surfaces. */
+  --accent: oklch(57% 0.155 259);  /* ≈ #3a75d1 */
   --accent-hover: color-mix(in oklch, var(--accent) 86%, #000000 14%);
   --accent-strong: color-mix(in oklch, var(--accent) 80%, #000000 20%);
   --accent-contrast: #ffffff;
