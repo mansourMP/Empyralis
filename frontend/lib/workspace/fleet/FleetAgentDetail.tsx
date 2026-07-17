@@ -2045,29 +2045,48 @@ function ToolsTab({
 // ── Capabilities (image/video generation, TTS/STT) ─────────────────────────
 // See server_modules/agent_capability_service.py for the resolver this
 // surfaces, and its module docstring for the full "which 4 pre-existing
-// pieces this unifies" audit. Same platform_credits/byok_api spectrum the
-// Model tab already uses for the chat model, one level down — no separate
-// enable toggle here: choosing a provider that resolves IS the enable, so
-// image_generation's tool (generate_image) just appears in this agent's
-// toolset the moment a provider below shows "Ready".
+// pieces this unifies" audit, plus its "BYOK IS OPENAI/ANTHROPIC-ONLY" note
+// that this section's UI encodes. Same platform_credits/byok_api spectrum
+// the Model tab already uses for the chat model, one level down — no
+// separate enable toggle here: choosing a provider that resolves IS the
+// enable, so image_generation's tool (generate_image) just appears in this
+// agent's toolset the moment a provider below shows "Ready".
+//
+// Founder's hard rule: customers never hunt for or paste a raw API key,
+// except OpenAI/Anthropic. Researched every media provider in this
+// catalog (OpenAI, Stability, ElevenLabs, Runway) plus the obvious
+// mainstream alternatives — none offer OAuth "authorize your account" for
+// API access, all are bearer-key-only. So unlike the Model tab's
+// MODE_LABELS (generic "Your own API key" across a dozen chat-model
+// providers), every row here only ever has ONE legitimate BYOK provider —
+// OpenAI — enforced server-side too (CapabilityProviderOption.supports_byok
+// is only ever True for "openai"; store_capability_secret_patch and
+// validate_capability_config_patch both reject anything else even if a
+// client bypasses this UI). That key is managed ONCE, below, instead of
+// pasted per row, and every non-OpenAI provider is platform-credits-only
+// (priced, no paste box) or "not available yet" if it has no
+// platform-credits path either.
+const CAPABILITY_MODE_LABELS: Record<"platform_credits" | "byok_api", string> = {
+  platform_credits: "Platform credits",
+  byok_api: "Your OpenAI key",
+};
+
+function formatCapabilityPrice(usd: number | null | undefined, unit: string | null | undefined): string | null {
+  if (usd == null || !unit) return null;
+  return `~$${usd.toFixed(usd < 0.01 ? 3 : 2)} / ${unit}`;
+}
 
 function CapabilityRow({
-  capability, busy, keyDraft, onKeyDraftChange, onModeChange, onSaveKey, onClearKey,
+  capability, busy, onModeChange, onFocusSharedKey,
 }: {
   capability: FleetCapability;
   busy: boolean;
-  keyDraft: string;
-  onKeyDraftChange: (value: string) => void;
   onModeChange: (mode: ProviderMode, provider: string) => void;
-  onSaveKey: (provider: string) => void;
-  onClearKey: () => void;
+  onFocusSharedKey: () => void;
 }) {
   const [provider, setProvider] = useState(capability.provider);
-  // "Peek" at the byok_api key-entry UI without saving anything until the
-  // key is actually submitted — switching TO platform_credits saves
-  // immediately (nothing else to configure); switching to "your own key"
-  // just reveals the field. Resynced whenever the server state changes
-  // (after a save, or switching agents) so this never drifts from truth.
+  // Resynced whenever the server state changes (after a save, or switching
+  // agents) so this never drifts from truth.
   const [uiMode, setUiMode] = useState<ProviderMode>(capability.mode);
   useEffect(() => {
     setUiMode(capability.mode);
@@ -2076,6 +2095,14 @@ function CapabilityRow({
 
   const selectedOption = capability.providers.find((p) => p.id === provider) || capability.providers[0];
   const stubbed = selectedOption ? !selectedOption.live : false;
+  const platformOptions = capability.providers.filter((p) => p.supports_platform_credits);
+  const canPlatformCredits = platformOptions.length > 0;
+  // Only OpenAI ever has supports_byok=true (see module note above) — this
+  // is really "does this capability register an OpenAI option at all."
+  const canByok = capability.providers.some((p) => p.supports_byok);
+  const priceText = uiMode === "platform_credits"
+    ? formatCapabilityPrice(selectedOption?.platform_price_usd, selectedOption?.platform_price_unit)
+    : null;
 
   return (
     <div className="fleet-toggle-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
@@ -2084,7 +2111,7 @@ function CapabilityRow({
           <div className="fleet-toggle-row-label">{capability.label}</div>
           <div className="fleet-toggle-row-desc">
             {capability.available
-              ? `Ready — ${MODE_LABELS[capability.mode]} · ${selectedOption?.label || capability.provider}`
+              ? `Ready — ${CAPABILITY_MODE_LABELS[capability.mode]} · ${selectedOption?.label || capability.provider}${priceText ? ` · ${priceText}` : ""}`
               : capability.message || "Not configured yet."}
           </div>
           {!capability.tool_gated && (
@@ -2099,72 +2126,74 @@ function CapabilityRow({
         </span>
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-        <select
-          className="fleet-wizard-input"
-          style={{ maxWidth: 240, width: "auto" }}
-          value={provider}
-          disabled={busy}
-          onChange={(e) => {
-            const next = e.currentTarget.value;
-            setProvider(next);
-            if (uiMode === "platform_credits") onModeChange("platform_credits", next);
-          }}
-        >
-          {capability.providers.map((p) => (
-            <option key={p.id} value={p.id}>{p.label}{p.live ? "" : " (coming soon)"}</option>
-          ))}
-        </select>
-
-        <div style={{ display: "inline-flex", gap: 6 }} role="tablist" aria-label={`${capability.label} mode`}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={uiMode === "platform_credits"}
-            className={`fleet-btn${uiMode === "platform_credits" ? " fleet-btn--accent" : ""}`}
-            disabled={busy}
-            onClick={() => { setUiMode("platform_credits"); onModeChange("platform_credits", provider); }}
-          >
-            {MODE_LABELS.platform_credits}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={uiMode === "byok_api"}
-            className={`fleet-btn${uiMode === "byok_api" ? " fleet-btn--accent" : ""}`}
-            disabled={busy}
-            onClick={() => setUiMode("byok_api")}
-          >
-            {MODE_LABELS.byok_api}
-          </button>
-        </div>
-      </div>
-
-      {uiMode === "byok_api" && (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <input
-            type="password"
-            className="fleet-wizard-input"
-            style={{ maxWidth: 320 }}
-            placeholder={capability.has_byok_key && capability.mode === "byok_api" ? "Key saved — paste a new one to replace it" : "Paste your API key"}
-            value={keyDraft}
-            disabled={busy}
-            onChange={(e) => onKeyDraftChange(e.currentTarget.value)}
-          />
-          <button
-            type="button"
-            className="fleet-btn fleet-btn--accent"
-            disabled={busy || !keyDraft.trim()}
-            onClick={() => onSaveKey(provider)}
-          >
-            {busy ? "Saving…" : "Save key"}
-          </button>
-          {capability.has_byok_key && capability.mode === "byok_api" && (
-            <button type="button" className="fleet-btn" disabled={busy} onClick={onClearKey}>
-              Remove key
-            </button>
+      {(canPlatformCredits || canByok) ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          {uiMode === "platform_credits" && canPlatformCredits && (
+            <select
+              className="fleet-wizard-input"
+              style={{ maxWidth: 280, width: "auto" }}
+              value={provider}
+              disabled={busy}
+              onChange={(e) => {
+                const next = e.currentTarget.value;
+                setProvider(next);
+                onModeChange("platform_credits", next);
+              }}
+            >
+              {platformOptions.map((p) => {
+                const price = formatCapabilityPrice(p.platform_price_usd, p.platform_price_unit);
+                return (
+                  <option key={p.id} value={p.id}>
+                    {p.label}{!p.live ? " (coming soon)" : price ? ` — ${price}` : ""}
+                  </option>
+                );
+              })}
+            </select>
           )}
+
+          <div style={{ display: "inline-flex", gap: 6 }} role="tablist" aria-label={`${capability.label} mode`}>
+            {canPlatformCredits && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={uiMode === "platform_credits"}
+                className={`fleet-btn${uiMode === "platform_credits" ? " fleet-btn--accent" : ""}`}
+                disabled={busy}
+                onClick={() => {
+                  setUiMode("platform_credits");
+                  const fallback = platformOptions.some((p) => p.id === provider) ? provider : (platformOptions[0]?.id || provider);
+                  setProvider(fallback);
+                  onModeChange("platform_credits", fallback);
+                }}
+              >
+                {CAPABILITY_MODE_LABELS.platform_credits}
+              </button>
+            )}
+            {canByok && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={uiMode === "byok_api"}
+                className={`fleet-btn${uiMode === "byok_api" ? " fleet-btn--accent" : ""}`}
+                disabled={busy}
+                onClick={() => { setUiMode("byok_api"); onModeChange("byok_api", "openai"); }}
+              >
+                {CAPABILITY_MODE_LABELS.byok_api}
+              </button>
+            )}
+          </div>
         </div>
+      ) : (
+        <p className="fleet-toggle-row-desc" style={{ marginTop: 0 }}>Not available on this deployment yet.</p>
+      )}
+
+      {/* No per-row paste box any more — byok_api always means the ONE
+          shared OpenAI key managed above CapabilitiesTab's list. If it
+          isn't saved yet, point there instead of asking again here. */}
+      {uiMode === "byok_api" && !capability.has_byok_key && (
+        <button type="button" className="fleet-link" onClick={onFocusSharedKey}>
+          Add your OpenAI key above
+        </button>
       )}
     </div>
   );
@@ -2176,7 +2205,9 @@ function CapabilitiesTab({
   const { capabilities, isMaster, loading, refresh } = useFleetAgentCapabilities(workspaceId, agentId);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  const [openaiKeyDraft, setOpenaiKeyDraft] = useState("");
+  const [openaiKeyBusy, setOpenaiKeyBusy] = useState(false);
+  const openaiKeyInputRef = useRef<HTMLInputElement | null>(null);
 
   async function saveMode(capabilityId: string, mode: ProviderMode, provider: string) {
     setPending(capabilityId);
@@ -2198,52 +2229,73 @@ function CapabilitiesTab({
     }
   }
 
-  async function saveKey(capabilityId: string, provider: string) {
-    const apiKey = (keyDrafts[capabilityId] || "").trim();
-    if (!apiKey) return;
-    setPending(capabilityId);
+  // A single OpenAI key covers every OpenAI-eligible capability (image
+  // generation, text-to-speech, speech-to-text) — paste it once here
+  // instead of once per row below. Fans out to the same per-capability
+  // key endpoint each row used to call individually; saving switches each
+  // of those capabilities to "Your OpenAI key" (fleet_set_agent_capability_key's
+  // existing, tested behavior — pasting a key IS choosing byok for it), and
+  // any row can still be switched back to Platform credits afterward
+  // without losing the saved key (removing it is a separate action, below).
+  const openaiEligible = capabilities.filter((c) => c.providers.some((p) => p.id === "openai" && p.supports_byok));
+  const openaiSavedCount = openaiEligible.filter((c) => c.has_byok_key && c.provider === "openai").length;
+  const openaiKeySaved = openaiSavedCount > 0;
+
+  async function saveSharedOpenAIKey() {
+    const apiKey = openaiKeyDraft.trim();
+    if (!apiKey || openaiEligible.length === 0) return;
+    setOpenaiKeyBusy(true);
     setError(null);
     try {
-      const res = await fetch(
-        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-capabilities/key?agent_id=${encodeURIComponent(agentId)}`,
-        {
-          method: "POST",
-          credentials: "include",
-          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-          body: JSON.stringify({ capability: capabilityId, provider, api_key: apiKey }),
-        },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
-      setKeyDrafts((cur) => ({ ...cur, [capabilityId]: "" }));
+      const results = await Promise.all(openaiEligible.map(async (c) => {
+        const res = await fetch(
+          `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-capabilities/key?agent_id=${encodeURIComponent(agentId)}`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+            body: JSON.stringify({ capability: c.id, provider: "openai", api_key: apiKey }),
+          },
+        );
+        const data = await res.json().catch(() => ({}));
+        return res.ok && data?.ok !== false;
+      }));
+      if (results.some((ok) => !ok)) throw new Error("Saved for some capabilities but not all — try again.");
+      setOpenaiKeyDraft("");
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save this key.");
+      setError(e instanceof Error ? e.message : "Could not save your OpenAI key.");
     } finally {
-      setPending(null);
+      setOpenaiKeyBusy(false);
     }
   }
 
-  async function clearKey(capabilityId: string) {
-    setPending(capabilityId);
+  async function removeSharedOpenAIKey() {
+    const targets = capabilities.filter((c) => c.has_byok_key && c.provider === "openai");
+    if (targets.length === 0) return;
+    setOpenaiKeyBusy(true);
     setError(null);
     try {
-      const res = await fetch(
-        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-capabilities/key?agent_id=${encodeURIComponent(agentId)}&capability=${encodeURIComponent(capabilityId)}`,
-        {
-          method: "DELETE",
-          credentials: "include",
-          headers: buildCookieAuthHeaders("DELETE", {}),
-        },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      const results = await Promise.all(targets.map(async (c) => {
+        const res = await fetch(
+          `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-capabilities/key?agent_id=${encodeURIComponent(agentId)}&capability=${encodeURIComponent(c.id)}`,
+          { method: "DELETE", credentials: "include", headers: buildCookieAuthHeaders("DELETE", {}) },
+        );
+        const data = await res.json().catch(() => ({}));
+        return res.ok && data?.ok !== false;
+      }));
+      if (results.some((ok) => !ok)) throw new Error("Removed for some capabilities but not all — try again.");
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not remove this key.");
+      setError(e instanceof Error ? e.message : "Could not remove your OpenAI key.");
     } finally {
-      setPending(null);
+      setOpenaiKeyBusy(false);
     }
+  }
+
+  function focusSharedKeyInput() {
+    openaiKeyInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    openaiKeyInputRef.current?.focus();
   }
 
   if (loading) {
@@ -2261,18 +2313,53 @@ function CapabilitiesTab({
   return (
     <div className="fleet-config">
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Choose a provider for each capability — platform credits, or your own API key. Once a provider resolves, this agent can use it right away; there&apos;s no separate on/off switch.
+        Platform credits are the default for every capability below — nothing to set up, priced per use. The only key we ever ask you to paste is your own OpenAI key, and one covers image generation, text-to-speech, and speech-to-text together. Other providers here (Stability AI, ElevenLabs) don&apos;t offer a way to connect your own account, so they&apos;re platform-credits only.
       </p>
+
+      {openaiEligible.length > 0 && (
+        <div className="fleet-channel-expand" style={{ marginBottom: 12 }}>
+          <div className="fleet-toggle-row-label">Your OpenAI key</div>
+          <p className="fleet-channel-expand-hint" style={{ marginTop: 2, marginBottom: 8 }}>
+            {openaiKeySaved
+              ? `Saved — covers ${openaiSavedCount} of ${openaiEligible.length} capabilities below. Paste a new key to replace it.`
+              : "Covers image generation, text-to-speech, and speech-to-text at once — paste it here instead of on every row below."}
+          </p>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              ref={openaiKeyInputRef}
+              type="password"
+              className="fleet-wizard-input"
+              style={{ maxWidth: 320 }}
+              aria-label="OpenAI API key"
+              placeholder={openaiKeySaved ? "Key saved — paste a new one to replace it" : "Paste your OpenAI API key"}
+              value={openaiKeyDraft}
+              disabled={openaiKeyBusy}
+              onChange={(e) => setOpenaiKeyDraft(e.currentTarget.value)}
+            />
+            <button
+              type="button"
+              className="fleet-btn fleet-btn--accent"
+              disabled={openaiKeyBusy || !openaiKeyDraft.trim()}
+              onClick={saveSharedOpenAIKey}
+            >
+              {openaiKeyBusy ? "Saving…" : "Save key"}
+            </button>
+            {openaiKeySaved && (
+              <button type="button" className="fleet-btn" disabled={openaiKeyBusy} onClick={removeSharedOpenAIKey}>
+                Remove key
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {capabilities.map((cap) => (
         <CapabilityRow
           key={cap.id}
           capability={cap}
           busy={pending === cap.id}
-          keyDraft={keyDrafts[cap.id] || ""}
-          onKeyDraftChange={(v) => setKeyDrafts((cur) => ({ ...cur, [cap.id]: v }))}
           onModeChange={(mode, provider) => saveMode(cap.id, mode, provider)}
-          onSaveKey={(provider) => saveKey(cap.id, provider)}
-          onClearKey={() => clearKey(cap.id)}
+          onFocusSharedKey={focusSharedKeyInput}
         />
       ))}
       {error && <p className="fleet-channel-expand-error">{error}</p>}

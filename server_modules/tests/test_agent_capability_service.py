@@ -158,11 +158,18 @@ class ByokResolutionTests(unittest.TestCase):
         self.assertNotIn("api_key", secret_patch)
 
     def test_secret_for_a_different_provider_than_configured_is_ignored(self):
-        """A stability secret sitting in capability_secrets must not satisfy
-        an openai byok_api request — provider must match exactly."""
-        secret_patch = caps.store_capability_secret_patch(
-            capability="image_generation", provider="stability", api_key="sk-stability-key",
-        )
+        """A secret recorded under a stale/different provider than the one
+        currently configured must not satisfy this capability's byok_api
+        request — provider must match exactly. (Stability's own BYOK path is
+        disabled per the platform's OpenAI/Anthropic-only key-paste rule —
+        see CAPABILITY_PROVIDER_CATALOG — so this simulates a stale/mismatched
+        secret record directly instead of going through
+        store_capability_secret_patch, which now refuses to store a
+        non-OpenAI secret for this capability at all.)"""
+        secret_patch = dict(caps.store_capability_secret_patch(
+            capability="image_generation", provider="openai", api_key="sk-openai-key",
+        ))
+        secret_patch["provider"] = "stability"  # simulate a stale/mismatched record
         cfg = {"image_generation": {"mode": "byok_api", "provider": "openai"}}
         secrets = {"image_generation": secret_patch}
         r = caps.resolve_agent_capability_provider(
@@ -226,7 +233,18 @@ class PerAgentIsolationTests(unittest.TestCase):
         }
         secrets = {
             "image_generation": caps.store_capability_secret_patch(capability="image_generation", provider="openai", api_key="sk-1"),
-            "video_generation": caps.store_capability_secret_patch(capability="video_generation", provider="runway", api_key="sk-2"),
+            # Runway no longer supports byok at all (see CAPABILITY_PROVIDER_CATALOG
+            # — it's neither OpenAI/Anthropic nor OAuth-capable), so
+            # store_capability_secret_patch now refuses to create this
+            # secret. Hand-craft the record directly to simulate one already
+            # sitting in storage (e.g. from before that rule existed) — the
+            # point of this test is that live=False alone is enough to keep
+            # it unresolved regardless of what's stored.
+            "video_generation": {
+                "provider": "runway",
+                "ciphertext": caps._encrypt_capability_secret({"api_key": "sk-2"}),
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
         }
         resolved = caps.resolved_capability_ids(
             workspace_id="ws-1", agent_id="a-1", capability_config=cfg, capability_secrets=secrets,
@@ -297,6 +315,88 @@ class ValidationTests(unittest.TestCase):
     def test_store_capability_secret_patch_rejects_unknown_provider_for_capability(self):
         with self.assertRaises(ValueError):
             caps.store_capability_secret_patch(capability="image_generation", provider="elevenlabs", api_key="sk-x")
+
+    # ── Founder's hard rule: BYOK is OpenAI/Anthropic-only ─────────────────
+    # No raw key-paste for Stability, ElevenLabs, or Runway — enforced here
+    # (store_capability_secret_patch / validate_capability_config_patch), not
+    # just hidden in the UI. See module docstring's "BYOK IS
+    # OPENAI/ANTHROPIC-ONLY" note for the researched provider list this
+    # encodes.
+
+    def test_store_capability_secret_patch_rejects_stability_byok(self):
+        with self.assertRaises(ValueError):
+            caps.store_capability_secret_patch(capability="image_generation", provider="stability", api_key="sk-x")
+
+    def test_store_capability_secret_patch_rejects_elevenlabs_byok(self):
+        with self.assertRaises(ValueError):
+            caps.store_capability_secret_patch(capability="text_to_speech", provider="elevenlabs", api_key="sk-x")
+
+    def test_store_capability_secret_patch_rejects_runway_byok(self):
+        with self.assertRaises(ValueError):
+            caps.store_capability_secret_patch(capability="video_generation", provider="runway", api_key="sk-x")
+
+    def test_store_capability_secret_patch_still_accepts_openai_everywhere_it_appears(self):
+        """The one allowed BYOK provider must keep working for every
+        capability it's registered under (image_generation, speech_to_text,
+        text_to_speech) — this rule subtracts non-OpenAI providers, it must
+        never accidentally subtract OpenAI too."""
+        for cap in ("image_generation", "speech_to_text", "text_to_speech"):
+            patch = caps.store_capability_secret_patch(capability=cap, provider="openai", api_key="sk-openai")
+            self.assertEqual(patch["provider"], "openai")
+
+    def test_validate_capability_config_patch_rejects_byok_mode_for_stability(self):
+        with self.assertRaises(ValueError):
+            caps.validate_capability_config_patch({"image_generation": {"mode": "byok_api", "provider": "stability"}})
+
+    def test_validate_capability_config_patch_rejects_byok_mode_for_elevenlabs(self):
+        with self.assertRaises(ValueError):
+            caps.validate_capability_config_patch({"text_to_speech": {"mode": "byok_api", "provider": "elevenlabs"}})
+
+    def test_validate_capability_config_patch_rejects_byok_mode_for_runway(self):
+        with self.assertRaises(ValueError):
+            caps.validate_capability_config_patch({"video_generation": {"mode": "byok_api", "provider": "runway"}})
+
+    def test_validate_capability_config_patch_still_allows_platform_credits_for_stability(self):
+        """Removing Stability's BYOK path must not remove Stability itself —
+        it's still a legitimate platform-credits provider."""
+        cleaned = caps.validate_capability_config_patch({"image_generation": {"mode": "platform_credits", "provider": "stability"}})
+        self.assertEqual(cleaned["image_generation"], {"mode": "platform_credits", "provider": "stability"})
+
+    def test_validate_capability_config_patch_still_allows_byok_mode_for_openai(self):
+        cleaned = caps.validate_capability_config_patch({"image_generation": {"mode": "byok_api", "provider": "openai"}})
+        self.assertEqual(cleaned["image_generation"], {"mode": "byok_api", "provider": "openai"})
+
+
+class ProviderCatalogComplianceTests(unittest.TestCase):
+    """The Capabilities tab reads supports_byok straight off the catalog to
+    decide whether to render a key-paste box at all — these pin the catalog
+    itself to the founder's rule so a future edit can't silently reintroduce
+    a non-OpenAI paste box without a test noticing."""
+
+    def test_only_openai_supports_byok_anywhere_in_the_catalog(self):
+        for cap, options in caps.CAPABILITY_PROVIDER_CATALOG.items():
+            for opt in options:
+                if opt.supports_byok:
+                    self.assertEqual(
+                        opt.id, "openai",
+                        f"{cap}/{opt.id} supports_byok=True but isn't OpenAI — violates the no-key-hunting rule.",
+                    )
+
+    def test_catalog_payload_prices_only_live_platform_credit_options(self):
+        catalog = caps.capability_catalog_payload()
+        image_gen = next(c for c in catalog if c["id"] == "image_generation")
+        openai_opt = next(p for p in image_gen["providers"] if p["id"] == "openai")
+        stability_opt = next(p for p in image_gen["providers"] if p["id"] == "stability")
+        self.assertIsNotNone(openai_opt["platform_price_usd"])
+        self.assertEqual(openai_opt["platform_price_unit"], "image")
+        self.assertFalse(stability_opt["supports_byok"])
+        self.assertIsNotNone(stability_opt["platform_price_usd"])  # still priced — platform-credits still works
+
+        tts = next(c for c in catalog if c["id"] == "text_to_speech")
+        for opt in tts["providers"]:
+            # Neither TTS provider is live yet — no price to show for either.
+            self.assertIsNone(opt["platform_price_usd"])
+            self.assertIsNone(opt["platform_price_unit"])
 
 
 class AgentCapabilityStatePayloadTests(unittest.TestCase):

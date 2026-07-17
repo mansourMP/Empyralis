@@ -545,10 +545,21 @@ export type FleetCapabilityProvider = {
   id: string;
   label: string;
   supports_platform_credits: boolean;
+  // Founder's hard rule: customers never hunt for or paste a raw API key
+  // except OpenAI/Anthropic — see agent_capability_service.py's "BYOK IS
+  // OPENAI/ANTHROPIC-ONLY" module-docstring note. True only for provider
+  // "openai" today; every other provider here is platform-credits-only (or,
+  // if it ever ships genuine OAuth, an "authorize your account" connection
+  // instead of a paste box — none of the researched providers do yet).
   supports_byok: boolean;
   // False = registered but not wired to a live adapter yet (stubbed for
   // this pass — see the module docstring in agent_capability_service.py).
   live: boolean;
+  // Estimated platform-credits cost, only populated when supports_platform_credits
+  // && live (nothing to price for a stubbed adapter) — display-only, e.g.
+  // "~$0.04 / image"; not used for any billing math on this side.
+  platform_price_usd: number | null;
+  platform_price_unit: string | null;
 };
 
 export type FleetCapability = {

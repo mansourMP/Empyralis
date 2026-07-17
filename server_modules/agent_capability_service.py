@@ -57,6 +57,30 @@ _PLATFORM_KEY_RESOLVERS, and wire a consumer (a new ToolDescriptor +
 execute_single_direct_tool_call branch for a callable tool, or a pipeline
 call site like personal_channel_transcription_service's, depending on the
 capability's shape). Nothing else in this module changes.
+
+BYOK IS OPENAI/ANTHROPIC-ONLY (founder's hard rule): customers must never be
+asked to hunt for or paste a raw API key, except for OpenAI/Anthropic — every
+other provider is either platform-credits-only or (if it ever ships genuine
+OAuth) an "authorize your account" connection instead. Researched 2026-07-18
+for every provider in this catalog plus the obvious mainstream alternatives:
+OpenAI, Stability AI, ElevenLabs, Runway, Anthropic, Google Cloud (Imagen /
+Cloud TTS/STT), Azure OpenAI, Deepgram, and Replicate. Finding: NONE of the
+media-generation providers researched offer a "Sign in with X" / delegated
+OAuth flow for third-party apps to call their generation API on a user's
+behalf — every one is bearer-API-key-only (Google Cloud's AI APIs and Azure
+OpenAI are the sole *technical* OAuth exceptions, but that OAuth still
+requires the customer to first stand up a billed cloud project, so it's not
+the frictionless "authorize your account" the founder's rule is aiming for —
+not adopted here). Consequently `CapabilityProviderOption.supports_byok` is
+only ever True for provider="openai" below; every non-OpenAI provider
+(stability, elevenlabs, runway, ...) is platform-credits-only or
+not-yet-available, enforced at BOTH the catalog level and in
+store_capability_secret_patch/validate_capability_config_patch (defense in
+depth — the API rejects a byok save/config for a non-supporting provider
+even if a client bypasses the UI). If a provider ever ships real user-consent
+OAuth for billed API access, the extension point is a new `supports_oauth`
+flag alongside `supports_byok` plus an "oauth" entry in VALID_MODES — NOT a
+raw key-paste box.
 """
 
 from __future__ import annotations
@@ -127,22 +151,35 @@ class CapabilityProviderOption:
 CAPABILITY_PROVIDER_CATALOG: Dict[str, List[CapabilityProviderOption]] = {
     IMAGE_GENERATION: [
         CapabilityProviderOption("openai", "OpenAI (DALL-E)", supports_platform_credits=True, supports_byok=True, live=True),
-        CapabilityProviderOption("stability", "Stability AI", supports_platform_credits=True, supports_byok=True, live=True),
+        # Stability AI is API-key-only (no OAuth) and isn't OpenAI/Anthropic,
+        # so per the founder's hard rule it's platform-credits-only here —
+        # never a self-serve key-paste box. See module docstring's "BYOK IS
+        # OPENAI/ANTHROPIC-ONLY" note for the researched provider list.
+        CapabilityProviderOption("stability", "Stability AI", supports_platform_credits=True, supports_byok=False, live=True),
     ],
     SPEECH_TO_TEXT: [
         # OpenAI-only for now — matches personal_channel_transcription_service's
         # existing hardcoded behavior (see its module docstring). Adding
         # ElevenLabs here is a small follow-up, not a redesign: add the
-        # option below, add its platform-key resolver, and thread a real
+        # option below (supports_byok=False, same reasoning as TEXT_TO_SPEECH's
+        # ElevenLabs entry), add its platform-key resolver, and thread a real
         # ElevenLabs call into personal_channel_transcription_service.
         CapabilityProviderOption("openai", "OpenAI (Whisper)", supports_platform_credits=True, supports_byok=True, live=True),
     ],
     TEXT_TO_SPEECH: [
         CapabilityProviderOption("openai", "OpenAI (TTS)", supports_platform_credits=True, supports_byok=True, live=False),
-        CapabilityProviderOption("elevenlabs", "ElevenLabs", supports_platform_credits=True, supports_byok=True, live=False),
+        # ElevenLabs is API-key-only (no OAuth) and isn't OpenAI/Anthropic —
+        # platform-credits-only once it goes live, never a key-paste box.
+        CapabilityProviderOption("elevenlabs", "ElevenLabs", supports_platform_credits=True, supports_byok=False, live=False),
     ],
     VIDEO_GENERATION: [
-        CapabilityProviderOption("runway", "Runway", supports_platform_credits=False, supports_byok=True, live=False),
+        # Runway is API-key-only (no OAuth) and isn't OpenAI/Anthropic, so
+        # BYOK is off. Platform credits are ALSO off — the platform hasn't
+        # acquired a Runway key yet — so this capability has no self-serve
+        # path at all today (matches its live=False stub); it becomes a
+        # normal platform-credits row the moment supports_platform_credits
+        # flips True, with no UI change needed elsewhere.
+        CapabilityProviderOption("runway", "Runway", supports_platform_credits=False, supports_byok=False, live=False),
     ],
 }
 
@@ -162,6 +199,17 @@ ESTIMATED_COST_USD_PER_CALL: Dict[tuple[str, str], float] = {
     (IMAGE_GENERATION, "openai"): 0.04,
     (IMAGE_GENERATION, "stability"): 0.03,
     (SPEECH_TO_TEXT, "openai"): 0.006,
+}
+
+# Human-facing unit for the price shown next to a platform-credits provider
+# in the Capabilities tab ("~$0.04 / image") — display only, never used in
+# billing math (that stays in ESTIMATED_COST_USD_PER_CALL /
+# meter_platform_capability_usage below).
+PRICE_UNIT_BY_CAPABILITY: Dict[str, str] = {
+    IMAGE_GENERATION: "image",
+    VIDEO_GENERATION: "video",
+    TEXT_TO_SPEECH: "request",
+    SPEECH_TO_TEXT: "request",
 }
 
 
@@ -445,14 +493,26 @@ def _decrypt_capability_secret(ciphertext: str) -> Dict[str, Any]:
 def store_capability_secret_patch(*, capability: str, provider: str, api_key: str) -> Dict[str, Any]:
     """Encrypt one BYOK key and return the metadata fragment to merge into
     an agent's capability_secrets[capability]. Raises ValueError on bad
-    input (caller turns that into a 4xx). Never logs api_key."""
+    input (caller turns that into a 4xx). Never logs api_key.
+
+    Enforces the founder's hard rule at the API boundary, not just in the
+    UI: a provider with supports_byok=False (every non-OpenAI media
+    provider today — see module docstring) is rejected here even if a
+    client bypasses the Capabilities tab and calls this directly. The UI
+    simply never renders a paste box for these; this is the backstop."""
     cap = canonical_capability(capability)
     if cap not in ALL_CAPABILITIES:
         raise ValueError(f"Unknown capability '{capability}'.")
     clean_provider = str(provider or "").strip().lower()
-    valid_providers = {opt.id for opt in CAPABILITY_PROVIDER_CATALOG.get(cap, [])}
-    if clean_provider not in valid_providers:
+    options_by_id = {opt.id: opt for opt in CAPABILITY_PROVIDER_CATALOG.get(cap, [])}
+    option = options_by_id.get(clean_provider)
+    if option is None:
         raise ValueError(f"'{provider}' is not a supported provider for {CAPABILITY_LABELS.get(cap, cap)}.")
+    if not option.supports_byok:
+        raise ValueError(
+            f"{option.label} doesn't support bring-your-own-key for {CAPABILITY_LABELS.get(cap, cap)} — "
+            "use platform credits instead."
+        )
     clean_key = str(api_key or "").strip()
     if not clean_key:
         raise ValueError("api_key is required.")
@@ -463,7 +523,15 @@ def store_capability_secret_patch(*, capability: str, provider: str, api_key: st
 def validate_capability_config_patch(patch: Any) -> Dict[str, Any]:
     """Validate + normalize a {capability: {mode, provider}} patch (no secret
     material ever belongs in this dict — see module docstring). Raises
-    ValueError on bad input."""
+    ValueError on bad input.
+
+    Also rejects mode="byok_api" paired with a provider whose
+    supports_byok is False — same defense-in-depth rationale as
+    store_capability_secret_patch's guard: the founder's hard rule holds
+    even if a client PATCHes capability_config directly instead of using
+    the key-save endpoint (that combination could never actually resolve
+    to available — resolve_agent_capability_provider already refuses it at
+    read time — but it should never validate as accepted config either)."""
     if not isinstance(patch, dict):
         raise ValueError("capability_config must be an object.")
     cleaned: Dict[str, Any] = {}
@@ -477,22 +545,37 @@ def validate_capability_config_patch(patch: Any) -> Dict[str, Any]:
         if mode not in VALID_MODES:
             raise ValueError(f"capability_config.{capability}.mode must be one of: {', '.join(sorted(VALID_MODES))}")
         provider = str(raw_entry.get("provider") or "").strip().lower() or DEFAULT_PROVIDER_BY_CAPABILITY.get(cap, "")
-        valid_providers = {opt.id for opt in CAPABILITY_PROVIDER_CATALOG.get(cap, [])}
-        if provider not in valid_providers:
-            raise ValueError(f"capability_config.{capability}.provider must be one of: {', '.join(sorted(valid_providers))}")
+        options_by_id = {opt.id: opt for opt in CAPABILITY_PROVIDER_CATALOG.get(cap, [])}
+        option = options_by_id.get(provider)
+        if option is None:
+            raise ValueError(f"capability_config.{capability}.provider must be one of: {', '.join(sorted(options_by_id))}")
+        if mode == "byok_api" and not option.supports_byok:
+            raise ValueError(
+                f"capability_config.{capability}: {option.label} doesn't support bring-your-own-key — "
+                "use platform_credits instead."
+            )
         cleaned[cap] = {"mode": mode, "provider": provider}
     return cleaned
 
 
 # ── Frontend-facing payloads ─────────────────────────────────────────────────
 
-def _provider_option_payload(opt: CapabilityProviderOption) -> Dict[str, Any]:
+def _provider_option_payload(cap: str, opt: CapabilityProviderOption) -> Dict[str, Any]:
+    # Price is shown only where it's actually chargeable right now: a live,
+    # platform-credits-eligible provider with a documented estimate. Stubbed
+    # providers (live=False) show no price — there's nothing to charge for
+    # yet, and inventing a number for an adapter that doesn't exist would be
+    # exactly the kind of unverified claim the founder's rigor standard
+    # rules out.
+    cost = ESTIMATED_COST_USD_PER_CALL.get((cap, opt.id)) if (opt.supports_platform_credits and opt.live) else None
     return {
         "id": opt.id,
         "label": opt.label,
         "supports_platform_credits": opt.supports_platform_credits,
         "supports_byok": opt.supports_byok,
         "live": opt.live,
+        "platform_price_usd": cost,
+        "platform_price_unit": PRICE_UNIT_BY_CAPABILITY.get(cap, "call") if cost is not None else None,
     }
 
 
@@ -503,7 +586,7 @@ def capability_catalog_payload() -> List[Dict[str, Any]]:
         {
             "id": cap,
             "label": CAPABILITY_LABELS[cap],
-            "providers": [_provider_option_payload(opt) for opt in CAPABILITY_PROVIDER_CATALOG.get(cap, [])],
+            "providers": [_provider_option_payload(cap, opt) for opt in CAPABILITY_PROVIDER_CATALOG.get(cap, [])],
         }
         for cap in ALL_CAPABILITIES
     ]
@@ -543,7 +626,7 @@ def agent_capability_state_payload(
             "message": resolution.message,
             "has_byok_key": has_key,
             "tool_gated": cap in TOOL_GATED_CAPABILITIES,
-            "providers": [_provider_option_payload(opt) for opt in CAPABILITY_PROVIDER_CATALOG.get(cap, [])],
+            "providers": [_provider_option_payload(cap, opt) for opt in CAPABILITY_PROVIDER_CATALOG.get(cap, [])],
         })
     return out
 
