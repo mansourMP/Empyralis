@@ -482,11 +482,19 @@ function NowStrip({ agent, status }: { agent: FleetAgent | null; status: { tone:
 // stopped, an honest chip naming who stopped it (never a bare "Stopped").
 // kill_switch_gate.py enforces this on the backend before any turn runs;
 // this is purely the control surface.
+//
+// Stopping is a real, disruptive action (the agent goes dark on every
+// channel until resumed) so it's gated behind a confirm dialog — a blurred/
+// dimmed backdrop (.fleet-detail-backdrop, the same primitive the channel-
+// connect banner below uses) plus a small centered card (.fleet-small-dialog),
+// Cancel (neutral) + Stop agent (.fleet-btn--danger, solid red). Resume is
+// affirmative, not destructive — it stays a plain one-click button, no confirm.
 function StopAgentControl({
   workspaceId, agentId, agent, onChanged,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChanged?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const stopped = agent?.stopped;
 
   async function handleStop() {
@@ -494,8 +502,12 @@ function StopAgentControl({
     setError(null);
     const result = await stopFleetAgent(workspaceId, agentId);
     setBusy(false);
-    if (result.ok) onChanged?.();
-    else setError(result.error || "Could not stop this agent.");
+    if (result.ok) {
+      setConfirmOpen(false);
+      onChanged?.();
+    } else {
+      setError(result.error || "Could not stop this agent.");
+    }
   }
 
   async function handleResume() {
@@ -506,6 +518,21 @@ function StopAgentControl({
     if (result.ok) onChanged?.();
     else setError(result.error || "Could not resume this agent.");
   }
+
+  // Close the confirm dialog on Escape (own the key so it doesn't bubble to
+  // the page's own "Esc goes back" handler — same reasoning as the channel
+  // banner below).
+  useEffect(() => {
+    if (!confirmOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) {
+        e.stopPropagation();
+        setConfirmOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmOpen, busy]);
 
   if (stopped?.active) {
     return (
@@ -525,11 +552,53 @@ function StopAgentControl({
 
   return (
     <div className="fleet-stop-control">
-      <button type="button" className="fleet-btn" disabled={busy} onClick={handleStop}>
-        {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Square size={14} strokeWidth={1.75} />}
+      <button
+        type="button"
+        className="fleet-btn"
+        disabled={busy}
+        onClick={() => { setError(null); setConfirmOpen(true); }}
+      >
+        <Square size={14} strokeWidth={1.75} />
         Stop agent
       </button>
-      {error && <span className="fleet-stop-error">{error}</span>}
+      {error && !confirmOpen && <span className="fleet-stop-error">{error}</span>}
+
+      {confirmOpen && (
+        <div
+          className="fleet-detail-backdrop"
+          onClick={() => { if (!busy) setConfirmOpen(false); }}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="fleet-stop-agent-title"
+            className="fleet-small-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="fleet-small-dialog-header">
+              <span id="fleet-stop-agent-title" className="fleet-title">Stop agent</span>
+            </div>
+            <div className="fleet-small-dialog-body">
+              <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
+                Are you sure you want to stop <strong>{agent?.label || "this agent"}</strong>?
+                It stops responding on every channel until you resume it.
+              </p>
+              {error && (
+                <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>
+              )}
+            </div>
+            <div className="fleet-small-dialog-footer">
+              <button type="button" className="fleet-btn" onClick={() => setConfirmOpen(false)} disabled={busy}>
+                Cancel
+              </button>
+              <button type="button" className="fleet-btn fleet-btn--danger" onClick={handleStop} disabled={busy}>
+                {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Square size={14} strokeWidth={1.75} />}
+                {busy ? "Stopping…" : "Stop agent"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

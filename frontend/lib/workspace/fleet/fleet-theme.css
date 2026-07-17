@@ -1895,6 +1895,22 @@ a.fleet-breadcrumb:hover {
   color: var(--accent);
 }
 
+/* Destructive — the one button style that IS a saturated fill, on purpose:
+   an irreversible action (Stop agent) confirmed inside a modal gets one
+   unambiguous signal, not the primary button's quiet hairline treatment.
+   White label on a solid --destructive fill, same shape/height as every
+   other .fleet-btn. */
+.fleet-btn--danger {
+  border-color: var(--destructive);
+  background: var(--destructive);
+  color: var(--destructive-contrast);
+}
+
+.fleet-btn--danger:hover:not(:disabled) {
+  background: var(--destructive-hover);
+  border-color: var(--destructive-hover);
+}
+
 .fleet-btn-plus {
   font-size: 16px;
   line-height: 1;

@@ -201,6 +201,79 @@ function DeleteAgentDialog({
   );
 }
 
+/** Stop-agent confirmation — the row-level twin of the Stop-agent confirm
+ *  dialog on the agent detail page (FleetAgentDetail.tsx's
+ *  StopAgentControl): same blurred .fleet-detail-backdrop + .fleet-small-dialog
+ *  + Cancel/.fleet-btn--danger shape, just reachable from the list row's
+ *  inline stop toggle instead of the detail header. Resume is affirmative,
+ *  not destructive — it never opens this, see AgentRow's onClick wiring below. */
+function StopAgentDialog({
+  agentName,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  agentName: string;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      role="presentation"
+      className="fleet-detail-backdrop"
+      onClick={() => { if (!busy) onCancel(); }}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="fleet-stop-agent-row-title"
+        className="fleet-small-dialog"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="fleet-small-dialog-header">
+          <span id="fleet-stop-agent-row-title" className="fleet-title">Stop agent</span>
+        </div>
+        <div className="fleet-small-dialog-body">
+          <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
+            Are you sure you want to stop <strong>{agentName}</strong>? It stops responding on
+            every channel until you resume it.
+          </p>
+          {error && (
+            <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>
+          )}
+        </div>
+        <div className="fleet-small-dialog-footer">
+          <button type="button" className="fleet-btn" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--danger"
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? "Stopping…" : "Stop agent"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /**
  * Fleet agent list — dense, column-aligned rows on a shared 6-column grid, with
  * a muted header row above and no per-agent cards. Every value has a column;
@@ -365,6 +438,8 @@ function AgentRow({
   tabIndex: number;
 }) {
   const [busy, setBusy] = useState(false);
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -400,16 +475,41 @@ function AgentRow({
       activate();
     }
   };
-  const toggleStop = async (e: React.MouseEvent) => {
+  // Resume is affirmative — one click, no confirm. Stop is destructive —
+  // clicking the row's Stop toggle opens a confirm dialog (requestStop)
+  // instead of firing immediately; the actual stopFleetAgent call only
+  // happens from the dialog's Stop button (confirmStop).
+  const handleResumeClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (busy) return;
     setBusy(true);
-    const result = stopped
-      ? await resumeFleetAgent(workspaceId, agent.agent_id)
-      : await stopFleetAgent(workspaceId, agent.agent_id);
+    const result = await resumeFleetAgent(workspaceId, agent.agent_id);
     setBusy(false);
     if (result.ok) onStoppedChanged?.();
   };
+  const requestStop = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (busy) return;
+    setStopError(null);
+    setStopConfirmOpen(true);
+  };
+  const closeStopConfirm = useCallback(() => {
+    if (busy) return;
+    setStopConfirmOpen(false);
+    setStopError(null);
+  }, [busy]);
+  const confirmStop = useCallback(async () => {
+    setBusy(true);
+    setStopError(null);
+    const result = await stopFleetAgent(workspaceId, agent.agent_id);
+    setBusy(false);
+    if (result.ok) {
+      setStopConfirmOpen(false);
+      onStoppedChanged?.();
+    } else {
+      setStopError(result.error || "Could not stop this agent.");
+    }
+  }, [workspaceId, agent.agent_id, onStoppedChanged]);
 
   const openDeleteConfirm = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -484,7 +584,7 @@ function AgentRow({
           title={stopped ? "Resume agent" : "Stop agent"}
           aria-label={stopped ? `Resume ${agent.label || "agent"}` : `Stop ${agent.label || "agent"}`}
           disabled={busy}
-          onClick={toggleStop}
+          onClick={stopped ? handleResumeClick : requestStop}
         >
           {stopped ? <Play size={12} strokeWidth={2} /> : <Square size={12} strokeWidth={2} />}
         </button>
@@ -521,6 +621,15 @@ function AgentRow({
         </div>
       </div>
     </div>
+    {stopConfirmOpen && (
+      <StopAgentDialog
+        agentName={agentDisplayName}
+        busy={busy}
+        error={stopError}
+        onCancel={closeStopConfirm}
+        onConfirm={confirmStop}
+      />
+    )}
     {confirmOpen && (
       <DeleteAgentDialog
         agentName={agentDisplayName}

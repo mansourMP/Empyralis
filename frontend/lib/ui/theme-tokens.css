@@ -104,6 +104,18 @@ html[data-theme="dark"] {
   --accent-muted: color-mix(in oklch, var(--accent) 24%, transparent);
   --accent-ring: color-mix(in oklch, var(--accent) 55%, transparent);
 
+  /* Destructive — one clear red, mirrors --accent's derived-step shape.
+     Reserved for irreversible/stop-it-now confirmations (Stop agent,
+     Delete agent) — a distinct role from --offline-* status color below,
+     even though the hue is a close cousin. */
+  --destructive: oklch(58% 0.19 25);  /* ≈ #d33a3c */
+  --destructive-hover: color-mix(in oklch, var(--destructive) 84%, #ffffff 16%);
+  --destructive-strong: color-mix(in oklch, var(--destructive) 78%, #ffffff 22%);
+  --destructive-contrast: #ffffff;
+  --destructive-soft: color-mix(in oklch, var(--destructive) 14%, transparent);
+  --destructive-muted: color-mix(in oklch, var(--destructive) 24%, transparent);
+  --destructive-ring: color-mix(in oklch, var(--destructive) 55%, transparent);
+
   /* Brand mark only — the one place color survives. */
   --brand-clay: #bc6c4c;
   --brand-clay-contrast: #fff;
@@ -152,6 +164,15 @@ html[data-theme="light"] {
   --accent-soft: color-mix(in oklch, var(--accent) 10%, transparent);
   --accent-muted: color-mix(in oklch, var(--accent) 18%, transparent);
   --accent-ring: color-mix(in oklch, var(--accent) 42%, transparent);
+
+  /* Destructive — same clear red, darken-on-hover like the light accent. */
+  --destructive: oklch(58% 0.19 25);  /* ≈ #d33a3c */
+  --destructive-hover: color-mix(in oklch, var(--destructive) 86%, #000000 14%);
+  --destructive-strong: color-mix(in oklch, var(--destructive) 80%, #000000 20%);
+  --destructive-contrast: #ffffff;
+  --destructive-soft: color-mix(in oklch, var(--destructive) 10%, transparent);
+  --destructive-muted: color-mix(in oklch, var(--destructive) 18%, transparent);
+  --destructive-ring: color-mix(in oklch, var(--destructive) 42%, transparent);
 
   --online-text: #15803d;
   --offline-text: #b91c1c;
