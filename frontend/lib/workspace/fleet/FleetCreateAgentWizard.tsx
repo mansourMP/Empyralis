@@ -383,8 +383,20 @@ export function FleetCreateAgentWizard({
   function finish() {
     if (!agentId) return;
     onCreated(agentId);
+    // Placement always resolves a real project (explicit pick, or "General"
+    // — see the doc comment above), so projSeg should never actually be
+    // blank here. But .../projects/{projSeg}/agents/{id}/overview 404s (via
+    // the global not-found page) if it ever is — the empty segment collapses
+    // the path so "agents" gets consumed as the [projectId] value, stranding
+    // the real agent id — so guard it anyway: land on the flat, always-valid
+    // agents list rather than a link known to be broken.
     const projSeg = resolvedProjectId || initialProjectId || "";
-    router.push(`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projSeg)}/agents/${encodeURIComponent(agentId)}/overview`);
+    const base = `/w/${encodeURIComponent(workspaceId)}`;
+    router.push(
+      projSeg
+        ? `${base}/projects/${encodeURIComponent(projSeg)}/agents/${encodeURIComponent(agentId)}/overview`
+        : `${base}/agents`,
+    );
   }
 
   return (
