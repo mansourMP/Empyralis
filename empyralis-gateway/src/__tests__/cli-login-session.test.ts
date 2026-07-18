@@ -132,6 +132,74 @@ test("start() resolves immediately without waiting for the process to finish", a
   assert.equal(fake.killCalls.length, 0);
 });
 
+// ---- claude_code's reliable subscription default (claudeai) --------------
+// `claudeai` (`claude auth login --claudeai`) is the fully-automatic,
+// Codex-device_auth-equivalent subscription flow: the CLI itself persists
+// the resulting credential (Keychain / credentials file), so this is now
+// claude_code's default method — see the module doc comment for why
+// `claude setup-token` is deliberately NOT one of the spawnable methods.
+
+test("claude_code defaults to claudeai (subscription) and spawns the right argv", async () => {
+  const fake = makeFakeChild();
+  let capturedCommand = "";
+  let capturedArgs: string[] = [];
+  const manager = new CliLoginSessionManager({
+    spawnImpl: (command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return fake.child;
+    },
+    // Precise (not blanket-true) so resolveLineBufferedSpawn's own
+    // `commandExists("stdbuf", env)` probe correctly resolves to "absent" —
+    // keeps this assertion about LOGIN_COMMAND's argv, not the unrelated
+    // stdbuf line-buffering prefix (covered by its own tests elsewhere).
+    commandExists: (command) => (command === "claude" ? "/usr/bin/claude" : null),
+  });
+  const result = await manager.start({ runId: "run-claudeai", runtime: "claude_code" });
+  assert.equal(result.method, "claudeai", "claudeai must be claude_code's default method, mirroring Codex's device_auth default");
+  assert.equal(result.awaits_secret, false);
+  assert.equal(capturedCommand, "/usr/bin/claude");
+  assert.deepEqual(capturedArgs, ["auth", "login", "--claudeai"]);
+});
+
+test("claude_code:subscription (the old gateway-spawned `claude setup-token`) is no longer a supported method", async () => {
+  // Confirms the removal is deliberate, not an accidental regression: the
+  // gateway must never spawn `claude setup-token` itself, because the
+  // resulting token would only ever reach this process's own memory (never
+  // the owner) and would be correctly-but-uselessly discarded — see the
+  // module doc comment. Requesting it explicitly must fail loudly with
+  // "unsupported_method", not silently fall back to some other flow.
+  const manager = new CliLoginSessionManager({
+    spawnImpl: () => {
+      throw new Error("must not spawn for an unsupported method");
+    },
+    commandExists: () => "/usr/bin/claude",
+  });
+  await assert.rejects(
+    manager.start({ runId: "run-no-subscription", runtime: "claude_code", method: "subscription" as never }),
+    (err: unknown) => {
+      assert.ok(err instanceof CliLoginError);
+      assert.equal(err.kind, "unsupported_method");
+      return true;
+    },
+  );
+});
+
+test("claude_code:console remains available as the non-subscription (API billing) alternative", async () => {
+  const fake = makeFakeChild();
+  let capturedArgs: string[] = [];
+  const manager = new CliLoginSessionManager({
+    spawnImpl: (_command, args) => {
+      capturedArgs = args;
+      return fake.child;
+    },
+    commandExists: (command) => (command === "claude" ? "/usr/bin/claude" : null),
+  });
+  const result = await manager.start({ runId: "run-console", runtime: "claude_code", method: "console" });
+  assert.equal(result.method, "console");
+  assert.deepEqual(capturedArgs, ["auth", "login", "--console"]);
+});
+
 test("input() writes the pasted-back code plus a newline to the session's stdin", async () => {
   const fake = makeFakeChild();
   const manager = new CliLoginSessionManager({

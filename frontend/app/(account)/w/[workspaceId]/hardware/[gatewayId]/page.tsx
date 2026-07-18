@@ -53,6 +53,22 @@ const VERIFY_POLL_MS = 5_000;
 const VERIFY_TIMEOUT_MS = 90_000;
 const LOGIN_EVENTS_POLL_MS = 2_000;
 
+/** Multi-line copy-paste shell/config snippet inside the claude_code
+ *  long-lived-token guide (CliSetupControl) — .fleet-md-code is chip-sized
+ *  for inline spans, so a block variant is defined here rather than adding
+ *  a new global CSS class for one component's use. */
+const CODE_BLOCK_STYLE: React.CSSProperties = {
+  margin: "6px 0 0",
+  padding: "8px 10px",
+  borderRadius: 6,
+  background: "var(--bg-inset)",
+  fontFamily: "var(--app-font-mono, ui-monospace, monospace)",
+  fontSize: 11,
+  lineHeight: 1.5,
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-all",
+};
+
 function createRunId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
   return `run_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -114,7 +130,7 @@ type CliLoginPhase = "idle" | "picking" | "starting" | "active" | "submitting" |
  *  Field `inputKind` tells the picker what to collect after the user picks
  *  a stdin-secret method (null = URL-and-code flow, submits nothing back). */
 type CliAuthMethod = {
-  key: "device_auth" | "api_key" | "access_token" | "console" | "subscription";
+  key: "device_auth" | "api_key" | "access_token" | "claudeai" | "console";
   label: string;
   description: string;
   inputKind: null | "api_key" | "access_token";
@@ -145,16 +161,16 @@ const CLI_AUTH_METHODS: Record<"claude_code" | "codex", CliAuthMethod[]> = {
   ],
   claude_code: [
     {
-      key: "console",
-      label: "Anthropic Console (API billing)",
-      description: "Uses your Anthropic Console account, per-token billing. Device-code flow, works on a headless box.",
+      key: "claudeai",
+      label: "Your Claude subscription (Pro / Max / Team)",
+      description: "Uses your Claude.ai plan quota. Sign in on any browser — device-code flow, works on a headless box.",
       inputKind: null,
       recommended: true,
     },
     {
-      key: "subscription",
-      label: "Claude subscription long-lived token",
-      description: "Requires a Claude Pro / Max plan. Prefer Console unless you specifically need this.",
+      key: "console",
+      label: "Anthropic Console (API billing)",
+      description: "Uses your Anthropic Console account, per-token billing. Same device-code flow, for per-token billing instead.",
       inputKind: null,
     },
     {
@@ -183,12 +199,19 @@ function CliSetupControl({
   gatewayId,
   workspaceId,
   refresh,
+  isCloud,
 }: {
   runtime: "claude_code" | "codex";
   state: RuntimeState;
   gatewayId: string;
   workspaceId: string;
   refresh: (opts?: { silent?: boolean }) => Promise<FleetGateway[]>;
+  /** Cloud VPS (Ubuntu, systemd) vs this-device (macOS, launchd) — used only
+   *  to default the long-lived-token guide's instructions to the right OS.
+   *  The guide itself never assumes; it's presented as a toggle so an
+   *  operator whose box doesn't match this heuristic can still get correct
+   *  copy-paste instructions. */
+  isCloud: boolean;
 }) {
   const label = RUNTIME_LABELS[runtime];
   const capabilityLabel = runtime === "claude_code" ? "Claude Code" : "Codex";
@@ -290,6 +313,21 @@ function CliSetupControl({
   /** Value collected in the picker for stdin-secret methods (api_key /
    *  access_token). Never rendered as plain text — password-style input. */
   const [secretInput, setSecretInput] = useState("");
+  /** claude_code only: the owner-driven CLAUDE_CODE_OAUTH_TOKEN fallback.
+   *  This is NOT a cli.login.* flow — nothing is spawned on the Gateway and
+   *  no run_id exists. The owner runs `claude setup-token` themselves (on
+   *  any machine with a browser) and places the printed token into this
+   *  Gateway's own environment file directly; Empyralis never sees the
+   *  value at any point. See cli-login-session.ts's module doc comment for
+   *  why this exists as a separate, non-spawned path rather than a fourth
+   *  cli.login.start method. */
+  const [tokenGuideOpen, setTokenGuideOpen] = useState(false);
+  /** Which OS's instructions the guide shows — defaults from isCloud (cloud
+   *  VPS boxes are always Ubuntu/systemd per scripts/install-agent-
+   *  computer.sh; a non-cloud box is the owner's own machine, macOS/
+   *  launchd for this product today) but stays a toggle since that
+   *  heuristic isn't a hard guarantee for every box shape. */
+  const [tokenGuideIsCloud, setTokenGuideIsCloud] = useState(isCloud);
   const eventsPollRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -430,6 +468,7 @@ function CliSetupControl({
     setLoginError(null);
     setChosenMethod(recommendedMethod);
     setSecretInput("");
+    setTokenGuideOpen(false);
   }, [recommendedMethod]);
 
   // Small design-system helpers scoped to this component. Local because
@@ -597,6 +636,94 @@ function CliSetupControl({
             Back
           </button>
         </div>
+        {runtime === "claude_code" && (
+          <div style={{ marginTop: 4, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+            <button
+              type="button"
+              onClick={() => setTokenGuideOpen((open) => !open)}
+              style={{
+                fontSize: 12,
+                color: "var(--text-muted)",
+                background: "none",
+                border: "none",
+                padding: 0,
+                cursor: "pointer",
+                textDecoration: "underline",
+                textUnderlineOffset: 2,
+              }}
+            >
+              {tokenGuideOpen ? "Hide manual token setup" : "Sign-in not sticking? Set a long-lived token manually"}
+            </button>
+            {tokenGuideOpen && (
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10, fontSize: 12 }}>
+                <p style={{ margin: 0, color: "var(--text-muted)" }}>
+                  This is the same long-lived-token mechanism Anthropic documents for CI and
+                  background services. You generate it yourself and place it directly into this
+                  Gateway&apos;s own environment — Empyralis never transmits or stores the value.
+                </p>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    type="button"
+                    className={tokenGuideIsCloud ? "fleet-btn fleet-btn--accent" : "fleet-btn"}
+                    style={{ padding: "4px 10px", fontSize: 12 }}
+                    onClick={() => setTokenGuideIsCloud(true)}
+                  >
+                    Cloud server (Linux)
+                  </button>
+                  <button
+                    type="button"
+                    className={!tokenGuideIsCloud ? "fleet-btn fleet-btn--accent" : "fleet-btn"}
+                    style={{ padding: "4px 10px", fontSize: 12 }}
+                    onClick={() => setTokenGuideIsCloud(false)}
+                  >
+                    This Mac
+                  </button>
+                </div>
+                <ol style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <li>
+                    On any computer where you&apos;re signed in to Claude Code, run{" "}
+                    <code className="fleet-md-code">claude setup-token</code>, approve access in the
+                    browser, and copy the token it prints — treat it like a password.
+                  </li>
+                  {tokenGuideIsCloud ? (
+                    <li>
+                      SSH into this box and run:
+                      <pre style={CODE_BLOCK_STYLE}>
+                        {'echo \'CLAUDE_CODE_OAUTH_TOKEN="paste-your-token-here"\' | sudo tee -a /etc/empyralis/agent-computer.env\nsudo systemctl restart empyralis-gateway.service'}
+                      </pre>
+                    </li>
+                  ) : (
+                    <li>
+                      In the Empyralis folder you installed this in, run:
+                      <pre style={CODE_BLOCK_STYLE}>
+                        {'echo \'CLAUDE_CODE_OAUTH_TOKEN=paste-your-token-here\' >> .env.local\nscripts/agent_computer.sh stop && scripts/agent_computer.sh start'}
+                      </pre>
+                      Not sure where that is, or running this as a background service already? Add the
+                      same line to{" "}
+                      <code className="fleet-md-code">~/Library/LaunchAgents/ai.empyralis.agent-computer.plist</code>
+                      {"'"}s <code className="fleet-md-code">EnvironmentVariables</code> dict instead
+                      (<code className="fleet-md-code">{"<key>CLAUDE_CODE_OAUTH_TOKEN</key><string>…</string>"}</code>),
+                      then run{" "}
+                      <code className="fleet-md-code">launchctl kickstart -k gui/$(id -u)/ai.empyralis.agent-computer</code>.
+                    </li>
+                  )}
+                  <li>We&apos;ll pick it up on the next heartbeat, usually within 20 seconds.</li>
+                </ol>
+                <div>
+                  <button
+                    type="button"
+                    className="fleet-btn"
+                    onClick={() => verifyUntil((s) => s === "ready")}
+                    disabled={verifying}
+                  >
+                    {verifying ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+                    {verifying ? "Checking…" : "Check now"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>,
     );
   }
@@ -654,7 +781,18 @@ function CliSetupControl({
         {codePromptText && (
           <p style={{ margin: "0 0 4px", color: "var(--text-muted)" }}>{codePromptText}</p>
         )}
-        {runtime === "claude_code" && chosenMethod.key === "subscription" && !chosenMethod.inputKind && (
+        {/* Claude Code's paste-back completion step: applies to EVERY
+            claude_code URL+code method (claudeai, console), not just one of
+            them. Any box the owner is reached over the network on (a paired
+            remote Gateway is the common case) can't have its own loopback
+            callback reached by the owner's local browser, so the CLI falls
+            back to printing "Paste code here if prompted" and blocking on
+            stdin — see cli-login-session.ts's module doc comment and
+            https://code.claude.com/docs/en/authentication. Previously this
+            was gated to chosenMethod.key === "subscription" only, which left
+            console (the old default!) with no way to actually complete a
+            sign-in that hit this fallback. */}
+        {runtime === "claude_code" && !chosenMethod.inputKind && (
           <>
             <div className="gw-pair-panel-row" style={{ marginTop: 6, alignItems: "stretch", gap: 8 }}>
               <input
@@ -870,6 +1008,7 @@ export default function GatewayDetailPage() {
                   gatewayId={targetGatewayId}
                   workspaceId={workspaceId}
                   refresh={refresh}
+                  isCloud={isCloud}
                 />
               </div>
             );

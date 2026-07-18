@@ -13,17 +13,39 @@ import { spawn } from "child_process";
 // but both flows are modeled the same way here for one uniform primitive.
 //
 // SAFETY-CRITICAL: what gets forwarded as output.
-// `claude setup-token` prints the long-lived OAuth token to stdout as its
-// OWN final success output — that is the one thing the Gateway must never
-// transmit, full stop. So this module does NOT forward stdout as a raw
-// passthrough. It only ever forwards a line that positively matches one of
-// two known-safe shapes: a URL to open, or the literal "paste code" prompt
-// text. Everything else — including whatever prints after a successful
-// exchange — is buffered locally (bounded, for failure diagnostics only)
-// and is NEVER handed to the event publisher. This is the enforcement point
-// for "the Gateway never reads or transmits the credential": not a promise
-// in a comment, an allowlist a line must match before it ever leaves this
-// process.
+// A credential-shaped line printed by the child CLI is the one thing the
+// Gateway must never transmit, full stop. So this module does NOT forward
+// stdout as a raw passthrough. It only ever forwards a line that positively
+// matches one of two known-safe shapes: a URL to open, or the literal
+// "paste code" prompt text. Everything else — including whatever prints
+// after a successful exchange — is buffered locally (bounded, for failure
+// diagnostics only) and is NEVER handed to the event publisher. This is the
+// enforcement point for "the Gateway never reads or transmits the
+// credential": not a promise in a comment, an allowlist a line must match
+// before it ever leaves this process.
+//
+// Why there is no gateway-spawned `claude setup-token` method. That command
+// (Claude Code's CLAUDE_CODE_OAUTH_TOKEN generator — see docs at
+// https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)
+// deliberately does NOT save the token anywhere; it only ever prints it to
+// stdout for the operator running it to copy. If the Gateway spawned it here
+// (piped stdio, per the safety-critical rule above), the token would land
+// ONLY in this process's own memory — never shown to the owner, who is
+// looking at the platform UI, not this process's stdout — and never relayed
+// (correctly, per the rule above). The run would report success and leave
+// NOTHING usable behind: a guaranteed, silent dead end, confirmed against
+// the installed 2.1.214 CLI. So `claude setup-token` is intentionally NOT
+// one of the methods below. It is instead surfaced as an owner-run, owner-
+// pasted-into-their-own-environment step in the frontend's guided "long-
+// lived token" panel — the Gateway never spawns it and never sees the
+// result. `claude auth login --claudeai` (the `claudeai` method below) is
+// the reliable, fully-automatic Claude-subscription equivalent of Codex's
+// `device_auth`: it prints a URL + optional paste-back code exactly like
+// `console` does (verified empirically under piped/non-TTY stdio against
+// 2.1.214), and — unlike `setup-token` — the CLI itself durably persists the
+// resulting credential on success (macOS Keychain / Linux+Windows
+// ~/.claude/.credentials.json), so a completed run leaves this box actually
+// signed in with no further owner action.
 //
 // Multi-method support: each runtime exposes several real auth methods
 // (see LOGIN_METHODS below). The (runtime, method) pair selects one row of
@@ -40,8 +62,8 @@ export type CliLoginMethod =
   | "device_auth"     // OAuth device-authorization grant — Codex's default
   | "api_key"         // Read a raw API key from cli.login.input
   | "access_token"    // Read a pre-obtained access token from cli.login.input
-  | "console"         // Anthropic Console (API billing) — Claude's new default
-  | "subscription";   // Claude subscription long-lived token via `claude setup-token`
+  | "claudeai"        // Claude subscription (Pro/Max/Team) — Claude Code's default, mirrors Codex's device_auth
+  | "console";        // Anthropic Console (API billing)
 
 export type CliLoginFailureKind = "not_installed" | "timeout" | "crash" | "cancelled" | "unsupported_method";
 
@@ -135,24 +157,30 @@ const LOGIN_COMMAND: Record<string, LoginCommandSpec> = {
   },
   // Claude Code — https://github.com/anthropics/claude-code
   //
-  // console (new default): `claude auth login --console` prints a URL + code
-  // for the Anthropic Console (API-billing) account. This is the flow that
-  // WORKS reliably on a headless box in a piped subprocess. `claude setup-
-  // token` — the PREVIOUS default — hung silently under non-TTY stdio and
-  // was every user's first-login dead end.
+  // claudeai (default): `claude auth login --claudeai` explicitly requests
+  // Claude subscription (Pro/Max/Team) auth — the same flag `claude auth
+  // login --help` documents as "Use Claude subscription (default)" — and
+  // skips straight to the URL+code device-style flow with no interactive
+  // account-type picker. Empirically confirmed (2.1.214, piped/non-TTY
+  // stdio with the stdbuf prefix below) to print the authorize URL and the
+  // "Paste code here if prompted" prompt exactly as reliably as `console`
+  // does. Unlike `claude setup-token`, completing this flow makes the CLI
+  // persist the credential itself (Keychain on macOS, ~/.claude/
+  // .credentials.json on Linux/Windows) — no owner copy-paste step needed,
+  // matching Codex's device_auth UX.
+  "claude_code:claudeai": {
+    binaryEnvVar: "CLAUDE_CLI_PATH",
+    defaultBinary: "claude",
+    args: ["auth", "login", "--claudeai"],
+  },
+  // console: `claude auth login --console` prints a URL + code for the
+  // Anthropic Console (API-billing, pay-per-token) account instead of a
+  // subscription. Same reliable URL+code shape as claudeai; kept as the
+  // alternative for teams who bill per-token rather than by seat.
   "claude_code:console": {
     binaryEnvVar: "CLAUDE_CLI_PATH",
     defaultBinary: "claude",
     args: ["auth", "login", "--console"],
-  },
-  // subscription: `claude setup-token` — kept as an OPT-IN option for users
-  // who explicitly want the subscription long-lived token flow. May still
-  // hang on some CLI versions in non-TTY environments; the stdbuf line-
-  // buffer fallback below mitigates but doesn't fully fix. Not default.
-  "claude_code:subscription": {
-    binaryEnvVar: "CLAUDE_CLI_PATH",
-    defaultBinary: "claude",
-    args: ["setup-token"],
   },
   // api_key: `claude` doesn't have a `--with-api-key` login subcommand, so
   // this method uses `claude auth login --console --env-var` style
@@ -176,7 +204,7 @@ const LOGIN_COMMAND: Record<string, LoginCommandSpec> = {
  *  recommended default for a headless box. */
 export const LOGIN_METHODS: Record<CliLoginRuntime, CliLoginMethod[]> = {
   codex: ["device_auth", "api_key", "access_token"],
-  claude_code: ["console", "subscription", "api_key"],
+  claude_code: ["claudeai", "console", "api_key"],
 };
 
 /** Look up (runtime, method) with sensible per-runtime defaults if method is

@@ -48,6 +48,14 @@ Environment:
                                       Diagnostic override. Allows starting the cloud connection
                                       even when stored pairing state belongs to another workspace.
   EMPYRALIS_AGENT_COMPUTER_SERVICE_USER  User for Linux/macOS server service mode.
+  CLAUDE_CODE_OAUTH_TOKEN           Long-lived token from `claude setup-token`, for a reliable
+                                      Claude Code subscription sign-in on this box (recommended over
+                                      relying on the macOS Keychain for a background service — see
+                                      https://code.claude.com/docs/en/authentication). Also readable
+                                      from this repo's .env.local so it survives every env-file
+                                      regeneration. Never seen or stored by Empyralis' servers.
+  ANTHROPIC_API_KEY                 Same local-only placement as CLAUDE_CODE_OAUTH_TOKEN above, for
+                                      Claude Code's per-token API billing instead of a subscription.
 EOF
 }
 
@@ -199,6 +207,27 @@ EOF
     fi
     if [[ -n "${telegram_env_value}" ]]; then
       echo "export ${telegram_env_name}=$(shell_quote "${telegram_env_value}")" >> "${ENV_FILE}"
+    fi
+  done
+  # Claude Code sign-in (reliable path): `claude setup-token` PRINTS a
+  # long-lived OAuth token rather than saving it anywhere — the owner is
+  # meant to export it wherever Claude Code should run non-interactively
+  # (https://code.claude.com/docs/en/authentication#generate-a-long-lived-token).
+  # Same durable-local-secret shape as the Telegram vars above: drop
+  # `CLAUDE_CODE_OAUTH_TOKEN=...` into this repo's .env.local (or export it
+  # before running `agent_computer.sh`) and it survives every regeneration
+  # of this env file, including a launchd-triggered restart. The Gateway
+  # itself never sees this value in transit — only this owner-controlled
+  # local file/shell does. ANTHROPIC_API_KEY works the same way for anyone
+  # who'd rather pay per-token than use their subscription.
+  local claude_env_name
+  for claude_env_name in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY; do
+    local claude_env_value="${!claude_env_name-}"
+    if [[ -z "${claude_env_value}" ]]; then
+      claude_env_value="$(dotenv_value "${claude_env_name}" || true)"
+    fi
+    if [[ -n "${claude_env_value}" ]]; then
+      echo "export ${claude_env_name}=$(shell_quote "${claude_env_value}")" >> "${ENV_FILE}"
     fi
   done
   chmod 600 "${ENV_FILE}" 2>/dev/null || true

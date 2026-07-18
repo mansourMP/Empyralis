@@ -535,6 +535,28 @@ async function probeCodexCli(
   }, checkedAt);
 }
 
+// Claude Code's own credential-storage locations, per
+// https://code.claude.com/docs/en/authentication#credential-management:
+// macOS always uses the login Keychain (never a file, regardless of
+// CLAUDE_CONFIG_DIR); Linux and Windows write ~/.claude/.credentials.json,
+// relocated under CLAUDE_CONFIG_DIR when that env var is set. This mirrors
+// that precisely so the passive probe never disagrees with the real CLI
+// about where its own credential lives.
+function claudeCredentialFileCandidates(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
+  const home = homeDir(env);
+  const candidates = [
+    path.join(home, ".claude", ".credentials.json"),
+    path.join(home, ".claude", "credentials.json"),
+  ];
+  if (platform !== "darwin") {
+    const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+    if (configDir) {
+      candidates.unshift(path.join(configDir, ".credentials.json"));
+    }
+  }
+  return candidates;
+}
+
 async function probeClaudeCli(
   checkedAt: string,
   env: NodeJS.ProcessEnv,
@@ -564,11 +586,16 @@ async function probeClaudeCli(
   // a best-effort version/liveness string — a slow cold start (these are Node
   // CLIs) must never flip installed → false and produce a flaky signal.
   const installed = true;
+  // CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY are the mechanism Anthropic
+  // itself documents for headless/CI use (a long-lived token from `claude
+  // setup-token`, meant to be exported wherever Claude Code runs
+  // non-interactively) — see
+  // https://code.claude.com/docs/en/authentication#generate-a-long-lived-token.
+  // Both sit ABOVE plain /login credentials in the CLI's own auth precedence,
+  // so detecting either here is a fully deterministic, OS-independent signal:
+  // no Keychain/session dependency, unlike the macOS branch below.
   let authenticated = detectAuthPresence(
-    [
-      path.join(homeDir(env), ".claude", ".credentials.json"),
-      path.join(homeDir(env), ".claude", "credentials.json"),
-    ],
+    claudeCredentialFileCandidates(env, platform),
     ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
     env,
   );
@@ -578,6 +605,18 @@ async function probeClaudeCli(
     // metadata + a 0 exit status when it EXISTS — it never emits the secret.
     // This keeps the "never read credential contents" rule while making the
     // installed-vs-authenticated signal accurate on macOS boxes too.
+    //
+    // Caveat this branch cannot resolve: this is an EXISTENCE check, not proof
+    // that a later, separately-spawned, non-interactive child process (e.g.
+    // this same Gateway spawning `claude -p ...` for a real agent turn) can
+    // actually decrypt the item — Keychain access-control lists are enforced
+    // per requesting application at USE time, not at existence-query time, and
+    // are known to behave differently for headless/background process
+    // contexts than for an interactive Terminal session. Treat a "ready" that
+    // came from this branch alone as a reasonable but unverified signal; if
+    // dispatch keeps failing "not authenticated" despite this reporting ready,
+    // the reliable fix is CLAUDE_CODE_OAUTH_TOKEN above, not re-probing the
+    // Keychain harder.
     const security = commandExists("security");
     if (security) {
       try {
