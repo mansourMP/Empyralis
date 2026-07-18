@@ -2169,7 +2169,17 @@ async def _handle_telegram_gateway_channel_inbound(
     media_items = [item for item in (message.get("media") or []) if isinstance(item, dict)]
     if not external_message_id or not remote_jid or (not text and not media_items):
         raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
-    if bool(message.get("from_me")):
+    # A self-chat message (the owner messaging their own Telegram "Saved
+    # Messages" — the exact analog of WhatsApp's is_self_chat command
+    # channel) is ALWAYS from_me too, since only the owner can post into
+    # their own Saved Messages. Let it through here exactly like the
+    # WhatsApp handler above (`from_me and not is_self_chat`) instead of
+    # ignoring every from_me message unconditionally — the pre-fix
+    # behavior, which was moot only because the Gateway (runtime.ts)
+    # dropped self-chat messages before they ever reached this handler at
+    # all. An ordinary outgoing message to someone else (or to a group)
+    # still has is_self_chat=False and is still ignored here.
+    if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
         return {"ignored": True, "reason": "from_me", "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY}
     # Group gate: skip group messages unless mentioned or replying to Sage.
     # The Gateway-side filter (runtime.ts) is the primary gate; this is a
@@ -2199,18 +2209,21 @@ async def _handle_telegram_gateway_channel_inbound(
                 TELEGRAM_PERSONAL_CHANNEL_KEY: {
                     "provider": str(payload.get("provider") or TELEGRAM_PERSONAL_PROVIDER).strip() or TELEGRAM_PERSONAL_PROVIDER,
                     "status": "connected",
-                    # Telegram has no explicit is_self_chat signal on the
-                    # message payload (unlike WhatsApp) — remote_jid for a
-                    # genuine "Saved Messages" self-chat equals the owner's
-                    # own user id, which is exactly what's already preserved
-                    # in existing_state, so there is never a NEW value to
-                    # supply here; only preserve. See
+                    # Mirrors the WhatsApp handler above exactly, now that
+                    # Telegram's message payload also carries is_self_chat
+                    # (see telegram/message-mapper.ts's
+                    # mapTelegramInboundMessage): only a genuine self-chat
+                    # event supplies a NEW linked_user_id; every other
+                    # inbound message (including a stranger's, or the
+                    # owner posting inside a group) preserves whatever is
+                    # already persisted. See
                     # _resolve_linked_identity_for_sync's docstring for why
-                    # deriving this from the message's own sender_jid (the
-                    # pre-fix behavior) silently clobbered the real owner
-                    # identity with whichever stranger last texted in.
+                    # deriving this from the message's own sender_jid
+                    # unconditionally (the pre-fix behavior) silently
+                    # clobbered the real owner identity with whichever
+                    # stranger last texted in.
                     "linked_user_id": _resolve_linked_identity_for_sync(
-                        current_value=None,
+                        current_value=str(message.get("sender_jid") or "").strip() if bool(message.get("is_self_chat")) else None,
                         preserved_value=_channel_owner_linked_id(channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY, state=existing_state),
                     ),
                     "linked_name": str((existing_state or {}).get("linked_name") or "").strip() or None,

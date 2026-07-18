@@ -25,6 +25,21 @@ export interface TelegramInboundMessage {
   text: string;
   receivedAt?: string;
   fromMe?: boolean;
+  /** True when the peer IS the logged-in account itself — Telegram's
+   *  "Saved Messages" chat, the exact analog of WhatsApp's is_self_chat
+   *  (see whatsapp/message-mapper.ts's mapWhatsAppInboundMessage /
+   *  is_self_chat: ownedJid ? remoteJid === ownedJid : false). Resolved
+   *  synchronously in runtime.ts's GramJS event handler from Telegram's own
+   *  `self` flag on the resolved chat entity (event.isPrivate && chat.self
+   *  === true) — a genuine server-computed "this peer is literally you"
+   *  signal, not a locally-reconstructed id comparison. A self-chat message
+   *  is always fromMe too (only the owner can post into their own Saved
+   *  Messages), so this is what lets handleInboundMessage's from_me gate
+   *  carve it out as an allowed owner command instead of an ignored echo —
+   *  see handleInboundMessage's loop-guard block comment for the other half
+   *  of that story (suppressing the runtime's OWN replies into this same
+   *  chat). */
+  isSelfChat?: boolean;
   /** Zero or more media attachments already downloaded and saved to disk
    *  by the adapter before the message handler is invoked (see
    *  runtime.ts's NewMessage event handler). Empty/absent for text-only
@@ -74,6 +89,7 @@ export function mapTelegramInboundMessage(rawMessage: TelegramInboundMessage): T
       text,
       received_at: String(rawMessage.receivedAt || "").trim() || new Date().toISOString(),
       from_me: Boolean(rawMessage.fromMe),
+      is_self_chat: Boolean(rawMessage.isSelfChat),
       is_group: isGroup,
       is_mentioned: isGroup && Boolean(rawMessage.isMentioned),
       quoted_stanza_id: quotedStanzaId,
