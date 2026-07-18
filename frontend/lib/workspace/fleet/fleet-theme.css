@@ -4145,6 +4145,28 @@ a.fleet-list-row:hover,
 button.fleet-list-row:hover {
   background: var(--bg-card-hover);
 }
+/* Light mode only: --bg-card/--bg-panel are literally #ffffff here, so a
+   transparent row + var(--border)'s 8% black hairline has almost no visible
+   edge against the white content panel (dark mode's own 8% WHITE hairline
+   on the near-black canvas reads with far more contrast at the same alpha —
+   simultaneous-contrast, not a token asymmetry — so dark needs no change).
+   Give rows a subtle surface fill (uniform across adjacent rows, so the
+   whole list reads as one carded block) plus a stronger divider; rounded
+   only at the list's own outer corners so it reads as one list card, not
+   stacked boxes. */
+html[data-theme="light"] .fleet-list-row {
+  background: var(--bg-surface-2);
+  border-bottom-color: var(--border-strong);
+}
+html[data-theme="light"] .fleet-list-row:first-child {
+  border-top-left-radius: var(--radius-card);
+  border-top-right-radius: var(--radius-card);
+}
+html[data-theme="light"] .fleet-list-row:last-child {
+  border-bottom: 1px solid var(--border-strong);
+  border-bottom-left-radius: var(--radius-card);
+  border-bottom-right-radius: var(--radius-card);
+}
 .fleet-list-row-icon { display: inline-flex; color: var(--text-secondary); flex-shrink: 0; }
 .fleet-list-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .fleet-list-row-title { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary); }
@@ -4891,16 +4913,79 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-muted);
   margin: var(--space-4) 0 var(--space-2);
 }
-.fleet-list-row-remove {
+/* Hardware list row actions — one "⋯" menu (Rename / Disconnect) replacing
+   the old bare "×" + hover-pencil combo: the always-visible × read as a
+   one-click destroy, inconsistent with the pencil's separate hover-reveal
+   affordance. Reveal pattern matches .fleet-agent-stop-btn (row hover/
+   focus-within, not .fleet-list-row-title-rename-btn's own opacity-based
+   pattern) since this trigger owns a popover with its own focusable
+   children — :focus-within keeps it visible while a menu item inside is
+   focused, not just the trigger itself. */
+.fleet-list-row-menu-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.fleet-list-row-menu-trigger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
   background: none;
-  border: none;
   color: var(--text-secondary);
   font-size: var(--text-xs);
   cursor: pointer;
-  padding: 4px 8px;
-  border-radius: var(--radius-control);
+  flex-shrink: 0;
+  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
-.fleet-list-row-remove:hover { color: var(--text-primary); background: var(--bg-card-hover); }
+.fleet-list-row:hover .fleet-list-row-menu-trigger,
+.fleet-list-row:focus-within .fleet-list-row-menu-trigger,
+.fleet-list-row-menu-trigger.is-open,
+.fleet-list-row-menu-trigger:disabled {
+  display: inline-flex;
+}
+.fleet-list-row-menu-trigger:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-card-hover); }
+.fleet-list-row-menu-trigger.is-open { color: var(--text-primary); background: var(--bg-inset); border-color: var(--border-strong); }
+.fleet-list-row-menu-trigger:disabled { opacity: 0.6; cursor: default; }
+
+.fleet-list-row-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  /* Same popover tier as .fleet-toolbar-popover: above the properties
+     drawer (30) and its scrim (29), below nothing on this page. */
+  z-index: 40;
+  min-width: 140px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.fleet-list-row-menu-item {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.fleet-list-row-menu-item:hover { background: var(--bg-card-hover); }
+/* Destructive — same --app-danger token ConfirmDialog's own danger button
+   (AppButton tone="danger", chrome.css) uses, so the menu's warning color
+   matches the confirm dialog it opens. */
+.fleet-list-row-menu-item--danger { color: var(--app-danger); }
+.fleet-list-row-menu-item--danger:hover { background: color-mix(in srgb, var(--app-danger) 12%, transparent); }
 
 .fleet-secondary-toggle {
   background: none;
