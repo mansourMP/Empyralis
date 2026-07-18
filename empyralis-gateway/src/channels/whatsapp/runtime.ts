@@ -197,6 +197,46 @@ const WHATSAPP_FFMPEG_TIMEOUT_MS = 60_000;
 // media_id contract (below) is identical either way.
 const WHATSAPP_MEDIA_SUBDIR = "whatsapp/media";
 
+// ── Self-chat loop-guard tuning (see WhatsAppPersonalRuntime's
+// pendingSelfChatSends/selfChatTurnTimestamps fields and
+// isOwnSelfChatEcho/admitSelfChatTurnOrTrip for the mechanisms these tune).
+// Mirrors telegram/runtime.ts's identically-named/valued constants exactly
+// — same class of bug (an owner "Saved Messages" self-chat channel whose
+// own replies can echo back in as new inbound events), same fix shape.
+
+/** How long a "we just started sending this text into self-chat" bookkeeping
+ *  entry stays eligible to match an inbound echo. Generous relative to a
+ *  single sendMessage RPC round trip (normally well under a second) so the
+ *  race window it exists for is comfortably covered; short enough that a
+ *  genuinely new owner message which happens to repeat earlier text is only
+ *  at risk of a false match for a brief window, not indefinitely. Exported
+ *  for direct reference from tests (see whatsapp-self-chat.test.ts) instead
+ *  of duplicating the value as a magic number that could silently drift. */
+export const SELF_CHAT_PENDING_SEND_TTL_MS = 20_000;
+
+/** Rolling window for the self-chat circuit breaker. Exported for tests —
+ *  see SELF_CHAT_PENDING_SEND_TTL_MS's doc for why. */
+export const SELF_CHAT_BREAKER_WINDOW_MS = 60_000;
+
+/** Max self-chat turns admitted (i.e. that passed isOwnSelfChatEcho) within
+ *  SELF_CHAT_BREAKER_WINDOW_MS before the breaker refuses further ones. Well
+ *  above any plausible human-paced back-and-forth (each turn already
+ *  absorbs a burst of rapid messages via the inbound debouncer) — a real
+ *  runaway loop with no human pacing it would blow past this within
+ *  seconds, tripping fast; a legitimate conversation should never get
+ *  close. Exported for tests — see SELF_CHAT_PENDING_SEND_TTL_MS's doc for
+ *  why. */
+export const SELF_CHAT_BREAKER_MAX_TURNS = 6;
+
+/** Pulls the Baileys-assigned `key.id` off a sendMessage() response —
+ *  shared by sendWhatsAppTextChunks and sendOutboundMediaItems so every
+ *  dispatched chunk/media item reports its id back through the same shape,
+ *  regardless of which helper sent it. */
+function extractWhatsAppSentMessageId(response: Record<string, unknown> | undefined): string | undefined {
+  const key = response?.key as { id?: unknown } | undefined;
+  return String(key?.id ?? "").trim() || undefined;
+}
+
 export class WhatsAppPersonalRuntime {
   private readonly configStore: PersonalChannelConfigStore;
   private readonly sessionStore: WhatsAppSessionStore;
@@ -216,7 +256,43 @@ export class WhatsAppPersonalRuntime {
   private pairingCodeRequested = false;
   private connectPromise: Promise<void> | null = null;
   private reconnectAttempts = 0;
+  /**
+   * External message IDs this runtime has sent — EVERY chunk of a
+   * multi-part text reply and every media item, not just the "primary" one
+   * returned to the caller (see sendFinalOutbound). Used to resolve
+   * is_reply_to_sage (someone replying to a message Sage sent counts as
+   * "addressed" in a group, same as an explicit @mention) AND, since
+   * is_self_chat is deliberately let through the from_me gate below (see
+   * handleMessagesUpsert), reused as the primary self-chat loop-guard
+   * signal: an inbound self-chat event whose external_message_id is
+   * already in this set is unambiguously our own reply resurfacing, not a
+   * new owner command (see isOwnSelfChatEcho). Mirrors telegram/runtime.ts's
+   * identically-named/purposed field exactly. Capped so a long-lived
+   * connection can't grow this unboundedly.
+   */
   private sentMessageIds = new Set<string>();
+  /**
+   * LOOP-GUARD state (see isOwnSelfChatEcho / admitSelfChatTurnOrTrip and
+   * handleMessagesUpsert's block comment). Two layers, both scoped to
+   * self-chat sends only — mirrors telegram/runtime.ts's identically-named
+   * fields exactly:
+   *  1. pendingSelfChatSends — the plain (pre-markdown-render) text of a
+   *     self-chat reply chunk, recorded the instant its send begins (see
+   *     beginSelfChatEchoGuard, called from sendWhatsAppTextChunks via
+   *     sendFinalOutbound's hooks). Covers a race where Baileys' own-send
+   *     echo (messages.upsert fired via emitOwnEvents — see
+   *     @whiskeysockets/baileys/lib/Socket/messages-send.js's
+   *     `if (config.emitOwnEvents) { process.nextTick(...upsertMessage...) }`)
+   *     reaches handleMessagesUpsert before sendMessage()'s returned
+   *     key.id lands in sentMessageIds above.
+   *  2. selfChatTurnTimestamps — a rolling count of self-chat turns
+   *     actually admitted (i.e. that got past layer 1), capped at
+   *     SELF_CHAT_BREAKER_MAX_TURNS per SELF_CHAT_BREAKER_WINDOW_MS. Pure
+   *     backstop: bounds the worst case even if layer 1 somehow misses a
+   *     real echo, instead of trusting it blindly.
+   */
+  private readonly pendingSelfChatSends: Array<{ remoteJid: string; text: string; startedAt: number }> = [];
+  private selfChatTurnTimestamps: number[] = [];
   private readonly draftManager = new DraftManager();
   /**
    * Coalesces a rapid burst of inbound messages on one chat into a single
@@ -485,6 +561,12 @@ export class WhatsAppPersonalRuntime {
     // A long reply is split into sequential messages at natural boundaries
     // (see sendWhatsAppTextChunks) rather than rejected.
     const clientMessageId = buildWhatsAppClientMessageId(idempotencyKey);
+    // Self-chat loop guard (see handleMessagesUpsert's block comment): a
+    // reply landing back in the owner's own WhatsApp "Saved Messages" is the
+    // one case that can echo back through messages.upsert and re-trigger
+    // itself. isSelfChatJid is false for every ordinary DM/group send, so
+    // this adds no bookkeeping overhead outside self-chat.
+    const isSelfChatTarget = this.isSelfChatJid(remoteJid);
     const now = new Date().toISOString();
     const existing = await this.outboundStore.beginSend(
       idempotencyKey,
@@ -527,6 +609,13 @@ export class WhatsAppPersonalRuntime {
     if (!claimedTyping) {
       await typing.start();
     }
+    // Every id this call actually dispatches — every media item AND every
+    // text chunk, not just the "primary" one mapped below. A long reply
+    // split into several chunks previously only remembered its FIRST
+    // chunk's id, silently missing the rest for both is_reply_to_sage and
+    // (now) the self-chat echo guard. Mirrors telegram/runtime.ts's
+    // sendFinalOutbound exactly.
+    const sentIds: string[] = [];
     try {
       const response = mediaItems.length > 0
         ? await this.sendOutboundMediaItems(
@@ -535,12 +624,22 @@ export class WhatsAppPersonalRuntime {
             text,
             mediaItems,
             outboundRecord.clientMessageId || clientMessageId,
+            { afterItemSent: (id) => { if (id) sentIds.push(id); } },
           )
         : await this.sendWhatsAppTextChunks(
             socket,
             remoteJid,
             text,
             outboundRecord.clientMessageId || clientMessageId,
+            {
+              // Layer 1 of the loop guard (see beginSelfChatEchoGuard) —
+              // only armed when this send actually targets self-chat, so an
+              // ordinary DM/group reply never touches pendingSelfChatSends.
+              beforeChunkSend: isSelfChatTarget
+                ? (chunkText) => this.beginSelfChatEchoGuard(remoteJid, chunkText)
+                : undefined,
+              afterChunkSent: (id) => { if (id) sentIds.push(id); },
+            },
           );
       const mapped = mapWhatsAppOutboundResult(
         {
@@ -556,11 +655,14 @@ export class WhatsAppPersonalRuntime {
         idempotencyKey,
         String(mapped.external_message_id || "").trim() || undefined,
       );
-      // Track sent message ID for reply-to detection in group gate
-      const sentId = String(mapped.external_message_id || "").trim();
-      if (sentId) {
-        this.sentMessageIds.add(sentId);
-        if (this.sentMessageIds.size > 500) this.sentMessageIds.clear();
+      // Track every sent message id for reply-to detection in the group
+      // gate (is_reply_to_sage) AND the self-chat loop guard's primary,
+      // durable check (isOwnSelfChatEcho).
+      for (const id of sentIds) {
+        this.sentMessageIds.add(id);
+      }
+      if (this.sentMessageIds.size > 500) {
+        this.sentMessageIds.clear();
       }
       return mapped;
     } finally {
@@ -574,12 +676,23 @@ export class WhatsAppPersonalRuntime {
    * to WhatsApp's native inline formatting (bold/italic/strike/monospace).
    * Only the first chunk carries the deterministic idempotency messageId (and
    * is the primary send result); the rest are best-effort follow-ups.
+   *
+   * `hooks` lets the caller observe each chunk without duplicating the
+   * chunking logic itself: `beforeChunkSend` fires with the chunk's plain
+   * (pre-markdown-render) text right before that chunk's send begins —
+   * sendFinalOutbound uses it to arm the self-chat loop guard (see
+   * beginSelfChatEchoGuard) — and `afterChunkSent` fires with each chunk's
+   * resulting external message id, however many chunks there were.
    */
   private async sendWhatsAppTextChunks(
     socket: BaileysSocketLike,
     remoteJid: string,
     text: string,
     primaryMessageId: string,
+    hooks?: {
+      beforeChunkSend?: (chunkText: string) => void;
+      afterChunkSent?: (externalMessageId: string | undefined) => void;
+    },
   ): Promise<Record<string, unknown> | undefined> {
     const chunks = chunkMessage(text, WHATSAPP_MESSAGE_LIMIT);
     if (chunks.length === 0) {
@@ -587,11 +700,13 @@ export class WhatsAppPersonalRuntime {
     }
     let primaryResponse: Record<string, unknown> | undefined;
     for (let index = 0; index < chunks.length; index += 1) {
+      hooks?.beforeChunkSend?.(chunks[index]);
       const response = await socket.sendMessage(
         remoteJid,
         { text: renderMarkdownToWhatsApp(chunks[index]) },
         index === 0 ? { messageId: primaryMessageId } : undefined,
       );
+      hooks?.afterChunkSent?.(extractWhatsAppSentMessageId(response));
       if (index === 0) {
         primaryResponse = response;
       }
@@ -609,6 +724,12 @@ export class WhatsAppPersonalRuntime {
    * support a caption bubble in WhatsApp's UI, so a voice item's caption
    * (or the primary item's leftover `text`) goes out as a separate
    * plain-text follow-up instead of being silently dropped.
+   *
+   * `hooks.afterItemSent` fires with EVERY actual socket.sendMessage call's
+   * resulting external message id -- the primary item, every follow-up
+   * item, the voice-caption follow-up, and the final degrade-to-text
+   * fallback -- so the caller (sendFinalOutbound) can record all of them,
+   * not just the primary one, in sentMessageIds.
    */
   private async sendOutboundMediaItems(
     socket: BaileysSocketLike,
@@ -616,6 +737,7 @@ export class WhatsAppPersonalRuntime {
     text: string,
     mediaItems: WhatsAppOutboundMediaItem[],
     primaryMessageId: string,
+    hooks?: { afterItemSent?: (externalMessageId: string | undefined) => void },
   ): Promise<Record<string, unknown> | undefined> {
     let primaryResponse: Record<string, unknown> | undefined;
     for (let index = 0; index < mediaItems.length; index += 1) {
@@ -638,11 +760,13 @@ export class WhatsAppPersonalRuntime {
         content,
         isPrimary ? { messageId: primaryMessageId } : undefined,
       );
+      hooks?.afterItemSent?.(extractWhatsAppSentMessageId(response));
       if (isPrimary) {
         primaryResponse = response;
       }
       if (isVoice && formattedCaption) {
-        await socket.sendMessage(remoteJid, { text: formattedCaption });
+        const captionResponse = await socket.sendMessage(remoteJid, { text: formattedCaption });
+        hooks?.afterItemSent?.(extractWhatsAppSentMessageId(captionResponse));
       }
     }
     if (!primaryResponse && text) {
@@ -653,6 +777,7 @@ export class WhatsAppPersonalRuntime {
         { text: renderMarkdownToWhatsApp(text) },
         { messageId: primaryMessageId },
       );
+      hooks?.afterItemSent?.(extractWhatsAppSentMessageId(primaryResponse));
     }
     return primaryResponse;
   }
@@ -1004,6 +1129,34 @@ export class WhatsAppPersonalRuntime {
       if (!mapped || (mapped.message.from_me && !mapped.message.is_self_chat)) {
         continue;
       }
+      if (mapped.message.is_self_chat) {
+        // ── LOOP GUARD ──────────────────────────────────────────────────
+        // is_self_chat is deliberately let through the from_me gate above
+        // (a message the owner sends into their own WhatsApp "Saved
+        // Messages" is a command channel, not noise) — but Baileys'
+        // emitOwnEvents (default true, never overridden by createSocket()
+        // above; see @whiskeysockets/baileys/lib/Defaults/index.js and
+        // lib/Socket/messages-send.js's
+        // `if (config.emitOwnEvents) { process.nextTick(...upsertMessage...) }`)
+        // fires this SAME messages.upsert event for every message WE send
+        // too, including our own replies into that same self-chat. Without
+        // a guard, every reply Sage sends into self-chat would immediately
+        // re-admit itself as a new inbound "command", producing an
+        // infinite reply loop (same class as a prior group-spam incident).
+        // isOwnSelfChatEcho recognizes (and drops) our own echo;
+        // admitSelfChatTurnOrTrip is the backstop circuit breaker in case
+        // that ever misses one. Neither applies to a plain inbound message
+        // from someone else, or to a group — only self-chat, which is the
+        // only case that can ever echo the runtime's own send back to
+        // itself. Mirrors telegram/runtime.ts's handleInboundMessage
+        // exactly.
+        if (this.isOwnSelfChatEcho(mapped.message)) {
+          continue;
+        }
+        if (!this.admitSelfChatTurnOrTrip()) {
+          continue;
+        }
+      }
       // Resolve is_reply_to_sage: quoted stanza was sent by Sage
       if (mapped.message.is_group && mapped.message.quoted_stanza_id) {
         mapped.message.is_reply_to_sage = this.sentMessageIds.has(String(mapped.message.quoted_stanza_id));
@@ -1043,6 +1196,122 @@ export class WhatsAppPersonalRuntime {
       // text) — a photo shouldn't wait, whether or not we could fetch it.
       this.inboundDebouncer.admit(mapped, { bypass: Boolean(mediaDescriptor) });
     }
+  }
+
+  /**
+   * True when `jid` is the connected account's OWN identity — i.e. a send
+   * to this remoteJid lands in the owner's WhatsApp "Saved Messages", not a
+   * DM with someone else or a group. Reads the live socket's own user id
+   * fresh on every call (rather than caching it once, the way
+   * telegram/runtime.ts's isSelfChatJid caches selfIdentity) since Baileys
+   * exposes it directly on the socket at all times and a reconnect can swap
+   * in a new socket/identity between calls — using the exact same
+   * comparison message-mapper.ts's mapWhatsAppInboundMessage uses for
+   * is_self_chat (`remoteJid === ownedJid`) so both sides always agree on
+   * the same chat.
+   */
+  private isSelfChatJid(jid: string): boolean {
+    const trimmed = String(jid || "").trim();
+    const ownedJid = String(this.socket?.user?.id ?? "").trim();
+    if (!trimmed || !ownedJid) {
+      return false;
+    }
+    return trimmed === ownedJid;
+  }
+
+  /**
+   * Records that a self-chat send is about to go out with this exact
+   * (pre-markdown-render) text — layer 1 of the loop guard's two send-side
+   * hooks (see the pendingSelfChatSends field doc). Called from
+   * sendFinalOutbound (via sendWhatsAppTextChunks's beforeChunkSend hook)
+   * only when the send targets the self-chat peer. No matching "end" call
+   * on purpose: entries are cheap, capped, and pruned by TTL the next time
+   * isOwnSelfChatEcho runs — precise removal would need to survive send
+   * failures/retries too, and isn't worth the bookkeeping for a low-volume,
+   * single-conversation guard. Mirrors telegram/runtime.ts's
+   * beginSelfChatEchoGuard exactly.
+   */
+  private beginSelfChatEchoGuard(remoteJid: string, text: string): void {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) {
+      return;
+    }
+    this.pendingSelfChatSends.push({ remoteJid, text: trimmed, startedAt: Date.now() });
+    // Defensive cap, mirroring sentMessageIds's own bound above — self-chat
+    // traffic is low-volume so this should never really fill up.
+    if (this.pendingSelfChatSends.length > 20) {
+      this.pendingSelfChatSends.splice(0, this.pendingSelfChatSends.length - 20);
+    }
+  }
+
+  /**
+   * True when this inbound self-chat message is actually OUR OWN reply
+   * resurfacing through messages.upsert, not a new owner command — see
+   * handleMessagesUpsert's LOOP GUARD block comment for why this exists.
+   * Two independent checks, either one is sufficient:
+   *
+   *  1. external_message_id already in sentMessageIds — the durable,
+   *     precise signal: this EXACT message (every chunk of every reply
+   *     this runtime has sent is recorded there, see sendFinalOutbound) is
+   *     one we sent ourselves.
+   *  2. text+remoteJid matches a still-pending send recorded by
+   *     beginSelfChatEchoGuard — covers the race where Baileys' own-send
+   *     echo (emitOwnEvents, fired via process.nextTick right after
+   *     relayMessage resolves — see messages-send.js) reaches
+   *     handleMessagesUpsert before sendMessage()'s returned key.id is
+   *     known to the caller. Stale entries (older than
+   *     SELF_CHAT_PENDING_SEND_TTL_MS) are pruned opportunistically on
+   *     every call. Mirrors telegram/runtime.ts's isOwnSelfChatEcho
+   *     exactly.
+   */
+  private isOwnSelfChatEcho(message: { external_message_id: string; remote_jid: string; text: string }): boolean {
+    const externalId = String(message.external_message_id || "").trim();
+    if (externalId && this.sentMessageIds.has(externalId)) {
+      return true;
+    }
+    const text = String(message.text || "").trim();
+    const remoteJid = String(message.remote_jid || "").trim();
+    const now = Date.now();
+    let matched = false;
+    for (let i = this.pendingSelfChatSends.length - 1; i >= 0; i -= 1) {
+      const entry = this.pendingSelfChatSends[i];
+      if (now - entry.startedAt > SELF_CHAT_PENDING_SEND_TTL_MS) {
+        this.pendingSelfChatSends.splice(i, 1);
+        continue;
+      }
+      if (!matched && entry.remoteJid === remoteJid && entry.text === text) {
+        matched = true;
+        this.pendingSelfChatSends.splice(i, 1);
+      }
+    }
+    return matched;
+  }
+
+  /**
+   * Rolling circuit breaker — layer 2 of the loop guard, independent of
+   * isOwnSelfChatEcho. Returns true (and records the turn) when it's safe
+   * to admit one more self-chat turn right now; false (refusing, loudly)
+   * once SELF_CHAT_BREAKER_MAX_TURNS have already been admitted within the
+   * last SELF_CHAT_BREAKER_WINDOW_MS. This is a pure backstop: it bounds
+   * the worst case to a handful of extra turns — instead of an unbounded
+   * reply loop hammering the WhatsApp API — even in a future scenario
+   * where isOwnSelfChatEcho somehow fails to recognize a genuine echo.
+   * Mirrors telegram/runtime.ts's admitSelfChatTurnOrTrip exactly.
+   */
+  private admitSelfChatTurnOrTrip(): boolean {
+    const now = Date.now();
+    this.selfChatTurnTimestamps = this.selfChatTurnTimestamps.filter(
+      (ts) => now - ts < SELF_CHAT_BREAKER_WINDOW_MS,
+    );
+    if (this.selfChatTurnTimestamps.length >= SELF_CHAT_BREAKER_MAX_TURNS) {
+      this.logger?.error?.(
+        { windowMs: SELF_CHAT_BREAKER_WINDOW_MS, maxTurns: SELF_CHAT_BREAKER_MAX_TURNS },
+        "whatsapp self-chat loop-guard circuit breaker tripped — refusing further self-chat turns",
+      );
+      return false;
+    }
+    this.selfChatTurnTimestamps.push(now);
+    return true;
   }
 
   /** Downloads a detected media attachment's bytes via Baileys, capped at
