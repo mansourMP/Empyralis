@@ -1585,6 +1585,60 @@ class CliSubscriptionGatewayBrainTests(unittest.TestCase):
         self.assertEqual(usage_kwargs["mode"], "cli_subscription")
         self.assertTrue(usage_kwargs["metadata"]["tokens_known"])
 
+    def test_reasoning_effort_reaches_the_gateway_arguments_when_set(self):
+        """Phase 1 (reasoning-effort control): the value reaches the
+        Gateway's llm.generate arguments dict as "reasoning_effort" --
+        runtime.ts forwards it into cli-runner.ts's buildInvocation, which
+        appends --effort (claude_code) or -c model_reasoning_effort=
+        (codex)."""
+        response = {"result": {"text": "hi", "usage": {}}}
+        mock_execute = AsyncMock(return_value=response)
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=mock_execute),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.usage_events_repository.record_usage_event", new=AsyncMock()),
+        ):
+            _run(
+                sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                    workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                    gateway_binding="gateway-1", runtime="claude_code", model="claude-sonnet-4-6",
+                    system_prompt="Be terse.", user_message="hi", reasoning_effort="xhigh",
+                )
+            )
+        sent_arguments = mock_execute.await_args.kwargs["arguments"]
+        self.assertEqual(sent_arguments["reasoning_effort"], "xhigh")
+
+    def test_reasoning_effort_key_omitted_entirely_when_unset(self):
+        """Append-only-when-set -- an empty override means "let the CLI use
+        its own configured default", never a fabricated/empty flag value
+        appended on the Gateway side."""
+        response = {"result": {"text": "hi", "usage": {}}}
+        mock_execute = AsyncMock(return_value=response)
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value=self._llm_runtimes_payload(),
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=mock_execute),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.usage_events_repository.record_usage_event", new=AsyncMock()),
+        ):
+            _run(
+                sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                    workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                    gateway_binding="gateway-1", runtime="claude_code", model="claude-sonnet-4-6",
+                    system_prompt="Be terse.", user_message="hi",
+                )
+            )
+        sent_arguments = mock_execute.await_args.kwargs["arguments"]
+        self.assertNotIn("reasoning_effort", sent_arguments)
+
     def test_happy_path_with_unreported_usage_marks_tokens_unknown(self):
         """Truth in numbers: when the CLI doesn't report usage, the row is
         still recorded (never skipped) with an explicit tokens_known=False
@@ -2183,14 +2237,108 @@ class SageAgentRuntimeReasoningEffortResolutionTests(unittest.TestCase):
 
         self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
 
-    def test_sage_own_turn_reasoning_effort_stays_unset(self):
-        """Sage's own master-install model_config is not consulted for
-        model/provider either (see _resolve_cloud_provider's docstring) --
-        reasoning_effort follows that same existing scope, not a new gap."""
-        exploding = AsyncMock(side_effect=AssertionError("must not be called for Sage's own turn"))
-        _mock_agent, _mock_ws, mock_stream = self._run_chat(
-            specialist_context=None, mock_agent_provider=exploding,
+    def test_sage_own_turn_now_consults_its_own_master_reasoning_effort(self):
+        """Phase 1 (reasoning-effort control): unlike model/provider (still
+        specialist-only -- see _resolve_cloud_provider's docstring, a
+        provider/credential switch), reasoning effort is a deliberate,
+        scoped exception -- Sage's own turn now ALSO reads its own
+        model_config.reasoning_effort, the field /thinking persists to
+        (command_registry.py's _handle_thinking). Before this fix this was
+        permanently unreachable from here, which is exactly why /thinking
+        used to be inert."""
+        master_install = {
+            "id": "sage-main-1",
+            "install_metadata": {"model_config": {"mode": "platform_credits", "reasoning_effort": "high"}},
+        }
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+            new=AsyncMock(return_value=master_install),
+        ):
+            _mock_agent, _mock_ws, mock_stream = self._run_chat(specialist_context=None)
+
+        self.assertEqual(mock_stream.call_args.kwargs["normalized_reasoning_effort"], "high")
+
+    def test_sage_own_turn_with_no_resolvable_master_fails_safe_to_unset(self):
+        """No master install found (or the lookup errors/times out) must
+        never crash the turn -- just falls back to no override, same as an
+        unconfigured agent."""
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+            new=AsyncMock(return_value=None),
+        ):
+            _mock_agent, _mock_ws, mock_stream = self._run_chat(specialist_context=None)
+
+        self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
+
+    @staticmethod
+    def _run_cli_subscription_chat(*, runtime, reasoning_effort):
+        """Minimal harness for handle_sage_chat's cli_subscription branch --
+        modeled on SageAgentRuntimeSpecialistProviderResolutionTests's own
+        test_local_mode_specialist_never_touches_cloud_resolver (the
+        structurally parallel "local" branch), since this branch dispatches
+        entirely separately (gateway WSS rail) from the byok/platform_credits
+        action-loop path the other _run_chat helper in this file covers."""
+        spec = SpecialistRuntimeContext(
+            agent_install_id="agent-cli-1", agent_label="CLI Agent", agent_kind="specialist",
+            persona="You are a specialist.", mode="cli_subscription", runtime=runtime,
+            gateway_binding="gw-1", reasoning_effort=reasoning_effort,
         )
+        mock_dispatch = AsyncMock(return_value=("cli reply", {"input_tokens": 1, "output_tokens": 1}, "default"))
+        with (
+            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))),
+            patch("server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider", new=AsyncMock(side_effect=AssertionError("must not be called for cli_subscription"))),
+            patch("server_modules.sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain", new=mock_dispatch),
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+        ):
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello", specialist_context=spec,
+            ))
+        return mock_dispatch
+
+    def test_cli_subscription_valid_reasoning_effort_reaches_the_gateway_dispatch(self):
+        """"xhigh" is valid for BOTH claude_code and codex — proves the
+        happy path threads through end-to-end via handle_sage_chat, not
+        just the lower-level _dispatch_cli_subscription_gateway_brain unit
+        tested directly above."""
+        mock_dispatch = self._run_cli_subscription_chat(runtime="claude_code", reasoning_effort="xhigh")
+        self.assertEqual(mock_dispatch.await_args.kwargs["reasoning_effort"], "xhigh")
+
+    def test_cli_subscription_claude_code_drops_a_codex_only_value(self):
+        """"off" is real for codex's -c model_reasoning_effort= but NOT for
+        the Claude CLI's --effort (verified live against each CLI's own
+        --help — see _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME's docstring). A
+        stale value saved under a different runtime must never reach the
+        wrong CLI's flag."""
+        mock_dispatch = self._run_cli_subscription_chat(runtime="claude_code", reasoning_effort="off")
+        self.assertEqual(mock_dispatch.await_args.kwargs["reasoning_effort"], "")
+
+    def test_cli_subscription_codex_accepts_its_own_off_value(self):
+        """The SAME "off" value IS valid for codex — proves the two
+        runtimes' vocabularies are validated independently, not against one
+        shared/lowest-common-denominator set."""
+        mock_dispatch = self._run_cli_subscription_chat(runtime="codex", reasoning_effort="off")
+        self.assertEqual(mock_dispatch.await_args.kwargs["reasoning_effort"], "off")
+
+    def test_sage_own_turn_invalid_master_reasoning_effort_is_dropped(self):
+        """Same _VALID_REASONING_EFFORTS gate applies to Sage's own turn as
+        to a specialist's -- a stale/hand-edited value (or one saved for a
+        cli_subscription runtime's wider vocabulary, e.g. "max") never
+        reaches the generation call raw."""
+        master_install = {
+            "id": "sage-main-1",
+            "install_metadata": {"model_config": {"mode": "platform_credits", "reasoning_effort": "max"}},
+        }
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+            new=AsyncMock(return_value=master_install),
+        ):
+            _mock_agent, _mock_ws, mock_stream = self._run_chat(specialist_context=None)
 
         self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
 

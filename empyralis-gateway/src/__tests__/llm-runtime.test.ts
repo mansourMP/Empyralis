@@ -143,6 +143,7 @@ interface CliCapture {
   prompt?: string;
   systemPrompt?: string;
   model?: string;
+  reasoningEffort?: string;
   timeoutMs?: number;
 }
 
@@ -185,6 +186,51 @@ test("llm.generate (codex): dispatches via cliRunner, folds system prompt into t
   assert.equal(capture.prompt, "Be terse.\n\nping");
   assert.equal(result.source, "gateway_codex");
   assert.equal(result.model, "default");
+});
+
+// ── Reasoning effort (Phase 1: reasoning-effort control) — the backend's
+// _dispatch_cli_subscription_gateway_brain sends this as
+// arguments.reasoning_effort; this Gateway handler must forward it into
+// cliRunner's reasoningEffort param unchanged, for either runtime.
+
+test("llm.generate (claude_code): forwards reasoning_effort into cliRunner", async () => {
+  const capture: CliCapture = {};
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      Object.assign(capture, params);
+      return { text: "ok", usage: { input_tokens: 1, output_tokens: 1 } };
+    },
+  });
+  await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({ runtime: "claude_code", prompt: "hi", reasoning_effort: "xhigh" }),
+  );
+  assert.equal(capture.reasoningEffort, "xhigh");
+});
+
+test("llm.generate (codex): forwards reasoning_effort into cliRunner", async () => {
+  const capture: CliCapture = {};
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      Object.assign(capture, params);
+      return { text: "ok", usage: { input_tokens: 1, output_tokens: 1 } };
+    },
+  });
+  await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({ runtime: "codex", prompt: "hi", reasoning_effort: "off" }),
+  );
+  assert.equal(capture.reasoningEffort, "off");
+});
+
+test("llm.generate: an omitted reasoning_effort forwards as empty (CLI's own default applies)", async () => {
+  const capture: CliCapture = {};
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      Object.assign(capture, params);
+      return { text: "ok", usage: { input_tokens: 1, output_tokens: 1 } };
+    },
+  });
+  await runtime.handleCapabilityInvoke(makeInvokeFrame({ runtime: "claude_code", prompt: "hi" }));
+  assert.equal(capture.reasoningEffort, "");
 });
 
 test("llm.generate (claude_code/codex): never inherits Ollama's default model name", async () => {

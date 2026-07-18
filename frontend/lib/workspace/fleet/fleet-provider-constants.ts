@@ -151,20 +151,75 @@ export const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }
   { value: "xhigh", label: "Extra high" },
 ];
 
+// Superset label map — every value ANY reasoning-effort vocabulary in this
+// codebase can produce (the platform_credits/byok_api set above, PLUS
+// cli_subscription's off/minimal/max — see CLI_REASONING_EFFORT_OPTIONS_BY_
+// RUNTIME below). One shared map so a value coined under one mode always
+// renders the same human label wherever it's displayed (e.g. the Model
+// tab's "Current state" summary), even after the agent's mode has since
+// changed to one with a narrower picker.
+const REASONING_EFFORT_LABELS: Record<string, string> = {
+  "": "Model default",
+  off: "Off",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
+};
+
 export function reasoningEffortLabel(value: string): string {
-  return REASONING_EFFORT_OPTIONS.find((o) => o.value === value)?.label || "Model default";
+  return REASONING_EFFORT_LABELS[value] || "Model default";
 }
 
-// Which model_config modes actually apply reasoning_effort at turn time —
-// see sage_agent_runtime_service.py's handle_sage_chat /
-// _run_sage_action_loop_v3: platform_credits and byok_api are the two lanes
-// that reach stream_provider_backed_direct_chat, which applies this natively
-// for models it recognizes as reasoning-capable and as a soft system-prompt
-// instruction otherwise. cli_subscription/local dispatch to the paired
-// Gateway instead, which has no reasoning_effort plumbing today — the Model
-// tab hides the picker for those two modes rather than saving a setting
-// that silently does nothing.
+// Which model_config modes apply reasoning_effort via the SHARED
+// platform_credits/byok_api picker (REASONING_EFFORT_OPTIONS) — see
+// sage_agent_runtime_service.py's handle_sage_chat / _run_sage_action_
+// loop_v3: both reach stream_provider_backed_direct_chat, which applies
+// this natively for models it recognizes as reasoning-capable and as a
+// soft system-prompt instruction otherwise. cli_subscription has its OWN,
+// runtime-gated picker and vocabulary instead (see
+// CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME below — claude_code and codex
+// accept genuinely different values, verified live against each CLI's own
+// --help, so it can't share this flat list). local (Ollama) still has no
+// reasoning-effort control at all today.
 export const REASONING_EFFORT_SUPPORTED_MODES: ReadonlySet<ProviderMode> = new Set<ProviderMode>([
   "platform_credits",
   "byok_api",
 ]);
+
+// cli_subscription's reasoning-effort picker — the owner's own Claude Code /
+// Codex CLI, spawned on their paired Gateway (BYO-brain Phase 3). Verified
+// live against each CLI's own --help — two genuinely different vocabularies,
+// never flattened to one shared list:
+//   - claude_code: `claude --effort <level>` — low/medium/high/xhigh/max.
+//     No "off"/"minimal" — the flag has no such value.
+//   - codex: `codex exec -c model_reasoning_effort=<level>` — codex's own
+//     ReasoningEffort enum (off/minimal/low/medium/high/xhigh/max — see
+//     empyralis-gateway/src/llm/codex-app-server.ts's identical comment).
+// Mirrors sage_agent_runtime_service.py's and fleet_tools.py's
+// _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME (same duplicate-but-documented-
+// across-layers pattern as RUNTIME_FOR_PROVIDER, not a shared import).
+export type CliSubscriptionRuntime = "claude_code" | "codex";
+
+export const CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME: Record<CliSubscriptionRuntime, { value: string; label: string }[]> = {
+  claude_code: [
+    { value: "", label: "Model default" },
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
+    { value: "xhigh", label: "Extra high" },
+    { value: "max", label: "Max" },
+  ],
+  codex: [
+    { value: "", label: "Model default" },
+    { value: "off", label: "Off" },
+    { value: "minimal", label: "Minimal" },
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
+    { value: "xhigh", label: "Extra high" },
+    { value: "max", label: "Max" },
+  ],
+};

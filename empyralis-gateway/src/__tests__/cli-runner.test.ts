@@ -327,6 +327,78 @@ test("codex argv: exec, --json, --skip-git-repo-check, --sandbox read-only", asy
   assert.deepEqual(captured.args, ["exec", "say hi", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "o4"]);
 });
 
+// ---- Reasoning effort (Phase 1: reasoning-effort control) ----------------
+// Two DIFFERENT flags/enums, verified live against each CLI's own --help —
+// never flattened to one shared shape.
+
+test("claude_code argv: reasoningEffort appends --effort <level>", async () => {
+  const captured: { args: string[] } = { args: [] };
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(
+    baseParams({ runtime: "claude_code", prompt: "hi", reasoningEffort: "xhigh" }),
+    {
+      spawnImpl: (_command, args) => {
+        captured.args = args;
+        return fake.child;
+      },
+    },
+  );
+  fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "ok", usage: {} })}\n`);
+  fake.emitClose(0, null);
+  await promise;
+  assert.deepEqual(captured.args, [
+    "-p", "hi", "--output-format", "stream-json", "--verbose", "--tools", "", "--effort", "xhigh",
+  ]);
+});
+
+test("codex argv: reasoningEffort appends -c model_reasoning_effort=<level>", async () => {
+  const captured: { args: string[] } = { args: [] };
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(
+    baseParams({ runtime: "codex", prompt: "hi", reasoningEffort: "off" }),
+    {
+      spawnImpl: (_command, args) => {
+        captured.args = args;
+        return fake.child;
+      },
+    },
+  );
+  fake.emitStdout(
+    `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hi" } })}\n`
+    + `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })}\n`,
+  );
+  fake.emitClose(0, null);
+  await promise;
+  assert.deepEqual(captured.args, [
+    "exec", "hi", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-c", "model_reasoning_effort=off",
+  ]);
+});
+
+test("reasoningEffort unset: neither runtime appends any effort flag (CLI's own default applies)", async () => {
+  for (const runtime of ["claude_code", "codex"] as const) {
+    const captured: { args: string[] } = { args: [] };
+    const fake = makeFakeChild();
+    const promise = runCliSubscription(baseParams({ runtime, prompt: "hi" }), {
+      spawnImpl: (_command, args) => {
+        captured.args = args;
+        return fake.child;
+      },
+    });
+    if (runtime === "claude_code") {
+      fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "ok", usage: {} })}\n`);
+    } else {
+      fake.emitStdout(
+        `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hi" } })}\n`
+        + `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })}\n`,
+      );
+    }
+    fake.emitClose(0, null);
+    await promise;
+    assert.ok(!captured.args.includes("--effort"), `${runtime}: --effort must not appear when unset`);
+    assert.ok(!captured.args.some((a) => a.startsWith("model_reasoning_effort=")), `${runtime}: model_reasoning_effort= must not appear when unset`);
+  }
+});
+
 test("CLAUDE_CLI_PATH / CODEX_CLI_PATH env overrides pick a different binary", async () => {
   const fake = makeFakeChild();
   let capturedCommand = "";

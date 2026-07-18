@@ -41,6 +41,28 @@ _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local
 # fleet_configure_agent below), so these persist WITHOUT a schema/storage
 # change — we only validate their VALUES here so a typo can't be stored.
 _VALID_MODEL_RUNTIMES = {"claude_code", "codex", "ollama"}
+# Reasoning-effort picker (Fleet Model tab, model_config.reasoning_effort;
+# also what /thinking now persists — see command_registry.py's
+# _handle_thinking). Kept in sync with sage_agent_runtime_service.py's own
+# _VALID_REASONING_EFFORTS (same duplicate-but-documented-across-layers
+# pattern as _VALID_MODEL_RUNTIMES above, not a shared import — that module
+# is far heavier and this one must stay importable from lightweight
+# contexts). Only meaningful for platform_credits/byok_api — both reach
+# stream_provider_backed_direct_chat, which applies this natively for
+# models it recognizes as reasoning models, degraded to a system-prompt
+# instruction otherwise.
+_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+# cli_subscription's OWN reasoning-effort vocabulary — DIFFERENT from
+# _VALID_REASONING_EFFORTS above and DIFFERENT per runtime, verified live
+# against each CLI's own --help. claude_code's `--effort` has no "off"/
+# "minimal"; codex's `-c model_reasoning_effort=` is its own ReasoningEffort
+# enum (off/minimal/low/medium/high/xhigh/max — see empyralis-gateway/src/
+# llm/codex-app-server.ts's identical comment). Kept in sync with
+# sage_agent_runtime_service.py's _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME.
+_VALID_CLI_REASONING_EFFORTS_BY_RUNTIME = {
+    "claude_code": {"low", "medium", "high", "xhigh", "max"},
+    "codex": {"off", "minimal", "low", "medium", "high", "xhigh", "max"},
+}
 _VALID_PURPOSE_PRESETS = {"customer_facing", "internal_assistant", "operator"}
 _PURPOSE_PRESET_INSTRUCTIONS = {
     "customer_facing": (
@@ -1175,6 +1197,37 @@ async def fleet_configure_agent(
                 "ok": False,
                 "error": f"Invalid model_config runtime: {runtime}. Must be one of: {', '.join(sorted(_VALID_MODEL_RUNTIMES))}",
             }
+        # reasoning_effort: two DIFFERENT vocabularies depending on mode/
+        # runtime — see _VALID_REASONING_EFFORTS and _VALID_CLI_REASONING_
+        # EFFORTS_BY_RUNTIME's own docstrings. Rejected here (save time)
+        # rather than silently dropped later (turn time) — the latter would
+        # let a caller (the Fleet UI, or /thinking) believe a value is in
+        # effect when the turn-time consumer actually discards it as
+        # invalid for this agent's real mode/runtime.
+        reasoning_effort = str(mc.get("reasoning_effort") or "").strip().lower()
+        if reasoning_effort:
+            _effective_mode = mode or "platform_credits"
+            if _effective_mode == "cli_subscription":
+                _effective_runtime = runtime or "claude_code"
+                _valid_efforts = _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME.get(_effective_runtime, set())
+            elif _effective_mode in ("platform_credits", "byok_api"):
+                _valid_efforts = _VALID_REASONING_EFFORTS
+            else:
+                # "local" (Ollama): no CLI reasoning-effort control exists for
+                # it today — same scope boundary the Fleet UI's own picker
+                # already draws (REASONING_EFFORT_SUPPORTED_MODES /
+                # renderReasoningEffortUnsupportedNote in FleetAgentDetail.tsx).
+                _valid_efforts = set()
+            if reasoning_effort not in _valid_efforts:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Invalid model_config reasoning_effort '{reasoning_effort}' for mode "
+                        f"'{_effective_mode}'"
+                        + (f" runtime '{runtime or 'claude_code'}'" if _effective_mode == "cli_subscription" else "")
+                        + (f". Must be one of: {', '.join(sorted(_valid_efforts))}" if _valid_efforts else " — reasoning effort isn't available for this mode.")
+                    ),
+                }
         gateway_binding = mc.get("gateway_binding")
         if gateway_binding is not None and not isinstance(gateway_binding, str):
             return {

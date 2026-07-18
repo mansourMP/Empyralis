@@ -137,5 +137,137 @@ class OwnerGatedDispatchTests(unittest.TestCase):
         self.handler.assert_called_once()
 
 
+class HandleThinkingPersistsPerAgentTests(unittest.TestCase):
+    """/thinking used to write to workspace-global sage_ai_reasoning_effort
+    metadata that nothing but /config's own display ever read back — a
+    value set here never reached an actual reply turn. It now persists to
+    the ACTING agent's own model_config.reasoning_effort, the same
+    per-agent field the Fleet Model tab's picker reads/writes and that
+    sage_agent_runtime_service.py's handle_sage_chat / _run_sage_action_
+    loop_v3 actually consult for the completion."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", model_config=None):
+        return {
+            "id": agent_id,
+            "install_metadata": {"model_config": dict(model_config or {})},
+        }
+
+    def _dispatch_thinking(self, level="high", **kwargs):
+        return _run(
+            command_registry.dispatch(
+                text=f"/thinking {level}",
+                workspace_id="ws-1",
+                surface="web",
+                **kwargs,
+            )
+        )
+
+    def test_invalid_level_never_touches_storage(self):
+        exploding = AsyncMock(side_effect=AssertionError("must not resolve tenant/agent for a bad level"))
+        with patch(
+            "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+            new=exploding,
+        ):
+            result = self._dispatch_thinking(level="ultra-mega")
+        self.assertIn("Usage:", result["reply"])
+
+    def test_no_agent_install_id_targets_the_workspace_master(self):
+        master = self._bundle(agent_id="sage-main-1", model_config={"mode": "platform_credits"})
+        captured = {}
+
+        async def _capture_configure(**kwargs):
+            captured.update(kwargs)
+            return {"ok": True}
+
+        with (
+            patch(
+                "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+                new=AsyncMock(return_value="tenant-1"),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+                new=AsyncMock(return_value=master),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=master),
+            ),
+            patch(
+                "server_modules.fleet_tools.fleet_configure_agent",
+                new=_capture_configure,
+            ),
+        ):
+            result = self._dispatch_thinking(level="high")
+        self.assertEqual(captured["agent_id"], "sage-main-1")
+        self.assertEqual(captured["workspace_id"], "ws-1")
+        self.assertEqual(captured["patch"]["model_config"]["reasoning_effort"], "high")
+        self.assertIn("persisted for this agent", result["reply"])
+
+    def test_an_explicit_agent_install_id_targets_that_specialist_not_the_master(self):
+        specialist = self._bundle(
+            agent_id="agent-specialist-1",
+            model_config={"mode": "cli_subscription", "runtime": "codex", "gateway_binding": "gw-1"},
+        )
+        exploding_master_lookup = AsyncMock(
+            side_effect=AssertionError("must not look up the master when an agent_install_id is given")
+        )
+        captured = {}
+
+        async def _capture_configure(**kwargs):
+            captured.update(kwargs)
+            return {"ok": True}
+
+        with (
+            patch(
+                "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+                new=AsyncMock(return_value="tenant-1"),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+                new=exploding_master_lookup,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=specialist),
+            ),
+            patch(
+                "server_modules.fleet_tools.fleet_configure_agent",
+                new=_capture_configure,
+            ),
+        ):
+            result = self._dispatch_thinking(level="off", agent_install_id="agent-specialist-1")
+        self.assertEqual(captured["agent_id"], "agent-specialist-1")
+        # Preserves the specialist's existing binding — never wholesale-wipes
+        # mode/runtime/gateway_binding just to set reasoning_effort.
+        self.assertEqual(captured["patch"]["model_config"], {
+            "mode": "cli_subscription", "runtime": "codex", "gateway_binding": "gw-1",
+            "reasoning_effort": "off",
+        })
+        self.assertIn("persisted for this agent", result["reply"])
+
+    def test_a_value_invalid_for_the_targeted_agents_mode_surfaces_the_real_error(self):
+        """e.g. "off" saved while bound to claude_code, which has no such
+        --effort value — fleet_configure_agent's own validation rejects it;
+        the command must report that honestly, not claim success."""
+        specialist = self._bundle(
+            agent_id="agent-specialist-1",
+            model_config={"mode": "cli_subscription", "runtime": "claude_code"},
+        )
+        with (
+            patch(
+                "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+                new=AsyncMock(return_value="tenant-1"),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=specialist),
+            ),
+        ):
+            result = self._dispatch_thinking(level="off", agent_install_id="agent-specialist-1")
+        self.assertNotIn("persisted for this agent", result["reply"])
+        self.assertIn("off", result["reply"])
+
+
 if __name__ == "__main__":
     unittest.main()

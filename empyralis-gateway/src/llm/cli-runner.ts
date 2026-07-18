@@ -51,6 +51,20 @@ export interface CliRunParams {
   /** Explicit model override. Empty means "let the CLI use its own default"
    *  — never fabricate a model name the CLI wouldn't recognize. */
   model?: string;
+  /** Reasoning-effort override, verified live against each CLI's own --help.
+   *  The two runtimes are DIFFERENT controls with different flags and
+   *  different accepted vocabularies — never flattened to one shape:
+   *    - claude_code: "low" | "medium" | "high" | "xhigh" | "max"
+   *      (no "off"/"minimal" — the Claude CLI's --effort has no such value).
+   *    - codex:       "off" | "minimal" | "low" | "medium" | "high" |
+   *                   "xhigh" | "max" (codex's own ReasoningEffort enum —
+   *                   see codex-app-server.ts's identical comment).
+   *  Validation of which value is legal for which runtime happens upstream
+   *  (server_modules/fleet_tools.py, server_modules/sage_agent_runtime_
+   *  service.py) — this module trusts what it's given and only decides
+   *  WHETHER to append a flag at all (empty/unset means "let the CLI use its
+   *  own configured default", same convention as `model` above). */
+  reasoningEffort?: string;
   timeoutMs: number;
 }
 
@@ -123,7 +137,15 @@ function binaryFor(runtime: CliSubscriptionRuntime, env: NodeJS.ProcessEnv): str
  *  Codex: `exec <prompt> --json --skip-git-repo-check --sandbox read-only`.
  *  Codex has no "disable tools" flag (it is a coding agent by design), so
  *  --sandbox read-only is the closest safety net: this capability is a text
- *  completion, not a license to mutate the box's filesystem. */
+ *  completion, not a license to mutate the box's filesystem.
+ *
+ *  Reasoning effort (verified against each CLI's own --help — two distinct
+ *  flags/enums, never flattened to one): Claude Code takes a top-level
+ *  `--effort <level>` flag; Codex takes a config override,
+ *  `-c model_reasoning_effort=<level>`, since it has no dedicated CLI flag
+ *  for this on the `exec` subcommand. Both are appended ONLY when
+ *  params.reasoningEffort is set — an unset value means "let the CLI use
+ *  its own configured default", same convention as `model` above. */
 function buildInvocation(
   params: CliRunParams,
   env: NodeJS.ProcessEnv,
@@ -137,11 +159,17 @@ function buildInvocation(
     if (params.model) {
       args.push("--model", params.model);
     }
+    if (params.reasoningEffort) {
+      args.push("--effort", params.reasoningEffort);
+    }
     return { command, args };
   }
   const args = ["exec", params.prompt, "--json", "--skip-git-repo-check", "--sandbox", "read-only"];
   if (params.model) {
     args.push("--model", params.model);
+  }
+  if (params.reasoningEffort) {
+    args.push("-c", `model_reasoning_effort=${params.reasoningEffort}`);
   }
   return { command, args };
 }

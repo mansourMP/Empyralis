@@ -301,6 +301,89 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertEqual(events[-1]["payload"]["provider"], "openai")
         self.assertFalse(events[-1]["payload"]["response_leak_guard"]["redacted"])
 
+    def _capture_system_prompt(self, *, model: str, provider: str = "anthropic") -> str:
+        """Runs stream_provider_backed_direct_chat with a requested reasoning
+        effort and returns the system_prompt that actually reached
+        generate_chat_reply_stream_with_provider_fallback — the observable
+        signal of whether supports_reasoning treated *model* as reasoning-
+        native (system_prompt unchanged) or degraded it (system_prompt gets
+        a "[System Instruction: ...]" suffix appended)."""
+        captured: dict = {}
+        services = self._services(
+            stream_events=[
+                {
+                    "type": "result",
+                    "reply": "ok",
+                    "usage_masked": {"provider": provider},
+                    "provider": provider,
+                    "model": model,
+                    "attempted_providers": provider,
+                    "error": "",
+                    "tool_calls": [],
+                }
+            ]
+        )
+        _passthrough = services.generate_chat_reply_stream_with_provider_fallback
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return _passthrough(**kwargs)
+
+        services.generate_chat_reply_stream_with_provider_fallback = _capture
+
+        list(
+            direct_chat_generation_service.stream_provider_backed_direct_chat(
+                services=services,
+                context={"provider": provider},
+                metadata={"provider": provider, "model": model},
+                system_prompt="Base system prompt",
+                normalized_workspace_id="default",
+                normalized_requested_provider=provider,
+                normalized_requested_model=model,
+                normalized_reasoning_effort="high",
+                normalized_thread_id="thread-1",
+                normalized_message="hello",
+                compacted_prior_messages=[],
+                prior_messages_used=False,
+                history_mode="none",
+                connected_systems=[],
+                tool_capabilities=[],
+                availability_payload={"ai_ready": True},
+                tools=[],
+                direct_chat_credentials={},
+                proactive_suggestions=[],
+                tool_loop_session_key="session-1",
+                fallback_reason=None,
+                session_ctx=None,
+                trace_context=None,
+                resolved_chat_max_iterations=3,
+                direct_tool_result_summary_system_message="Summarize tool results.",
+            )
+        )
+        return str(captured.get("system_prompt") or "")
+
+    def test_supports_reasoning_now_recognizes_claude_models_as_native(self) -> None:
+        """Reconciled with the frontend's inferReasoningLevels(), which
+        already offers a reasoning picker for Claude models — this used to
+        be stale here and silently degraded to a system-prompt instruction
+        instead, contradicting what the UI promised."""
+        system_prompt = self._capture_system_prompt(model="claude-sonnet-4-6")
+        self.assertEqual(system_prompt, "Base system prompt")
+
+    def test_supports_reasoning_now_recognizes_current_gpt5_and_codex_models_as_native(self) -> None:
+        for model in ("gpt-5.4", "gpt-5.3-codex", "openai/gpt-5.4"):
+            with self.subTest(model=model):
+                system_prompt = self._capture_system_prompt(model=model, provider="openai")
+                self.assertEqual(system_prompt, "Base system prompt")
+
+    def test_supports_reasoning_still_degrades_an_unrecognized_model_to_a_system_instruction(self) -> None:
+        """An honest fallback for a model this detection genuinely doesn't
+        know about — proves the fix widened the allowlist without making
+        every model look reasoning-native."""
+        system_prompt = self._capture_system_prompt(model="llama-3.3-70b-versatile", provider="groq")
+        self.assertIn("[System Instruction:", system_prompt)
+        self.assertIn("high reasoning effort", system_prompt)
+
     def test_stream_provider_backed_direct_chat_masks_platform_paid_metadata(self) -> None:
         persisted_usage: dict[str, object] = {}
         services = self._services(
