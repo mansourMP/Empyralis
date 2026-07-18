@@ -111,6 +111,12 @@ interface BaileysSocketLike {
    *  -- passed as downloadMediaMessage()'s ctx.reuploadRequest so a media
    *  message downloaded a while after receipt can still be fetched. */
   updateMediaMessage?: (msg: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /** Fetches a group's metadata (subject/participants/etc) directly from
+   *  WhatsApp -- used ONLY for a best-effort chat_title lookup on inbound
+   *  group messages that already passed the mention/reply gate (see
+   *  handleMessagesUpsert). Optional: older/mocked adapters that don't
+   *  implement it simply never populate chat_title. */
+  groupMetadata?: (jid: string) => Promise<{ subject?: string } | undefined>;
 }
 
 interface WhatsAppBaileysAdapter {
@@ -1005,6 +1011,26 @@ export class WhatsAppPersonalRuntime {
       // Group gate: skip group messages unless mentioned or replying to Sage
       if (mapped.message.is_group && !mapped.message.is_mentioned && !mapped.message.is_reply_to_sage) {
         continue;
+      }
+      // Best-effort group subject lookup — ONLY for messages that just
+      // passed the gate above (mentioned/reply-to-sage), so this network
+      // round trip is paid rarely, not on every group message. Threaded
+      // through to the server as chat_title so the owner-unified activity
+      // feed's mirrored "[sent to WhatsApp · <subject>]" entries are
+      // legible instead of a bare remote_jid (see
+      // personal_channel_sage_bridge_service.py). A failed/slow lookup
+      // must never drop or delay the message itself — chat_title just
+      // stays unset and the server falls back to the channel label alone.
+      if (mapped.message.is_group && typeof this.socket?.groupMetadata === "function") {
+        try {
+          const groupMetadata = await this.socket.groupMetadata(mapped.message.remote_jid);
+          const subject = String(groupMetadata?.subject ?? "").trim();
+          if (subject) {
+            mapped.message.chat_title = subject;
+          }
+        } catch {
+          // best-effort — group subject is cosmetic, never load-bearing
+        }
       }
       // Typing starts NOW (before the debouncer) so the indicator is live for
       // the whole coalesce window and the agent's think-time. The publish is

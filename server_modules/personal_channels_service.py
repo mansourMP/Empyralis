@@ -1770,6 +1770,8 @@ async def _deliver_whatsapp_personal_reply(
     agent_id: str = "",
     attachments: Optional[List[Dict[str, Any]]] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
     if reply_idempotency_key and reply_idempotency_key.startswith(WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX):
@@ -1858,6 +1860,8 @@ async def _deliver_whatsapp_personal_reply(
             agent_id=agent_id,
             attachments=attachments,
             is_owner=is_owner,
+            is_group=is_group,
+            chat_label=chat_label,
         )
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
         # be sent into a channel (DM or group). filter_channel_outbound_reply()
@@ -2113,6 +2117,17 @@ async def _handle_whatsapp_gateway_channel_inbound(
         agent_id=agent_id,
         attachments=attachments,
         is_owner=bool(dm_decision.get("is_owner")),
+        # is_group: same signal the group-mention gate above already reads
+        # (message.get("is_group")) — threaded through so an owner-unified
+        # memory turn is never mistaken for a private 1:1 with the owner
+        # just because the owner happens to be a member of this group (see
+        # _build_unified_sage_personal_reply_async's is_group contract).
+        # chat_label: the group's human-readable subject when the Gateway
+        # supplied one (mapWhatsAppInboundMessage / runtime.ts's
+        # groupMetadata lookup — best-effort, may be absent), used only to
+        # make the owner-unified activity feed's mirrored entries legible.
+        is_group=bool(message.get("is_group")),
+        chat_label=str(message.get("chat_title") or "").strip() or None,
     )
 
 
@@ -2273,6 +2288,16 @@ async def _handle_telegram_gateway_channel_inbound(
             agent_id=agent_id,
             attachments=attachments,
             is_owner=bool(dm_decision.get("is_owner")),
+            # is_group/chat_title: resolved gateway-side from the already-
+            # fetched GramJS chat entity (see telegram/runtime.ts — a
+            # private chat has no .title, a group/supergroup/channel does;
+            # no extra network call). Absent on any inbound predating that
+            # Gateway upgrade, which safely reads as False/None here — never
+            # a regression, matches "Telegram personal has NO group/mention
+            # gate" above (this only affects memory routing/labeling, not
+            # whether a group message reaches the model at all).
+            is_group=bool(message.get("is_group")),
+            chat_label=str(message.get("chat_title") or "").strip() or None,
         )
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
         # be sent into a channel (DM or group — Telegram personal has NO
@@ -2398,6 +2423,8 @@ async def _deliver_local_bridge_personal_reply(
     trace_id: str = "",
     attachments: Optional[List[Dict[str, Any]]] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     no_reply_prefix = f"{channel_key}:noreply:"
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
@@ -2433,6 +2460,8 @@ async def _deliver_local_bridge_personal_reply(
             source_event_id=external_message_id,
             attachments=attachments,
             is_owner=is_owner,
+            is_group=is_group,
+            chat_label=chat_label,
         )
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
         # be sent into a channel (DM or group).
@@ -2654,6 +2683,12 @@ async def _handle_local_bridge_gateway_channel_inbound(
         # hardcoded) so this can never silently drift out of sync with
         # _enforce_dm_policy's own logic if that gap is closed later.
         is_owner=bool(dm_decision.get("is_owner")),
+        # Same forward-compatible defaults as Telegram above: the local
+        # bridge (Signal/iMessage/WeChat on Agent Computer) doesn't resolve
+        # is_group/chat_title today, so this reads as False/None until that
+        # bridge is upgraded — a safe no-op today, not a regression.
+        is_group=bool(message.get("is_group")),
+        chat_label=str(message.get("chat_title") or "").strip() or None,
     )
 
 

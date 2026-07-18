@@ -1278,6 +1278,19 @@ export class TelegramPersonalRuntime {
               || String(sender?.username ?? chat?.title ?? "").trim()
               || undefined
             );
+            // A private Telegram chat's GramJS entity is a User (firstName/
+            // lastName/username, no .title); a group/supergroup/channel's is
+            // a Chat/Channel entity, which DOES have .title. Treating "has a
+            // resolved title" as the group signal avoids depending on a
+            // specific GramJS class-name/getter surface we can't verify
+            // without the package installed. Both are already-fetched data
+            // (event.getChat() above) — no extra network call, unlike
+            // WhatsApp's groupMetadata lookup. Threaded through to the
+            // server as is_group/chat_title (see message-mapper.ts) so the
+            // owner-unified memory routing and activity-feed labeling both
+            // work for Telegram groups the same way they do for WhatsApp.
+            const chatTitle = String(chat?.title ?? "").trim() || undefined;
+            const isGroup = Boolean(chatTitle);
             let media: TelegramInboundMediaItem[] | undefined;
             if (classification) {
               // Never let a download/disk-write failure sink the whole
@@ -1308,6 +1321,8 @@ export class TelegramPersonalRuntime {
               ).toISOString(),
               fromMe: Boolean(rawMessage?.out),
               media,
+              isGroup,
+              chatTitle,
             });
           },
           NewMessage ? new NewMessage({ incoming: true }) : undefined,

@@ -174,6 +174,14 @@ export interface GatewayChannelInboundPayload {
     is_mentioned?: boolean;
     is_reply_to_sage?: boolean;
     quoted_stanza_id?: string;
+    /** Human-readable chat/group name (e.g. a WhatsApp group's subject, a
+     *  Telegram group/channel's title) — best-effort, present only when the
+     *  channel adapter resolved one for a group chat. The server folds this
+     *  into the owner-unified activity-feed's mirrored "[sent to X · Y]"
+     *  entries (see personal_channel_sage_bridge_service.py); never a trust
+     *  boundary, since any group member/admin can set it. Absent for 1:1
+     *  chats and for channels that haven't resolved a title. */
+    chat_title?: string;
     /** Present only when the inbound message carried one or more media
      *  attachments (photo/voice/audio/video/document/sticker on Telegram).
      *  Absent (not an empty array) for text-only messages. */

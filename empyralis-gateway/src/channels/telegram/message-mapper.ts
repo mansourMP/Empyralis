@@ -30,6 +30,15 @@ export interface TelegramInboundMessage {
    *  runtime.ts's NewMessage event handler). Empty/absent for text-only
    *  messages. */
   media?: TelegramInboundMediaItem[];
+  /** True for a group/supergroup/channel chat rather than a private 1:1 —
+   *  derived in runtime.ts from the already-fetched chat entity (a private
+   *  chat's GramJS entity is a User with no .title; a group/channel's is a
+   *  Chat/Channel, which has one). Absent/false for a private chat. */
+  isGroup?: boolean;
+  /** The group/channel's title, when isGroup is true and GramJS resolved
+   *  one on the same already-fetched chat entity (no extra network call).
+   *  Absent for private chats or when unresolved. */
+  chatTitle?: string;
 }
 
 export type TelegramInboundEventPayload = GatewayChannelInboundPayload;
@@ -55,6 +64,8 @@ export function mapTelegramInboundMessage(rawMessage: TelegramInboundMessage): T
       text,
       received_at: String(rawMessage.receivedAt || "").trim() || new Date().toISOString(),
       from_me: Boolean(rawMessage.fromMe),
+      is_group: Boolean(rawMessage.isGroup) || undefined,
+      chat_title: String(rawMessage.chatTitle || "").trim() || undefined,
       ...(media.length > 0
         ? {
             media: media.map((item) => ({

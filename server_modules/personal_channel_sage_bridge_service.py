@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
@@ -170,6 +171,43 @@ def _owner_provenance_message(
     return f"From: {name} (owner) · {label} · direct message\n\n{raw_text}"
 
 
+def _owner_unified_conversation_key(agent_id: str) -> str:
+    """Fixed agent_conversation_memory conversation_key for the owner's own
+    1:1 thread with this agent — shared across EVERY channel the owner DMs
+    it from (Telegram, WhatsApp, WeChat, iMessage, ...) instead of the usual
+    per-(channel,chat) silo. One per (workspace, agent): workspace scoping
+    already comes from agent_conversation_memory's own directory layout
+    (conversation_path nests workspace_id/agent_id/conversation_key.jsonl);
+    agent_id is folded into the key literal too so it stays a single
+    self-describing string independent of that directory nesting. Empty
+    agent_id (the master Sage install) buckets under "_sage", matching
+    agent_conversation_memory's own fallback for the directory segment.
+    """
+    return f"owner:direct:{str(agent_id or '').strip() or '_sage'}"
+
+
+# Cap on a chat/group label baked into the owner-unified activity feed (see
+# the mirrored "[sent to X · Y]" entries in _build_unified_sage_personal_reply_async).
+_CHANNEL_LABEL_MAX_CHARS = 60
+
+
+def _sanitize_channel_label(value: Optional[str]) -> str:
+    """Best-effort-clean a human-readable chat/group label before it is
+    baked into stored conversation content. Source is e.g. a WhatsApp group
+    subject — settable by ANY group member/admin, not just the owner — so
+    this is untrusted decorative text, never a trust boundary. Collapses
+    newlines/control characters (so it cannot forge a fake line break or
+    role marker inside the stored JSONL line) and truncates so one hostile
+    group name can't bloat every future turn's context. Returns "" (never
+    None) so callers can build a label suffix with a plain truthiness check.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    return text[:_CHANNEL_LABEL_MAX_CHARS].strip()
+
+
 @contextmanager
 def _without_direct_chat_runtime_tools(runtime_exports: Any):
     saved = {
@@ -286,6 +324,8 @@ async def _build_unified_sage_personal_reply_async(
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Route personal channel messages through the unified Sage turn adapter.
@@ -314,6 +354,27 @@ async def _build_unified_sage_personal_reply_async(
     behavior: full external_content_guard wrapping, unchanged. Defaults to
     False so any caller that hasn't threaded a real signal fails to the
     safe/guarded path.
+
+    is_group: True when this turn came from a group/channel chat rather
+    than a private 1:1 — caller-resolved (e.g. WhatsApp's
+    message.is_group). Together with is_owner this decides conversation
+    MEMORY routing (see the agent_conversation_memory block below): only
+    an owner turn in a NON-group chat — a real 1:1 DM — uses the
+    owner-unified thread; every group turn, even one from the owner,
+    keeps the existing per-(channel,chat) silo, because a group is a
+    shared space with other, non-owner participants (the same
+    prompt-injection boundary commit 2ae01498 hardened for provenance
+    above), never folded into the owner's private thread. Defaults to
+    False — a caller passing is_owner=True MUST also correctly resolve
+    is_group, or a group turn from the owner would be mis-routed into
+    the unified thread.
+
+    chat_label: human-readable chat/group name (e.g. a WhatsApp group's
+    subject), used only to make the owner-unified activity feed's
+    mirrored "[sent to X · Y]" entries legible. Never a trust boundary —
+    treated as untrusted, attacker-influenceable text (sanitized +
+    truncated before storage, see _sanitize_channel_label). None when
+    unavailable; the mirror entry then falls back to fallback_label alone.
     """
     from server_modules.sage_turn_adapter import execute_sage_turn_for_channel
 
@@ -354,7 +415,29 @@ async def _build_unified_sage_personal_reply_async(
     from server_modules import agent_conversation_memory
     _mem_ws = str(workspace_id or "default").strip() or "default"
     _mem_agent = str(agent_id or "").strip()
-    _mem_key = f"{surface_channel}:{str(remote_jid or '').strip()}"
+    _owner_unified_key = _owner_unified_conversation_key(_mem_agent)
+    # Owner-unified 1:1 key (fix/unified-owner-memory): a message ROBUSTLY
+    # identified as the owner's own (is_owner — see this function's
+    # docstring) AND NOT inside a group uses ONE fixed, channel-agnostic key
+    # instead of the usual per-(channel,chat) silo, so the owner's
+    # DM-with-agent on Telegram/WhatsApp/WeChat/iMessage is a single
+    # continuous thread the agent can recall from any of them — this is the
+    # fix for "the agent denies its own actions when asked from a different
+    # channel/DM": before this, every (channel, chat) was a disjoint JSONL
+    # file with no shared owner thread at all. Groups stay isolated even
+    # when the owner is the sender (a group is a shared space with other,
+    # non-owner participants — never folded into the owner's private
+    # thread), and every non-owner sender keeps the EXACT prior per-silo
+    # behavior. Gate for LOAD is enforced by construction here: a non-owner
+    # turn's _mem_key can only ever resolve to the per-silo branch below, so
+    # it never loads the owner-unified key as context (never leaks the
+    # owner's private cross-channel thread to a stranger).
+    _is_owner_direct_dm = bool(is_owner) and not bool(is_group)
+    _mem_key = (
+        _owner_unified_key
+        if _is_owner_direct_dm
+        else f"{surface_channel}:{str(remote_jid or '').strip()}"
+    )
     try:
         _mem_prior = agent_conversation_memory.load_recent_turns(
             workspace_id=_mem_ws, agent_id=_mem_agent, conversation_key=_mem_key,
@@ -392,16 +475,56 @@ async def _build_unified_sage_personal_reply_async(
         # (problem 2 of fix/owner-aware-provenance); the model still sees
         # the appropriately-provenanced/guarded turn_message for THIS turn,
         # only the stored memory changes.
+        # Sender attribution for GROUP-silo storage only: prefix the stored
+        # user turn with "{push_name}: " so a replayed group transcript
+        # shows who said what — a bare per-(channel,chat) silo otherwise has
+        # no record of which of several group participants sent a given
+        # line. Never applied to a 1:1 (owner-unified or per-silo), where
+        # there's exactly one counterpart and a prefix would just be noise.
+        _mem_user_content = raw_text
+        if is_group:
+            _push_name_clean = str(push_name or "").strip()
+            if _push_name_clean:
+                _mem_user_content = f"{_push_name_clean}: {raw_text}"
         try:
             agent_conversation_memory.append_turn(
                 workspace_id=_mem_ws, agent_id=_mem_agent,
-                conversation_key=_mem_key, role="user", content=raw_text,
+                conversation_key=_mem_key, role="user", content=_mem_user_content,
             )
             if reply:
                 agent_conversation_memory.append_turn(
                     workspace_id=_mem_ws, agent_id=_mem_agent,
                     conversation_key=_mem_key, role="assistant", content=reply,
                 )
+                # Mirror every outbound send into the owner-unified key,
+                # tagged by destination — but only when this turn's OWN
+                # storage isn't already that key (an owner-direct-DM turn
+                # IS the unified thread already; mirroring it back into
+                # itself would just duplicate the line right below it).
+                # This is what turns the owner's own thread into a standing
+                # activity log of every reply the agent sent anywhere — a
+                # group, a stranger's DM, WeChat/iMessage/Signal — so the
+                # owner can ask from ANY of their own channels "what did you
+                # send in X" and the answer is in their own confirmed
+                # history. Only ever the ASSISTANT'S OWN reply text — never
+                # another participant's inbound message — so this can never
+                # leak a group member's or stranger's content into the
+                # owner's feed, only a record of what the agent itself did.
+                # Safe regardless of who triggered THIS turn (is_owner True
+                # or False): logging the agent's own output is not the
+                # sender's private data to protect, and the LOAD gate above
+                # already ensures only an owner-identified turn ever reads
+                # this key back out — a stranger's turn writes here (as the
+                # destination of an agent reply, e.g. a DM to that same
+                # stranger) but can never load it.
+                if _mem_key != _owner_unified_key:
+                    _label = _sanitize_channel_label(chat_label)
+                    _destination = f"{fallback_label}{' · ' + _label if _label else ''}"
+                    agent_conversation_memory.append_turn(
+                        workspace_id=_mem_ws, agent_id=_mem_agent,
+                        conversation_key=_owner_unified_key, role="assistant",
+                        content=f"[sent to {_destination}] {reply}",
+                    )
         except Exception:
             pass
         if reply:
@@ -434,6 +557,8 @@ def _build_unified_sage_personal_reply(
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     import asyncio
     import threading
@@ -454,6 +579,8 @@ def _build_unified_sage_personal_reply(
                 agent_id=agent_id,
                 attachments=attachments,
                 is_owner=is_owner,
+                is_group=is_group,
+                chat_label=chat_label,
             )
         )
 
@@ -474,6 +601,8 @@ def _build_unified_sage_personal_reply(
                     agent_id=agent_id,
                     attachments=attachments,
                     is_owner=is_owner,
+                    is_group=is_group,
+                    chat_label=chat_label,
                 )
             )
         except Exception as exc:
@@ -496,6 +625,8 @@ async def build_whatsapp_personal_reply_async(
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -508,6 +639,8 @@ async def build_whatsapp_personal_reply_async(
             fallback_label="WhatsApp",
             source_event_id=source_event_id,
             is_owner=is_owner,
+            is_group=is_group,
+            chat_label=chat_label,
         )
         return unified
     except Exception as _exc:
@@ -531,6 +664,8 @@ async def build_telegram_personal_reply_async(
     push_name: Optional[str] = None,
     source_event_id: Optional[str] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -543,6 +678,8 @@ async def build_telegram_personal_reply_async(
             fallback_label="Telegram",
             source_event_id=source_event_id,
             is_owner=is_owner,
+            is_group=is_group,
+            chat_label=chat_label,
         )
         return unified
     except Exception as _exc:
@@ -566,6 +703,8 @@ async def build_discord_personal_reply_async(
     source_event_id: Optional[str] = None,
     linked_user_name: Optional[str] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a Sage reply for a Discord personal DM.
 
@@ -592,6 +731,8 @@ async def build_discord_personal_reply_async(
             fallback_label="Discord",
             source_event_id=source_event_id,
             is_owner=is_owner,
+            is_group=is_group,
+            chat_label=chat_label,
         )
         return unified
     except Exception as _exc:
@@ -614,6 +755,8 @@ async def build_personal_channel_reply_async(
     source_event_id: Optional[str] = None,
     attachments: Optional[List[dict]] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -627,6 +770,8 @@ async def build_personal_channel_reply_async(
             source_event_id=source_event_id,
             attachments=attachments,
             is_owner=is_owner,
+            is_group=is_group,
+            chat_label=chat_label,
         )
         return unified
     except Exception as _exc:
@@ -649,6 +794,8 @@ def build_whatsapp_personal_reply(
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a WhatsApp personal DM — as the specialist agent_id
     names (see execute_sage_turn_for_channel), or as Sage when agent_id is
@@ -666,6 +813,10 @@ def build_whatsapp_personal_reply(
     _build_unified_sage_personal_reply_async's docstring for the full
     contract. Defaults to False (guarded/external), matching every other
     build_*_personal_reply* entry point.
+
+    is_group / chat_label: caller-resolved group signal + human-readable
+    chat/group label — see _build_unified_sage_personal_reply_async's
+    docstring for the owner-unified-memory contract they feed.
     """
     unified = _build_unified_sage_personal_reply(
         surface_channel="whatsapp_personal",
@@ -679,6 +830,8 @@ def build_whatsapp_personal_reply(
         agent_id=agent_id,
         attachments=attachments,
         is_owner=is_owner,
+        is_group=is_group,
+        chat_label=chat_label,
     )
     if unified is not None:
         return unified
@@ -706,9 +859,11 @@ def build_telegram_personal_reply(
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a Telegram personal DM — see build_whatsapp_personal_reply's
-    docstring for the agent_id and is_owner contracts."""
+    docstring for the agent_id, is_owner, is_group and chat_label contracts."""
     unified = _build_unified_sage_personal_reply(
         surface_channel="telegram_personal",
         workspace_id=workspace_id,
@@ -721,6 +876,8 @@ def build_telegram_personal_reply(
         agent_id=agent_id,
         attachments=attachments,
         is_owner=is_owner,
+        is_group=is_group,
+        chat_label=chat_label,
     )
     if unified is not None:
         return unified
