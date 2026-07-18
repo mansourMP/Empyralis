@@ -3340,8 +3340,16 @@ async def handle_cloud_channel_inbound(
 
     Args:
         session_id: cloud session manager session ID
-        channel_key: "telegram_personal" or "whatsapp_personal"
-        message: {external_message_id, sender_id, sender_name, text, received_at}
+        channel_key: "telegram_personal" or "whatsapp_personal" (accepted but
+            not yet branched on below — every reply is built via the
+            Telegram-specific bridge call regardless of this value, and
+            cloud-session-manager/src/ has no whatsapp/ producer at all
+            today, so whatsapp_personal never actually arrives here)
+        message: {external_message_id, sender_id, sender_name, text,
+            received_at} today; optionally is_group/is_mentioned/
+            is_reply_to_sage if a future upstream adds them (see the group
+            gate below — those fields default to "not a group" when absent,
+            so this stays backward compatible with the current wire shape)
         workspace_id: workspace UUID from cloud session (defaults to "default" for backward compat)
     """
     if not _CLOUD_SESSION_MANAGER_ENABLED:
@@ -3380,6 +3388,62 @@ async def handle_cloud_channel_inbound(
         # tier. Reject rather than let a malformed relay payload buy owner
         # authority.
         raise ValueError("cloud_channel_inbound requires a non-empty sender_id")
+
+    # ── Group/mention gate (backend safety net) ──
+    # WIRE REALITY TODAY: the only live producer of this webhook —
+    # cloud-session-manager/src/telegram/hmac.js::buildSignedInbound, called
+    # from inbound-handler.js — never puts is_group / is_mentioned /
+    # is_reply_to_sage on the wire. The signed `message` body is exactly
+    # {external_message_id, sender_id, sender_name, linked_username, text,
+    # received_at}. So message.get("is_group") is always falsy here in
+    # production today and this block is presently a no-op.
+    #
+    # It is a no-op because the signal is stripped upstream, NOT because
+    # groups can't reach this function. GramJS's NewMessage handler
+    # (cloud-session-manager/src/telegram/client-factory.js) fires for
+    # group/channel chats too and computes a real isGroup; inbound-
+    # handler.js:79-123 already gates on it there (isGroup && !isMentioned
+    # && !isReplyToSage -> drop the message before it is ever forwarded —
+    # added in 927d2c7c "add Saved Messages support + group chat gating",
+    # explicitly to prevent "credit drain and Telegram spam risk from
+    # replying to every group message", i.e. the same prior incident this
+    # backend gate exists for). It then omits is_group/entities/
+    # reply_to_msg_id when building the HTTP body, so even an addressed
+    # group message that passes that gate arrives here indistinguishable
+    # from a DM — and its sender_id is the individual member's JID (not the
+    # group's), so a reply would route to a 1:1 chat with that member, not
+    # back into the group (a separate, pre-existing routing quirk, not a
+    # group-gating one).
+    #
+    # This block exists as the same defense-in-depth backend safety net the
+    # three Gateway handlers above already have — each states "the Gateway-
+    # side filter is the primary gate; this is a backend safety net in case
+    # the Gateway bypasses it for any reason" (see
+    # _handle_telegram_gateway_channel_inbound /
+    # _handle_whatsapp_gateway_channel_inbound /
+    # _handle_local_bridge_gateway_channel_inbound). The cloud-session-
+    # manager path should not be the one ingestion path in this file that
+    # trusts a single upstream gate with zero redundancy: if
+    # cloud-session-manager's JS gate ever regresses, or some future
+    # producer of this same webhook doesn't replicate it, this is what
+    # stops an unaddressed group message from reaching a live agent turn.
+    #
+    # For this to ever actually engage, the upstream payload must start
+    # setting message.is_group (bool) and either message.is_mentioned
+    # (bool, precomputed) or message.entities (raw, for this side to
+    # compute it) plus message.is_reply_to_sage (bool) or
+    # message.reply_to_msg_id paired with a sent-message-id set. Missing
+    # is_group defaults to False deliberately — a DM (the only shape the
+    # wire actually sends today) must never be silently dropped by this
+    # gate.
+    if bool(message.get("is_group")):
+        if not bool(message.get("is_mentioned")) and not bool(message.get("is_reply_to_sage")):
+            return {
+                "ignored": True,
+                "reason": "group_no_mention",
+                "channel_key": channel_key,
+                "session_id": session_id,
+            }
 
     # ── Shared command dispatcher ──
     from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
