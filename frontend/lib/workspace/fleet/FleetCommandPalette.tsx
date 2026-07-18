@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 
 import type { FleetTheme } from "./fleet-preferences";
-import { useFleetAgents, useFleetProjects } from "./fleet-data";
+import { resolveAgentProjectId, useFleetAgents, useFleetProjects } from "./fleet-data";
 import { findSageAgent } from "./fleet-presentation";
 
 type Action = {
@@ -185,7 +185,7 @@ export function FleetCommandPalette({
         hint: "open",
         group: "Agents",
         icon: Bot,
-        run: () => go(`${base}/projects/${encodeURIComponent(a.project_id || "")}/agents/${encodeURIComponent(a.agent_id)}/overview`),
+        run: () => go(`${base}/projects/${encodeURIComponent(resolveAgentProjectId(a.project_id, projects))}/agents/${encodeURIComponent(a.agent_id)}/overview`),
       }));
 
     const projectActions: Action[] = projects.map((p) => ({

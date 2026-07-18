@@ -62,6 +62,32 @@ export type FleetProject = {
   created_at?: string;
 };
 
+/** Resolve the project id to use when linking to an agent's own detail
+ *  route — …/w/{ws}/projects/{projectId}/agents/{agentId}/{tab} structurally
+ *  requires a non-empty project segment (see
+ *  app/(account)/w/[workspaceId]/projects/[projectId]/agents/[agentId]/
+ *  [tab]/page.tsx). But an agent's own project_id can be blank: it's a
+ *  nullable column (workspace_agent_installs.project_id, ON DELETE SET
+ *  NULL) added by the Phase 2 projects migration with no backfill for
+ *  agents that already existed, and the fleet-agents list API surfaces it
+ *  verbatim (fleet_tools.fleet_list_agents). A link built with that segment
+ *  missing collapses to .../projects/agents/{id}/overview — the literal
+ *  "agents" folder swallows it as the [projectId] value, stranding the
+ *  real agent id with no matching route — and 404s to the global
+ *  not-found page (this was the "This route is not available" dead end).
+ *  Falling back to the workspace's default project — the same one new
+ *  agents resolve to when created without an explicit pick (see
+ *  fleet_tools.create_agent's _default_project branch) — keeps the link
+ *  live instead of dead-ending. */
+export function resolveAgentProjectId(
+  projectId: string | undefined,
+  projects: FleetProject[],
+): string {
+  const own = (projectId || "").trim();
+  if (own) return own;
+  return (projects.find((p) => p.is_default) || projects[0])?.id || "";
+}
+
 export type FleetAgentActivity = {
   event_id: string;
   action: string;

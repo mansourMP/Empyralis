@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 
 import { Bot, Radio } from "lucide-react";
 
-import { useFleetAgents, useFleetProjects, type FleetAgent, type FleetProject } from "@/lib/workspace/fleet/fleet-data";
+import { resolveAgentProjectId, useFleetAgents, useFleetProjects, type FleetAgent, type FleetProject } from "@/lib/workspace/fleet/fleet-data";
 import { breadcrumbCount, findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
 import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
@@ -167,7 +167,8 @@ export default function AgentsPage() {
 
   const goToAgent = (agentId: string, projectId: string) => {
     rememberLastViewedAgent(agentId);
-    router.push(`${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/overview`);
+    const resolvedProjectId = resolveAgentProjectId(projectId, projects);
+    router.push(`${base}/projects/${encodeURIComponent(resolvedProjectId)}/agents/${encodeURIComponent(agentId)}/overview`);
   };
 
   const activeCount = agents.filter((a) => (a.hardware_status || "").toLowerCase() === "online").length;

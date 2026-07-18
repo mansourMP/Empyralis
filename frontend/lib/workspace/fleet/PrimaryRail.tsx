@@ -23,7 +23,7 @@ import {
 
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
-import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { StatusDot } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
@@ -357,7 +357,7 @@ export function PrimaryRail({
                     return (
                       <Link
                         key={a.agent_id}
-                        href={`${hrefFor("projects")}/${encodeURIComponent(a.project_id || "")}/agents/${encodeURIComponent(a.agent_id)}/overview`}
+                        href={`${hrefFor("projects")}/${encodeURIComponent(resolveAgentProjectId(a.project_id, projects))}/agents/${encodeURIComponent(a.agent_id)}/overview`}
                         className={`fleet-rail-subitem${agentActive ? " fleet-rail-subitem--active" : ""}`}
                       >
                         <StatusDot tone={st.tone} size={7} />

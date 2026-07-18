@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { Bot, Radio, Plug, Cpu } from "lucide-react";
 
-import { useFleetAgents, useWorkspaceActivity, useWorkspaceStatusStrip } from "./fleet-data";
+import { resolveAgentProjectId, useFleetAgents, useFleetProjects, useWorkspaceActivity, useWorkspaceStatusStrip } from "./fleet-data";
 import { FleetCard } from "./FleetCard";
 import { FleetCreateAgentWizard } from "./FleetCreateAgentWizard";
 import { TelegramPairPanel } from "./TelegramPairPanel";
@@ -17,15 +17,19 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   // Fetched once here (not per-card) — resolveHardwarePlacement needs it for
   // every card's "where does this run" line.
   const { gateways } = useWorkspaceGateways(workspaceId);
+  const { projects } = useFleetProjects(workspaceId);
   const [wizardOpen, setWizardOpen] = useState(false);
   const router = useRouter();
 
   const base = `/w/${encodeURIComponent(workspaceId)}`;
-  // Selecting an agent opens its routed detail page (was a modal). Ungrouped
-  // agents still carry the backend's default project id.
+  // Selecting an agent opens its routed detail page (was a modal). Agents
+  // created before the projects feature existed can have a blank project_id
+  // (nullable column, never backfilled) — resolveAgentProjectId falls back
+  // to the workspace default so the card still opens instead of silently
+  // doing nothing.
   const goToAgentTab = (agentId: string, tab = "overview") => {
     const a = agents.find((x) => x.agent_id === agentId);
-    const pid = (a?.project_id || "").trim();
+    const pid = resolveAgentProjectId(a?.project_id, projects);
     if (!pid) return;
     router.push(`${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(agentId)}/${tab}`);
   };
