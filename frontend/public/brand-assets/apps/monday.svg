@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 24 24" fill="#4B5563">
+  <title>monday.com</title>
+  <!-- Not the real monday.com logo (monday.com has never been carried by
+       Simple Icons — checked every published release, v1.0.0 through
+       v16.26.0 — so no verified official source asset was available here):
+       an original abstract mark used as a placeholder, matching this
+       directory's one file per connector icon convention. Four rounded
+       status bars of ascending height, evoking the work-tracking board the
+       product is built around. Deliberately neutral gray, not monday.com's
+       brand red, so it does not read as an attempted brand-color match. -->
+  <rect x="2.4" y="15" width="3.6" height="5" rx="1.4" />
+  <rect x="7.6" y="11" width="3.6" height="9" rx="1.4" />
+  <rect x="12.8" y="7" width="3.6" height="13" rx="1.4" />
+  <rect x="18" y="3" width="3.6" height="17" rx="1.4" />
+</svg>
