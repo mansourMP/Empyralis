@@ -143,6 +143,10 @@ function SageRow({
       className="fleet-sage"
       onClick={() => onSelect()}
       onKeyDown={(e) => {
+        // Enter/Space bubbles up from the nested "Chat with Sage" button
+        // below — without this guard, keyboard-activating it ALSO fired
+        // onSelect here, hijacking the button's own onChat activation.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onSelect();

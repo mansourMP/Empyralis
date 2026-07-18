@@ -144,6 +144,12 @@ export default function HardwarePage() {
         tabIndex={0}
         onClick={() => router.push(detailHref)}
         onKeyDown={(e) => {
+          // Enter/Space bubbles up from nested interactive elements (the
+          // menu trigger, its menu items, the rename input) — without this
+          // guard, activating any of THEM also navigated the row, cancelling
+          // their own Enter/Space handling. Only fire when the row itself is
+          // the focused/keyed element.
+          if (e.target !== e.currentTarget) return;
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             router.push(detailHref);

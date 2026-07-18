@@ -1,9 +1,12 @@
+import tempfile
 import unittest
 import uuid
 import asyncio
+from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
 from server_modules import personal_channel_sage_bridge_service
+from server_modules import personal_channels_service, personal_channels_repository
 
 
 class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
@@ -705,98 +708,165 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
         self.assertIn("[sent to WhatsApp · Work Group] noted, Work Group", unified_text)
 
 
-class PersonalChannelRouteErrorSurfacingTests(unittest.TestCase):
-    """Verify route handlers return 200 with error_text, not 500."""
+class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
+    """routes_signal.py / routes_wechat.py / routes_imessage.py (and their
+    signal_inbound/wechat_inbound/imessage_inbound handlers) don't exist any
+    more — Signal/WeChat/iMessage inbound now lives in
+    personal_channels_service.py's generic
+    _handle_local_bridge_gateway_channel_inbound, driven by
+    LOCAL_BRIDGE_PERSONAL_CHANNELS, for all three. These replace the old
+    per-route "exception -> 200 with ok=True/sage_replied=False/
+    error_surfaced=True/error_text classified" coverage with the current
+    equivalent, for the SAME three exception shapes (rate limit / auth /
+    connection failure), at two levels:
 
-    def test_signal_route_exception_returns_200_with_error_text(self) -> None:
-        """On exception, signal route returns 200 with error_surfaced=True."""
-        import json
-        from unittest.mock import MagicMock, AsyncMock
-        from server_modules.routes_signal import signal_inbound
+      (a) the exception never propagates out of the live inbound handler and
+          never reaches gateway_protocol_service.dispatch_channel_outbound.
+          The current architecture's rule (see
+          personal_channel_sage_bridge_service._build_error_reply_dict's
+          docstring: "no hardcoded status/error message may EVER be sent
+          into a channel") is actually stricter than the old ok=True/
+          error_text-in-the-response contract — this asserts the strictER
+          guarantee holds.
+      (b) the failure is still classified, not silently swallowed — the
+          same generic reply builder all three channels share
+          (build_personal_channel_reply_async) puts it under
+          result["error_text"]. This mocks the same sage_turn_adapter.
+          execute_sage_turn_for_channel seam OwnerAwareProvenanceTests above
+          already uses to exercise this module without the sqlite/
+          kill-switch/rust-kernel machinery live-handler integration needs.
+    """
 
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        db_path = Path(self.tmpdir.name) / "personal-channels.sqlite3"
+        personal_channels_repository.init_personal_channels_db(db_path)
+        self.db_patcher = patch.object(personal_channels_repository, "PERSONAL_CHANNELS_DB_FILE", db_path)
+        self.db_patcher.start()
+        self.registration = {
+            "gateway_id": "gw-err-1",
+            "workspace_id": "default",
+            "tenant_id": "tenant-1",
+            "device_trust_state": "trusted",
+            "active_session_id": "sess-1",
+        }
+
+    def tearDown(self) -> None:
+        self.db_patcher.stop()
+        self.tmpdir.cleanup()
+
+    def _assert_never_reaches_the_channel(
+        self, *, channel_key: str, provider: str, label: str, external_message_id: str, exc: Exception,
+    ) -> None:
         async def run_case():
-            mock_request = MagicMock()
-            mock_request.json = AsyncMock(return_value={
-                "text": "hello",
-                "sender_id": "test-sender",
-                "workspace_id": "test-workspace",
-            })
-
-            with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
-                new=AsyncMock(side_effect=RuntimeError("HTTP 429 rate limit")),
+            with (
+                patch(
+                    "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                    new=AsyncMock(side_effect=AssertionError(
+                        "must never dispatch a raw/classified error into the channel"
+                    )),
+                    create=True,
+                ),
+                patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
+                patch(
+                    "server_modules.sage_turn_adapter.execute_sage_turn",
+                    new=AsyncMock(side_effect=exc),
+                ),
             ):
-                # signal_inbound requires Depends(require_api_key),
-                # but we can pass current_user=None since it's not validated
-                # by FastAPI when called directly
-                return await signal_inbound(
-                    request=mock_request,
-                    current_user=None,
+                return await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
+                    gateway_id="gw-err-1",
+                    registration=self.registration,
+                    payload={
+                        "message": {
+                            "external_message_id": external_message_id,
+                            "remote_jid": f"{channel_key}-owner",
+                            "sender_jid": f"{channel_key}-owner",
+                            "push_name": "Owner",
+                            "text": "hello",
+                            "from_me": False,
+                            # Robustly-identified owner turn (channel-agnostic
+                            # — see _is_owner_message), so this reaches the
+                            # Sage turn instead of being blocked by dmPolicy.
+                            "is_self_chat": True,
+                        },
+                    },
+                    channel_key=channel_key,
+                    provider=provider,
+                    label=label,
                 )
 
         result = asyncio.run(run_case())
-        self.assertTrue(result["ok"])
-        self.assertFalse(result.get("sage_replied"))
-        self.assertTrue(result.get("error_surfaced"))
-        self.assertIn("rate limited", result["error_text"].lower())
+        # Never crashed (asyncio.run would have propagated any exception),
+        # and — the modern, stricter equivalent of the old ok=True/
+        # sage_replied=False — nothing was ever dispatched to the channel.
+        self.assertIsNone(result.get("outbound"))
 
-    def test_wechat_route_exception_returns_200_with_error_text(self) -> None:
-        """On exception, wechat route returns 200 with error_surfaced=True."""
-        import json
-        from unittest.mock import MagicMock, AsyncMock
-        from server_modules.routes_wechat import wechat_inbound
-
+    def _assert_classified_error_text(
+        self, *, channel_key: str, external_message_id: str, exc: Exception, expect_substring: str,
+    ) -> None:
         async def run_case():
-            mock_request = MagicMock()
-            mock_request.json = AsyncMock(return_value={
-                "text": "hello",
-                "sender_id": "test-sender",
-                "workspace_id": "test-workspace",
-            })
-
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
-                new=AsyncMock(side_effect=RuntimeError("provider HTTP 401 unauthorized")),
+                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                new=AsyncMock(side_effect=exc),
             ):
-                return await wechat_inbound(
-                    request=mock_request,
-                    current_user=None,
+                return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+                    surface_channel=channel_key,
+                    workspace_id="default",
+                    gateway_id="gw-err-1",
+                    remote_jid=f"{channel_key}-owner",
+                    text="hello",
+                    push_name="Owner",
+                    fallback_label="Signal",
+                    source_event_id=external_message_id,
+                    is_owner=True,
                 )
 
-        result = asyncio.run(run_case())
-        self.assertTrue(result["ok"])
-        self.assertFalse(result.get("sage_replied"))
-        self.assertTrue(result.get("error_surfaced"))
-        self.assertIn("authentication", result["error_text"].lower())
+        reply = asyncio.run(run_case())
+        self.assertEqual(reply["text"], "", "an error must never be surfaced as raw channel text")
+        self.assertEqual(reply["source"], "error_classifier")
+        self.assertIn(expect_substring, reply["error_text"].lower())
 
-    def test_imessage_route_exception_returns_200_with_error_text(self) -> None:
-        """On exception, imessage route returns 200 with error_surfaced=True."""
-        import json
-        from unittest.mock import MagicMock, AsyncMock
-        from server_modules.routes_imessage import imessage_inbound
+    def test_signal_execute_sage_turn_failure_never_reaches_the_channel(self) -> None:
+        self._assert_never_reaches_the_channel(
+            channel_key="signal_personal", provider="signal_local_bridge", label="Signal",
+            external_message_id="sig-err-1", exc=RuntimeError("HTTP 429 rate limit"),
+        )
 
-        async def run_case():
-            mock_request = MagicMock()
-            mock_request.json = AsyncMock(return_value={
-                "text": "hello",
-                "sender_id": "test-sender",
-                "workspace_id": "test-workspace",
-            })
+    def test_signal_execute_sage_turn_failure_is_classified(self) -> None:
+        self._assert_classified_error_text(
+            channel_key="signal_personal", external_message_id="sig-err-2",
+            exc=RuntimeError("HTTP 429 rate limit"), expect_substring="rate limited",
+        )
 
-            with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
-                new=AsyncMock(side_effect=ConnectionError("unreachable")),
-            ):
-                return await imessage_inbound(
-                    request=mock_request,
-                    current_user=None,
-                )
+    def test_wechat_execute_sage_turn_failure_never_reaches_the_channel(self) -> None:
+        self._assert_never_reaches_the_channel(
+            channel_key="wechat_personal", provider="wechat_local_bridge", label="WeChat",
+            external_message_id="wc-err-1", exc=RuntimeError("provider HTTP 401 unauthorized"),
+        )
 
-        result = asyncio.run(run_case())
-        self.assertTrue(result["ok"])
-        self.assertFalse(result.get("sage_replied"))
-        self.assertTrue(result.get("error_surfaced"))
-        self.assertIn("unreachable", result["error_text"].lower())
+    def test_wechat_execute_sage_turn_failure_is_classified(self) -> None:
+        # NOTE: the classified text for a platform-credits auth failure is
+        # "...needs attention on the platform side...", not the word
+        # "authentication" (that wording is reserved for the BYOK variant —
+        # see sage_command_dispatcher.classify_error's is_platform_credits
+        # branch) — this assertion reflects the actual current text rather
+        # than the pre-existing test's stale substring.
+        self._assert_classified_error_text(
+            channel_key="wechat_personal", external_message_id="wc-err-2",
+            exc=RuntimeError("provider HTTP 401 unauthorized"), expect_substring="needs attention",
+        )
+
+    def test_imessage_execute_sage_turn_failure_never_reaches_the_channel(self) -> None:
+        self._assert_never_reaches_the_channel(
+            channel_key="imessage_personal", provider="bluebubbles_local_bridge", label="iMessage",
+            external_message_id="im-err-1", exc=ConnectionError("unreachable"),
+        )
+
+    def test_imessage_execute_sage_turn_failure_is_classified(self) -> None:
+        self._assert_classified_error_text(
+            channel_key="imessage_personal", external_message_id="im-err-2",
+            exc=ConnectionError("unreachable"), expect_substring="unreachable",
+        )
 
 
 if __name__ == "__main__":

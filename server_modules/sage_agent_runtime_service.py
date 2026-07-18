@@ -970,12 +970,18 @@ def _friendly_cli_subscription_error(reason: str, *, runtime: str) -> str:
     if "exited unexpectedly" in r or "crash" in r or "empty_completion" in r or "empty completion" in r:
         # Surface the CLI's own message (usage limit + reset time, a real
         # crash reason, etc.) instead of an opaque "check Gateway logs" the
-        # user can't see. Fall back to the generic event only when there is
-        # no wrapped detail to show.
+        # user can't see — but keep the "exited unexpectedly" framing intact
+        # even when a detail is found. empyralis-gateway/src/llm/runtime.ts's
+        # cliErrorMessage() documents this exact phrase as one of the ones
+        # "the control plane's platform-voice error mapper pattern-matches
+        # on", so a generic/crash-shaped detail (e.g. a bare exit code, which
+        # carries no more information than the phrase itself) must not
+        # silently replace it. Fall back to the generic event only when there
+        # is no wrapped detail to show.
         detail = _extract_cli_gateway_detail(reason)
+        label = "Codex" if is_codex else "Claude Code"
         if detail:
-            label = "Codex" if is_codex else "Claude Code"
-            return f"Heads up: {label} couldn't complete this turn — {detail}"
+            return f"Heads up: {label} exited unexpectedly — {detail}"
         return _say(_pe.CLI_SUBSCRIPTION_CRASH)
     # Fallback — still honest (includes the raw reason), never a silently
     # generic string per this repo's fail-loud convention.

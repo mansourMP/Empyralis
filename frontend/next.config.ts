@@ -36,7 +36,11 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   distDir: process.env.NEXT_DIST_DIR || '.next',
   typescript: { ignoreBuildErrors: true },
-  eslint: { ignoreDuringBuilds: true },
+  // Next.js 16 dropped the `eslint` config key (and `next lint`) entirely —
+  // there's no replacement key to migrate to, and this project has no
+  // eslint dependency/config/script anyway, so the old
+  // `eslint: { ignoreDuringBuilds: true }` here was already a no-op; removed
+  // rather than migrated.
   // frontend/ isn't self-contained — its own source imports across the
   // repo boundary via relative path (e.g. lib/ui/tokens.ts pulls from
   // ../../../shared/design-system/tokens), so the Turbopack root has to

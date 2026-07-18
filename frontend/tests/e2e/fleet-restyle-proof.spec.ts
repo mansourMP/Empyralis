@@ -36,7 +36,7 @@ async function gotoFleet(page: any) {
 }
 
 async function setTheme(page: any, theme: "light" | "dark") {
-  await page.evaluate((t) => {
+  await page.evaluate((t: "light" | "dark") => {
     const root = document.querySelector(".fleet-root");
     return root?.getAttribute("data-theme") === t;
   }, theme);
