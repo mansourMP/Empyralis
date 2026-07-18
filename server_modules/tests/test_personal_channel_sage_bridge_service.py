@@ -237,6 +237,94 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         self.assertEqual(result["source"], "error_classifier")
 
 
+class OutboundMediaPropagationTests(unittest.TestCase):
+    """build_*_personal_reply's "media" key -- populated by send_image /
+    generate_image's auto-attach via SageTurnResult.media (see
+    sage_agent_runtime_contract.py, sage_turn_adapter.py) and forwarded
+    verbatim through execute_sage_turn_for_channel's dict result. Covers the
+    same media-only-reply property test_personal_channels_service_media.py
+    covers one layer down (agent_channel_router's dispatch calls) -- this is
+    the layer that actually extracts "media" out of execute_sage_turn_for_channel's
+    result dict in the first place."""
+
+    _MEDIA_ITEM = {
+        "kind": "image",
+        "source_path": "/app/.orion-stack/generated_images/fox.png",
+        "mime_type": "image/png",
+    }
+
+    def test_whatsapp_reply_carries_media_from_the_turn_result(self) -> None:
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+            new=AsyncMock(return_value={"message": "Here's the fox.", "media": [self._MEDIA_ITEM]}),
+        ):
+            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+                workspace_id="workspace-1",
+                gateway_id="gateway-1",
+                remote_jid="15551234567",
+                text="send me that fox picture",
+                push_name="Mansur",
+            )
+
+        self.assertEqual(result["text"], "Here's the fox.")
+        self.assertEqual(result["media"], [self._MEDIA_ITEM])
+
+    def test_telegram_media_only_turn_still_returns_a_result(self) -> None:
+        """An empty message with a queued attachment must not collapse to
+        None the way a genuinely silent turn does -- _build_unified_sage_personal_reply_async
+        gates on `reply or media`, not `reply` alone."""
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+            new=AsyncMock(return_value={"message": "", "media": [self._MEDIA_ITEM]}),
+        ):
+            result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
+                workspace_id="workspace-1",
+                gateway_id="gateway-1",
+                remote_jid="tg-user-1",
+                text="send me that fox picture",
+                push_name="Mansur",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["text"], "")
+        self.assertEqual(result["media"], [self._MEDIA_ITEM])
+
+    def test_genuinely_silent_turn_still_returns_none(self) -> None:
+        """Unchanged behavior: no message AND no media is real silence."""
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+            new=AsyncMock(return_value={"message": ""}),
+        ):
+            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+                workspace_id="workspace-1",
+                gateway_id="gateway-1",
+                remote_jid="15551234567",
+                text="hello",
+                push_name="Mansur",
+            )
+
+        self.assertIsNone(result)
+
+    def test_reply_with_no_media_key_defaults_to_empty_list(self) -> None:
+        """A turn that never touched send_image/generate_image (the common
+        case) has no "media" key at all in its raw result -- must not crash,
+        must default to []."""
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+            new=AsyncMock(return_value={"message": "just chatting, no attachments"}),
+        ):
+            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+                workspace_id="workspace-1",
+                gateway_id="gateway-1",
+                remote_jid="15551234567",
+                text="hi",
+                push_name="Mansur",
+            )
+
+        self.assertEqual(result["text"], "just chatting, no attachments")
+        self.assertEqual(result["media"], [])
+
+
 class OwnerAwareProvenanceTests(unittest.TestCase):
     """fix/owner-aware-provenance regression coverage.
 

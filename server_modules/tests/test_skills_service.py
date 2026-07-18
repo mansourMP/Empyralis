@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from server_modules.agent_turn import AgentTurnRequest, TurnActor
 from server_modules import agent_capability_service
 from server_modules import authority_mandate_service
+from server_modules import direct_chat_operator_binding_service
 from server_modules import direct_tool_execution_service
 from server_modules import no_provider_service
 from server_modules import skills_service
@@ -20,9 +21,15 @@ class SkillsServiceTests(unittest.TestCase):
             compact_step_detail=lambda value: " ".join(str(value or "").split()).strip() or None,
             titleize_direct_step_token=lambda value: " ".join(word.capitalize() for word in str(value or "").split("_")),
             run_async_tool_call=lambda awaitable: awaitable,
-            parse_tool_name=lambda name: (
-                tuple(str(name or "").split("__", 1)) if "__" in str(name or "") else tuple(str(name or "").split("_", 1))
-            ),
+            # The real router (not a naive "_"-split lambda): a handful of
+            # tool names (generate_image, send_image, the memory_* family)
+            # have no "__" separator and need their own explicit mapping —
+            # see direct_chat_operator_binding_service.parse_tool_name's own
+            # if/elif chain. Using the real function here (rather than a
+            # fixture-local approximation) is what makes
+            # tool_call={"name": "send_image", ...} / {"name": "generate_image", ...}
+            # actually reach the connector_id/action_id branches under test.
+            parse_tool_name=direct_chat_operator_binding_service.parse_tool_name,
             tool_arguments_payload=lambda payload: payload if isinstance(payload, dict) else {},
             parse_json_object_loose=lambda value: {},
             safe_positive_int=lambda value, default=0: int(value) if str(value or "").strip().isdigit() else default,
@@ -1307,6 +1314,376 @@ class GenerateImageCapabilityResolutionTests(unittest.TestCase):
                 callbacks=self._callbacks(),
             )
         self.assertEqual(captured_agent_id["value"], "")
+class SendImageAndAutoAttachTests(unittest.TestCase):
+    """send_image's execution handler and generate_image's channel-context
+    auto-attach — the agent-decision layer that turns a generated/local file
+    into an actual outbound attachment. Both write into session_ctx's shared
+    "pending_outbound_media" list (see _run_sage_action_loop_v3's session_ctx
+    construction and handle_sage_chat's "media" response key), which is the
+    same dict object the caller still holds afterward — CPython threads
+    share memory, so a mutation made deep inside execute_single_direct_tool_call
+    (itself invoked via a ThreadPoolExecutor hop from
+    direct_chat_generation_service.py) is visible to the caller without any
+    return-value plumbing. These tests assert directly on that mutation.
+    """
+
+    def _execution_callbacks(self, **overrides) -> direct_tool_execution_service.DirectToolExecutionCallbacks:
+        # run_async_tool_call is a lazy passthrough (not asyncio.run) by
+        # default: most tests in this class (send_image) never route through
+        # it for anything the assertions depend on, and staying lazy avoids
+        # ever actually executing the unconditional activity-ledger append
+        # near the top of execute_single_direct_tool_call. The
+        # generate_image tests below DO need a real event loop — the
+        # capabilities feature (agent_capability_service resolution) gates
+        # generate_image behind an awaited coroutine now — so those pass
+        # run_async_tool_call=lambda coro: asyncio.run(coro) as an override,
+        # same as GenerateImageCapabilityResolutionTests._callbacks above.
+        base = dict(
+            compact_step_detail=lambda value: " ".join(str(value or "").split()).strip() or None,
+            titleize_direct_step_token=lambda value: " ".join(word.capitalize() for word in str(value or "").split("_")),
+            run_async_tool_call=lambda awaitable: awaitable,
+            parse_tool_name=direct_chat_operator_binding_service.parse_tool_name,
+            tool_arguments_payload=lambda payload: payload if isinstance(payload, dict) else {},
+            parse_json_object_loose=lambda value: {},
+            safe_positive_int=lambda value, default=0: int(value) if str(value or "").strip().isdigit() else default,
+            normalize_reasoning_effort=lambda value: str(value or "").strip().lower() or None,
+            build_direct_local_tool_config=skills_service.build_direct_local_tool_config,
+            format_direct_local_tool_result=lambda result: json.dumps(result, ensure_ascii=False),
+            build_direct_tool_config=lambda connector_id, action_id, tool_input: {
+                "connector": connector_id, "action": action_id, "input": tool_input,
+            },
+            format_direct_tool_result=lambda result: json.dumps(result, ensure_ascii=False),
+            llm_task=lambda *args, **kwargs: {"ok": True},
+            web_search=lambda query: [],
+            web_fetch=lambda url: f"Fetched {url}",
+            search_memory_notebook=lambda *a, **k: [],
+            get_memory_notebook_excerpt=lambda *a, **k: {},
+            update_memory_context_file=lambda *a, **k: {},
+            memory_append_daily_note=lambda *a, **k: {},
+            create_memory_consolidation_staging_file=lambda *a, **k: {},
+            consolidate_daily_memory_notes=lambda *a, **k: {},
+            apply_memory_consolidation_staging=lambda *a, **k: {},
+            list_memory_file_versions=lambda *a, **k: [],
+            rollback_memory_file_version=lambda *a, **k: {},
+        )
+        base.update(overrides)
+        return direct_tool_execution_service.DirectToolExecutionCallbacks(**base)
+
+    def _channel_session_ctx(self, channel_origin: str = "whatsapp_personal") -> dict:
+        # authority_tier is required here, not just realism: _authority_mandate_gate
+        # (skills_service.py) fail-closes to "audience" for any session_ctx
+        # missing it, and neither send_image nor generate_image is
+        # audience_safe — an owner-tier turn is what _run_sage_action_loop_v3
+        # actually stamps for every live channel (see that gate's own
+        # docstring), so this matches production, not a test-only shortcut.
+        return {"metadata": {"channel_origin": channel_origin}, "authority_tier": "owner"}
+
+    # ── send_image: local path ──────────────────────────────────────────
+
+    def test_send_image_local_path_queues_media_with_caption(self) -> None:
+        callbacks = self._execution_callbacks()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                image_dir = Path(tmpdir) / ".orion-stack" / "generated_images"
+                image_dir.mkdir(parents=True, exist_ok=True)
+                image_path = image_dir / "receipt.png"
+                image_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-png-bytes")
+
+                session_ctx = self._channel_session_ctx("whatsapp_personal")
+                result = skills_service.execute_single_direct_tool_call(
+                    tool_call={
+                        "name": "send_image",
+                        "arguments": {"path_or_url": str(image_path), "caption": "Here's the receipt"},
+                    },
+                    workspace_id="default",
+                    thread_id="thread-1",
+                    session_ctx=session_ctx,
+                    callbacks=callbacks,
+                )
+            finally:
+                os.chdir(cwd)
+
+        self.assertIn("Queued", result)
+        queued = session_ctx["pending_outbound_media"]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["kind"], "image")
+        # Compare against the RESOLVED path, not the literal input: on macOS
+        # tempfile.TemporaryDirectory() returns a /var/... path that's itself
+        # a symlink to /private/var/..., and _resolve_send_image_local_path
+        # deliberately calls Path.resolve() (that's the containment check's
+        # own security property, not an artifact to work around).
+        self.assertEqual(queued[0]["source_path"], str(image_path.resolve()))
+        self.assertEqual(queued[0]["caption"], "Here's the receipt")
+        self.assertEqual(queued[0]["mime_type"], "image/png")
+
+    def test_send_image_rejects_path_outside_safe_root(self) -> None:
+        """The core security property: send_image must not become an
+        arbitrary-file-read/exfiltration primitive. A path outside
+        .orion-stack/ (e.g. an attacker- or prompt-injection-supplied
+        ~/.ssh/id_rsa or /app/.env) must be rejected, not read and queued
+        for delivery to whoever is on the other end of the chat."""
+        callbacks = self._execution_callbacks()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                outside_dir = Path(tmpdir) / "not-orion-stack"
+                outside_dir.mkdir(parents=True, exist_ok=True)
+                secret_path = outside_dir / "secret.txt"
+                secret_path.write_text("super secret content")
+
+                session_ctx = self._channel_session_ctx("whatsapp_personal")
+                with self.assertRaises(ValueError) as ctx:
+                    skills_service.execute_single_direct_tool_call(
+                        tool_call={
+                            "name": "send_image",
+                            "arguments": {"path_or_url": str(secret_path)},
+                        },
+                        workspace_id="default",
+                        thread_id="thread-1",
+                        session_ctx=session_ctx,
+                        callbacks=callbacks,
+                    )
+            finally:
+                os.chdir(cwd)
+
+        self.assertIn(".orion-stack", str(ctx.exception))
+        self.assertNotIn("pending_outbound_media", session_ctx)
+
+    def test_send_image_rejects_path_traversal_out_of_safe_root(self) -> None:
+        callbacks = self._execution_callbacks()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                (Path(tmpdir) / ".orion-stack").mkdir(parents=True, exist_ok=True)
+                outside_file = Path(tmpdir) / "outside.txt"
+                outside_file.write_text("nope")
+
+                session_ctx = self._channel_session_ctx("whatsapp_personal")
+                with self.assertRaises(ValueError):
+                    skills_service.execute_single_direct_tool_call(
+                        tool_call={
+                            "name": "send_image",
+                            "arguments": {"path_or_url": ".orion-stack/../outside.txt"},
+                        },
+                        workspace_id="default",
+                        thread_id="thread-1",
+                        session_ctx=session_ctx,
+                        callbacks=callbacks,
+                    )
+            finally:
+                os.chdir(cwd)
+
+    def test_send_image_missing_local_file_raises(self) -> None:
+        callbacks = self._execution_callbacks()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                session_ctx = self._channel_session_ctx("whatsapp_personal")
+                with self.assertRaises(ValueError) as ctx:
+                    skills_service.execute_single_direct_tool_call(
+                        tool_call={
+                            "name": "send_image",
+                            "arguments": {"path_or_url": ".orion-stack/generated_images/nope.png"},
+                        },
+                        workspace_id="default",
+                        thread_id="thread-1",
+                        session_ctx=session_ctx,
+                        callbacks=callbacks,
+                    )
+            finally:
+                os.chdir(cwd)
+        self.assertIn("not found", str(ctx.exception))
+
+    # ── send_image: URL ──────────────────────────────────────────────────
+
+    def test_send_image_url_queues_media_without_touching_disk(self) -> None:
+        callbacks = self._execution_callbacks()
+        session_ctx = self._channel_session_ctx("telegram_personal")
+        result = skills_service.execute_single_direct_tool_call(
+            tool_call={
+                "name": "send_image",
+                "arguments": {"path_or_url": "https://example.com/cat.jpg"},
+            },
+            workspace_id="default",
+            thread_id="thread-1",
+            session_ctx=session_ctx,
+            callbacks=callbacks,
+        )
+
+        self.assertIn("Queued", result)
+        queued = session_ctx["pending_outbound_media"]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["kind"], "image")
+        self.assertEqual(queued[0]["source_url"], "https://example.com/cat.jpg")
+        self.assertNotIn("source_path", queued[0])
+
+    # ── _queue_outbound_media: the shared accumulator helper ────────────
+    #
+    # Exercised directly rather than through execute_single_direct_tool_call:
+    # a session_ctx that isn't a dict (the "no turn to attach to" case) is
+    # indistinguishable, from the authority-mandate gate's point of view,
+    # from an unattributed/audience-tier caller — _authority_mandate_gate
+    # fail-closes and raises its own "workspace owner only" RuntimeError
+    # before send_image's handler ever runs. So the only way to reach a real
+    # session_ctx that IS a dict is one _run_sage_action_loop_v3 already
+    # stamped, which always includes "pending_outbound_media" — meaning
+    # _queue_outbound_media's False branch is a pure defensive backstop for
+    # this call path, not something send_image's own dispatch can trigger
+    # end-to-end. Unit-testing the helper directly covers it precisely.
+
+    def test_queue_outbound_media_returns_false_without_a_session(self) -> None:
+        self.assertFalse(skills_service._queue_outbound_media(None, {"kind": "image"}))
+        self.assertFalse(skills_service._queue_outbound_media("not-a-dict", {"kind": "image"}))
+
+    def test_queue_outbound_media_appends_in_place(self) -> None:
+        session_ctx: dict = {}
+        self.assertTrue(skills_service._queue_outbound_media(session_ctx, {"kind": "image", "source_url": "https://x/1.png"}))
+        self.assertTrue(skills_service._queue_outbound_media(session_ctx, {"kind": "image", "source_url": "https://x/2.png"}))
+        self.assertEqual(
+            session_ctx["pending_outbound_media"],
+            [{"kind": "image", "source_url": "https://x/1.png"}, {"kind": "image", "source_url": "https://x/2.png"}],
+        )
+
+    def test_send_image_requires_path_or_url(self) -> None:
+        callbacks = self._execution_callbacks()
+        with self.assertRaises(RuntimeError):
+            skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "send_image", "arguments": {}},
+                workspace_id="default",
+                thread_id="thread-1",
+                session_ctx=self._channel_session_ctx(),
+                callbacks=callbacks,
+            )
+
+    # ── generate_image auto-attach ───────────────────────────────────────
+
+    def _generate_image_callbacks(self) -> direct_tool_execution_service.DirectToolExecutionCallbacks:
+        # generate_image's handler resolves this agent's capability provider
+        # via callbacks.run_async_tool_call(<coroutine>) before it does
+        # anything else (see skills_service.execute_single_direct_tool_call's
+        # "image"/"generate" branch) — needs a real event loop, unlike this
+        # class's other tests (send_image never awaits anything).
+        return self._execution_callbacks(run_async_tool_call=lambda coro: asyncio.run(coro))
+
+    def _mock_available_image_capability(self):
+        return patch(
+            "server_modules.agent_capability_service.resolve_agent_capability_provider_by_id",
+            new=AsyncMock(return_value=agent_capability_service.CapabilityResolution(
+                capability="image_generation", available=True, mode="byok_api",
+                provider="openai", credentials={"api_key": "sk-test"}, billing_mode="byok_api",
+            )),
+        )
+
+    def test_generate_image_auto_attaches_in_channel_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "generated.png"
+            with (
+                patch(
+                    "server_modules.tools_image_gen.generate_image",
+                    return_value=[str(output_path)],
+                ),
+                self._mock_available_image_capability(),
+                patch("server_modules.activity_ledger_service.append_execution_activity", new=AsyncMock()),
+            ):
+                callbacks = self._generate_image_callbacks()
+                session_ctx = self._channel_session_ctx("whatsapp_personal")
+                result = skills_service.execute_single_direct_tool_call(
+                    tool_call={
+                        "name": "generate_image",
+                        "arguments": {"prompt": "a red fox"},
+                    },
+                    workspace_id="default",
+                    thread_id="thread-1",
+                    session_ctx=session_ctx,
+                    callbacks=callbacks,
+                )
+
+        self.assertIn("Generated 1 image(s)", result)
+        self.assertIn("queued to send", result)
+        queued = session_ctx["pending_outbound_media"]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0], {
+            "kind": "image",
+            "source_path": str(output_path),
+            "mime_type": "image/png",
+        })
+
+    def test_generate_image_does_not_auto_attach_outside_channel_context(self) -> None:
+        """Web chat / dashboard turns (channel_origin absent or "sage") have
+        no channel to attach an image TO — generate_image must behave exactly
+        as before there: just report the saved path, nothing queued."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "generated.png"
+            with (
+                patch(
+                    "server_modules.tools_image_gen.generate_image",
+                    return_value=[str(output_path)],
+                ),
+                self._mock_available_image_capability(),
+                patch("server_modules.activity_ledger_service.append_execution_activity", new=AsyncMock()),
+            ):
+                callbacks = self._generate_image_callbacks()
+                session_ctx = {"metadata": {"channel_origin": "sage"}, "authority_tier": "owner"}
+                result = skills_service.execute_single_direct_tool_call(
+                    tool_call={
+                        "name": "generate_image",
+                        "arguments": {"prompt": "a red fox"},
+                    },
+                    workspace_id="default",
+                    thread_id="thread-1",
+                    session_ctx=session_ctx,
+                    callbacks=callbacks,
+                )
+
+        self.assertIn("Generated 1 image(s)", result)
+        self.assertNotIn("queued to send", result)
+        self.assertNotIn("pending_outbound_media", session_ctx)
+
+    def test_generate_image_auto_attach_caps_at_max_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = [str(Path(tmpdir) / f"img-{i}.png") for i in range(6)]
+            with (
+                patch(
+                    "server_modules.tools_image_gen.generate_image",
+                    return_value=paths,
+                ),
+                self._mock_available_image_capability(),
+                patch("server_modules.activity_ledger_service.append_execution_activity", new=AsyncMock()),
+            ):
+                callbacks = self._generate_image_callbacks()
+                session_ctx = self._channel_session_ctx("whatsapp_personal")
+                skills_service.execute_single_direct_tool_call(
+                    tool_call={
+                        "name": "generate_image",
+                        "arguments": {"prompt": "six cats", "n": 4},
+                    },
+                    workspace_id="default",
+                    thread_id="thread-1",
+                    session_ctx=session_ctx,
+                    callbacks=callbacks,
+                )
+
+        self.assertEqual(len(session_ctx["pending_outbound_media"]), skills_service._MAX_AUTO_ATTACH_IMAGES)
+
+
+class SendImageToolDescriptorTests(unittest.TestCase):
+    def test_send_image_descriptor_accepts_local_path_or_url(self) -> None:
+        descriptors = skills_service._builtin_tool_descriptors()
+        send_image = next(d for d in descriptors if d.tool_name == "send_image")
+        self.assertEqual(send_image.connector_id, "messaging")
+        self.assertEqual(send_image.action_id, "send_image")
+        self.assertIn("path_or_url", send_image.parameters["properties"])
+        self.assertIn("path_or_url", send_image.parameters["required"])
+        self.assertNotIn(
+            "publicly accessible",
+            send_image.description,
+            "description should no longer demand a publicly-hosted URL now that local paths are accepted",
+        )
 
 
 class AuthorityMandateGateTests(unittest.TestCase):

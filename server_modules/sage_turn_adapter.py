@@ -292,6 +292,7 @@ async def execute_sage_turn(
         provider=result.get("provider", ""),
         model=result.get("model"),
         ai_setup_url=_ai_setup_url,
+        media=list(result.get("media") or []),
     )
 
 

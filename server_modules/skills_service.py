@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -1136,18 +1137,26 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="messaging",
             action_id="send_image",
             description=(
-                "Send an image or file through the current messaging channel. "
-                "Use this to share screenshots, generated images, documents, or other files. "
-                "url should be a publicly accessible image/file URL. "
-                "caption is an optional text to send alongside the image."
+                "Attach an image or file to your reply in the current messaging channel "
+                "(Telegram, WhatsApp). Use this to share a screenshot, a generate_image "
+                "output, a document, or any other local file — no need to publish it "
+                "anywhere first. Note: generate_image already auto-attaches its own "
+                "output when you're replying in a channel, so you only need this tool "
+                "for a file that isn't already the direct result of generate_image "
+                "(e.g. a screenshot, an existing document, or a public URL). "
+                "path_or_url accepts either a local file path or a public URL. "
+                "caption is optional text to send alongside it."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "Public URL of the image or file to send."},
+                    "path_or_url": {
+                        "type": "string",
+                        "description": "A local file path (e.g. generate_image's output path) or a public URL of the image/file to send.",
+                    },
                     "caption": {"type": "string", "description": "Optional caption text for the image."},
                 },
-                "required": ["url"],
+                "required": ["path_or_url"],
             },
         ),
         ToolDescriptor(
@@ -3274,6 +3283,13 @@ _BUILTIN_DIRECT_TOOL_IDS: frozenset = frozenset(
         "browser",
         "image",
         "sage_service",
+        # send_image (messaging.send_image) needs session_ctx for the current
+        # channel/gateway context and the shared pending_outbound_media
+        # accumulator — both only available on the builtin sync path
+        # (execute_single_direct_tool_call). Without this it falls through to
+        # _execute_custom_connector_tool_call_sync's OAuth-connector lookup,
+        # which has no "messaging" connector registered and would error.
+        "messaging",
     }
 )
 
@@ -3815,6 +3831,117 @@ async def execute_single_direct_tool_call_async(
     return callbacks.format_direct_local_tool_result(result)
 
 
+# ── Outbound media (send_image / generate_image auto-attach) ──────────────
+#
+# Root directory under which locally-generated media is eligible for
+# send_image's local-path acceptance. Deliberately the SAME root
+# tools_image_gen.DEFAULT_OUTPUT_DIR's parent lives under: confining
+# send_image to files inside it (rather than any path the model names) is
+# what keeps "send a local file" from becoming an arbitrary-file-read /
+# exfiltration primitive — a compromised or prompt-injected turn could
+# otherwise ask send_image("~/.ssh/id_rsa") or send_image("/app/.env") and
+# have the bytes read off disk and delivered to whoever is on the other end
+# of the chat. generate_image's OWN auto-attach (below) does not need this
+# check: it only ever attaches paths it just wrote itself, i.e. freshly
+# generated image bytes, never a pre-existing file's original content.
+_SEND_IMAGE_SAFE_ROOT_DIRNAME = ".orion-stack"
+# Matches the WhatsApp/Telegram gateway outbound media caps
+# (WHATSAPP_MEDIA_MAX_BYTES in empyralis-gateway/src/channels/whatsapp/runtime.ts).
+_SEND_IMAGE_MAX_LOCAL_BYTES = 25 * 1024 * 1024
+# Mirrors generate_image's own `n` parameter ceiling (ToolDescriptor:
+# minimum 1, maximum 4) — caps how many images one generate_image call can
+# queue for auto-attach, so a single tool call can't balloon the reply.
+_MAX_AUTO_ATTACH_IMAGES = 4
+
+
+def _send_image_safe_root() -> Path:
+    root = Path.cwd() / _SEND_IMAGE_SAFE_ROOT_DIRNAME
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _resolve_send_image_local_path(raw_path: str) -> Path:
+    """Resolve+validate a local path for send_image, confined to the
+    .orion-stack/ generated-content root. Raises ValueError for anything
+    that isn't a plain, existing, non-empty, size-capped file inside that
+    root — including a symlink that resolves outside it, since the
+    containment check below runs AFTER Path.resolve() follows symlinks.
+    Mirrors agent_memory_tools._resolve_safe_path's containment idiom.
+    """
+    candidate = str(raw_path or "").strip()
+    if not candidate:
+        raise ValueError("path_or_url is required")
+    safe_root = _send_image_safe_root().resolve()
+    resolved = Path(candidate).expanduser()
+    if not resolved.is_absolute():
+        resolved = Path.cwd() / resolved
+    resolved = resolved.resolve()
+    if not str(resolved).startswith(str(safe_root) + os.sep):
+        raise ValueError(
+            f"Local path must be inside {_SEND_IMAGE_SAFE_ROOT_DIRNAME}/ (e.g. "
+            "generate_image's own output path) — arbitrary filesystem paths "
+            "cannot be sent. Pass a public URL instead if the file lives elsewhere."
+        )
+    if not resolved.is_file():
+        raise ValueError(f"Local file not found: {candidate}")
+    size = resolved.stat().st_size
+    if size <= 0:
+        raise ValueError(f"Local file is empty: {candidate}")
+    if size > _SEND_IMAGE_MAX_LOCAL_BYTES:
+        raise ValueError(
+            f"Local file too large to send ({size} bytes, max {_SEND_IMAGE_MAX_LOCAL_BYTES})."
+        )
+    return resolved
+
+
+def _media_kind_for_mime(mime_type: str) -> str:
+    """Maps a MIME type to the gateway's media-kind vocabulary (image, video,
+    audio, file — see empyralis-gateway/src/protocol/types.ts's
+    GatewayChannelMediaKind). "voice" is never inferred here — it's an
+    explicit sender choice (as_voice), not derivable from a MIME type alone.
+    """
+    normalized = str(mime_type or "").split(";")[0].strip().lower()
+    if normalized.startswith("image/"):
+        return "image"
+    if normalized.startswith("video/"):
+        return "video"
+    if normalized.startswith("audio/"):
+        return "audio"
+    return "file"
+
+
+def _session_channel_origin(session_ctx: Optional[Dict[str, Any]]) -> str:
+    """Returns the current turn's channel_origin (e.g. "whatsapp_personal",
+    "telegram_personal") when this tool call is running inside a real
+    messaging-channel turn, or "" for a web-chat/dashboard/no-channel turn
+    (channel_origin defaults to the literal "sage" there — see
+    _run_sage_action_loop_v3's session_ctx construction). Used to gate
+    generate_image's auto-attach: there is no channel to attach a reply
+    attachment TO outside a channel turn.
+    """
+    if not isinstance(session_ctx, dict):
+        return ""
+    metadata = session_ctx.get("metadata")
+    if isinstance(metadata, dict):
+        origin = str(metadata.get("channel_origin") or "").strip()
+        if origin and origin != "sage":
+            return origin
+    return ""
+
+
+def _queue_outbound_media(session_ctx: Optional[Dict[str, Any]], item: Dict[str, Any]) -> bool:
+    """Appends one media item to the turn's shared pending_outbound_media
+    accumulator (see _run_sage_action_loop_v3's session_ctx construction and
+    handle_sage_chat's "media" response key). Returns False (does nothing)
+    when session_ctx isn't a dict — there is no turn to attach to, which
+    callers surface to the model rather than silently dropping the file.
+    """
+    if not isinstance(session_ctx, dict):
+        return False
+    session_ctx.setdefault("pending_outbound_media", []).append(item)
+    return True
+
+
 def execute_single_direct_tool_call(
     *,
     tool_call: Dict[str, Any],
@@ -3960,9 +4087,64 @@ def execute_single_direct_tool_call(
                 )
             except Exception:
                 pass
-        return "\n".join(
-            [f"Generated {len(saved_images)} image(s):", *[f"{tool_index}. {path}" for tool_index, path in enumerate(saved_images, start=1)]]
+        # Auto-attach: in a real messaging-channel turn (Telegram/WhatsApp —
+        # see _session_channel_origin), a generated image auto-attaches to
+        # the agent's reply, matching OpenClaw's model. Outside a channel
+        # turn (web chat / dashboard) there is nothing to attach it TO, so
+        # the reply just references the saved path as before. Capped at
+        # _MAX_AUTO_ATTACH_IMAGES so a single call can't balloon the reply.
+        _channel_origin = _session_channel_origin(session_ctx)
+        _auto_attached = 0
+        if _channel_origin and saved_images:
+            for _image_path in saved_images[:_MAX_AUTO_ATTACH_IMAGES]:
+                _mime_type = mimetypes.guess_type(str(_image_path))[0] or "image/png"
+                if _queue_outbound_media(
+                    session_ctx,
+                    {"kind": "image", "source_path": str(_image_path), "mime_type": _mime_type},
+                ):
+                    _auto_attached += 1
+        _summary_lines = [f"Generated {len(saved_images)} image(s):", *[f"{tool_index}. {path}" for tool_index, path in enumerate(saved_images, start=1)]]
+        if _auto_attached:
+            _summary_lines.append(
+                f"({_auto_attached} image(s) queued to send with your reply on {_channel_origin} — "
+                "no need to also call send_image for these.)"
+            )
+        return "\n".join(_summary_lines).strip()
+    if connector_id == "messaging" and action_id == "send_image":
+        raw_target = str(
+            argument_payload.get("path_or_url") or argument_payload.get("url") or ""
         ).strip()
+        if not raw_target:
+            raise RuntimeError("send_image requires path_or_url.")
+        caption = str(argument_payload.get("caption") or "").strip() or None
+        is_url = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", raw_target))
+        if is_url:
+            guessed_mime, _ = mimetypes.guess_type(raw_target)
+            media_item: Dict[str, Any] = {
+                "kind": _media_kind_for_mime(guessed_mime) if guessed_mime else "file",
+                "source_url": raw_target,
+            }
+            if guessed_mime:
+                media_item["mime_type"] = guessed_mime
+        else:
+            resolved_path = _resolve_send_image_local_path(raw_target)
+            mime_type = mimetypes.guess_type(str(resolved_path))[0] or "application/octet-stream"
+            media_item = {
+                "kind": _media_kind_for_mime(mime_type),
+                "source_path": str(resolved_path),
+                "mime_type": mime_type,
+            }
+        if caption:
+            media_item["caption"] = caption
+        if not _queue_outbound_media(session_ctx, media_item):
+            raise RuntimeError(
+                "send_image requires an active messaging-channel turn — there is no "
+                "channel to send through right now."
+            )
+        return (
+            f"Queued {media_item['kind']} to send with your reply: {raw_target}"
+            + (f" (caption: {caption})" if caption else "")
+        )
     if connector_id == "browser":
         browser = _resolve_direct_tool_browser_adapter(session_ctx)
         if action_id == "navigate":

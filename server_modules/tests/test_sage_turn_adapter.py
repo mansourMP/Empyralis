@@ -66,6 +66,46 @@ class SageTurnAdapterParityTests(unittest.TestCase):
         for key in SAGE_RESPONSE_KEYS:
             self.assertIn(key, result, f"Channel result missing key: {key}")
 
+    def test_both_paths_thread_media_from_handle_sage_chat(self):
+        """handle_sage_chat's "media" key (populated by send_image /
+        generate_image's auto-attach — see skills_service.py's
+        session_ctx["pending_outbound_media"]) must survive both the
+        SageTurnResult dataclass round-trip (execute_sage_turn) and the
+        channel dict round-trip (execute_sage_turn_for_channel, which
+        returns sage_result.as_dict())."""
+        media_item = {"kind": "image", "source_path": "/tmp/fox.png", "mime_type": "image/png"}
+        with patch(
+            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            new=AsyncMock(return_value=self._mock_sage_chat(media=[media_item])),
+        ):
+            api_result = _run(execute_sage_turn(workspace_id="ws-1", message="send me that fox"))
+            channel_result = _run(execute_sage_turn_for_channel(
+                workspace_id="ws-1",
+                message="send me that fox",
+                surface_channel="whatsapp_personal",
+                remote_jid="123456",
+            ))
+
+        self.assertEqual(api_result.media, [media_item])
+        self.assertEqual(channel_result["media"], [media_item])
+
+    def test_media_defaults_to_empty_list_when_handle_sage_chat_omits_it(self):
+        """The vast majority of turns never call send_image/generate_image —
+        handle_sage_chat's result dict has no "media" key at all then, and
+        both paths must default to [], not KeyError/None."""
+        with patch(
+            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            new=AsyncMock(return_value=self._mock_sage_chat()),
+        ):
+            api_result = _run(execute_sage_turn(workspace_id="ws-1", message="hello"))
+            channel_result = _run(execute_sage_turn_for_channel(
+                workspace_id="ws-1", message="hello",
+                surface_channel="whatsapp_personal", remote_jid="123456",
+            ))
+
+        self.assertEqual(api_result.media, [])
+        self.assertEqual(channel_result["media"], [])
+
     def test_both_paths_enforce_owner_sage_mode(self):
         for surface_channel in ("whatsapp_personal", "telegram_personal"):
             with patch(

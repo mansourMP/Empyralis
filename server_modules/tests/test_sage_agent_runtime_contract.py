@@ -91,6 +91,17 @@ class SageContractNormalizationTests(unittest.TestCase):
         self.assertEqual(result.approvals_required, [])
         self.assertEqual(result.memory_updates, [])
 
+    def test_sage_turn_result_media_defaults_empty(self):
+        result = SageTurnResult(message="ok")
+        self.assertEqual(result.media, [])
+        self.assertEqual(result.as_dict()["media"], [])
+
+    def test_sage_turn_result_media_round_trips_through_as_dict(self):
+        media_item = {"kind": "image", "source_path": "/tmp/fox.png", "mime_type": "image/png"}
+        result = SageTurnResult(message="here's the fox", media=[media_item])
+        self.assertEqual(result.media, [media_item])
+        self.assertEqual(result.as_dict()["media"], [media_item])
+
 
 if __name__ == "__main__":
     unittest.main()
