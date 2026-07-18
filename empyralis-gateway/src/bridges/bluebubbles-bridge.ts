@@ -14,7 +14,15 @@ type BridgeEvent = {
   text: string;
   received_at: string;
   from_me?: boolean;
+  is_group?: boolean;
+  is_mentioned?: boolean;
+  is_reply_to_sage?: boolean;
 };
+
+/** Caps how many of this bridge's own sent-message guids are kept for
+ *  is_reply_to_sage matching — mirrors the WhatsApp/Telegram/Signal
+ *  sentMessageIds cap exactly. */
+const SENT_MESSAGE_ID_CACHE_LIMIT = 500;
 
 export interface BlueBubblesBridgeOptions {
   host?: string;
@@ -250,22 +258,51 @@ async function sendBlueBubblesMessage(
   return extractMessageId(await response.json().catch(() => null));
 }
 
-function firstChatGuid(message: JsonObject): string {
+function firstChatRecord(message: JsonObject): JsonObject {
   const chats = Array.isArray(message.chats) ? message.chats : [];
   for (const entry of chats) {
-    const guid = chatGuidFromRecord(asObject(entry));
-    if (guid) {
-      return guid;
+    const record = asObject(entry);
+    if (chatGuidFromRecord(record)) {
+      return record;
     }
   }
-  return "";
+  return {};
+}
+
+function firstChatGuid(message: JsonObject): string {
+  return chatGuidFromRecord(firstChatRecord(message));
 }
 
 function handleRecord(message: JsonObject): JsonObject {
   return objectOrNull(message.handle) ?? objectOrNull(message.sender) ?? {};
 }
 
-export function mapBlueBubblesWebhookPayload(payload: JsonObject): BridgeEvent | null {
+/** BlueBubbles' own Chat ORM entity (packages/server/.../entity/Chat.ts)
+ *  defines `get isGroup() { return this.style === 43; }` (45 = single/DM) —
+ *  the ChatSerializer includes the raw `style` number verbatim in the
+ *  webhook payload's chats[] entries (there is no serialized `isGroup`
+ *  boolean on the wire), so 43 is the actual, verified check, not a guess.
+ *  Falls back to participant count (>1 other participant) for a payload
+ *  that includes participants but omits style, since that's a strictly
+ *  weaker but still-correct signal for the same fact. */
+function isBlueBubblesGroupChat(chatRecord: JsonObject): boolean {
+  const style = Number(chatRecord.style);
+  if (Number.isFinite(style)) {
+    return style === 43;
+  }
+  return participantAddresses(chatRecord).length > 1;
+}
+
+export interface MapBlueBubblesWebhookOptions {
+  /** External message guids (BlueBubbles message.guid) this bridge has
+   *  itself sent successfully — compared against an inbound message's
+   *  threadOriginatorGuid (BlueBubbles' field for "this message is an
+   *  inline reply to message X") to resolve is_reply_to_sage. Same
+   *  contract as WhatsApp/Telegram/Signal's sentMessageIds. */
+  sentMessageIds?: Set<string>;
+}
+
+export function mapBlueBubblesWebhookPayload(payload: JsonObject, options: MapBlueBubblesWebhookOptions = {}): BridgeEvent | null {
   const event = objectOrNull(payload.data) ?? payload;
   const message = objectOrNull(event.message) ?? event;
   const body = text(message.text) || text(message.body) || text(message.message);
@@ -277,11 +314,25 @@ export function mapBlueBubblesWebhookPayload(payload: JsonObject): BridgeEvent |
   }
   const handle = handleRecord(message);
   const sender = text(handle.address) || text(handle.handle) || text(handle.id) || text(message.senderId) || text(message.sender);
-  const chatGuid = text(message.chatGuid) || text(message.chat_guid) || firstChatGuid(message);
+  const chatRecord = firstChatRecord(message);
+  const chatGuid = text(message.chatGuid) || text(message.chat_guid) || chatGuidFromRecord(chatRecord);
   const remoteJid = chatGuid || sender;
   if (!remoteJid) {
     return null;
   }
+  const fromMe = message.isFromMe === true || message.fromMe === true;
+  const isGroup = Boolean(chatGuid) && isBlueBubblesGroupChat(chatRecord);
+  // NOTE is_mentioned is intentionally always false: BlueBubbles does not
+  // expose a structured "you were @-mentioned" field anywhere in its
+  // webhook payload (verified against its MessageSerializer — no mentions
+  // array, only raw attributedBody, which would require parsing Apple's
+  // proprietary NSAttributedString/typedstream mention runs client-side —
+  // not attempted here). A group member can still address Sage via a
+  // native inline reply, which threadOriginatorGuid below DOES detect.
+  const threadOriginatorGuid = text(message.threadOriginatorGuid);
+  const isReplyToSage = isGroup && !fromMe && threadOriginatorGuid
+    ? Boolean(options.sentMessageIds?.has(threadOriginatorGuid))
+    : false;
   return {
     external_message_id: text(message.guid) || text(message.id) || text(payload.guid) || randomUUID(),
     remote_jid: remoteJid,
@@ -289,7 +340,10 @@ export function mapBlueBubblesWebhookPayload(payload: JsonObject): BridgeEvent |
     push_name: text(handle.displayName) || text(handle.name) || text(message.senderName) || undefined,
     text: messageText,
     received_at: text(message.dateCreated) || text(message.date) || new Date().toISOString(),
-    from_me: message.isFromMe === true || message.fromMe === true,
+    from_me: fromMe,
+    is_group: isGroup,
+    is_mentioned: false,
+    is_reply_to_sage: isReplyToSage,
   };
 }
 
@@ -305,6 +359,10 @@ export async function startBlueBubblesBridge(options: BlueBubblesBridgeOptions):
     ? Math.round(Number(options.timeoutMs))
     : 10_000;
   const eventsByChannel = new Map<string, BridgeEvent[]>();
+  // Sent-message guids, for is_reply_to_sage matching against an inbound
+  // message's threadOriginatorGuid — see MapBlueBubblesWebhookOptions and
+  // the /messages POST handler below (where this is populated).
+  const sentMessageIds = new Set<string>();
 
   const enqueue = (event: BridgeEvent): void => {
     const items = eventsByChannel.get(IMESSAGE_CHANNEL_KEY) || [];
@@ -348,6 +406,13 @@ export async function startBlueBubblesBridge(options: BlueBubblesBridgeOptions):
           return;
         }
         const messageId = await sendBlueBubblesMessage(baseUrl, password, remoteJid, message, timeoutMs);
+        // Track for is_reply_to_sage — see MapBlueBubblesWebhookOptions.
+        if (messageId) {
+          sentMessageIds.add(messageId);
+          if (sentMessageIds.size > SENT_MESSAGE_ID_CACHE_LIMIT) {
+            sentMessageIds.clear();
+          }
+        }
         sendJson(response, 200, {
           delivered: true,
           status: "sent",
@@ -370,7 +435,7 @@ export async function startBlueBubblesBridge(options: BlueBubblesBridgeOptions):
       }
       if (request.method === "POST" && url.pathname === "/webhook") {
         const body = await parseJsonBody(request);
-        const event = mapBlueBubblesWebhookPayload(body);
+        const event = mapBlueBubblesWebhookPayload(body, { sentMessageIds });
         if (event) {
           enqueue(event);
         }

@@ -201,3 +201,163 @@ test("Signal Agent Computer bridge sends through signal-cli JSON-RPC and receive
     }
   }
 });
+
+/** Shared setup for the group-gate tests below: real bridge + real
+ *  LocalBridgePersonalChannelRuntime wired together exactly like the happy
+ *  path test above, so the gate is exercised through its full, real call
+ *  path (SSE receive -> mapSignalCliReceiveNotification -> pollInboundEvents
+ *  -> publishEvent) rather than by calling an internal function directly. */
+async function withSignalGroupGateHarness(
+  run: (ctx: {
+    runtime: LocalBridgePersonalChannelRuntime;
+    signalCli: Awaited<ReturnType<typeof startFakeSignalCliDaemon>>;
+    inbound: Array<{ message?: Record<string, unknown> }>;
+  }) => Promise<void>,
+): Promise<void> {
+  const signalConfig = LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.find(
+    (item) => item.channelKey === "signal_personal",
+  );
+  assert.ok(signalConfig);
+  const signalCli = await startFakeSignalCliDaemon();
+  const bridge = await startSignalCliBridge({
+    signalCliRpcUrl: signalCli.url,
+    account: "+15551234567",
+  });
+  const previousUrl = process.env.EMPYRALIS_SIGNAL_BRIDGE_URL;
+  const previousPollMs = process.env.EMPYRALIS_SIGNAL_BRIDGE_POLL_MS;
+  process.env.EMPYRALIS_SIGNAL_BRIDGE_URL = bridge.url;
+  process.env.EMPYRALIS_SIGNAL_BRIDGE_POLL_MS = "25";
+  const runtime = new LocalBridgePersonalChannelRuntime(signalConfig!);
+  const inbound: Array<{ message?: Record<string, unknown> }> = [];
+  runtime.setPublisher({
+    publishStateUpdate: async () => undefined,
+    publishEvent: async (_type, payload) => {
+      inbound.push(payload as { message?: Record<string, unknown> });
+    },
+  });
+  try {
+    await runtime.start();
+    await eventually(() => {
+      assert.equal(signalCli.eventClientCount(), 1);
+    });
+    await run({ runtime, signalCli, inbound });
+  } finally {
+    await runtime.stop();
+    await bridge.close();
+    await signalCli.close();
+    if (previousUrl === undefined) {
+      delete process.env.EMPYRALIS_SIGNAL_BRIDGE_URL;
+    } else {
+      process.env.EMPYRALIS_SIGNAL_BRIDGE_URL = previousUrl;
+    }
+    if (previousPollMs === undefined) {
+      delete process.env.EMPYRALIS_SIGNAL_BRIDGE_POLL_MS;
+    } else {
+      process.env.EMPYRALIS_SIGNAL_BRIDGE_POLL_MS = previousPollMs;
+    }
+  }
+}
+
+test("Signal group gate: an unaddressed group message is never published", async () => {
+  await withSignalGroupGateHarness(async ({ signalCli, inbound }) => {
+    signalCli.emitReceive({
+      jsonrpc: "2.0",
+      method: "receive",
+      params: {
+        envelope: {
+          sourceNumber: "+15557654321",
+          sourceName: "Family Member",
+          timestamp: 1_714_000_100_001,
+          dataMessage: {
+            timestamp: 1_714_000_100_001,
+            message: "what time is dinner",
+            groupInfo: { groupId: "Z3JvdXAtaWQ=", type: "DELIVER" },
+          },
+        },
+      },
+    });
+    // Negative assertion: give the (fast, 25ms) poll loop several cycles to
+    // have picked this up if it were going to, then confirm it never did.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(inbound.length, 0, "an unaddressed group message must never reach publishEvent");
+  });
+});
+
+test("Signal group gate: an explicit @mention of this account is published", async () => {
+  await withSignalGroupGateHarness(async ({ signalCli, inbound }) => {
+    signalCli.emitReceive({
+      jsonrpc: "2.0",
+      method: "receive",
+      params: {
+        envelope: {
+          sourceNumber: "+15557654321",
+          sourceName: "Family Member",
+          timestamp: 1_714_000_100_002,
+          dataMessage: {
+            timestamp: 1_714_000_100_002,
+            message: "hey ￼ are you there",
+            groupInfo: { groupId: "Z3JvdXAtaWQ=", type: "DELIVER" },
+            mentions: [{ number: "+15551234567", start: 4, length: 1 }],
+          },
+        },
+      },
+    });
+    await eventually(() => {
+      assert.equal(inbound.length, 1);
+      const message = inbound[0].message as Record<string, unknown>;
+      assert.equal(message.remote_jid, "group:Z3JvdXAtaWQ=");
+      assert.equal(message.is_group, true);
+      assert.equal(message.is_mentioned, true);
+    });
+  });
+});
+
+test("Signal group gate: a reply to a message Sage sent is published even without a mention", async () => {
+  await withSignalGroupGateHarness(async ({ runtime, signalCli, inbound }) => {
+    // Send once through the real outbound path so the bridge's own
+    // sentMessageIds set captures this send's timestamp (the fake daemon's
+    // /api/v1/rpc handler always returns { timestamp: 1_714_000_000_000 }).
+    await runtime.handleChannelOutbound({
+      id: "req-signal-group-1",
+      kind: "request",
+      protocolVersion: "v1alpha2",
+      type: "channel.outbound",
+      ts: new Date().toISOString(),
+      scope: { tenant_id: "t1", workspace_id: "w1", user_id: "u1", device_id: "d1", gateway_id: "g1" },
+      payload: {
+        channel_key: "signal_personal",
+        provider: "signal_local_bridge",
+        idempotency_key: "signal-group-idem-1",
+        remote_jid: "group:Z3JvdXAtaWQ=",
+        text: "dinner's at 7",
+      },
+    });
+
+    // A group member quotes that exact message (quote.id === the timestamp
+    // signal-cli returned for our send above) without @-mentioning Sage.
+    signalCli.emitReceive({
+      jsonrpc: "2.0",
+      method: "receive",
+      params: {
+        envelope: {
+          sourceNumber: "+15557654321",
+          sourceName: "Family Member",
+          timestamp: 1_714_000_100_003,
+          dataMessage: {
+            timestamp: 1_714_000_100_003,
+            message: "sounds good",
+            groupInfo: { groupId: "Z3JvdXAtaWQ=", type: "DELIVER" },
+            quote: { id: 1_714_000_000_000, authorNumber: "+15557654321" },
+          },
+        },
+      },
+    });
+    await eventually(() => {
+      assert.equal(inbound.length, 1);
+      const message = inbound[0].message as Record<string, unknown>;
+      assert.equal(message.is_group, true);
+      assert.equal(message.is_mentioned, false);
+      assert.equal(message.is_reply_to_sage, true);
+    });
+  });
+});

@@ -30,6 +30,19 @@ export interface TelegramInboundMessage {
    *  runtime.ts's NewMessage event handler). Empty/absent for text-only
    *  messages. */
   media?: TelegramInboundMediaItem[];
+  /** Group/mention/reply metadata — mirrors WhatsApp's message-mapper
+   *  contract (see whatsapp/message-mapper.ts's mapWhatsAppInboundMessage).
+   *  isGroup/isMentioned are resolved synchronously in runtime.ts's GramJS
+   *  event handler (event.isPrivate / rawMessage.mentioned, both reliable
+   *  server-computed signals — no local entity parsing needed).
+   *  replyToExternalMessageId is the raw replyTo.replyToMsgId off the wire;
+   *  is_reply_to_sage itself is resolved AFTER mapping, in
+   *  handleInboundMessage, against this runtime's own sentMessageIds (the
+   *  mapper has no access to that set) — same two-step split WhatsApp uses
+   *  for quoted_stanza_id -> is_reply_to_sage. */
+  isGroup?: boolean;
+  isMentioned?: boolean;
+  replyToExternalMessageId?: string;
 }
 
 export type TelegramInboundEventPayload = GatewayChannelInboundPayload;
@@ -44,6 +57,8 @@ export function mapTelegramInboundMessage(rawMessage: TelegramInboundMessage): T
   if (!externalMessageId || !remoteJid || (!text && media.length === 0)) {
     return null;
   }
+  const isGroup = Boolean(rawMessage.isGroup);
+  const quotedStanzaId = isGroup ? String(rawMessage.replyToExternalMessageId || "").trim() || undefined : undefined;
   return {
     channel_key: TELEGRAM_PERSONAL_CHANNEL_KEY,
     provider: TELEGRAM_PERSONAL_PROVIDER,
@@ -55,6 +70,10 @@ export function mapTelegramInboundMessage(rawMessage: TelegramInboundMessage): T
       text,
       received_at: String(rawMessage.receivedAt || "").trim() || new Date().toISOString(),
       from_me: Boolean(rawMessage.fromMe),
+      is_group: isGroup,
+      is_mentioned: isGroup && Boolean(rawMessage.isMentioned),
+      quoted_stanza_id: quotedStanzaId,
+      is_reply_to_sage: false, // resolved in handleInboundMessage with sentMessageIds
       ...(media.length > 0
         ? {
             media: media.map((item) => ({

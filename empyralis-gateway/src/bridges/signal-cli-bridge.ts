@@ -12,7 +12,17 @@ type BridgeEvent = {
   text: string;
   received_at: string;
   from_me?: boolean;
+  is_group?: boolean;
+  is_mentioned?: boolean;
+  is_reply_to_sage?: boolean;
 };
+
+/** Caps how many of this bridge's own sent-message timestamps are kept for
+ *  is_reply_to_sage matching — mirrors the WhatsApp/Telegram gateway
+ *  runtime's sentMessageIds cap exactly (same rationale: bounded memory on
+ *  a long-lived connection, 500 is far more than any realistic reply
+ *  window needs). */
+const SENT_MESSAGE_ID_CACHE_LIMIT = 500;
 
 type JsonObject = Record<string, unknown>;
 
@@ -154,7 +164,54 @@ function signalEnvelope(notification: JsonObject): JsonObject {
   return asObject(wrappedResult.envelope || params.envelope);
 }
 
-export function mapSignalCliReceiveNotification(notification: JsonObject): BridgeEvent | null {
+/** signal-cli's own JsonGroupInfo (org.asamk.signal.json.JsonGroupInfo)
+ *  serializes groupId as base64 — this is the same convention
+ *  buildSignalCliSendParams above expects back via the "group:" prefix
+ *  (remoteJid.slice("group:".length) is handed straight to signal-cli's
+ *  groupId send param), so encoding it here is what makes an inbound group
+ *  message's reply actually route back to the group instead of into a
+ *  stray 1:1 chat with whichever member happened to send it. */
+function signalGroupRemoteJid(groupInfo: JsonObject): string | undefined {
+  const groupId = eventText(groupInfo.groupId);
+  return groupId ? `group:${groupId}` : undefined;
+}
+
+/** True if any entry of a signal-cli dataMessage.mentions[] array
+ *  (JsonMention: {name, number, uuid, start, length}) identifies this
+ *  bridge's own configured account — i.e. this bridge's linked user was
+ *  explicitly @-mentioned in the group message. */
+function signalMentionsMatchAccount(mentions: unknown, account: string): boolean {
+  if (!account || !Array.isArray(mentions)) {
+    return false;
+  }
+  return mentions.some((entry) => {
+    const mention = asObject(entry);
+    return eventText(mention.number) === account || eventText(mention.uuid) === account;
+  });
+}
+
+export interface MapSignalCliReceiveOptions {
+  /** This bridge's own signal-cli account (EMPYRALIS_SIGNAL_CLI_ACCOUNT,
+   *  typically an E.164 phone number) — compared against
+   *  dataMessage.mentions[].number to resolve is_mentioned. Mention
+   *  detection is skipped (stays false) when this isn't configured, since
+   *  there is then no reliable identity to match against — safe default,
+   *  the group gate still applies via is_group. */
+  account?: string;
+  /** External message ids (signal-cli timestamps, stringified) this bridge
+   *  has itself sent successfully — see SENT_MESSAGE_ID_CACHE_LIMIT. A
+   *  Signal "quote" identifies the original message purely by
+   *  (author, timestamp); there's no separate opaque message id, so
+   *  dataMessage.quote.id matching one of these timestamps is exactly
+   *  "someone replied to a message Sage sent" — the same is_reply_to_sage
+   *  contract WhatsApp/Telegram resolve via their own sentMessageIds sets. */
+  sentMessageIds?: Set<string>;
+}
+
+export function mapSignalCliReceiveNotification(
+  notification: JsonObject,
+  options: MapSignalCliReceiveOptions = {},
+): BridgeEvent | null {
   if (eventText(notification.method) !== "receive") {
     return null;
   }
@@ -169,13 +226,29 @@ export function mapSignalCliReceiveNotification(notification: JsonObject): Bridg
     return null;
   }
   const fromMe = !incomingText && Boolean(syncText);
+  // A group message's dataMessage/sentMessage carries groupInfo.groupId
+  // instead of (only) an individual source/destination — checked first so
+  // remoteJid below prefers the group's own address over the individual
+  // sender's, for both is_group's meaning and correct reply routing.
+  const groupInfo = asObject(fromMe ? sentMessage.groupInfo : dataMessage.groupInfo);
+  const isGroup = Boolean(eventText(groupInfo.groupId));
   const source = eventText(envelope.sourceNumber || envelope.source || envelope.sourceUuid);
   const destination = eventText(sentMessage.destinationNumber || sentMessage.destination || sentMessage.destinationUuid);
-  const remoteJid = fromMe ? destination : source;
+  const remoteJid = (isGroup ? signalGroupRemoteJid(groupInfo) : undefined) || (fromMe ? destination : source);
   if (!remoteJid) {
     return null;
   }
   const timestamp = envelope.timestamp || dataMessage.timestamp || sentMessage.timestamp;
+  // Mention/reply detection only makes sense for a genuine incoming group
+  // message — a self-sent echo (fromMe, via syncMessage) can't mention or
+  // reply to "Sage" in any meaningful sense.
+  const isMentioned = isGroup && !fromMe
+    ? signalMentionsMatchAccount(dataMessage.mentions, eventText(options.account))
+    : false;
+  const quoteId = eventText(asObject(dataMessage.quote).id);
+  const isReplyToSage = isGroup && !fromMe && quoteId
+    ? Boolean(options.sentMessageIds?.has(quoteId))
+    : false;
   return {
     external_message_id: eventText(timestamp) || randomUUID(),
     remote_jid: remoteJid,
@@ -184,6 +257,9 @@ export function mapSignalCliReceiveNotification(notification: JsonObject): Bridg
     text,
     received_at: eventTimestamp(timestamp),
     from_me: fromMe,
+    is_group: isGroup,
+    is_mentioned: isMentioned,
+    is_reply_to_sage: isReplyToSage,
   };
 }
 
@@ -214,6 +290,7 @@ async function connectSignalCliEvents(
   signalCliBaseUrl: string,
   enqueue: (event: BridgeEvent) => void,
   controller: AbortController,
+  mapOptions: MapSignalCliReceiveOptions,
 ): Promise<void> {
   const response = await fetch(`${signalCliBaseUrl}/api/v1/events`, {
     method: "GET",
@@ -239,7 +316,7 @@ async function connectSignalCliEvents(
     const complete = buffer.slice(0, lastBoundary + 2);
     buffer = buffer.slice(lastBoundary + 2);
     for (const notification of parseSseChunk(complete)) {
-      const event = mapSignalCliReceiveNotification(notification);
+      const event = mapSignalCliReceiveNotification(notification, mapOptions);
       if (event) {
         enqueue(event);
       }
@@ -254,6 +331,10 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
   const token = String(options.token || "").trim() || undefined;
   const eventsByChannel = new Map<string, BridgeEvent[]>();
   const eventController = new AbortController();
+  // Sent-message timestamps, for is_reply_to_sage matching against an
+  // inbound dataMessage.quote.id — see MapSignalCliReceiveOptions and the
+  // /messages POST handler below (where this is populated).
+  const sentMessageIds = new Set<string>();
 
   const enqueue = (event: BridgeEvent): void => {
     const items = eventsByChannel.get(SIGNAL_CHANNEL_KEY) || [];
@@ -262,7 +343,7 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
   };
 
   if (options.connectEvents !== false) {
-    void connectSignalCliEvents(signalCliBaseUrl, enqueue, eventController).catch(() => undefined);
+    void connectSignalCliEvents(signalCliBaseUrl, enqueue, eventController, { account, sentMessageIds }).catch(() => undefined);
   }
 
   const server = http.createServer(async (request, response) => {
@@ -315,12 +396,21 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
           buildSignalCliSendParams(account, remoteJid, text),
         );
         const timestamp = result.timestamp || result.timestamps;
+        const externalMessageId = eventText(timestamp) || `signal-${Date.now()}`;
+        // Track for is_reply_to_sage: a Signal quote identifies the
+        // original message by timestamp, and this send's timestamp IS that
+        // identifier for whatever we just sent — see
+        // MapSignalCliReceiveOptions.sentMessageIds.
+        sentMessageIds.add(externalMessageId);
+        if (sentMessageIds.size > SENT_MESSAGE_ID_CACHE_LIMIT) {
+          sentMessageIds.clear();
+        }
         sendJson(response, 200, {
           delivered: true,
           status: "sent",
           channel_key: SIGNAL_CHANNEL_KEY,
           provider: SIGNAL_PROVIDER,
-          external_message_id: eventText(timestamp) || `signal-${Date.now()}`,
+          external_message_id: externalMessageId,
         });
         return;
       }
