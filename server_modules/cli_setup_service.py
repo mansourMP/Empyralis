@@ -54,20 +54,20 @@ LOGIN_METHODS: Dict[str, List[Dict[str, Any]]] = {
     ],
     "claude_code": [
         {
-            "key": "console",
-            "label": "Anthropic Console (API billing)",
+            "key": "claudeai",
+            "label": "Your Claude subscription (Pro / Max / Team)",
             "description": (
-                "Uses your Anthropic Console account — per-token billing. Device-code flow, "
+                "Uses your Claude.ai plan quota. Sign in on any browser — device-code flow, "
                 "works reliably on a headless box. Recommended for a paired remote box."
             ),
             "input_kind": None,
         },
         {
-            "key": "subscription",
-            "label": "Claude subscription long-lived token",
+            "key": "console",
+            "label": "Anthropic Console (API billing)",
             "description": (
-                "Requires a Claude Pro / Max plan. Some CLI versions hang on headless boxes — "
-                "prefer the Console option unless you specifically need this."
+                "Uses your Anthropic Console account — per-token billing. Same device-code flow "
+                "as the subscription option, for teams who bill per token instead."
             ),
             "input_kind": None,
         },
@@ -83,8 +83,8 @@ LOGIN_METHODS: Dict[str, List[Dict[str, Any]]] = {
 
 _VALID_INPUT_KINDS_BY_METHOD = {
     "device_auth": None,
+    "claudeai": None,
     "console": None,
-    "subscription": None,
     "api_key": "api_key",
     "access_token": "access_token",
 }

@@ -2715,6 +2715,98 @@ same-session measurement of a "deny a successful tool" failure rate:
 default for every new agent is the one the platform's own measurement,
 recorded in the code, found performed worse on that metric.
 
+### 25.5 Claude Code subscription sign-in — the reliable mechanism, and two dead-end bugs found+fixed (2026-07-18)
+
+Codex's device-auth (`codex login --device-auth`) writes `~/.codex/auth.json`
+automatically on success — no owner action after the browser step. Claude
+Code has no equivalent single command: its NORMAL `/login`/`auth login`
+persists a credential the OS-specific way (macOS Keychain; a plain
+`~/.claude/.credentials.json` file on Linux/Windows — confirmed against
+official docs, https://code.claude.com/docs/en/authentication), while its
+CI-oriented `claude setup-token` command deliberately does **not** persist
+anything — it opens the same browser OAuth flow and **prints** a one-year
+token to the terminal for the operator to `export CLAUDE_CODE_OAUTH_TOKEN=…`
+wherever Claude Code should run non-interactively. `CLAUDE_CODE_OAUTH_TOKEN`
+sits above plain `/login` credentials in Claude Code's own auth precedence
+and below `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` — confirmed against the
+docs, not assumed.
+
+**Bug 1 — `claude_code:subscription` (`claude setup-token`) was a guaranteed
+dead end.** `cli-login-session.ts` spawned it with piped stdio (same shape as
+every other login method) and, by design (the safety-critical allowlist that
+stops a credential-shaped line ever reaching the event publisher — see that
+file's module doc comment), never forwarded the final token line anywhere.
+Since `setup-token` saves nothing itself, a *successful* run left the token
+sitting only in the Gateway's own transient `diagnosticBuffer` (assigned,
+never read anywhere — confirmed by grep) — invisible to the owner, who is
+watching the platform UI, not this process's stdout — then discarded when
+the session object was deleted. The frontend's own polling made this worse,
+not just inert: `verifyUntil((s) => s === "ready")` would time out after 90s
+with **zero error surfaced** (the `unauthenticated && verifyTimedOut`
+expansion branch only existed for `state === "missing"`), so the UI silently
+reverted to a plain "Sign in ▾" button as if the completed flow had never
+happened. Root cause confirmed by reading the code, not guessed; the
+`claude setup-token`-prints-not-saves mechanism itself was confirmed both
+against the official docs above and empirically (piped/non-TTY spawn,
+mirroring the gateway's exact `stdbuf -oL -eL` shape, killed before any
+browser step — https://code.claude.com/docs/en/authentication#generate-a-long-lived-token).
+**Fix:** removed `claude_code:subscription` as a spawnable method entirely
+(`cli-login-session.ts` `LOGIN_COMMAND`/`LOGIN_METHODS`, mirrored in
+`cli_setup_service.py` and the frontend's `CLI_AUTH_METHODS`). The owner-run
+`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` path still exists, but now
+as a clearly-separate, non-spawned, owner-driven guide in the Hardware page
+UI (`CliSetupControl`'s "Sign-in not sticking? Set a long-lived token
+manually" panel) — the Gateway never spawns the command and never sees the
+result, closing the loop honestly instead of pretending to automate it.
+
+**Bug 2 — `console` (the *previous* recommended default) had no way to
+actually finish on a real remote box either.** Any headless/paired Gateway
+hits Claude Code's own documented fallback — "the browser can't reach
+Claude Code's local callback server, which is common in WSL2, SSH sessions,
+and containers" (same docs page) — which requires pasting a code back into
+the process's stdin. The paste-back `<input>` + Submit button in
+`page.tsx`'s `CliSetupControl` was gated to
+`chosenMethod.key === "subscription"` only, so `console` — the thing every
+owner was being defaulted into — would show the code prompt as inert text
+with no way to actually submit it. Confirmed as a real, reachable path (not
+theoretical): empirically verified `claude auth login --claudeai` prints
+this exact "Paste code here if prompted" prompt reliably under piped,
+non-TTY stdio with the same `stdbuf` prefix the Gateway uses. **Fix:**
+broadened the gate to any non-`inputKind` `claude_code` method.
+
+**What's the default now:** `claude_code:claudeai`
+(`claude auth login --claudeai`) — explicitly requests Claude subscription
+auth (the `--help` text calls it out as "Use Claude subscription
+(default)"), skips the interactive account-type picker, and — unlike
+`setup-token` — the CLI persists the resulting credential itself
+(Keychain/file), so a completed run needs zero further owner action, mirroring
+Codex's `device_auth` UX. `console` (Anthropic Console / API billing) remains
+available as the per-token-billing alternative.
+
+**Open question this pass could not fully close:** whether a Gateway running
+as a macOS `gui/<uid>` LaunchAgent (`scripts/agent_computer.sh
+launchd_install`, the only macOS mode currently allowed — the system
+LaunchDaemon path is explicitly refused, `service_install_launchdaemon_system`)
+can reliably read back its own just-created Keychain item from a
+*separately-spawned, later, non-interactive* child process (i.e. a real
+agent-turn dispatch via `cli-runner.ts`, hours after sign-in) without an
+ACL/session hiccup. Empirical probing this session (`security
+find-generic-password` without `-w`, then `claude auth status` / `claude
+doctor` / `claude -p`, all from the same shell) found the *existence*-only
+check succeeds while the CLI itself reported not-authenticated — but that
+test ran inside this session's own tool sandbox, which could not be cleanly
+proven to share a real Aqua/WindowServer security session with a genuine
+`gui/<uid>` LaunchAgent, so it is suggestive, not dispositive, for the real
+launchd case. This is exactly why `CLAUDE_CODE_OAUTH_TOKEN` — deterministic,
+env-var-based, no Keychain/session dependency at all — is positioned as the
+"sign-in not sticking?" fallback rather than something the platform tries to
+silently paper over.
+
+`empyralis-gateway/src/health/service-inventory.ts`'s `probeClaudeCli` also
+picked up a `CLAUDE_CONFIG_DIR` fix in the same pass (Linux/Windows only,
+per docs — macOS always uses the Keychain regardless) so the passive probe
+never disagrees with the real CLI about where its own credential lives.
+
 ---
 
 ## Part 26: `cli_subscription` — Full Wire Trace (Message → Reply) & the 2026-07-13 Transport Rebuild
