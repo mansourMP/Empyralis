@@ -436,6 +436,34 @@ export function ensureGramLoggerShape(client: { _log?: unknown }, buildGramLogge
 // 90s comfortably covers real reply turns while capping the worst case.
 const TELEGRAM_INBOUND_TYPING_MAX_TTL_MS = 90_000;
 
+// ── Self-chat loop-guard tuning (see TelegramPersonalRuntime's
+// pendingSelfChatSends/selfChatTurnTimestamps fields and
+// isOwnSelfChatEcho/admitSelfChatTurnOrTrip for the mechanisms these tune).
+
+/** How long a "we just started sending this text into self-chat" bookkeeping
+ *  entry stays eligible to match an inbound echo. Generous relative to a
+ *  single sendMessage RPC round trip (normally well under a second) so the
+ *  race window it exists for is comfortably covered; short enough that a
+ *  genuinely new owner message which happens to repeat earlier text is only
+ *  at risk of a false match for a brief window, not indefinitely. Exported
+ *  for direct reference from tests (see telegram-self-chat.test.ts) instead
+ *  of duplicating the value as a magic number that could silently drift. */
+export const SELF_CHAT_PENDING_SEND_TTL_MS = 20_000;
+
+/** Rolling window for the self-chat circuit breaker. Exported for tests —
+ *  see SELF_CHAT_PENDING_SEND_TTL_MS's doc for why. */
+export const SELF_CHAT_BREAKER_WINDOW_MS = 60_000;
+
+/** Max self-chat turns admitted (i.e. that passed isOwnSelfChatEcho) within
+ *  SELF_CHAT_BREAKER_WINDOW_MS before the breaker refuses further ones. Well
+ *  above any plausible human-paced back-and-forth (each turn already
+ *  absorbs a burst of rapid messages via the inbound debouncer) — a real
+ *  runaway loop with no human pacing it would blow past this within
+ *  seconds, tripping fast; a legitimate conversation should never get
+ *  close. Exported for tests — see SELF_CHAT_PENDING_SEND_TTL_MS's doc for
+ *  why. */
+export const SELF_CHAT_BREAKER_MAX_TURNS = 6;
+
 export class TelegramPersonalRuntime {
   private readonly configStore: PersonalChannelConfigStore;
   private readonly sessionStore: TelegramSessionStore;
@@ -467,13 +495,53 @@ export class TelegramPersonalRuntime {
     { typing: TelegramTypingKeepalive; startedAt: number; client: TelegramAdapterClient }
   >();
   /**
-   * External message IDs this runtime has sent, used to resolve
+   * External message IDs this runtime has sent — EVERY chunk of a
+   * multi-part text reply and every media item, not just the "primary" one
+   * returned to the caller (see sendFinalOutbound). Used to resolve
    * is_reply_to_sage (someone replying to a message Sage sent counts as
    * "addressed" in a group, same as an explicit @mention) — mirrors
-   * WhatsApp runtime.ts's identically-named/purposed field exactly. Capped
-   * so a long-lived connection can't grow this unboundedly.
+   * WhatsApp runtime.ts's identically-named/purposed field exactly — AND,
+   * since GramJS's own outgoing sends now flow back through
+   * handleInboundMessage (see the NewMessage subscription comment in
+   * getAdapter()), reused as the primary self-chat loop-guard signal: an
+   * inbound self-chat event whose external_message_id is already in this
+   * set is unambiguously our own reply resurfacing, not a new owner
+   * command (see isOwnSelfChatEcho). Capped so a long-lived connection
+   * can't grow this unboundedly.
    */
   private sentMessageIds = new Set<string>();
+  /**
+   * The connected account's own identity, captured once at connect time
+   * (see connectClientInternal) — lets sendFinalOutbound recognize "this
+   * reply is going into my OWN Saved Messages" (isSelfChatJid) without
+   * waiting to have first seen an inbound self-chat event. Cleared on a
+   * full disconnect (handleDisconnect).
+   */
+  private selfIdentity: { userId?: string; username?: string } | null = null;
+  /**
+   * LOOP-GUARD state (see isOwnSelfChatEcho / admitSelfChatTurnOrTrip and
+   * handleInboundMessage's block comment). Two layers, both scoped to
+   * self-chat sends only:
+   *  1. pendingSelfChatSends — the plain (pre-markdown-render) text of a
+   *     self-chat reply chunk, recorded the instant its send begins (see
+   *     beginSelfChatEchoGuard, called from sendTelegramTextChunks via
+   *     sendFinalOutbound's hooks). Covers the race where GramJS delivers
+   *     the echo update BEFORE the sendMessage RPC resolves and its id
+   *     lands in sentMessageIds above — see mtprotoSender.js's
+   *     _handleRPCResult vs _handleUpdate: the two are independent
+   *     delivery paths, so ordering between them isn't guaranteed. Only
+   *     matches plain unformatted text byte-for-byte (Telegram strips
+   *     markdown/HTML entities out of a formatted send before it's
+   *     ever echoed back) — a miss here still self-heals a moment later
+   *     via sentMessageIds once the send resolves.
+   *  2. selfChatTurnTimestamps — a rolling count of self-chat turns
+   *     actually admitted (i.e. that got past layer 1), capped at
+   *     SELF_CHAT_BREAKER_MAX_TURNS per SELF_CHAT_BREAKER_WINDOW_MS. Pure
+   *     backstop: bounds the worst case even if 1 somehow misses a real
+   *     echo (unknown GramJS edge case), instead of trusting it blindly.
+   */
+  private readonly pendingSelfChatSends: Array<{ remoteJid: string; text: string; startedAt: number }> = [];
+  private selfChatTurnTimestamps: number[] = [];
 
   constructor(
     private readonly db: GatewayStateDb,
@@ -545,6 +613,9 @@ export class TelegramPersonalRuntime {
       }
     }
     this.client = null;
+    this.selfIdentity = null;
+    this.pendingSelfChatSends.length = 0;
+    this.selfChatTurnTimestamps = [];
     await this.sessionStore.clearSessionString();
     await this.sessionStore.clearPendingLogin();
     await this.configStore.clearTelegramConfig();
@@ -702,6 +773,12 @@ export class TelegramPersonalRuntime {
     if (mediaItems.length > 0 && typeof client.sendMedia !== "function") {
       throw new Error("Telegram adapter does not support sending media.");
     }
+    // Self-chat loop guard (see handleInboundMessage's block comment):
+    // a reply landing back in the owner's own Saved Messages is the one
+    // case that can echo back through the inbound event stream and
+    // re-trigger itself. isSelfChatJid is false for every ordinary DM/group
+    // send, so this adds no bookkeeping overhead outside self-chat.
+    const isSelfChatTarget = this.isSelfChatJid(remoteJid);
     const now = new Date().toISOString();
     const existing = await this.outboundStore.beginSend(
       idempotencyKey,
@@ -751,18 +828,38 @@ export class TelegramPersonalRuntime {
       // message rather than a caption double-send. Most dispatches will set
       // exactly one of text/media; sending both is supported, not assumed.
       const mediaResults: Array<{ kind: GatewayChannelMediaKind; external_message_id?: string }> = [];
+      // Every id this call actually dispatches — every media item AND every
+      // text chunk, not just the "primary" one mapped below. See
+      // sentMessageIds's field doc: a long reply split into several chunks
+      // previously only remembered its FIRST chunk's id, silently missing
+      // the rest for both is_reply_to_sage and (now) the self-chat echo
+      // guard.
+      const sentIds: string[] = [];
       let response: Record<string, unknown> | undefined;
       for (const item of mediaItems) {
         // Guarded above (mediaItems.length > 0 implies sendMedia exists);
         // non-null assertion documents that instead of re-checking per item.
         response = await client.sendMedia!(remoteJid, item, replyTo);
-        mediaResults.push({
-          kind: item.kind,
-          external_message_id: String(response?.externalMessageId ?? "").trim() || undefined,
-        });
+        const mediaId = String(response?.externalMessageId ?? "").trim() || undefined;
+        mediaResults.push({ kind: item.kind, external_message_id: mediaId });
+        if (mediaId) {
+          sentIds.push(mediaId);
+        }
       }
       if (text) {
-        response = await this.sendTelegramTextChunks(client, remoteJid, text, replyTo);
+        response = await this.sendTelegramTextChunks(client, remoteJid, text, replyTo, {
+          // Layer 1 of the loop guard (see beginSelfChatEchoGuard) — only
+          // armed when this send actually targets self-chat, so an
+          // ordinary DM/group reply never touches pendingSelfChatSends.
+          beforeChunkSend: isSelfChatTarget
+            ? (chunkText) => this.beginSelfChatEchoGuard(remoteJid, chunkText)
+            : undefined,
+          afterChunkSent: (chunkId) => {
+            if (chunkId) {
+              sentIds.push(chunkId);
+            }
+          },
+        });
       }
       const mapped = mapTelegramOutboundResult(
         {
@@ -778,12 +875,16 @@ export class TelegramPersonalRuntime {
         idempotencyKey,
         String(mapped.external_message_id || "").trim() || undefined,
       );
-      // Track sent message ID for reply-to detection in group gate — mirrors
-      // WhatsApp runtime.ts's sendFinalOutbound exactly.
-      const sentId = String(mapped.external_message_id || "").trim();
-      if (sentId) {
-        this.sentMessageIds.add(sentId);
-        if (this.sentMessageIds.size > 500) this.sentMessageIds.clear();
+      // Track every sent message id for reply-to detection in the group
+      // gate (is_reply_to_sage) AND the self-chat loop guard's primary,
+      // durable check (isOwnSelfChatEcho) — mirrors WhatsApp runtime.ts's
+      // sendFinalOutbound, extended to cover every chunk/media item rather
+      // than only mapped's single "primary" id.
+      for (const id of sentIds) {
+        this.sentMessageIds.add(id);
+      }
+      if (this.sentMessageIds.size > 500) {
+        this.sentMessageIds.clear();
       }
       return mapped;
     } finally {
@@ -800,17 +901,29 @@ export class TelegramPersonalRuntime {
    * resent as plain text rather than failing the whole reply. Returns the
    * first chunk's send result (the primary reply id used for the mapped
    * outbound result).
+   *
+   * `hooks` lets the caller observe each chunk without duplicating the
+   * chunking logic itself: `beforeChunkSend` fires with the chunk's plain
+   * (pre-markdown-render) text right before that chunk's send begins —
+   * sendFinalOutbound uses it to arm the self-chat loop guard (see
+   * beginSelfChatEchoGuard) — and `afterChunkSent` fires with each chunk's
+   * resulting external message id, however many chunks there were.
    */
   private async sendTelegramTextChunks(
     client: TelegramAdapterClient,
     remoteJid: string,
     text: string,
     replyTo: string | undefined,
+    hooks?: {
+      beforeChunkSend?: (chunkText: string) => void;
+      afterChunkSent?: (externalMessageId: string | undefined) => void;
+    },
   ): Promise<Record<string, unknown> | undefined> {
     const chunks = chunkMessage(text, TELEGRAM_MESSAGE_LIMIT);
     let primaryResponse: Record<string, unknown> | undefined;
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index];
+      hooks?.beforeChunkSend?.(chunk);
       const chunkReplyTo = index === 0 ? replyTo : undefined;
       const rendered = renderMarkdownToTelegramHtml(chunk);
       let response: Record<string, unknown> | undefined;
@@ -825,6 +938,7 @@ export class TelegramPersonalRuntime {
           throw error;
         }
       }
+      hooks?.afterChunkSent?.(String(response?.externalMessageId ?? "").trim() || undefined);
       if (index === 0) {
         primaryResponse = response;
       }
@@ -946,6 +1060,16 @@ export class TelegramPersonalRuntime {
       const adapter = await this.getAdapter();
       const { client, account } = await adapter.connect(resolvedConfig);
       this.client = client;
+      // Captured up front (not lazily derived from the first inbound
+      // self-chat message) so sendFinalOutbound's isSelfChatJid check works
+      // correctly even for the very first self-chat reply — see the
+      // selfIdentity field doc.
+      this.selfIdentity = account
+        ? {
+            userId: String(account.userId || "").trim() || undefined,
+            username: String(account.username || "").trim() || undefined,
+          }
+        : null;
       this.client.setMessageHandler((message) => {
         void this.handleInboundMessage(message);
       });
@@ -990,8 +1114,39 @@ export class TelegramPersonalRuntime {
 
   private async handleInboundMessage(message: TelegramInboundMessage): Promise<void> {
     const mapped = mapTelegramInboundMessage(message);
-    if (!mapped || mapped.message.from_me) {
+    if (!mapped) {
       return;
+    }
+    const isSelfChat = Boolean(mapped.message.is_self_chat);
+    // A self-chat message (Telegram's Saved Messages) is ALWAYS from_me too
+    // — only the owner can post into their own Saved Messages — but is
+    // explicitly let through here as an owner command, mirroring WhatsApp
+    // runtime.ts's handleMessagesUpsert gate
+    // (`mapped.message.from_me && !mapped.message.is_self_chat`) exactly.
+    // An ordinary outgoing message to someone else (or to a group) is still
+    // never a trigger.
+    if (mapped.message.from_me && !isSelfChat) {
+      return;
+    }
+    if (isSelfChat) {
+      // ── LOOP GUARD ──────────────────────────────────────────────────
+      // Dropping the NewMessage subscription's `incoming: true` filter (see
+      // getAdapter()) means this runtime's OWN replies into Saved Messages
+      // now generate inbound events too, exactly like the owner's real
+      // commands do. Without a guard, every reply Sage sends into self-chat
+      // would immediately re-admit itself as a new inbound "command",
+      // producing an infinite reply loop. isOwnSelfChatEcho recognizes (and
+      // drops) our own echo; admitSelfChatTurnOrTrip is the backstop circuit
+      // breaker in case that ever misses one. Neither applies to a plain
+      // inbound message from someone else, or to a group — only to
+      // self-chat, which is the only case that can ever echo the runtime's
+      // own send back to itself.
+      if (this.isOwnSelfChatEcho(mapped.message)) {
+        return;
+      }
+      if (!this.admitSelfChatTurnOrTrip()) {
+        return;
+      }
     }
     // Resolve is_reply_to_sage: the replied-to message was sent by Sage —
     // mirrors WhatsApp runtime.ts's handleMessagesUpsert exactly.
@@ -1008,6 +1163,114 @@ export class TelegramPersonalRuntime {
     // messages becomes one channel.inbound event / one agent turn / one reply.
     this.startTypingForChat(mapped.message.remote_jid);
     this.inboundDebouncer.admit(mapped);
+  }
+
+  /**
+   * True when `jid` is the connected account's OWN identity — i.e. a send
+   * to this remoteJid lands in the owner's Saved Messages, not a DM with
+   * someone else or a group. Backed by the identity captured once at
+   * connect time (see connectClientInternal), using the exact same
+   * username-preferred-else-id preference order the inbound GramJS handler
+   * uses to compute remoteJid (see getAdapter()'s NewMessage handler) so
+   * both sides agree on the same string for the same chat.
+   */
+  private isSelfChatJid(jid: string): boolean {
+    const trimmed = String(jid || "").trim();
+    if (!trimmed || !this.selfIdentity) {
+      return false;
+    }
+    return trimmed === this.selfIdentity.username || trimmed === this.selfIdentity.userId;
+  }
+
+  /**
+   * Records that a self-chat send is about to go out with this exact
+   * (pre-markdown-render) text — layer 1 of the loop guard's two send-side
+   * hooks (see the pendingSelfChatSends field doc). Called from
+   * sendFinalOutbound (via sendTelegramTextChunks's beforeChunkSend hook)
+   * only when the send targets the self-chat peer. No matching "end" call
+   * on purpose: entries are cheap, capped, and pruned by TTL the next time
+   * isOwnSelfChatEcho runs — precise removal would need to survive
+   * send failures/retries too, and isn't worth the bookkeeping for a
+   * low-volume, single-conversation guard.
+   */
+  private beginSelfChatEchoGuard(remoteJid: string, text: string): void {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) {
+      return;
+    }
+    this.pendingSelfChatSends.push({ remoteJid, text: trimmed, startedAt: Date.now() });
+    // Defensive cap, mirroring sentMessageIds's own bound below — self-chat
+    // traffic is low-volume so this should never really fill up.
+    if (this.pendingSelfChatSends.length > 20) {
+      this.pendingSelfChatSends.splice(0, this.pendingSelfChatSends.length - 20);
+    }
+  }
+
+  /**
+   * True when this inbound self-chat message is actually OUR OWN reply
+   * resurfacing through the update stream, not a new owner command — see
+   * handleInboundMessage's LOOP GUARD block comment for why this exists.
+   * Two independent checks, either one is sufficient:
+   *
+   *  1. external_message_id already in sentMessageIds — the durable,
+   *     precise signal: this EXACT message (every chunk of every reply
+   *     this runtime has sent is recorded there, see sendFinalOutbound) is
+   *     one we sent ourselves.
+   *  2. text+remoteJid matches a still-pending send recorded by
+   *     beginSelfChatEchoGuard — covers the race where the echo update
+   *     arrives before the sendMessage RPC resolves and its id is known
+   *     (see mtprotoSender.js's _handleRPCResult vs _handleUpdate: two
+   *     independent delivery paths with no ordering guarantee between
+   *     them). Stale entries (older than SELF_CHAT_PENDING_SEND_TTL_MS)
+   *     are pruned opportunistically on every call.
+   */
+  private isOwnSelfChatEcho(message: { external_message_id: string; remote_jid: string; text: string }): boolean {
+    const externalId = String(message.external_message_id || "").trim();
+    if (externalId && this.sentMessageIds.has(externalId)) {
+      return true;
+    }
+    const text = String(message.text || "").trim();
+    const remoteJid = String(message.remote_jid || "").trim();
+    const now = Date.now();
+    let matched = false;
+    for (let i = this.pendingSelfChatSends.length - 1; i >= 0; i -= 1) {
+      const entry = this.pendingSelfChatSends[i];
+      if (now - entry.startedAt > SELF_CHAT_PENDING_SEND_TTL_MS) {
+        this.pendingSelfChatSends.splice(i, 1);
+        continue;
+      }
+      if (!matched && entry.remoteJid === remoteJid && entry.text === text) {
+        matched = true;
+        this.pendingSelfChatSends.splice(i, 1);
+      }
+    }
+    return matched;
+  }
+
+  /**
+   * Rolling circuit breaker — layer 2 of the loop guard, independent of
+   * isOwnSelfChatEcho. Returns true (and records the turn) when it's safe
+   * to admit one more self-chat turn right now; false (refusing, loudly)
+   * once SELF_CHAT_BREAKER_MAX_TURNS have already been admitted within the
+   * last SELF_CHAT_BREAKER_WINDOW_MS. This is a pure backstop: it bounds
+   * the worst case to a handful of extra turns — instead of an unbounded
+   * reply loop hammering the Telegram API — even in a future scenario
+   * where isOwnSelfChatEcho somehow fails to recognize a genuine echo.
+   */
+  private admitSelfChatTurnOrTrip(): boolean {
+    const now = Date.now();
+    this.selfChatTurnTimestamps = this.selfChatTurnTimestamps.filter(
+      (ts) => now - ts < SELF_CHAT_BREAKER_WINDOW_MS,
+    );
+    if (this.selfChatTurnTimestamps.length >= SELF_CHAT_BREAKER_MAX_TURNS) {
+      this.logger?.error?.(
+        { windowMs: SELF_CHAT_BREAKER_WINDOW_MS, maxTurns: SELF_CHAT_BREAKER_MAX_TURNS },
+        "telegram self-chat loop-guard circuit breaker tripped — refusing further self-chat turns",
+      );
+      return false;
+    }
+    this.selfChatTurnTimestamps.push(now);
+    return true;
   }
 
   private async publishInbound(payload: GatewayChannelInboundPayload): Promise<void> {
@@ -1328,7 +1591,22 @@ export class TelegramPersonalRuntime {
             //  - replyTo.replyToMsgId is the id of the message being
             //    replied to, if any — handleInboundMessage compares it
             //    against sentMessageIds to resolve is_reply_to_sage.
+            //  - isSelfChat: true when this is Telegram's "Saved Messages"
+            //    (the owner messaging themselves — the exact analog of
+            //    WhatsApp's is_self_chat command channel). isPrivate alone
+            //    can't tell self-chat apart from an ordinary 1:1 DM (both
+            //    are PeerUser peers); `chat.self` is Telegram's own flag,
+            //    set server-side on exactly one User entity: the currently
+            //    authenticated account's own (see
+            //    node_modules/telegram/tl/api.d.ts's User.self and
+            //    _handleRPCResult/_handleUpdate in
+            //    node_modules/telegram/network/mtprotoSender.js — this
+            //    reads the SAME already-fetched chat entity as chatTitle
+            //    below, no extra network call). A group/channel's chat
+            //    entity has no `.self` field at all, so this is false for
+            //    every group message unconditionally.
             const isGroup = !event?.isPrivate;
+            const isSelfChat = Boolean(event?.isPrivate) && Boolean((chat as { self?: boolean } | undefined)?.self);
             const isMentioned = Boolean(rawMessage?.mentioned);
             const replyToExternalMessageId = String(rawMessage?.replyTo?.replyToMsgId ?? "").trim() || undefined;
             // The group/channel's title, when GramJS resolved one on the
@@ -1371,12 +1649,30 @@ export class TelegramPersonalRuntime {
               fromMe: Boolean(rawMessage?.out),
               media,
               isGroup,
+              isSelfChat,
               isMentioned,
               replyToExternalMessageId,
               chatTitle,
             });
           },
-          NewMessage ? new NewMessage({ incoming: true }) : undefined,
+          // No `incoming`/`outgoing` filter: GramJS's NewMessage.filter()
+          // (node_modules/telegram/events/NewMessage.js) drops any event
+          // where message.out is true BEFORE this callback ever runs when
+          // `incoming: true` is set — which is exactly what made self-chat
+          // unreachable. A message the linked account sends into its OWN
+          // Saved Messages always has out: true (Telegram has no other way
+          // to mark "who wrote this"), so `{ incoming: true }` silently
+          // dropped every self-chat message at the subscription level,
+          // before fromMe/isSelfChat above could ever distinguish it from
+          // an ordinary outgoing reply to someone else. Receiving both
+          // directions here and doing ALL the real filtering in
+          // handleInboundMessage (from_me-unless-self-chat, plus the
+          // self-chat loop guard — see its block comment) mirrors how
+          // WhatsApp's Baileys-backed runtime already works: Baileys' own
+          // messages.upsert fires for outgoing messages too, and
+          // handleMessagesUpsert does the filtering in application code,
+          // not at subscription time.
+          NewMessage ? new NewMessage({}) : undefined,
         );
         const me = await client.getMe();
         const account: TelegramLinkedAccount = {

@@ -166,9 +166,15 @@ export interface GatewayChannelInboundPayload {
     text: string;
     received_at: string;
     from_me?: boolean;
-    /** Group/mention/reply metadata WhatsApp's mapper populates for its
-     *  group-gating logic (see whatsapp/runtime.ts's handleMessagesUpsert) —
-     *  optional since other channel mappers (e.g. Telegram's) don't set them. */
+    /** True when the peer IS the account's own identity — WhatsApp's and
+     *  Telegram's "message yourself" chat (WhatsApp: your own JID;
+     *  Telegram: "Saved Messages"), both channels' analog of a private
+     *  owner command channel. Set by both whatsapp/message-mapper.ts's
+     *  mapWhatsAppInboundMessage and telegram/message-mapper.ts's
+     *  mapTelegramInboundMessage. A self-chat message is always from_me
+     *  too, but is explicitly let through the from_me gate as an owner
+     *  command rather than an ignored echo — see each runtime's
+     *  handleInboundMessage/handleMessagesUpsert. */
     is_self_chat?: boolean;
     is_group?: boolean;
     is_mentioned?: boolean;
