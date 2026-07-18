@@ -43,6 +43,10 @@ export interface TelegramInboundMessage {
   isGroup?: boolean;
   isMentioned?: boolean;
   replyToExternalMessageId?: string;
+  /** The group/channel's title, when isGroup is true and GramJS resolved
+   *  one on the same already-fetched chat entity (no extra network call).
+   *  Absent for private chats or when unresolved. */
+  chatTitle?: string;
 }
 
 export type TelegramInboundEventPayload = GatewayChannelInboundPayload;
@@ -74,6 +78,7 @@ export function mapTelegramInboundMessage(rawMessage: TelegramInboundMessage): T
       is_mentioned: isGroup && Boolean(rawMessage.isMentioned),
       quoted_stanza_id: quotedStanzaId,
       is_reply_to_sage: false, // resolved in handleInboundMessage with sentMessageIds
+      chat_title: String(rawMessage.chatTitle || "").trim() || undefined,
       ...(media.length > 0
         ? {
             media: media.map((item) => ({

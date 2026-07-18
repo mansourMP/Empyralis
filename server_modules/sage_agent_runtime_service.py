@@ -4141,6 +4141,31 @@ async def handle_sage_chat(
         "go as photos, videos as videos, audio as audio, everything else as documents.\n"
     )
 
+    # fix/unified-owner-memory: mirrors _spec_honesty_rule below (same
+    # "state plainly what actually happened" shape) but for CHANNEL actions
+    # rather than tool calls. prior_messages for a channel turn can include
+    # the owner-unified activity feed (see personal_channel_sage_bridge_
+    # service._build_unified_sage_personal_reply_async) — a standing log of
+    # this agent's own confirmed sends across every channel/chat, tagged
+    # "[sent to X · Y]". Without this rule the model has no reason to trust
+    # that tagged history over its own prior (denying actions it can't
+    # "remember" making) is the exact failure mode this whole fix targets:
+    # the owner asks from channel A what the agent did on channel B, and
+    # the agent — even with the right history now loaded — denies it out of
+    # base-rate caution. Applies regardless of channel_origin so it's just
+    # as true (and harmless) on a turn with no channel history at all.
+    _channel_action_honesty_rule = (
+        "\n\n## Channel action honesty\n"
+        "The prior messages shown above are your own confirmed history — "
+        "every assistant turn there, including a tagged '[sent to X · Y]' "
+        "line, is something you actually sent, on whatever channel or chat "
+        "is named. If the user asks what you did, sent, or said — this "
+        "chat or another one — answer plainly from that history. Never "
+        "deny, hedge, or claim you didn't do something that appears there "
+        "as your own assistant turn; it is a real record, not a "
+        "hypothetical.\n"
+    )
+
     # ── Phase U2: audience behavioral instructions ──
     _audience_instructions = ""
     if _sender_class != "owner":
@@ -4204,7 +4229,7 @@ async def handle_sage_chat(
         # "Specialist turn" branch above) — empty when the agent's MEMORY.md
         # is still the untouched default scaffold, never fabricated.
         _spec_memory_block = f"\n\n## Your memory\n{memory_context}" if memory_context else ""
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_channel_action_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
@@ -4214,7 +4239,7 @@ async def handle_sage_chat(
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
-            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{attachment_context}{mcp_tool_inventory}",
+            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}{attachment_context}{mcp_tool_inventory}",
         )
 
     # ── BYO-brain Phase 2: on-box local model turn ─────────────────────────
@@ -4769,6 +4794,7 @@ async def handle_sage_chat(
         estimate_tokens, COMPACTION_RESERVE_TOKENS,
         resolve_context_window as _resolve_ctx_window,
         compact_turns as _compact_now_proactive,
+        find_cut_point as _find_cut_point_proactive,
     )
     _proactive_ctx_window = _resolve_ctx_window(provider, requested_model or None)
     # Phase 5C: a per-install context policy can set a smaller threshold than the
@@ -4819,36 +4845,73 @@ async def handle_sage_chat(
                 model=requested_model,
             )
             if _flush_ok:
-                _thread_rec = await thread_service.get_thread(
-                    thread_id,
-                    tenant_id=effective_tenant_id,
-                    workspace_id=normalized_workspace_id,
-                    include_turns=True,
-                )
-                _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
-                await _compact_now_proactive(
-                    turns=_raw_turns,
-                    workspace_id=normalized_workspace_id,
-                    tenant_id=effective_tenant_id,
-                    thread_id=thread_id,
-                )
-                # Reload prior_messages from compacted thread so the
-                # subsequent LLM call uses the post-compaction context.
-                _thread_rec2 = await thread_service.get_thread(
-                    thread_id,
-                    tenant_id=effective_tenant_id,
-                    workspace_id=normalized_workspace_id,
-                    include_turns=True,
-                )
-                _raw_turns2 = list((_thread_rec2 or {}).get("turns") or []) if isinstance(_thread_rec2, dict) else []
-                prior_messages = [
-                    {"role": str(t.get("role") or "").strip().lower(),
-                     "content": str(t.get("content") or "").strip()}
-                    for t in _raw_turns2
-                    if isinstance(t, dict)
-                    and str(t.get("role") or "").strip().lower() in {"user", "assistant"}
-                    and str(t.get("content") or "").strip()
-                ][-50:]  # keep last 50 turns post-compaction
+                if channel_prior_messages is not None:
+                    # fix/unified-owner-memory reliability fix: a channel
+                    # turn carries its OWN durable history via
+                    # agent_conversation_memory (prior_messages was already
+                    # set to list(channel_prior_messages) above) —
+                    # thread_service/control_plane_repository is dead under
+                    # SQLite-fallback prod for these turns (they never write
+                    # there in the first place), and for a master/Sage
+                    # channel turn thread_id is frequently a shared, UNSCOPED
+                    # value (e.g. "sage-main" — see sage_turn_adapter's
+                    # thread resolution) rather than one keyed to this
+                    # specific remote_jid/conversation. Falling through to
+                    # thread_service.get_thread(thread_id, ...) here would
+                    # either silently WIPE prior_messages (an empty read from
+                    # a store this conversation never wrote to) or
+                    # CROSS-CONTAMINATE it (splice in a different
+                    # conversation's turns via that shared thread_id) —
+                    # exactly the two failure modes a compaction pass must
+                    # never introduce. Compact the ALREADY-CORRECT
+                    # channel_prior_messages directly instead, reusing
+                    # find_cut_point's own "keep the most recent
+                    # keep_recent_tokens-worth of turns" policy (the same
+                    # sizing the thread_service path targets) — no store
+                    # round-trip, no risk of touching the wrong
+                    # conversation. This is a plain truncation, not an LLM
+                    # summary of the dropped older turns (unlike the
+                    # thread_service path below) — strictly safer than a
+                    # wipe or cross-contamination, and this channel's own
+                    # history is bounded/continuously appended anyway
+                    # (agent_conversation_memory's own MAX_TURNS_RETAINED).
+                    _channel_prior_list = list(prior_messages or [])
+                    _channel_cut_idx = _find_cut_point_proactive(
+                        _channel_prior_list, context_window=_proactive_ctx_window,
+                    )
+                    prior_messages = _channel_prior_list[_channel_cut_idx:]
+                    used_context.append("channel_prior_messages_compacted")
+                else:
+                    _thread_rec = await thread_service.get_thread(
+                        thread_id,
+                        tenant_id=effective_tenant_id,
+                        workspace_id=normalized_workspace_id,
+                        include_turns=True,
+                    )
+                    _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
+                    await _compact_now_proactive(
+                        turns=_raw_turns,
+                        workspace_id=normalized_workspace_id,
+                        tenant_id=effective_tenant_id,
+                        thread_id=thread_id,
+                    )
+                    # Reload prior_messages from compacted thread so the
+                    # subsequent LLM call uses the post-compaction context.
+                    _thread_rec2 = await thread_service.get_thread(
+                        thread_id,
+                        tenant_id=effective_tenant_id,
+                        workspace_id=normalized_workspace_id,
+                        include_turns=True,
+                    )
+                    _raw_turns2 = list((_thread_rec2 or {}).get("turns") or []) if isinstance(_thread_rec2, dict) else []
+                    prior_messages = [
+                        {"role": str(t.get("role") or "").strip().lower(),
+                         "content": str(t.get("content") or "").strip()}
+                        for t in _raw_turns2
+                        if isinstance(t, dict)
+                        and str(t.get("role") or "").strip().lower() in {"user", "assistant"}
+                        and str(t.get("content") or "").strip()
+                    ][-50:]  # keep last 50 turns post-compaction
             else:
                 _log.warning(
                     "sage_agent_runtime: proactive compaction skipped — "

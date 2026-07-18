@@ -1314,7 +1314,11 @@ export class TelegramPersonalRuntime {
             //    toward treating "unknown chat type" as a group (safer
             //    default — see message-mapper.ts's TelegramInboundMessage
             //    doc: this is the same fail-closed posture WhatsApp/local
-            //    bridges use).
+            //    bridges use). This is the SINGLE source of truth for
+            //    is_group (also used by chat_title below) — a chat-entity-
+            //    derived signal (e.g. "has a resolved title") is a strictly
+            //    weaker proxy for the same fact and is not used here to
+            //    avoid the two ever disagreeing.
             //  - rawMessage.mentioned is Telegram's own "you were addressed"
             //    bit (true for an explicit @mention AND for a reply to a
             //    message you sent) — a genuine MTProto flag, not text
@@ -1327,6 +1331,15 @@ export class TelegramPersonalRuntime {
             const isGroup = !event?.isPrivate;
             const isMentioned = Boolean(rawMessage?.mentioned);
             const replyToExternalMessageId = String(rawMessage?.replyTo?.replyToMsgId ?? "").trim() || undefined;
+            // The group/channel's title, when GramJS resolved one on the
+            // same already-fetched chat entity (a private chat's entity is
+            // a User with no .title; a group/supergroup/channel's is a
+            // Chat/Channel, which has one) — no extra network call, unlike
+            // WhatsApp's groupMetadata lookup. Threaded through to the
+            // server as chat_title (see message-mapper.ts) so the
+            // owner-unified memory routing's activity-feed labeling works
+            // for Telegram groups the same way it does for WhatsApp.
+            const chatTitle = String(chat?.title ?? "").trim() || undefined;
             let media: TelegramInboundMediaItem[] | undefined;
             if (classification) {
               // Never let a download/disk-write failure sink the whole
@@ -1360,6 +1373,7 @@ export class TelegramPersonalRuntime {
               isGroup,
               isMentioned,
               replyToExternalMessageId,
+              chatTitle,
             });
           },
           NewMessage ? new NewMessage({ incoming: true }) : undefined,
