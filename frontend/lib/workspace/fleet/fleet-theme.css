@@ -429,7 +429,7 @@ a.fleet-breadcrumb:hover {
   transition: background var(--motion-base) ease-out;
 }
 .fleet-rail-sage:hover { background: var(--rail-active); }
-.fleet-rail-sage--active { background: var(--accent-soft); }
+.fleet-rail-sage--active { background: var(--rail-active); }
 .fleet-rail-sage-icon {
   display: flex;
   align-items: center;
@@ -3045,9 +3045,9 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-detail-nav-toggle.is-active {
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-color: var(--accent-ring);
+  color: var(--text-primary);
+  background: var(--rail-active);
+  border-color: var(--border-strong);
 }
 
 .fleet-detail-body {
@@ -4669,7 +4669,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   width: 4px; height: 4px; border-radius: 999px;
   background: var(--text-muted); flex-shrink: 0;
 }
-.fleet-rail-subitem--active .fleet-rail-subitem-dot { background: var(--accent); }
+.fleet-rail-subitem--active .fleet-rail-subitem-dot { background: var(--text-secondary); }
 .fleet-rail-subitem-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fleet-rail-subitem-count { font-size: var(--text-2xs); color: var(--text-muted); }
 
