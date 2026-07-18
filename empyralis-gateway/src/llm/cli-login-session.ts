@@ -1,5 +1,7 @@
 import { spawn } from "child_process";
 
+import { resolveCommandPath } from "../shell/user-install-dirs";
+
 // cli.login (BYO-brain onboarding, Build F) — the interactive login session
 // primitive. This is deliberately a DIFFERENT execution shape from
 // cli-runner.ts's runCliSubscription: that one closes stdin ("ignore") and
@@ -214,6 +216,20 @@ const CODE_PROMPT_PATTERN = /paste.{0,20}code|enter.{0,20}code|device.{0,10}code
 // after — tightening URL_PATTERN's boundary alone wouldn't have covered
 // CODE_PROMPT_PATTERN or any future pattern hitting the same bytes.
 const ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[a-zA-Z]/g;
+// Codex's device-auth code, recognized by SHAPE, not by a preceding
+// instruction sentence. Real captured output from codex 0.144.1
+// (`codex login --device-auth`) prints the ANSI-colored code on the line
+// immediately after the ANSI-colored URL, with NO "Enter this code"
+// instruction line at all in that run — so CODE_PROMPT_PATTERN never
+// matches anything and awaitingCodexCodeValue (below) never gets set,
+// silently dropping the code and hanging the sign-in UI on "waiting for a
+// code" forever (the URL alone isn't enough to complete device-auth).
+// This is a second, independent allowlist entry — narrow and shape-based
+// (short, uppercase-alnum, dash-separated groups) so it only ever matches
+// something that positively looks like a device code, never an arbitrary
+// banner line. Scoped to runtime === "codex" only, same as
+// awaitingCodexCodeValue — see extractSafeLines' doc comment for why.
+const DEVICE_CODE_SHAPE_PATTERN = /^[A-Z0-9]{3,8}(?:-[A-Z0-9]{3,8}){1,3}$/i;
 
 /** Minimal structural subset of node:child_process's ChildProcess — same
  *  spirit as cli-runner.ts's CliChildProcessLike, extended with a writable
@@ -276,19 +292,18 @@ export interface CliLoginSessionConfig {
   commandExists?: (command: string, env: NodeJS.ProcessEnv) => string | null;
 }
 
+// Was a PATH-only scan; now delegates to the shared resolver (also used by
+// health/service-inventory.ts's passive detection and llm/cli-installer.ts's
+// install verification — see its doc comment) so a binary installed to
+// ~/.local/bin etc. resolves here too. Without this, a box could correctly
+// show "Claude Code: installed" on the health dashboard while "Sign in"
+// still threw not_installed — the exact same PATH gap, just hit a second
+// time in a second lookup. Platform isn't threaded through this file's
+// public config shape (it never has been — see CliLoginSessionConfig), so
+// this always resolves against the real process.platform, matching every
+// other default in this module.
 function defaultCommandExists(command: string, env: NodeJS.ProcessEnv): string | null {
-  const fs = require("fs") as typeof import("fs");
-  const path = require("path") as typeof import("path");
-  const pathValue = env.PATH || "";
-  for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
-    const candidate = path.join(directory, command);
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {
-      // Ignore inaccessible PATH entries.
-    }
-  }
-  return null;
+  return resolveCommandPath(command, env, process.platform);
 }
 
 function binaryFor(spec: LoginCommandSpec, env: NodeJS.ProcessEnv): string {
@@ -318,7 +333,17 @@ function binaryFor(spec: LoginCommandSpec, env: NodeJS.ProcessEnv): string {
  *  prompt ("Paste code here if prompted") has no such follow-up line — the
  *  process just blocks on stdin at that point waiting for cli.login.input —
  *  so applying this to claude_code too would risk mis-capturing whatever
- *  unrelated line happens to print next. */
+ *  unrelated line happens to print next.
+ *
+ *  Codex-only shape capture: some Codex builds (confirmed live on 0.144.1)
+ *  print the device code with NO instruction sentence at all — just the
+ *  ANSI-colored URL line immediately followed by the ANSI-colored code line.
+ *  There, the follow-up capture above never engages (nothing ever sets
+ *  awaitingCodexCodeValue), so the bare code line falls through to
+ *  DEVICE_CODE_SHAPE_PATTERN as a last-resort allowlist entry: still a
+ *  positive-match check, not a passthrough, just matched on the code's shape
+ *  instead of a preceding sentence. Also gated to runtime === "codex" for
+ *  the same reason as above. */
 function extractSafeLines(
   chunk: string,
   runtime: CliLoginRuntime,
@@ -350,6 +375,10 @@ function extractSafeLines(
       if (runtime === "codex") {
         state.awaitingCodexCodeValue = true;
       }
+      continue;
+    }
+    if (runtime === "codex" && DEVICE_CODE_SHAPE_PATTERN.test(line)) {
+      out.push({ kind: "code_prompt", text: line.slice(0, 300) });
       continue;
     }
     // Anything else is deliberately dropped — never forwarded, never
