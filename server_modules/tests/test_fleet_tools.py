@@ -1207,5 +1207,99 @@ class FleetClearAgentCapabilityKeyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class FleetConfigureAgentReasoningEffortValidationTests(unittest.TestCase):
+    """model_config.reasoning_effort has TWO DIFFERENT valid vocabularies —
+    _VALID_REASONING_EFFORTS for platform_credits/byok_api (the provider-API
+    param stream_provider_backed_direct_chat applies) and a THIRD, per-
+    runtime vocabulary for cli_subscription (claude_code's real `--effort`
+    values vs codex's real `-c model_reasoning_effort=` values — verified
+    live against each CLI's own --help, see _VALID_CLI_REASONING_EFFORTS_
+    BY_RUNTIME's docstring). Rejected at save time (here) rather than
+    silently dropped at turn time, so a caller (the Fleet UI, or /thinking)
+    never believes a value is in effect that the turn-time consumer would
+    actually discard."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    def _configure(self, model_config):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+        ):
+            return _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"model_config": model_config},
+                )
+            )
+
+    def test_platform_credits_accepts_a_value_from_its_own_set(self):
+        result = self._configure({"mode": "platform_credits", "reasoning_effort": "xhigh"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_platform_credits_rejects_a_cli_only_value(self):
+        """"off" is real for codex, not for the provider-API param path."""
+        result = self._configure({"mode": "platform_credits", "reasoning_effort": "off"})
+        self.assertFalse(result["ok"])
+        self.assertIn("reasoning_effort", result["error"])
+
+    def test_byok_api_accepts_a_value_from_its_own_set(self):
+        result = self._configure({"mode": "byok_api", "provider": "anthropic", "reasoning_effort": "high"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_cli_subscription_claude_code_accepts_max(self):
+        """"max" is NOT in _VALID_REASONING_EFFORTS (platform_credits/byok_api)
+        but IS real for the Claude CLI's --effort — proves the two
+        vocabularies are genuinely distinct, not one shared set."""
+        result = self._configure({
+            "mode": "cli_subscription", "runtime": "claude_code", "reasoning_effort": "max",
+        })
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_cli_subscription_claude_code_rejects_off(self):
+        """The Claude CLI's --effort has no "off"/"minimal" value."""
+        result = self._configure({
+            "mode": "cli_subscription", "runtime": "claude_code", "reasoning_effort": "off",
+        })
+        self.assertFalse(result["ok"])
+        self.assertIn("claude_code", result["error"])
+
+    def test_cli_subscription_codex_accepts_off(self):
+        """codex's ReasoningEffort enum DOES have "off" — the runtime-gated
+        vocabularies are genuinely different, not just claude_code being a
+        subset of codex or vice versa."""
+        result = self._configure({
+            "mode": "cli_subscription", "runtime": "codex", "reasoning_effort": "off",
+        })
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_cli_subscription_defaults_runtime_to_claude_code_when_unset(self):
+        result = self._configure({"mode": "cli_subscription", "reasoning_effort": "off"})
+        self.assertFalse(result["ok"])
+        self.assertIn("claude_code", result["error"])
+
+    def test_local_mode_rejects_any_reasoning_effort(self):
+        """Ollama has no CLI reasoning-effort control today — same boundary
+        the Fleet UI's own picker already draws."""
+        result = self._configure({"mode": "local", "reasoning_effort": "low"})
+        self.assertFalse(result["ok"])
+
+    def test_empty_reasoning_effort_skips_validation_entirely(self):
+        """Omitting the field (the overwhelming common case) must never be
+        rejected — only a genuinely SET, invalid value is."""
+        result = self._configure({"mode": "platform_credits"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+
 if __name__ == "__main__":
     unittest.main()

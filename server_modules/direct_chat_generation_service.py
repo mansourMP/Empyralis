@@ -945,14 +945,30 @@ def stream_provider_backed_direct_chat(
         supports_reasoning = False
         if actual_model:
             model_lower = actual_model.lower()
+            # Reconciled with the frontend's inferReasoningLevels()
+            # (workstation-chat-pane-model.ts), which already offers a
+            # low/medium/high/xhigh reasoning picker for Claude models — this
+            # was stale and didn't recognize any of them (or current GPT-5.x/
+            # Codex models), so a user picking "high" on a Claude model here
+            # got silently DEGRADED to a system-prompt instruction instead of
+            # the native param below, contradicting what the UI promised.
+            # "claude"/"gpt-5"/"codex" are substring checks (not startswith)
+            # so this also catches provider-prefixed ids from the OpenRouter-
+            # style catalog (e.g. "anthropic/claude-opus-4.7",
+            # "openai/gpt-5.4") and openai-codex's own model ids (e.g.
+            # "gpt-5.3-codex") — same substring convention provider_profiles.
+            # py's own supports_reasoning catalog heuristic already uses.
             supports_reasoning = (
                 model_lower.startswith("o1")
                 or model_lower.startswith("o3")
                 or "deepseek-r1" in model_lower
                 or "deepseek-reasoner" in model_lower
                 or ("gemini" in model_lower and "thinking" in model_lower)
+                or "claude" in model_lower
+                or "gpt-5" in model_lower
+                or "codex" in model_lower
             )
-        
+
         if not supports_reasoning:
             # Model does not support reasoning effort natively, pass as system prompt instruction
             system_instruction = f"The user has requested a {normalized_reasoning_effort} reasoning effort. Please adjust the depth of your thinking and response accordingly."

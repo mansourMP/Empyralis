@@ -444,9 +444,28 @@ _VALID_CLI_SUBSCRIPTION_RUNTIMES = {"claude_code", "codex"}
 # Matches scripts/orion_local_worker_llm.py's resolve_requested_reasoning_effort
 # and provider_profiles.py's PROVIDER_MODEL_CATALOG reasoning_levels union —
 # "xhigh" is real (GPT-5.x/Codex-class models), not a typo for "high". Only
-# consulted for platform_credits/byok_api — see SpecialistRuntimeContext.
-# reasoning_effort's docstring for why cli_subscription/local don't use it.
+# consulted for platform_credits/byok_api (both reach stream_provider_backed_
+# direct_chat, which applies this as a native provider-API param or a
+# system-prompt instruction — see direct_chat_generation_service.py's
+# "Reasoning effort logic" block).
 _VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+
+# cli_subscription's OWN reasoning-effort vocabulary (Phase 1: reasoning-
+# effort control) — DIFFERENT from _VALID_REASONING_EFFORTS above and
+# DIFFERENT per runtime, verified live against each CLI's own --help. Never
+# flattened to one shared set:
+#   - claude_code: `claude --effort <level>` — low/medium/high/xhigh/max.
+#     No "off"/"minimal" — the flag has no such value.
+#   - codex: `codex exec -c model_reasoning_effort=<level>` — codex's own
+#     ReasoningEffort enum (off/minimal/low/medium/high/xhigh/max — see
+#     empyralis-gateway/src/llm/codex-app-server.ts's identical comment).
+# Kept in sync with fleet_tools.py's _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME
+# (same duplicate-but-documented-across-layers pattern as
+# _VALID_CLI_SUBSCRIPTION_RUNTIMES above, not a shared import).
+_VALID_CLI_REASONING_EFFORTS_BY_RUNTIME: Dict[str, set] = {
+    "claude_code": {"low", "medium", "high", "xhigh", "max"},
+    "codex": {"off", "minimal", "low", "medium", "high", "xhigh", "max"},
+}
 
 
 async def _resolve_agent_cloud_provider(
@@ -1145,6 +1164,15 @@ async def _dispatch_cli_subscription_gateway_brain(
     user_message: str,
     prior_messages: Optional[list] = None,
     trace_id: str = "",
+    # Fleet Model tab's model_config.reasoning_effort, already resolved +
+    # validated by the caller (handle_sage_chat) against
+    # _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME[runtime] — a DIFFERENT
+    # vocabulary per runtime (see that constant's docstring). Empty = no
+    # override (the CLI's own configured default). Reaches the Gateway as
+    # arguments["reasoning_effort"], which runtime.ts's llm.generate handler
+    # forwards into cli-runner.ts's buildInvocation — `--effort <level>` for
+    # claude_code, `-c model_reasoning_effort=<level>` for codex.
+    reasoning_effort: str = "",
 ) -> tuple[str, dict, str]:
     """Dispatch ONE completion to the agent's paired Gateway via the gateway
     WSS rail (llm.generate → the box's OWN Claude Code / Codex CLI, running
@@ -1164,6 +1192,7 @@ async def _dispatch_cli_subscription_gateway_brain(
     gateway_id = str(gateway_binding or "").strip()
     _runtime = str(runtime or "").strip().lower() or "claude_code"
     _model = str(model or "").strip()
+    _reasoning_effort = str(reasoning_effort or "").strip().lower()
 
     if _runtime not in _VALID_CLI_SUBSCRIPTION_RUNTIMES:
         await _ledger_provider_unavailable(
@@ -1256,18 +1285,25 @@ async def _dispatch_cli_subscription_gateway_brain(
             except Exception:
                 pass
 
+    _arguments: Dict[str, Any] = {
+        "runtime": _runtime,
+        "model": _model,
+        "system": system_prompt,
+        "messages": messages,
+        "prompt": user_message,
+        "timeout_seconds": 120,
+    }
+    if _reasoning_effort:
+        # Append-only-when-set, mirroring cli-runner.ts's own convention for
+        # `model` — an omitted key means "let the CLI use its own configured
+        # default", never a fabricated value the CLI wouldn't recognize.
+        _arguments["reasoning_effort"] = _reasoning_effort
+
     try:
         response = await gateway_execution_service.execute_tool_via_gateway(
             gateway_id=gateway_id,
             capability_id="llm.generate",
-            arguments={
-                "runtime": _runtime,
-                "model": _model,
-                "system": system_prompt,
-                "messages": messages,
-                "prompt": user_message,
-                "timeout_seconds": 120,
-            },
+            arguments=_arguments,
             run_id=run_id,
             trace_id=trace_id or run_id,
             workspace_id=workspace_id,
@@ -3932,23 +3968,43 @@ async def handle_sage_chat(
             requested_model = _spec_model
 
     # ── Reasoning effort (Fleet Model tab's model_config.reasoning_effort) ──
-    # Specialist-only today, matching how model/provider overrides above are
-    # scoped: only a specialist with its own SpecialistRuntimeContext carries
-    # a resolved reasoning_effort (see specialist_runtime_context.py). Sage's
-    # own master-install model_config is not consulted for model/provider
-    # either (see _resolve_cloud_provider's docstring — check_master_model_
-    # config is never passed True on this path), so leaving Sage's own
-    # reasoning_effort unwired here is consistent with that existing scope,
-    # not a new gap. Validated against _VALID_REASONING_EFFORTS so a stale or
-    # hand-edited value can't reach the generation service as an arbitrary
-    # string (it would otherwise get quoted straight into a system-prompt
-    # instruction — see stream_provider_backed_direct_chat's degradation
-    # branch).
-    requested_reasoning_effort = ""
+    # A specialist's own resolved value when running as one (see
+    # specialist_runtime_context.py). Sage's own (master) turn ALSO now
+    # consults its own model_config.reasoning_effort — the field /thinking
+    # persists to (command_registry.py's _handle_thinking) — instead of
+    # leaving it permanently unreachable from here, which is exactly why
+    # /thinking used to be inert (it wrote to workspace-global
+    # sage_ai_reasoning_effort metadata that nothing but /config ever read
+    # back). Model/provider overrides above stay specialist-only by design
+    # (_resolve_cloud_provider's docstring — Sage's own model_config is
+    # deliberately not consulted for those, a provider/credential switch);
+    # reasoning effort is narrower and lower-risk to widen (a soft
+    # instruction/param on the SAME provider Sage already resolved), so this
+    # is a deliberate, scoped exception, not a precedent for the others.
+    # Either way the raw value is validated against _VALID_REASONING_EFFORTS
+    # so a stale/hand-edited value (or one saved for a different mode, e.g.
+    # cli_subscription's "max") can't reach the generation service as an
+    # arbitrary string (it would otherwise get quoted straight into a
+    # system-prompt instruction — see stream_provider_backed_direct_chat's
+    # degradation branch).
+    _raw_reasoning_effort = ""
     if _spec is not None:
-        _spec_reasoning_effort = str(getattr(_spec, "reasoning_effort", "") or "").strip().lower()
-        if _spec_reasoning_effort in _VALID_REASONING_EFFORTS:
-            requested_reasoning_effort = _spec_reasoning_effort
+        _raw_reasoning_effort = str(getattr(_spec, "reasoning_effort", "") or "").strip().lower()
+    else:
+        try:
+            from server_modules import agent_registry_repository as _reg_re
+
+            _master_re = await _reg_re.get_workspace_master_agent_install(
+                tenant_id=normalized_tenant_id or "default", workspace_id=normalized_workspace_id,
+            )
+            _master_re_meta = dict(
+                (_master_re or {}).get("install_metadata") or (_master_re or {}).get("metadata") or {}
+            )
+            _master_re_mc = _master_re_meta.get("model_config") if isinstance(_master_re_meta.get("model_config"), dict) else {}
+            _raw_reasoning_effort = str(_master_re_mc.get("reasoning_effort") or "").strip().lower()
+        except Exception:
+            _raw_reasoning_effort = ""
+    requested_reasoning_effort = _raw_reasoning_effort if _raw_reasoning_effort in _VALID_REASONING_EFFORTS else ""
 
     # --- Build Sage prompt/context before any model-backed action loop ---
     # --- Load recent conversation turns from shared thread store ---
@@ -4333,6 +4389,22 @@ async def handle_sage_chat(
     if _spec is not None and str(getattr(_spec, "mode", "") or "").strip().lower() == "cli_subscription":
         _cli_runtime = str(getattr(_spec, "runtime", "") or "").strip().lower() or "claude_code"
         _cli_gateway_id = str(getattr(_spec, "gateway_binding", "") or "").strip()
+        # Reasoning effort (Phase 1): _spec.reasoning_effort is this
+        # specialist's own model_config.reasoning_effort (what the Fleet
+        # Model tab's cli_subscription picker AND /thinking both write to —
+        # see command_registry.py's _handle_thinking). Validated against
+        # THIS runtime's own vocabulary, not _VALID_REASONING_EFFORTS — the
+        # CLI flags accept a different value set (e.g. "max") than the
+        # platform_credits/byok_api provider-API param does. An invalid or
+        # stale value (e.g. "off" saved while bound to claude_code, which
+        # has no such value) is dropped, not passed through raw — same
+        # fail-safe convention as the platform_credits/byok_api path below.
+        _cli_reasoning_raw = str(getattr(_spec, "reasoning_effort", "") or "").strip().lower()
+        _cli_reasoning_effort = (
+            _cli_reasoning_raw
+            if _cli_reasoning_raw in _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME.get(_cli_runtime, set())
+            else ""
+        )
         _cli_reply, _cli_usage, _cli_model = await _dispatch_cli_subscription_gateway_brain(
             workspace_id=normalized_workspace_id,
             tenant_id=effective_tenant_id,
@@ -4344,6 +4416,7 @@ async def handle_sage_chat(
             user_message=envelope.get("user_message") or normalized_message,
             prior_messages=prior_messages,
             trace_id=trace_id,
+            reasoning_effort=_cli_reasoning_effort,
         )
         if "gateway_brain_cli_subscription" not in used_context:
             used_context.append("gateway_brain_cli_subscription")

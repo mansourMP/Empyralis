@@ -47,6 +47,7 @@ type CliRunnerImpl = (params: {
   prompt: string;
   systemPrompt?: string;
   model?: string;
+  reasoningEffort?: string;
   timeoutMs: number;
 }) => Promise<CliRunResult>;
 
@@ -245,9 +246,16 @@ export class GatewayLLMRuntime {
       // model name. An unset model means "let the CLI use its own configured
       // default", never a fabricated model id the CLI wouldn't recognize.
       const model = token(args.model);
+      // Same "unset means use the CLI's own default" convention as model —
+      // validation of which value is legal for claude_code vs codex happens
+      // upstream on the control plane (fleet_tools.py / sage_agent_runtime_
+      // service.py); this Gateway trusts what it's given and only decides
+      // whether to append a flag at all (see cli-runner.ts's buildInvocation).
+      const reasoningEffort = token(args.reasoning_effort);
       return this.generateViaCli({
         runtime: runtime as CliSubscriptionRuntime,
         model,
+        reasoningEffort,
         messages,
         timeoutMs,
         requestId: token(frame.id),
@@ -333,6 +341,12 @@ export class GatewayLLMRuntime {
   private async generateViaCli(params: {
     runtime: CliSubscriptionRuntime;
     model: string;
+    /** Empty means "let the CLI use its own configured default" — same
+     *  convention as `model`. Forwarded to whichever backend actually runs
+     *  the turn below (cold-spawn cliRunner, or either warm-path pool when
+     *  its opt-in latency flag is on) so the effort control works the same
+     *  regardless of which path is active. */
+    reasoningEffort?: string;
     messages: OllamaChatMessage[];
     timeoutMs: number;
     requestId: string;
@@ -371,6 +385,7 @@ export class GatewayLLMRuntime {
           prompt: promptText,
           systemPrompt,
           model: params.model,
+          reasoningEffort: params.reasoningEffort,
           timeoutMs: params.timeoutMs,
         }, onDelta);
       } else if (useClaudePrewarm) {
@@ -378,6 +393,7 @@ export class GatewayLLMRuntime {
           prompt: promptText,
           systemPrompt,
           model: params.model,
+          reasoningEffort: params.reasoningEffort,
           timeoutMs: params.timeoutMs,
         });
       } else {
@@ -386,6 +402,7 @@ export class GatewayLLMRuntime {
           prompt: promptText,
           systemPrompt,
           model: params.model,
+          reasoningEffort: params.reasoningEffort,
           timeoutMs: params.timeoutMs,
         });
       }

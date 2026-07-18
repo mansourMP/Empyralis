@@ -73,14 +73,19 @@ function resolveAgentModelSummary(modelConfig: Record<string, any> | undefined |
   model: string;
   isPlatformDefault: boolean;
   /** model_config.reasoning_effort, or "" when unset OR when the mode
-   *  doesn't apply it (cli_subscription/local — see REASONING_EFFORT_
-   *  SUPPORTED_MODES). Kept off the summary for those two modes so it
-   *  never implies an effect that isn't real yet. */
+   *  doesn't apply it (local — see REASONING_EFFORT_SUPPORTED_MODES).
+   *  cli_subscription now applies it for real too (Phase 1: reasoning-
+   *  effort control — the paired Gateway's llm.generate forwards it into
+   *  the CLI's own --effort / -c model_reasoning_effort= flag), so it's
+   *  included here rather than hidden. Kept off the summary only for
+   *  local, which still has no reasoning-effort control at all today. */
   reasoningEffort: string;
 } {
   const config = modelConfig || {};
   const mode = config.mode;
-  const reasoningEffort = REASONING_EFFORT_SUPPORTED_MODES.has(mode) ? String(config.reasoning_effort || "") : "";
+  const reasoningEffort = (REASONING_EFFORT_SUPPORTED_MODES.has(mode) || mode === "cli_subscription")
+    ? String(config.reasoning_effort || "")
+    : "";
   if (mode === "cli_subscription") {
     const runtime: "claude_code" | "codex" = config.runtime === "codex" ? "codex" : "claude_code";
     const provider = config.provider ? providerLabel(config.provider) : RUNTIME_LABELS[runtime];
@@ -2374,6 +2379,7 @@ import {
   COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, type ProviderMode,
   FREEFORM_MODEL_PROVIDERS, modelsForProvider, defaultModelForProvider,
   REASONING_EFFORT_OPTIONS, REASONING_EFFORT_SUPPORTED_MODES, reasoningEffortLabel,
+  CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME, type CliSubscriptionRuntime,
 } from "./fleet-provider-constants";
 import {
   GatewayBoxPicker,
@@ -2601,11 +2607,15 @@ function ModelTab({
   // time ("no computer is bound" / "cli_subscription requires a Gateway").
   const localNeedsBox = mode === "local" && !gatewayBinding.trim();
   const cliSubscriptionNeedsBox = mode === "cli_subscription" && !gatewayBinding.trim();
-  // cli_subscription/local dispatch to the paired Gateway, which has no
-  // reasoning_effort plumbing today (see REASONING_EFFORT_SUPPORTED_MODES'
-  // own comment) — the picker is hidden for those two modes instead of
-  // saving a setting that silently does nothing at turn time.
+  // platform_credits/byok_api share ONE picker+vocabulary (REASONING_
+  // EFFORT_OPTIONS). cli_subscription gets its OWN runtime-gated picker
+  // below (renderCliReasoningEffortPicker) — claude_code and codex accept
+  // genuinely different values, verified live against each CLI's own
+  // --help, so it can't reuse this flat set. local (Ollama) still has no
+  // reasoning-effort control at all today — the picker stays hidden for
+  // it instead of saving a setting that silently does nothing at turn time.
   const reasoningEffortSupported = REASONING_EFFORT_SUPPORTED_MODES.has(mode);
+  const canSaveReasoningEffort = reasoningEffortSupported || mode === "cli_subscription";
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2720,13 +2730,13 @@ function ModelTab({
       const rt = runtimeForProvider(provider);
       if (rt) patch.runtime = rt;
     }
-    // Only for the two modes that actually consume it at turn time (see
-    // REASONING_EFFORT_SUPPORTED_MODES) — this patch REPLACES model_config
-    // wholesale (fleet_tools.py's fleet_configure_agent does `meta[
-    // "model_config"] = dict(patch)`, not a merge), so switching to
-    // cli_subscription/local and saving correctly drops any previously-set
-    // reasoning_effort instead of leaving a stale, inert value behind.
-    if (reasoningEffortSupported && reasoningEffort) {
+    // Only for the modes that actually consume it at turn time (see
+    // canSaveReasoningEffort) — this patch REPLACES model_config wholesale
+    // (fleet_tools.py's fleet_configure_agent does `meta["model_config"] =
+    // dict(patch)`, not a merge), so switching to local and saving
+    // correctly drops any previously-set reasoning_effort instead of
+    // leaving a stale, inert value behind.
+    if (canSaveReasoningEffort && reasoningEffort) {
       patch.reasoning_effort = reasoningEffort;
     }
     const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
@@ -2758,6 +2768,36 @@ function ModelTab({
         </select>
         <p className="fleet-channel-expand-hint">
           Higher effort can solve harder problems but costs more and replies slower. Models that support it natively use it directly; others get it as a strong instruction instead.
+        </p>
+      </>
+    );
+  }
+
+  // cli_subscription's own picker (Phase 1: reasoning-effort control) — the
+  // paired Gateway's llm.generate now forwards this into the CLI's own
+  // --effort (claude_code) / -c model_reasoning_effort= (codex) flag, so
+  // unlike platform_credits/byok_api this can't share REASONING_EFFORT_
+  // OPTIONS: the two CLIs accept genuinely different value sets (verified
+  // live against each CLI's own --help — see CLI_REASONING_EFFORT_OPTIONS_
+  // BY_RUNTIME's own docstring). Gated by cliRuntime, which already tracks
+  // the Subscription <select> above (claude_code_cli vs openai-codex), so
+  // switching the subscription provider swaps the option list live.
+  function renderCliReasoningEffortPicker() {
+    const options = CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime];
+    return (
+      <>
+        <label className="fleet-wizard-label">Reasoning effort</label>
+        <select
+          className="fleet-wizard-input"
+          value={reasoningEffort}
+          onChange={(e) => { setReasoningEffort(e.currentTarget.value); setSaved(false); }}
+        >
+          {options.map((o) => (
+            <option key={o.value || "unset"} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <p className="fleet-channel-expand-hint">
+          Higher effort can solve harder problems but costs more and replies slower. Passed straight to {cliRuntime === "codex" ? "Codex’s" : "Claude Code’s"} own reasoning control.
         </p>
       </>
     );
@@ -2921,7 +2961,7 @@ function ModelTab({
             ))}
           </select>
           <p className="fleet-channel-expand-hint">{SUBSCRIPTION_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
-          {renderReasoningEffortUnsupportedNote()}
+          {renderCliReasoningEffortPicker()}
           <div className="fleet-detail-section-title" style={{ marginTop: 16 }}>Brain runs on</div>
           <GatewayBoxPicker
             workspaceId={workspaceId}

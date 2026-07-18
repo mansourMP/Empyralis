@@ -155,3 +155,62 @@ test("different agents (different system prompts) never share a pool key or a pr
     "Agent B's process must be spawned with Agent B's own system prompt",
   );
 });
+
+// ── Reasoning effort (Phase 1: reasoning-effort control) — this pool's own
+// header comment promises it mirrors cli-runner.ts's buildInvocation
+// exactly, so --effort must appear here too, AND reasoningEffort must be
+// part of the spawn-time argv it's keyed by (like model/systemPrompt) —
+// otherwise a spare pre-spawned for one effort level could be silently
+// claimed by a turn that asked for a different one.
+
+test("reasoningEffort appends --effort <level> to the spawned argv", async () => {
+  const { spawnImpl, created } = makeSpawnFake();
+  const pool = new ClaudeCliPrewarmPool(process.env, spawnImpl);
+
+  const p1 = pool.generate(baseParams({ reasoningEffort: "xhigh" }));
+  writeLine(created[0].stdout, resultLine("ok"));
+  await p1;
+
+  assert.deepEqual(
+    created[0].args.slice(created[0].args.indexOf("--effort")),
+    ["--effort", "xhigh"],
+    "--effort <level> must be the trailing argv pair when reasoningEffort is set",
+  );
+});
+
+test("an unset reasoningEffort never appends --effort", async () => {
+  const { spawnImpl, created } = makeSpawnFake();
+  const pool = new ClaudeCliPrewarmPool(process.env, spawnImpl);
+
+  const p1 = pool.generate(baseParams());
+  writeLine(created[0].stdout, resultLine("ok"));
+  await p1;
+
+  assert.ok(!created[0].args.includes("--effort"), "--effort must not appear when reasoningEffort is unset");
+});
+
+test("two turns for the SAME agent but DIFFERENT reasoningEffort never share a spare process", async () => {
+  const { spawnImpl, created } = makeSpawnFake();
+  const pool = new ClaudeCliPrewarmPool(process.env, spawnImpl);
+
+  const p1 = pool.generate(baseParams({ reasoningEffort: "low", prompt: "first" }));
+  assert.equal(created.length, 1);
+  writeLine(created[0].stdout, resultLine("ok-1"));
+  await p1;
+  // The background refill after turn 1 settles is keyed to "low" — a
+  // DIFFERENT effort level's turn must not be able to claim it.
+  assert.equal(created.length, 2, "background refill spawned for the (model, systemPrompt, low) key");
+
+  const p2 = pool.generate(baseParams({ reasoningEffort: "high", prompt: "second" }));
+  // A THIRD process must be spawned fresh for the "high" key — turn 2 must
+  // NOT claim entry #2 (spawned for "low").
+  assert.equal(created.length, 3, "a different reasoningEffort must spawn its own process, not reuse the other level's spare");
+  writeLine(created[2].stdout, resultLine("ok-2"));
+  await p2;
+
+  // entry #2 (index 1) is the background refill spawned for turn 1's "low"
+  // key; entry #3 (index 2) is what turn 2's "high" request actually spawned
+  // fresh — each keeps its OWN effort level, never the other's.
+  assert.equal(created[1].args[created[1].args.indexOf("--effort") + 1], "low");
+  assert.equal(created[2].args[created[2].args.indexOf("--effort") + 1], "high");
+});

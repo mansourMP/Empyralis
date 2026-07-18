@@ -710,17 +710,63 @@ async def _handle_thinking(
     valid = {"off", "minimal", "low", "medium", "high"}
     if level not in valid:
         return {"reply": f"Usage: /thinking <level>\nValid: {', '.join(sorted(valid))}"}
-    # Persist to workspace metadata so it survives restarts
+    # Persist to the ACTING AGENT's own model_config.reasoning_effort — the
+    # SAME per-agent field the Fleet Model tab's picker reads/writes (see
+    # fleet_tools.py's fleet_configure_agent), not the old workspace-global
+    # sage_ai_reasoning_effort metadata this used to write. That old field
+    # was inert: nothing but /config's own display ever read it back, so a
+    # value set here never reached an actual reply turn (see
+    # sage_agent_runtime_service.py's handle_sage_chat / _run_sage_action_
+    # loop_v3, which now consult model_config.reasoning_effort instead).
+    #
+    # Targets whichever agent is acting THIS turn: the resolved specialist
+    # when the caller threads one through (kwargs["agent_install_id"] —
+    # sage_turn_adapter.py does this for channel turns), else the
+    # workspace's own master (Sage) install — the common case for both web
+    # Sage chat and the "Direct Chat" runs-API surface, neither of which has
+    # a specialist concept to lose here.
     try:
-        from server_modules.control_plane_repository import (
-            update_workspace_admin_defaults_metadata,
-        )
+        from server_modules import fleet_tools
+        from server_modules import agent_registry_repository as agent_repo
+        from server_modules.control_plane_repository import resolve_tenant_id_for_workspace
+
         ws = str(workspace_id or "default").strip() or "default"
-        await update_workspace_admin_defaults_metadata(
-            ws,
-            {"sage_ai_reasoning_effort": level},
+        tenant_id = await resolve_tenant_id_for_workspace(ws, default="default")
+        target_agent_id = str(kwargs.get("agent_install_id") or "").strip()
+        if not target_agent_id:
+            master = await agent_repo.get_workspace_master_agent_install(
+                tenant_id=tenant_id, workspace_id=ws,
+            )
+            target_agent_id = str((master or {}).get("id") or "").strip()
+        if not target_agent_id:
+            return {"reply": f"Thinking level set to '{level}' for this session (no agent found to persist it against)."}
+
+        install = await agent_repo.get_workspace_agent_install_bundle(
+            target_agent_id, tenant_id=tenant_id, workspace_id=ws,
         )
-        return {"reply": f"Thinking level set to '{level}' (persisted across restarts)."}
+        # Merge, never wholesale-replace — fleet_configure_agent's
+        # model_config patch REPLACES the stored dict outright (see
+        # FleetAgentDetail.tsx's patchModelConfig() for the identical
+        # merge-before-patch requirement on the UI side), so losing the
+        # existing mode/provider/model/runtime/gateway_binding here would
+        # silently unbind whatever brain this agent was already running.
+        existing_meta = dict((install or {}).get("install_metadata") or (install or {}).get("metadata") or {})
+        next_model_config = dict(existing_meta.get("model_config") or {})
+        next_model_config["reasoning_effort"] = level
+        result = await fleet_tools.fleet_configure_agent(
+            actor_id=str(kwargs.get("sender_id") or "owner"),
+            workspace_id=ws,
+            tenant_id=tenant_id,
+            agent_id=target_agent_id,
+            patch={"model_config": next_model_config},
+        )
+        if not result.get("ok"):
+            # Most likely cause: this level isn't in the acting agent's own
+            # mode/runtime vocabulary (e.g. "off" on a claude_code
+            # cli_subscription agent, which has no such --effort value) —
+            # surface the real reason rather than claiming success.
+            return {"reply": f"Thinking level set to '{level}' for this session ({result.get('error') or 'could not persist'})."}
+        return {"reply": f"Thinking level set to '{level}' (persisted for this agent)."}
     except Exception:
         return {"reply": f"Thinking level set to '{level}' for this session."}
 
@@ -1002,10 +1048,33 @@ async def _handle_config(
             f"  Live channels:      {', '.join(defaults.allowed_live_channels) if defaults.allowed_live_channels else '(none)'}",
         ]
 
-        # Also show reasoning effort if set
-        reasoning = str(meta.get("sage_ai_reasoning_effort") or "").strip()
-        if reasoning:
-            lines.append(f"  Reasoning effort:   {reasoning}")
+        # Reasoning effort now lives on the acting agent's own
+        # model_config.reasoning_effort (see _handle_thinking) — the same
+        # per-agent field the Fleet Model tab's picker reads/writes — not
+        # workspace metadata. Best-effort: never let a lookup failure here
+        # break the rest of /config's output.
+        try:
+            from server_modules import fleet_tools
+            from server_modules import agent_registry_repository as agent_repo
+            from server_modules.control_plane_repository import resolve_tenant_id_for_workspace
+
+            ws_id = str(workspace_id or "default").strip() or "default"
+            tenant_id = await resolve_tenant_id_for_workspace(ws_id, default="default")
+            target_agent_id = str(kwargs.get("agent_install_id") or "").strip()
+            if not target_agent_id:
+                master = await agent_repo.get_workspace_master_agent_install(
+                    tenant_id=tenant_id, workspace_id=ws_id,
+                )
+                target_agent_id = str((master or {}).get("id") or "").strip()
+            if target_agent_id:
+                install = await agent_repo.get_workspace_agent_install_bundle(
+                    target_agent_id, tenant_id=tenant_id, workspace_id=ws_id,
+                )
+                reasoning = str(fleet_tools.resolve_model_config(install).get("reasoning_effort") or "").strip()
+                if reasoning:
+                    lines.append(f"  Reasoning effort:   {reasoning}")
+        except Exception:
+            pass
 
         return {"reply": "\n".join(lines)}
     except Exception as exc:

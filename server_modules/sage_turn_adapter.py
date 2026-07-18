@@ -191,12 +191,20 @@ async def execute_sage_turn(
         from server_modules.command_registry import process_message as _proc_msg
         from server_modules.command_registry import dispatch as _cmd_dispatch
 
+        # Phase 4B / Phase 1 (reasoning effort): the resolved specialist's
+        # own install id, so directive handlers that persist per-agent state
+        # (e.g. /thinking — see command_registry.py's _handle_thinking)
+        # target THIS agent instead of always falling back to the workspace
+        # master. Empty when this turn runs as Sage/master, unchanged.
+        _directive_agent_install_id = str(getattr(specialist_context, "agent_install_id", "") or "").strip()
+
         _proc = await _proc_msg(
             text=_msg,
             workspace_id=resolved_workspace_id,
             surface="channel" if resolved_channel_origin else "web",
             channel_origin=resolved_channel_origin,
             sender_id=resolved_sender_id,
+            agent_install_id=_directive_agent_install_id,
         )
         if _proc.is_command_only and not _proc.text.strip():
             # Pure command/directive message — skip LLM entirely
@@ -214,6 +222,7 @@ async def execute_sage_turn(
                 text=_remaining,
                 workspace_id=resolved_workspace_id,
                 surface="channel" if resolved_channel_origin else "web",
+                agent_install_id=_directive_agent_install_id,
             )
             if _cmd_result is not None:
                 return SageTurnResult(
