@@ -5011,7 +5011,12 @@ async def handle_sage_chat(
             _exc_msg = str(exc)
             # Check if this is a context overflow error
             try:
-                from server_modules.compaction_service import is_context_overflow_error, compact_turns as _compact_now
+                from server_modules.compaction_service import (
+                    is_context_overflow_error,
+                    compact_turns as _compact_now,
+                    find_cut_point as _find_cut_point_reactive,
+                    resolve_context_window as _resolve_ctx_window_reactive,
+                )
                 if is_context_overflow_error(_exc_msg) and _compaction_retries < _MAX_COMPACTION_RETRIES:
                     _compaction_retries += 1
                     import logging as _logging
@@ -5038,20 +5043,66 @@ async def handle_sage_chat(
                                 "overflow error will propagate"
                             )
                             raise  # re-raise the original overflow exception
-                        # Reload turns from DB for compaction (recent_messages is {role,content} only)
-                        _thread_rec = await thread_service.get_thread(
-                            thread_id,
-                            tenant_id=effective_tenant_id,
-                            workspace_id=normalized_workspace_id,
-                            include_turns=True,
-                        )
-                        _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
-                        await _compact_now(
-                            turns=_raw_turns,
-                            workspace_id=normalized_workspace_id,
-                            tenant_id=effective_tenant_id,
-                            thread_id=thread_id,
-                        )
+                        if channel_prior_messages is not None:
+                            # Same reliability fix as the proactive pre-flight path
+                            # above (see the long comment there for the full
+                            # rationale): a channel turn's history lives in
+                            # agent_conversation_memory, not the control-plane
+                            # thread store — thread_service.get_thread is dead
+                            # under SQLite-fallback prod for these turns, and
+                            # thread_id can be an unscoped shared value like
+                            # "sage-main". Falling through to thread_service here
+                            # would silently wipe or cross-contaminate
+                            # prior_messages. Truncate the already-correct
+                            # prior_messages directly instead — and, unlike the
+                            # bug this replaces, actually reassign prior_messages
+                            # so the retried call below uses the shrunk list
+                            # instead of the exact same oversized one.
+                            _reactive_ctx_window = _resolve_ctx_window_reactive(provider, requested_model or None)
+                            if _ctx_policy_max and _ctx_policy_max > 0:
+                                _reactive_ctx_window = min(_reactive_ctx_window, _ctx_policy_max)
+                            _channel_prior_list = list(prior_messages or [])
+                            _channel_cut_idx = _find_cut_point_reactive(
+                                _channel_prior_list, context_window=_reactive_ctx_window,
+                            )
+                            prior_messages = _channel_prior_list[_channel_cut_idx:]
+                            used_context.append("channel_prior_messages_compacted")
+                        else:
+                            # Reload turns from DB for compaction (recent_messages is {role,content} only)
+                            _thread_rec = await thread_service.get_thread(
+                                thread_id,
+                                tenant_id=effective_tenant_id,
+                                workspace_id=normalized_workspace_id,
+                                include_turns=True,
+                            )
+                            _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
+                            await _compact_now(
+                                turns=_raw_turns,
+                                workspace_id=normalized_workspace_id,
+                                tenant_id=effective_tenant_id,
+                                thread_id=thread_id,
+                            )
+                            # Reload prior_messages from the compacted thread so
+                            # the retried call below actually uses the
+                            # post-compaction context. The bug this replaces
+                            # never reloaded here, so it retried with the exact
+                            # same oversized prior_messages and reliably
+                            # overflowed again until retries were exhausted.
+                            _thread_rec2 = await thread_service.get_thread(
+                                thread_id,
+                                tenant_id=effective_tenant_id,
+                                workspace_id=normalized_workspace_id,
+                                include_turns=True,
+                            )
+                            _raw_turns2 = list((_thread_rec2 or {}).get("turns") or []) if isinstance(_thread_rec2, dict) else []
+                            prior_messages = [
+                                {"role": str(t.get("role") or "").strip().lower(),
+                                 "content": str(t.get("content") or "").strip()}
+                                for t in _raw_turns2
+                                if isinstance(t, dict)
+                                and str(t.get("role") or "").strip().lower() in {"user", "assistant"}
+                                and str(t.get("content") or "").strip()
+                            ][-50:]  # keep last 50 turns post-compaction
                     except Exception as _compact_err:
                         _log.warning("sage_agent_runtime: compaction during overflow recovery failed: %s", _compact_err)
                     continue  # retry the LLM call
