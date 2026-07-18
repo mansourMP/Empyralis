@@ -470,6 +470,11 @@ function AgentRow({
 
   const activate = () => onSelect(agent.agent_id, agent.project_id || "");
   const handleKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Enter/Space bubbles up from the nested Resume/Stop and Delete buttons
+    // below — without this guard, keyboard-activating either of them ALSO
+    // fired activate() here, hijacking their own click handlers (e.g.
+    // Delete would instead navigate to the agent detail page).
+    if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       activate();

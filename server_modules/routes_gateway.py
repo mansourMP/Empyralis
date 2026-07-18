@@ -2767,13 +2767,20 @@ async def submit_gateway_cli_login_input(
     )
     resolved_value = str(body.value or body.code or "").strip()
     if not resolved_value:
-        raise HTTPException(status_code=400, detail="Value is required.")
+        raise HTTPException(status_code=422, detail="Value is required.")
     try:
         return await cli_setup_service.submit_cli_login_input(
             gateway_id=gateway_id,
             workspace_id=resolved_workspace_id,
             run_id=run_id,
             value=resolved_value,
+            # Back-compat: submit_cli_login_input's own signature still
+            # accepts (and documents accepting) the pre-multi-method `code=`
+            # kwarg for callers that haven't moved to value=/kind= — value=
+            # always wins there when both are set, so passing the same
+            # resolved value under both names is a no-op for behavior and
+            # keeps this route compatible with that documented contract.
+            code=resolved_value,
             kind=str(body.kind or "").strip() or None,
             trace_id=str(body.trace_id or "").strip(),
             request_id=str(body.request_id or "").strip() or None,

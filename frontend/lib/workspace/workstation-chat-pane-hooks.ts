@@ -31,6 +31,19 @@ export type CanonicalRunSummary = Record<string, unknown> & {
   created_at?: string | null;
 };
 
+// Restored after commit 0820a732c ("Remove approval system") deleted this
+// type along with the agent-computer-action approval UI/hooks it backed —
+// that removal left workstation-chat-pane-model.ts's normalizeCanonicalApprovalItems /
+// summarizeApprovals / latestApprovalSummary (a distinct, still-exported
+// utility trio, unrelated to the removed UI) importing a type that no
+// longer existed. Shape restored verbatim from git history.
+export type CanonicalApprovalSummary = Record<string, unknown> & {
+  approval_id?: string | null;
+  id?: string | null;
+  status?: string | null;
+  prompt?: string | null;
+};
+
 export type LiveTraceTransport = 'external' | 'trace-stream';
 
 export type LiveTraceState = {

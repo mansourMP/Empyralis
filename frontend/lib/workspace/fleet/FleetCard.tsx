@@ -39,6 +39,11 @@ export function FleetCard({
   };
 
   const handleKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Enter/Space bubbles up from the nested Configure/chat buttons below —
+    // without this guard, keyboard-activating either of them ALSO fired
+    // onSelect here, hijacking their own activation (e.g. "Open chat"
+    // incorrectly also opening the agent detail overlay).
+    if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       onSelect(agent.id);
