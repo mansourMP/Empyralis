@@ -96,7 +96,7 @@ html[data-theme="dark"] {
      derived from it, so re-tuning the whole ramp means changing a single
      value. Deliberately not violet/indigo — see the token-source comment
      above: this hue reads as unmistakably blue at every derived step. */
-  --accent: oklch(57% 0.155 259);  /* ≈ #3a75d1 */
+  --accent: oklch(57% 0.155 305);  /* violet/purple accent */
   --accent-hover: color-mix(in oklch, var(--accent) 84%, #ffffff 16%);
   --accent-strong: color-mix(in oklch, var(--accent) 78%, #ffffff 22%);
   --accent-contrast: #ffffff;
@@ -157,7 +157,7 @@ html[data-theme="light"] {
 
   /* Accent — same calm blue, tuned to darken (not lighten) on hover so it
      stays legible against light surfaces. */
-  --accent: oklch(57% 0.155 259);  /* ≈ #3a75d1 */
+  --accent: oklch(57% 0.155 305);  /* violet/purple accent */
   --accent-hover: color-mix(in oklch, var(--accent) 86%, #000000 14%);
   --accent-strong: color-mix(in oklch, var(--accent) 80%, #000000 20%);
   --accent-contrast: #ffffff;

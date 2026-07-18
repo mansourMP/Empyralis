@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Cpu, Server, Terminal, X } from "lucide-react";
+import { Cpu, MoreHorizontal, Server, Terminal } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
+import { PlatformNotification } from "@/lib/ui/platform-notification";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
@@ -44,6 +45,12 @@ export default function HardwarePage() {
   const [showManualPairing, setShowManualPairing] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = useState<{ gatewayId: string; label: string } | null>(null);
+  // Row-level "⋯" menu: one open at a time (opening a new row's menu closes
+  // any other), and one row renaming at a time — both single shared values,
+  // same convention as pendingRemove/removingId above.
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [disconnectNotice, setDisconnectNotice] = useState<string | null>(null);
   // "Latest call wins" — mirrors useWorkspaceGateways.refresh() in
   // gateway-box-picker.tsx. loadRegistrations is called from several places
   // (mount, pairing, VPS/SSH connect, remove) that can overlap; without this,
@@ -91,6 +98,7 @@ export default function HardwarePage() {
   // ever runs from the dialog's Confirm button.
   const confirmRemove = async () => {
     const gatewayId = pendingRemove?.gatewayId;
+    const label = pendingRemove?.label;
     if (!gatewayId) return;
     setRemovingId(gatewayId);
     try {
@@ -102,6 +110,7 @@ export default function HardwarePage() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setPendingRemove(null);
+      setDisconnectNotice(`${label || "Computer"} disconnected`);
       await loadRegistrations();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove that computer");
@@ -149,6 +158,8 @@ export default function HardwarePage() {
             gatewayId={gatewayId}
             displayName={r.display_name || r.hardware_label || r.platform || gatewayId || "Computer"}
             onRenamed={(next) => handleRenamed(gatewayId, next)}
+            editing={renamingId === gatewayId}
+            onEditingChange={(next) => setRenamingId(next ? gatewayId : null)}
           />
           <span className="fleet-list-row-desc">
             {/* hardware_label ("Provider · Region"), not display_name — the
@@ -161,21 +172,20 @@ export default function HardwarePage() {
         </span>
         <span className="fleet-list-row-meta" style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
           <StatusChip tone={presentation.tone} label={presentation.label} />
-          <button
-            type="button"
-            className="fleet-list-row-remove"
+          <HardwareRowMenu
+            label={r.display_name || r.hardware_label || r.platform || "computer"}
+            isOpen={openMenuId === gatewayId}
+            onOpenChange={(open) => setOpenMenuId(open ? gatewayId : null)}
             disabled={removingId === gatewayId}
-            onClick={(e) => {
-              e.stopPropagation();
+            removing={removingId === gatewayId}
+            onRename={() => setRenamingId(gatewayId)}
+            onDisconnect={() =>
               setPendingRemove({
                 gatewayId,
                 label: r.display_name || r.hardware_label || r.platform || "this computer",
-              });
-            }}
-            aria-label={`Remove ${r.display_name || r.hardware_label || "computer"}`}
-          >
-            {removingId === gatewayId ? "…" : <X size={14} strokeWidth={1.75} />}
-          </button>
+              })
+            }
+          />
         </span>
       </div>
     );
@@ -292,6 +302,104 @@ export default function HardwarePage() {
         onConfirm={() => void confirmRemove()}
         onCancel={() => setPendingRemove(null)}
       />
+
+      {disconnectNotice ? (
+        <PlatformNotification
+          tone="success"
+          title="Computer disconnected"
+          detail={disconnectNotice}
+          onClose={() => setDisconnectNotice(null)}
+        />
+      ) : null}
     </main>
+  );
+}
+
+// Per-row "⋯" actions menu — replaces the old bare "×" remove button +
+// HardwareRenameField's own hover-pencil with one consistent trigger.
+// Hand-rolled (no existing role="menu"/Popover/Dropdown primitive found
+// under lib/ui or lib/workspace) but the outside-click + Escape handling
+// mirrors FleetToolbar.tsx's identical popover pattern exactly.
+function HardwareRowMenu({
+  label,
+  isOpen,
+  onOpenChange,
+  onRename,
+  onDisconnect,
+  disabled,
+  removing,
+}: {
+  label: string;
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+  onRename: () => void;
+  onDisconnect: () => void;
+  disabled?: boolean;
+  removing?: boolean;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      onOpenChange(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onOpenChange(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isOpen, onOpenChange]);
+
+  return (
+    <div className="fleet-list-row-menu-wrap" ref={ref}>
+      <button
+        type="button"
+        className={`fleet-list-row-menu-trigger${isOpen ? " is-open" : ""}`}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-label={`Actions for ${label}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenChange(!isOpen);
+        }}
+      >
+        {removing ? "…" : <MoreHorizontal size={14} strokeWidth={1.75} />}
+      </button>
+      {isOpen && (
+        <div className="fleet-list-row-menu" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            className="fleet-list-row-menu-item"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenChange(false);
+              onRename();
+            }}
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenChange(false);
+              onDisconnect();
+            }}
+          >
+            Disconnect
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
