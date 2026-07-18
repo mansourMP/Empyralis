@@ -4994,7 +4994,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   font-size: var(--text-sm);
   cursor: pointer;
   padding: 0;
-  text-decoration: underline;
+  text-decoration: none;
   text-underline-offset: 2px;
 }
 
@@ -5312,7 +5312,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     animation: none;
   }
 }
-.fleet-secondary-toggle:hover { color: var(--text-primary); }
+.fleet-secondary-toggle:hover { color: var(--text-primary); text-decoration: underline; }
 
 /* ── Mobile list collapse (<=768px) — Agents/Projects/project-detail tables
    (project detail reuses AgentsList directly, so one fix covers both) —
