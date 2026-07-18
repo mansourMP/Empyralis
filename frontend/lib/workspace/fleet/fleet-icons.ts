@@ -48,6 +48,7 @@ export const CONNECTOR_ICONS: Record<string, string> = {
   square: "/brand-assets/apps/square.ico",
   typeform: "/brand-assets/apps/typeform.ico",
   vercel: "/brand-assets/apps/vercel.ico",
+  higgsfield: "/brand-assets/apps/higgsfield.svg",
   s3: "/brand-assets/apps/aws-s3.svg",
   smtp: "/brand-assets/generic/email.svg",
   wechat_work: "/brand-assets/channels/wechat.svg",

@@ -2329,6 +2329,20 @@ async def test_connector_vault(credential_id: str, workspace_id: Optional[str] =
         except Exception as exc:
             _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
             raise HTTPException(status_code=400, detail=str(exc))
+    elif connector == "higgsfield":
+        # Unlike the other generic OAuth-bearer connectors above, there is no
+        # verified profile/userinfo endpoint to probe here — Higgsfield's MCP
+        # OAuth discovery document (mcp.higgsfield.ai/.well-known/oauth-
+        # authorization-server) only advertises authorization_endpoint,
+        # token_endpoint, and registration_endpoint (checked 2026-07-18).
+        # This mirrors create_connector_vault's default path for connectors
+        # without a dedicated validator: confirm a token was stored rather
+        # than fabricate an unverified network probe.
+        access_token = str(credentials.get("access_token") or "").strip()
+        if not access_token:
+            _persist_capability_verification({"ok": False, "status": 400, "message": "Higgsfield access_token is required."})
+            raise HTTPException(status_code=400, detail="Higgsfield access_token is required.")
+        test_result = {"ok": True, "status": "healthy", "message": "Higgsfield OAuth token stored."}
     elif connector == "s3":
         try:
             test_result = validate_s3_connector(credentials)

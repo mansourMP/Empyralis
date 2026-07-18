@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict
@@ -44,6 +45,14 @@ class OAuthProviderConfig:
     include_redirect_uri_in_token_body: bool = True
     token_grant_type: str | None = "authorization_code"
     token_request_format: str = "form"
+    # RFC 7591 Dynamic Client Registration endpoint. None for every provider
+    # below except Higgsfield: those all require the workspace owner to
+    # pre-register a static OAuth app in the provider's developer console and
+    # supply client_id/client_secret via env_vars. Higgsfield has no such
+    # console (confirmed 2026-07-18 — see the "higgsfield" entry below) so a
+    # client_id can only be obtained by self-registering here. See
+    # _resolve_oauth_client().
+    registration_endpoint: str | None = None
 
 
 OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
@@ -517,6 +526,49 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://api.vercel.com/login/oauth/userinfo",
     ),
+    # Higgsfield: official remote MCP server (mcp.higgsfield.ai/mcp) aggregating
+    # ~30 image/video generation models (Kling, Sora, Veo, Seedream, Seedance,
+    # FLUX, Soul, Nano Banana, and more) behind one connection. Auth: OAuth 2.1
+    # + PKCE (S256) — NOT a flat API key. Confirmed live 2026-07-18 via MCP
+    # OAuth discovery:
+    #   GET https://mcp.higgsfield.ai/.well-known/oauth-authorization-server
+    #     -> {"authorization_endpoint": ".../oauth2/authorize",
+    #         "token_endpoint": ".../oauth2/token",
+    #         "registration_endpoint": ".../oauth2/register",
+    #         "grant_types_supported": ["authorization_code","refresh_token"],
+    #         "code_challenge_methods_supported": ["S256"],
+    #         "scopes_supported": ["openid","email","offline_access"]}
+    #   GET https://mcp.higgsfield.ai/.well-known/oauth-protected-resource
+    #     -> confirms authorization_code+PKCE is the right flow for a client
+    #        that can receive a redirect (vs. the separate device_code flow
+    #        at fnf-device-auth.higgsfield.ai for redirect-less CLI clients).
+    # Unlike every provider above, Higgsfield has NO developer console to
+    # pre-register a static client_id: higgsfield.ai/mcp's own setup docs say
+    # only "sign in with your Higgsfield account" (no OAuth-app/client-ID
+    # screen), and every guessed developer-console path 404s. cloud.higgsfield.ai
+    # is a SEPARATE product (their REST "Cloud API") with its own flat API-key
+    # auth — not the MCP server, and not used here. The only way to obtain a
+    # client_id is RFC 7591 Dynamic Client Registration at
+    # registration_endpoint below — see _resolve_oauth_client(), which uses
+    # HIGGSFIELD_CLIENT_ID/SECRET if the owner set them, else self-registers
+    # once (gated by HIGGSFIELD_OAUTH_ENABLED) and caches the result.
+    "higgsfield": OAuthProviderConfig(
+        label="Higgsfield",
+        env_vars={
+            "client_id": ("HIGGSFIELD_CLIENT_ID",),
+            "client_secret": ("HIGGSFIELD_CLIENT_SECRET",),
+        },
+        scopes=("openid", "email", "offline_access"),
+        auth_url="https://mcp.higgsfield.ai/oauth2/authorize",
+        token_url="https://mcp.higgsfield.ai/oauth2/token",
+        auth_method="pkce",
+        token_parser="standard",
+        # No userinfo/introspection endpoint is advertised in the discovery
+        # document above (only authorization/token/registration endpoints) —
+        # left unset rather than guessing an unverified URL.
+        profile_probe=None,
+        registration_endpoint="https://mcp.higgsfield.ai/oauth2/register",
+    ),
 }
 
 _CONNECTION_PROVIDER_ALIASES = {
@@ -562,6 +614,7 @@ _CONNECTION_PROVIDER_ALIASES = {
     "square": "square",
     "typeform": "typeform",
     "vercel": "vercel",
+    "higgsfield": "higgsfield",
 }
 
 
@@ -703,7 +756,121 @@ def ensure_oauth_configured(provider: str) -> tuple[str, str]:
 
 def oauth_provider_configured(provider: str) -> bool:
     client_id, client_secret, _client_names, _secret_names = _provider_env(provider)
-    return bool(client_id and client_secret)
+    if client_id and client_secret:
+        return True
+    # Dynamic-client-registration providers (Higgsfield today): no static
+    # client_id is required up front — the owner opts in with a feature flag
+    # instead, and the OAuth client self-registers on first real connect (see
+    # _resolve_oauth_client). Every other provider's config.registration_endpoint
+    # is None, so this branch never changes their existing True/False answer.
+    config = OAUTH_PROVIDER_CONFIGS.get(str(provider or "").strip().lower())
+    if config is not None and config.registration_endpoint:
+        return _dynamic_registration_enabled(provider)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Client Registration (RFC 7591) fallback for MCP providers that have
+# no developer console — see the registration_endpoint field on
+# OAuthProviderConfig and the "higgsfield" entry in OAUTH_PROVIDER_CONFIGS for
+# the motivating case. This machinery is inert for the 24+ statically
+# configured providers above, since config.registration_endpoint is None for
+# every one of them; _resolve_oauth_client() falls through to the exact same
+# ensure_oauth_configured() call (and exception) they always used.
+# ---------------------------------------------------------------------------
+
+_DYNAMIC_CLIENT_CACHE: Dict[tuple[str, str], tuple[str, str]] = {}
+_DYNAMIC_CLIENT_CACHE_LOCK = threading.Lock()
+
+
+def _dynamic_registration_enabled(provider: str) -> bool:
+    normalized = str(provider or "").strip().lower()
+    return _env_flag_enabled(f"{normalized.upper()}_OAUTH_ENABLED", f"{normalized.upper()}_MCP_ENABLED")
+
+
+def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirect_uri: str) -> tuple[str, str]:
+    """Self-register an OAuth client via RFC 7591 and cache the result for
+    the life of the process, keyed by (provider, redirect_uri) — a client
+    registration is bound to the redirect_uris declared at registration time,
+    so a cached entry is only reusable for the exact redirect_uri it was
+    registered with (stable in practice: one production origin per deploy)."""
+    cache_key = (provider, redirect_uri)
+    cached = _DYNAMIC_CLIENT_CACHE.get(cache_key)
+    if cached:
+        return cached
+    with _DYNAMIC_CLIENT_CACHE_LOCK:
+        cached = _DYNAMIC_CLIENT_CACHE.get(cache_key)
+        if cached:
+            return cached
+        if not config.registration_endpoint:
+            raise HTTPException(status_code=409, detail=f"{_connector_label(provider)} has no dynamic registration endpoint configured.")
+        payload = {
+            "client_name": _env_first(f"{provider.upper()}_OAUTH_CLIENT_NAME") or "Empyralis",
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            # Explicitly request a confidential client (client_secret_post) —
+            # Higgsfield's discovery document advertises this as supported
+            # (token_endpoint_auth_methods_supported includes both
+            # client_secret_post and "none"); requesting it explicitly avoids
+            # ending up with a public/secret-less client by default.
+            "token_endpoint_auth_method": "client_secret_post",
+        }
+        try:
+            registration = _post_json(config.registration_endpoint, payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{_connector_label(provider)} dynamic client registration failed: {exc}",
+            ) from exc
+        dynamic_client_id = str(registration.get("client_id") or "").strip()
+        if not dynamic_client_id:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{_connector_label(provider)} dynamic client registration did not return a client_id.",
+            )
+        dynamic_client_secret = str(registration.get("client_secret") or "").strip()
+        result = (dynamic_client_id, dynamic_client_secret)
+        _DYNAMIC_CLIENT_CACHE[cache_key] = result
+        _log.info("Dynamically registered OAuth client for %s (redirect_uri=%s)", provider, redirect_uri)
+        return result
+
+
+def _resolve_oauth_client(provider: str, redirect_uri: str) -> tuple[str, str]:
+    """Resolve (client_id, client_secret) for a provider's OAuth application.
+
+    Static path (every provider except Higgsfield today): a client_id/secret
+    pre-registered by the workspace owner in the provider's developer
+    console, supplied via env vars — see ensure_oauth_configured().
+
+    Dynamic path (Higgsfield): when OAUTH_PROVIDER_CONFIGS[provider] declares
+    a registration_endpoint and no static env vars are set, self-register via
+    RFC 7591 once per (provider, redirect_uri) instead of failing closed.
+    """
+    try:
+        return ensure_oauth_configured(provider)
+    except HTTPException:
+        config = _provider_config(provider)
+        if config.registration_endpoint and _dynamic_registration_enabled(provider):
+            return _register_dynamic_client(provider, config, redirect_uri)
+        raise
+
+
+def _resolve_oauth_client_for_refresh(provider: str) -> tuple[str, str]:
+    """Same resolution as _resolve_oauth_client(), for background token
+    refresh where no live Request/redirect_uri is available. Reuses whichever
+    dynamically-registered client is already cached for this provider (it was
+    registered during the original start_oauth call that produced the
+    credential now being refreshed)."""
+    try:
+        return ensure_oauth_configured(provider)
+    except HTTPException:
+        config = OAUTH_PROVIDER_CONFIGS.get(str(provider or "").strip().lower())
+        if config is not None and config.registration_endpoint:
+            for (cached_provider, _redirect_uri), credentials in _DYNAMIC_CLIENT_CACHE.items():
+                if cached_provider == provider:
+                    return credentials
+        raise
 
 
 def provider_from_connection_id(connection_id: str) -> str:
@@ -779,8 +946,14 @@ def start_oauth(
     extra_state: dict | None = None,
 ) -> Dict[str, Any]:
     config = _provider_config(provider)
-    client_id, _client_secret = ensure_oauth_configured(provider)
     redirect_uri = callback_url(request, provider)
+    # redirect_uri must be known before client resolution: dynamic-client-
+    # registration providers (Higgsfield) bind their client_id to the exact
+    # redirect_uris declared at registration time. Reordered from the plain
+    # ensure_oauth_configured(provider) call this replaces — callback_url()
+    # only needs `request` and `provider`, so this reorder is a no-op for
+    # every statically-configured provider.
+    client_id, _client_secret = _resolve_oauth_client(provider, redirect_uri)
     state_payload: Dict[str, Any] = {
         "provider": provider,
         "workspace_id": workspace_id,
@@ -918,7 +1091,12 @@ def _credentials_from_standard_token_response(provider: str, payload: Dict[str, 
 
 def _exchange_standard_oauth(provider: str, code: str, redirect_uri: str, *, code_verifier: str = "") -> Dict[str, Any]:
     config = _provider_config(provider)
-    client_id, client_secret = ensure_oauth_configured(provider)
+    # _resolve_oauth_client (not ensure_oauth_configured) so dynamic-client-
+    # registration providers (Higgsfield) exchange with the same client_id
+    # that was used for the authorize step in start_oauth — see that
+    # function's docstring. Identical to ensure_oauth_configured for every
+    # other provider (config.registration_endpoint is None for all of them).
+    client_id, client_secret = _resolve_oauth_client(provider, redirect_uri)
     body: Dict[str, Any] = {
         "code": code,
     }
@@ -1362,6 +1540,16 @@ APP_MCP_SERVER_MAP: Dict[str, List[Dict[str, Optional[str]]]] = {
     "gitlab": [
         {"server_id": "gitlab", "label": "GitLab (MCP)", "endpoint": "https://gitlab.com/api/v4/mcp"},
     ],
+    # Higgsfield: official remote MCP server aggregating ~30 image/video
+    # generation models (Kling, Sora, Veo, Seedream, Seedance, FLUX, Soul,
+    # Nano Banana, Cinema Studio, and more) behind one connection. Auth:
+    # OAuth 2.1 + PKCE + Dynamic Client Registration (see the "higgsfield"
+    # entry in OAUTH_PROVIDER_CONFIGS above for discovery evidence).
+    # Streamable HTTP. Source: higgsfield.ai/mcp; confirmed live 2026-07-18
+    # via GET https://mcp.higgsfield.ai/.well-known/oauth-protected-resource.
+    "higgsfield": [
+        {"server_id": "higgsfield", "label": "Higgsfield (MCP)", "endpoint": "https://mcp.higgsfield.ai/mcp"},
+    ],
 }
 
 
@@ -1591,7 +1779,11 @@ def refresh_oauth_token_if_needed(credential_id: str) -> Dict[str, Any]:
     # Step 4: Call the provider's token refresh endpoint
     client_id, client_secret = "", ""
     try:
-        client_id, client_secret = ensure_oauth_configured(provider)
+        # _resolve_oauth_client_for_refresh (not ensure_oauth_configured) so a
+        # credential obtained through Higgsfield's dynamic-client-registration
+        # path can still be refreshed — see that function's docstring.
+        # Identical to ensure_oauth_configured for every other provider.
+        client_id, client_secret = _resolve_oauth_client_for_refresh(provider)
     except Exception:
         _log.warning("refresh_oauth_token_if_needed: provider %s OAuth not configured", provider)
         return credential

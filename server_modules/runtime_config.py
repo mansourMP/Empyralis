@@ -910,6 +910,10 @@ CONNECTOR_CATALOG = {
         "label": "Vercel",
         "auth": ["access_token"],
     },
+    "higgsfield": {
+        "label": "Higgsfield",
+        "auth": ["access_token"],
+    },
     "s3": {
         "label": "Amazon S3",
         "auth": ["aws_access_key_id", "aws_secret_access_key", "region"],
