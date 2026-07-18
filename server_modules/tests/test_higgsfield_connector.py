@@ -54,12 +54,30 @@ def test_higgsfield_oauth_config_matches_discovered_auth_shape() -> None:
     assert config.env_vars["client_secret"] == ("HIGGSFIELD_CLIENT_SECRET",)
 
 
-def test_only_higgsfield_declares_a_registration_endpoint() -> None:
+_DCR_CAPABLE_PROVIDERS = {
+    "higgsfield",
+    "stripe",
+    "linear",
+    "notion",
+    "asana",
+    "canva",
+    "airtable",
+    "clickup",
+}
+
+
+def test_only_dcr_capable_providers_declare_a_registration_endpoint() -> None:
     """The dynamic-client-registration extension must be inert for every
-    provider that has a normal developer-console client_id/secret pair."""
+    provider that has a normal developer-console client_id/secret pair.
+    Higgsfield, Stripe, Linear, Notion, Asana, Canva, Airtable, and ClickUp
+    are the only ones with a live, confirmed RFC 7591 registration_endpoint
+    (see connection_oauth_service.OAUTH_PROVIDER_CONFIGS for the discovery
+    evidence on each) -- every other provider, including Zoom (confirmed to
+    have no registration_endpoint in its own discovery document), must stay
+    None."""
     for provider, config in service.OAUTH_PROVIDER_CONFIGS.items():
-        if provider == "higgsfield":
-            assert config.registration_endpoint is not None
+        if provider in _DCR_CAPABLE_PROVIDERS:
+            assert config.registration_endpoint is not None, f"{provider}: expected a registration_endpoint"
         else:
             assert config.registration_endpoint is None, (
                 f"{provider}: registration_endpoint should stay None for "
@@ -117,14 +135,19 @@ def test_higgsfield_configured_with_dynamic_registration_flag_alone(monkeypatch)
 def test_other_providers_are_unaffected_by_the_dynamic_gate(monkeypatch) -> None:
     """Regression guard for the oauth_provider_configured() edit: a provider
     with no registration_endpoint must still return False on missing env
-    vars, flag or no flag."""
-    monkeypatch.delenv("NOTION_OAUTH_CLIENT_ID", raising=False)
-    monkeypatch.delenv("NOTION_CLIENT_ID", raising=False)
-    monkeypatch.delenv("NOTION_OAUTH_CLIENT_SECRET", raising=False)
-    monkeypatch.delenv("NOTION_CLIENT_SECRET", raising=False)
-    monkeypatch.setenv("NOTION_OAUTH_ENABLED", "true")  # must have no effect
+    vars, flag or no flag. Dropbox (not one of the 8 DCR-capable providers)
+    stands in for "every provider that's still static-only" -- Notion can no
+    longer be used here since it's DCR-capable now (see
+    test_notion_*_connector.py's own configured-by-default tests)."""
+    monkeypatch.delenv("DROPBOX_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("DROPBOX_CLIENT_ID", raising=False)
+    monkeypatch.delenv("DROPBOX_APP_KEY", raising=False)
+    monkeypatch.delenv("DROPBOX_OAUTH_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("DROPBOX_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("DROPBOX_APP_SECRET", raising=False)
+    monkeypatch.setenv("DROPBOX_OAUTH_ENABLED", "true")  # must have no effect
 
-    assert service.oauth_provider_configured("notion") is False
+    assert service.oauth_provider_configured("dropbox") is False
 
 
 # ---------------------------------------------------------------------------

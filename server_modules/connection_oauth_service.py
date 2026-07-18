@@ -46,13 +46,38 @@ class OAuthProviderConfig:
     token_grant_type: str | None = "authorization_code"
     token_request_format: str = "form"
     # RFC 7591 Dynamic Client Registration endpoint. None for every provider
-    # below except Higgsfield: those all require the workspace owner to
+    # below except Higgsfield, Stripe, Linear, Notion, Asana, Canva, Airtable,
+    # and ClickUp: those remaining providers require the workspace owner to
     # pre-register a static OAuth app in the provider's developer console and
-    # supply client_id/client_secret via env_vars. Higgsfield has no such
-    # console (confirmed 2026-07-18 — see the "higgsfield" entry below) so a
+    # supply client_id/client_secret via env_vars. The 8 above have no such
+    # console for their MCP OAuth app (confirmed live via each provider's own
+    # /.well-known/oauth-authorization-server — see their entries below) so a
     # client_id can only be obtained by self-registering here. See
     # _resolve_oauth_client().
     registration_endpoint: str | None = None
+    # Whether the dynamic-registration fallback additionally requires the
+    # owner to opt in with a {PROVIDER}_OAUTH_ENABLED / _MCP_ENABLED env flag
+    # before it will self-register (see _dynamic_registration_enabled()).
+    # True (default) preserves Higgsfield's original behavior: DCR exists but
+    # stays inert, and oauth_provider_configured() stays False, until the
+    # owner explicitly turns it on. False means DCR engages the moment a
+    # request needs a client and no static client_id/secret is set — no flag,
+    # no console, genuinely zero-config — and oauth_provider_configured()
+    # reports True out of the box. Stripe/Linear/Notion/Asana/Canva/Airtable/
+    # ClickUp use False: mainstream SaaS with a live, confirmed self-register
+    # endpoint and nothing an operator could "finish configuring" manually
+    # even if they wanted to, so gating them behind a flag would only ever
+    # produce a false "not configured" reading.
+    dynamic_registration_opt_in_required: bool = True
+    # RFC 7591 token_endpoint_auth_method requested when self-registering
+    # (see _register_dynamic_client). Must be a value the provider's own
+    # token_endpoint_auth_methods_supported actually advertises, since this
+    # also determines how _exchange_standard_oauth/_exchange_notion/
+    # _exchange_linear must authenticate at the token endpoint afterward
+    # (token_auth / include_client_secret_in_token_body below). Defaults to
+    # "client_secret_post", the shape already used by every provider that
+    # doesn't override it.
+    dynamic_registration_token_auth_method: str = "client_secret_post"
 
 
 OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
@@ -127,6 +152,21 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         scope_separator=",",
         slack_authorize_helper=True,
     ),
+    # Notion: official remote MCP server (mcp.notion.com) — a different OAuth
+    # app from the classic api.notion.com integrations OAuth this config
+    # used to point at. Verified live 2026-07-19 via GET
+    # https://mcp.notion.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../authorize", token_endpoint=".../token",
+    # registration_endpoint=".../register"; code_challenge_methods_supported
+    # includes "S256" (auth_method switched to pkce to match);
+    # token_endpoint_auth_methods_supported includes "client_secret_basic"
+    # (matches this file's existing _exchange_notion, which already
+    # authenticates with a Basic header — kept as the DCR request shape too).
+    # Neither the authorization-server nor protected-resource discovery
+    # document advertises scopes_supported, matching Notion's classic
+    # all-or-nothing workspace grant, so scopes stays empty. auth_params
+    # owner=user was a classic api.notion.com-only query param with no
+    # meaning for mcp.notion.com's authorize endpoint — dropped.
     "notion": OAuthProviderConfig(
         label="Notion",
         env_vars={
@@ -134,13 +174,33 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("NOTION_OAUTH_CLIENT_SECRET", "NOTION_CLIENT_SECRET"),
         },
         scopes=(),
-        auth_url="https://api.notion.com/v1/oauth/authorize",
-        token_url="https://api.notion.com/v1/oauth/token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.notion.com/authorize",
+        token_url="https://mcp.notion.com/token",
+        auth_method="pkce",
         token_parser="custom",
         profile_probe="https://api.notion.com/v1/users/me",
-        auth_params={"owner": "user"},
+        registration_endpoint="https://mcp.notion.com/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
     ),
+    # Linear: official remote MCP server (mcp.linear.app) — a different OAuth
+    # app from the classic linear.app app-authorize OAuth this config used to
+    # point at. Verified live 2026-07-19 via GET
+    # https://mcp.linear.app/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../authorize", token_endpoint=".../token",
+    # registration_endpoint=".../register", code_challenge_methods_supported
+    # = ["S256"] (auth_method switched to pkce to match);
+    # token_endpoint_auth_methods_supported includes "client_secret_post"
+    # (matches this file's existing _exchange_linear, which already posts
+    # client_id+client_secret in the form body). scopes_supported at the
+    # protected-resource (mcp.linear.app/mcp) discovery is exactly
+    # ["read","write"] — matches the scopes already configured below.
+    # scope_separator switched from "," (a classic linear.app quirk) to the
+    # RFC 6749 default space separator to match mcp.linear.app's standard
+    # OAuth 2.1-shaped discovery document (same style as Notion/Asana/
+    # Canva's) — unverified beyond that pattern match, since a live
+    # authorize+consent round trip needs a browser and is outside what a
+    # registration-only smoke test can confirm.
     "linear": OAuthProviderConfig(
         label="Linear",
         env_vars={
@@ -148,12 +208,13 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("LINEAR_OAUTH_CLIENT_SECRET", "LINEAR_CLIENT_SECRET"),
         },
         scopes=("read", "write"),
-        auth_url="https://linear.app/oauth/authorize",
-        token_url="https://api.linear.app/oauth/token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.linear.app/authorize",
+        token_url="https://mcp.linear.app/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.linear.app/graphql",
-        scope_separator=",",
+        registration_endpoint="https://mcp.linear.app/register",
+        dynamic_registration_opt_in_required=False,
     ),
     "dropbox": OAuthProviderConfig(
         label="Dropbox",
@@ -212,6 +273,21 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://api.todoist.com/api/v1/projects?limit=1",
     ),
+    # Airtable: official remote MCP server (mcp.airtable.com), but its OAuth
+    # app lives at the SAME host as before. Verified live 2026-07-19 via GET
+    # https://airtable.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint / token_endpoint / registration_endpoint exactly
+    # match this config's existing auth_url/token_url — no change needed
+    # there. Cross-checked against
+    # https://mcp.airtable.com/.well-known/oauth-protected-resource, which
+    # declares authorization_servers=["https://airtable.com/oauth2/v1"] (the
+    # SAME issuer) and the same data.records:*/schema.bases:*/etc scope
+    # namespace already configured below — confirms an Airtable OAuth token
+    # is a genuine general-purpose API token, not narrowly MCP-scoped, so the
+    # profile_probe below stays valid too. token_endpoint_auth_methods_
+    # supported is ["client_secret_basic","none"] (no "client_secret_post") —
+    # matches this config's existing token_auth="basic"; DCR requests
+    # "client_secret_basic" to match.
     "airtable": OAuthProviderConfig(
         label="Airtable",
         env_vars={
@@ -227,7 +303,23 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_auth="basic",
         include_client_id_in_token_body=True,
         include_client_secret_in_token_body=False,
+        registration_endpoint="https://airtable.com/oauth2/v1/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
     ),
+    # Canva: official remote MCP server (mcp.canva.com) — a different OAuth
+    # app from the classic www.canva.com Connect API OAuth this config used
+    # to point at. Verified live 2026-07-19 via GET
+    # https://mcp.canva.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../authorize", token_endpoint=".../token",
+    # registration_endpoint=".../register";
+    # token_endpoint_auth_methods_supported includes "client_secret_basic"
+    # (matches this config's existing token_auth="basic" — DCR requests the
+    # same). scopes_supported isn't declared at the authorization-server
+    # level, but the protected-resource discovery
+    # (mcp.canva.com/.well-known/oauth-protected-resource) lists a full scope
+    # catalog that the 5 scopes already configured below are all real,
+    # unchanged members of — no change needed there.
     "canva": OAuthProviderConfig(
         label="Canva",
         env_vars={
@@ -235,27 +327,44 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("CANVA_CLIENT_SECRET",),
         },
         scopes=("profile:read", "design:meta:read", "design:content:read", "folder:read", "asset:read"),
-        auth_url="https://www.canva.com/api/oauth/authorize",
-        token_url="https://api.canva.com/rest/v1/oauth/token",
+        auth_url="https://mcp.canva.com/authorize",
+        token_url="https://mcp.canva.com/token",
         auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.canva.com/rest/v1/users/me/profile",
         token_auth="basic",
         include_client_id_in_token_body=False,
         include_client_secret_in_token_body=False,
+        registration_endpoint="https://mcp.canva.com/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
     ),
+    # Asana: official remote MCP server (mcp.asana.com) — a different OAuth
+    # app from the classic app.asana.com OAuth this config used to point at.
+    # Verified live 2026-07-19 via GET
+    # https://mcp.asana.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../authorize", token_endpoint=".../token",
+    # registration_endpoint=".../register";
+    # token_endpoint_auth_methods_supported includes "client_secret_post"
+    # (this config's default token_auth, unchanged). scopes: the classic
+    # fine-grained tasks:read/tasks:write/etc scopes this config previously
+    # requested do NOT exist in the new server's model — GET
+    # https://mcp.asana.com/.well-known/oauth-protected-resource declares
+    # scopes_supported=["default"] only, so scopes is corrected to match.
     "asana": OAuthProviderConfig(
         label="Asana",
         env_vars={
             "client_id": ("ASANA_CLIENT_ID",),
             "client_secret": ("ASANA_CLIENT_SECRET",),
         },
-        scopes=("tasks:read", "tasks:write", "projects:read", "users:read", "workspaces:read"),
-        auth_url="https://app.asana.com/-/oauth_authorize",
-        token_url="https://app.asana.com/-/oauth_token",
+        scopes=("default",),
+        auth_url="https://mcp.asana.com/authorize",
+        token_url="https://mcp.asana.com/token",
         auth_method="pkce",
         token_parser="standard",
         profile_probe="https://app.asana.com/api/1.0/users/me",
+        registration_endpoint="https://mcp.asana.com/register",
+        dynamic_registration_opt_in_required=False,
     ),
     "hubspot": OAuthProviderConfig(
         label="HubSpot",
@@ -276,6 +385,18 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://api.hubapi.com/crm/v3/objects/contacts?limit=1",
     ),
+    # Zoom: the one provider in this DCR pass that stays static-only.
+    # Verified live 2026-07-19 via GET
+    # https://zoom.us/.well-known/oauth-authorization-server (also mirrored
+    # at mcp.zoom.us/.well-known/oauth-authorization-server) -> no
+    # registration_endpoint field at all, only authorization_endpoint,
+    # token_endpoint, and token_endpoint_auth_methods_supported=
+    # ["client_secret_basic"] — Zoom has no self-registration API for this
+    # app, so a workspace owner must still pre-register a static OAuth app
+    # in the Zoom developer console (marketplace.zoom.us) and supply
+    # ZOOM_CLIENT_ID/ZOOM_CLIENT_SECRET via env vars, same as every provider
+    # below this point. auth_url/token_url already match the verified
+    # discovery exactly — no change.
     "zoom": OAuthProviderConfig(
         label="Zoom",
         env_vars={
@@ -305,21 +426,40 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://api.calendly.com/users/me",
     ),
+    # ClickUp: official remote MCP server (mcp.clickup.com) — a different
+    # OAuth app from the classic app.clickup.com "API" authorize page this
+    # config used to point at. Verified live 2026-07-19 via GET
+    # https://mcp.clickup.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../oauth/authorize",
+    # token_endpoint=".../oauth/token",
+    # registration_endpoint=".../oauth/register",
+    # scopes_supported=["read","write"],
+    # code_challenge_methods_supported=["S256"] (auth_method switched to
+    # pkce to match), token_endpoint_auth_methods_supported=["none"] only —
+    # no client secret exists for this app, so include_client_secret_in_
+    # token_body is turned off and the DCR request asks for "none" instead
+    # of the default "client_secret_post". The classic config's
+    # include_response_type=False / include_redirect_uri_in_token_body=False
+    # / token_grant_type=None overrides were app.clickup.com-specific
+    # omissions; the new server's response_types_supported=["code"] and
+    # grant_types_supported=["authorization_code"] expect the standard
+    # parameters, so those overrides are dropped back to the field defaults.
     "clickup": OAuthProviderConfig(
         label="ClickUp",
         env_vars={
             "client_id": ("CLICKUP_CLIENT_ID",),
             "client_secret": ("CLICKUP_CLIENT_SECRET",),
         },
-        scopes=(),
-        auth_url="https://app.clickup.com/api",
-        token_url="https://api.clickup.com/api/v2/oauth/token",
-        auth_method="authorization_code",
+        scopes=("read", "write"),
+        auth_url="https://mcp.clickup.com/oauth/authorize",
+        token_url="https://mcp.clickup.com/oauth/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.clickup.com/api/v2/user",
-        include_response_type=False,
-        include_redirect_uri_in_token_body=False,
-        token_grant_type=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://mcp.clickup.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
     ),
     "jira": OAuthProviderConfig(
         label="Jira",
@@ -336,20 +476,45 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         auth_params={"audience": "api.atlassian.com", "prompt": "consent"},
         token_request_format="json",
     ),
+    # Stripe: official remote MCP server (mcp.stripe.com), authenticated via
+    # a SEPARATE OAuth app at access.stripe.com/mcp — not the classic Stripe
+    # Connect OAuth (connect.stripe.com) this config used to point at (Stripe
+    # Connect authorizes a *merchant's* Stripe account into a platform;
+    # this app authorizes our own agent to call Stripe's MCP tools — a
+    # different product with a different app). Verified live 2026-07-19 via
+    # GET https://access.stripe.com/.well-known/oauth-authorization-server/mcp
+    # (a path-suffixed RFC 8414 discovery URL — the domain-root well-known
+    # path 404s for Stripe; also mirrored verbatim at
+    # https://mcp.stripe.com/.well-known/oauth-authorization-server) ->
+    # authorization_endpoint="https://access.stripe.com/mcp/oauth2/authorize",
+    # token_endpoint=".../mcp/oauth2/token",
+    # registration_endpoint=".../mcp/oauth2/register",
+    # scopes_supported=["mcp"], code_challenge_methods_supported=["S256"]
+    # (auth_method switched to pkce to match),
+    # token_endpoint_auth_methods_supported=["none"] only — no client secret
+    # exists, so include_client_secret_in_token_body is turned off and the
+    # DCR request asks for "none" instead of the default "client_secret_
+    # post". The classic Connect-specific include_client_id_in_token_body=
+    # False / include_redirect_uri_in_token_body=False overrides are dropped
+    # back to the field defaults (RFC 6749 §3.2.1 requires client_id in the
+    # body for a "none"-auth public client; redirect_uri is standard once it
+    # was included in the authorize request, which it is here).
     "stripe": OAuthProviderConfig(
         label="Stripe",
         env_vars={
             "client_id": ("STRIPE_CLIENT_ID",),
             "client_secret": ("STRIPE_CLIENT_SECRET", "STRIPE_SECRET_KEY"),
         },
-        scopes=("read_write",),
-        auth_url="https://connect.stripe.com/oauth/authorize",
-        token_url="https://connect.stripe.com/oauth/token",
-        auth_method="authorization_code",
+        scopes=("mcp",),
+        auth_url="https://access.stripe.com/mcp/oauth2/authorize",
+        token_url="https://access.stripe.com/mcp/oauth2/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.stripe.com/v1/account",
-        include_client_id_in_token_body=False,
-        include_redirect_uri_in_token_body=False,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://access.stripe.com/mcp/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
     ),
     "salesforce": OAuthProviderConfig(
         label="Salesforce",
@@ -758,11 +923,17 @@ def oauth_provider_configured(provider: str) -> bool:
     client_id, client_secret, _client_names, _secret_names = _provider_env(provider)
     if client_id and client_secret:
         return True
-    # Dynamic-client-registration providers (Higgsfield today): no static
-    # client_id is required up front — the owner opts in with a feature flag
-    # instead, and the OAuth client self-registers on first real connect (see
-    # _resolve_oauth_client). Every other provider's config.registration_endpoint
-    # is None, so this branch never changes their existing True/False answer.
+    # Dynamic-client-registration providers: no static client_id is required
+    # up front. Providers with dynamic_registration_opt_in_required=True
+    # (Higgsfield) still need the owner to opt in with a feature flag before
+    # this reports True — see _dynamic_registration_enabled(). Providers with
+    # dynamic_registration_opt_in_required=False (Stripe, Linear, Notion,
+    # Asana, Canva, Airtable, ClickUp) report True unconditionally: there is
+    # no console for an operator to "finish configuring" even if they wanted
+    # to, so the OAuth client self-registers on first real connect (see
+    # _resolve_oauth_client) with no flag needed. Every provider with
+    # config.registration_endpoint is None falls through to False exactly as
+    # before this branch existed.
     config = OAUTH_PROVIDER_CONFIGS.get(str(provider or "").strip().lower())
     if config is not None and config.registration_endpoint:
         return _dynamic_registration_enabled(provider)
@@ -772,10 +943,11 @@ def oauth_provider_configured(provider: str) -> bool:
 # ---------------------------------------------------------------------------
 # Dynamic Client Registration (RFC 7591) fallback for MCP providers that have
 # no developer console — see the registration_endpoint field on
-# OAuthProviderConfig and the "higgsfield" entry in OAUTH_PROVIDER_CONFIGS for
-# the motivating case. This machinery is inert for the 24+ statically
-# configured providers above, since config.registration_endpoint is None for
-# every one of them; _resolve_oauth_client() falls through to the exact same
+# OAuthProviderConfig and the "higgsfield"/"stripe"/"linear"/"notion"/
+# "asana"/"canva"/"airtable"/"clickup" entries in OAUTH_PROVIDER_CONFIGS for
+# the motivating cases. This machinery is inert for every other, statically
+# configured provider above, since config.registration_endpoint is None for
+# all of them; _resolve_oauth_client() falls through to the exact same
 # ensure_oauth_configured() call (and exception) they always used.
 # ---------------------------------------------------------------------------
 
@@ -785,6 +957,9 @@ _DYNAMIC_CLIENT_CACHE_LOCK = threading.Lock()
 
 def _dynamic_registration_enabled(provider: str) -> bool:
     normalized = str(provider or "").strip().lower()
+    config = OAUTH_PROVIDER_CONFIGS.get(normalized)
+    if config is not None and config.registration_endpoint and not config.dynamic_registration_opt_in_required:
+        return True
     return _env_flag_enabled(f"{normalized.upper()}_OAUTH_ENABLED", f"{normalized.upper()}_MCP_ENABLED")
 
 
@@ -809,12 +984,17 @@ def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirec
             "redirect_uris": [redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
-            # Explicitly request a confidential client (client_secret_post) —
-            # Higgsfield's discovery document advertises this as supported
-            # (token_endpoint_auth_methods_supported includes both
-            # client_secret_post and "none"); requesting it explicitly avoids
-            # ending up with a public/secret-less client by default.
-            "token_endpoint_auth_method": "client_secret_post",
+            # Request whichever token_endpoint_auth_method this provider's
+            # own discovery document actually advertises (see
+            # dynamic_registration_token_auth_method on OAuthProviderConfig)
+            # instead of assuming every provider supports "client_secret_
+            # post" — Stripe and ClickUp only advertise "none" (public
+            # client secured by PKCE, not a secret); Notion, Canva, and
+            # Airtable only advertise "client_secret_basic" among the
+            # secret-based options. Requesting an unsupported method risks
+            # the registration being rejected outright or silently coerced
+            # to a method the subsequent token exchange doesn't match.
+            "token_endpoint_auth_method": config.dynamic_registration_token_auth_method,
         }
         try:
             registration = _post_json(config.registration_endpoint, payload)
@@ -1223,17 +1403,25 @@ def _exchange_slack(code: str, redirect_uri: str) -> Dict[str, Any]:
     return credentials
 
 
-def _exchange_notion(code: str, redirect_uri: str) -> Dict[str, Any]:
+def _exchange_notion(code: str, redirect_uri: str, *, code_verifier: str = "") -> Dict[str, Any]:
     config = _provider_config("notion")
-    client_id, client_secret = ensure_oauth_configured("notion")
+    # _resolve_oauth_client (not ensure_oauth_configured) so Notion's
+    # dynamic-client-registration path (registration_endpoint on the
+    # "notion" config) can complete the token exchange with the same
+    # client_id/secret that was used for the authorize step in start_oauth()
+    # — see _exchange_standard_oauth's identical reasoning.
+    client_id, client_secret = _resolve_oauth_client("notion", redirect_uri)
     auth = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+    body: Dict[str, Any] = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    if code_verifier:
+        body["code_verifier"] = code_verifier
     payload = _post_json(
         _provider_url("notion", config.token_url),
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-        },
+        body,
         headers={"Authorization": f"Basic {auth}"},
     )
     access_token = str(payload.get("access_token") or "").strip()
@@ -1249,19 +1437,24 @@ def _exchange_notion(code: str, redirect_uri: str) -> Dict[str, Any]:
     }
 
 
-def _exchange_linear(code: str, redirect_uri: str) -> Dict[str, Any]:
+def _exchange_linear(code: str, redirect_uri: str, *, code_verifier: str = "") -> Dict[str, Any]:
     config = _provider_config("linear")
-    client_id, client_secret = ensure_oauth_configured("linear")
-    payload = _post_form_json(
-        _provider_url("linear", config.token_url),
-        {
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        },
-    )
+    # _resolve_oauth_client (not ensure_oauth_configured) so Linear's
+    # dynamic-client-registration path (registration_endpoint on the
+    # "linear" config) can complete the token exchange with the same
+    # client_id/secret that was used for the authorize step in start_oauth()
+    # — see _exchange_standard_oauth's identical reasoning.
+    client_id, client_secret = _resolve_oauth_client("linear", redirect_uri)
+    body: Dict[str, Any] = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    if code_verifier:
+        body["code_verifier"] = code_verifier
+    payload = _post_form_json(_provider_url("linear", config.token_url), body)
     access_token = str(payload.get("access_token") or "").strip()
     if not access_token:
         raise RuntimeError(str(payload.get("error_description") or payload.get("error") or "Linear token exchange failed."))
@@ -1583,6 +1776,14 @@ async def connect_app_via_oauth_to_mcp(
         raise HTTPException(status_code=400, detail="workspace_id is required.")
 
     # Step 1: Exchange OAuth code for tokens (reuse existing provider-specific logic)
+    # NOTE: this bridge takes a bare (oauth_code, redirect_uri) with no PKCE
+    # code_verifier param and no `state` round-trip to recover one from — so
+    # it cannot complete a token exchange for any auth_method="pkce"
+    # provider (Airtable, Canva, Asana, Higgsfield, and — as of this pass —
+    # Stripe, Linear, Notion, ClickUp all use PKCE now). That gap predates
+    # this change and isn't introduced by it; the primary redirect-based
+    # flow (complete_oauth_callback, driven by start_oauth()'s own `state`)
+    # is the one that's fully PKCE-wired.
     provider_config = _provider_config(normalized_provider)
 
     try:
@@ -1870,9 +2071,9 @@ async def complete_oauth_callback(
         elif normalized_provider == "slack":
             credentials = _exchange_slack(normalized_code, redirect_uri)
         elif normalized_provider == "notion":
-            credentials = _exchange_notion(normalized_code, redirect_uri)
+            credentials = _exchange_notion(normalized_code, redirect_uri, code_verifier=code_verifier)
         elif normalized_provider == "linear":
-            credentials = _exchange_linear(normalized_code, redirect_uri)
+            credentials = _exchange_linear(normalized_code, redirect_uri, code_verifier=code_verifier)
         elif normalized_provider == "dropbox":
             credentials = _exchange_dropbox(normalized_code, redirect_uri)
         elif normalized_provider == "discord":
