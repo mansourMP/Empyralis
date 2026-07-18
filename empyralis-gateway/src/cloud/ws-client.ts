@@ -553,7 +553,11 @@ export class GatewayWsClient {
       ]);
       const timeout = setTimeout(() => {
         socket.onopen = null;
-        socket.onerror = null;
+        // Keep a no-op error handler (NOT null): closing a still-connecting
+        // socket can emit a late 'error' event, and the `ws` library throws it
+        // as an unhandled 'error' that crashes the whole gateway process on
+        // Node. We've already rejected below, so just swallow it.
+        socket.onerror = () => {};
         socket.close();
         reject(new Error(`WebSocket connection timed out for ${url}`));
       }, 10_000);
