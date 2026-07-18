@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
-import fs from "fs";
-import path from "path";
+
+import { resolveCommandPath } from "../shell/user-install-dirs";
 
 // cli.install (BYO-brain onboarding, Build F): installs the box's OWN Claude
 // Code / Codex CLI via its real global npm install, run directly on the
@@ -91,10 +91,14 @@ export interface CliInstallerConfig {
   spawnImpl?: CliInstallSpawnImpl;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
-  /** Injectable for tests. Defaults to a real PATH scan (same logic as
-   *  health/service-inventory.ts's defaultCommandExists — duplicated here,
-   *  not imported, since that function is module-private there and this is
-   *  a small, self-contained ~20 lines). */
+  /** Injectable for tests. Defaults to the shared resolver in
+   *  shell/user-install-dirs.ts (also used by health/service-inventory.ts's
+   *  passive detection and llm/cli-login-session.ts's sign-in spawn — see
+   *  its doc comment). Matters here twice over: once for the npm preflight
+   *  below, and once to confirm the freshly-installed binary actually landed
+   *  somewhere findable — without the shared fallback dirs, a install that
+   *  genuinely succeeded but landed in ~/.local/bin (or another non-PATH
+   *  standard location) would be reported back to the user as a crash. */
   commandExists?: (command: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform) => string | null;
 }
 
@@ -107,30 +111,7 @@ function defaultSpawn(
 }
 
 function defaultCommandExists(command: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | null {
-  const candidates: string[] = [];
-  if (path.isAbsolute(command) || command.includes("/") || command.includes("\\")) {
-    candidates.push(command);
-  } else {
-    const pathValue = env.PATH || "";
-    const extensions = platform === "win32"
-      ? String(env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
-      : [""];
-    for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
-      for (const extension of extensions) {
-        candidates.push(path.join(directory, `${command}${extension}`));
-      }
-    }
-  }
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    } catch {
-      // Ignore inaccessible PATH entries.
-    }
-  }
-  return null;
+  return resolveCommandPath(command, env, platform);
 }
 
 interface SpawnOutcome {

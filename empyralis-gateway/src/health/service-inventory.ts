@@ -18,6 +18,7 @@ import {
   setShellSandboxDockerReady,
   type CapabilityPermissionStatus,
 } from "../runtime/desktop-permissions";
+import { resolveCommandPath } from "../shell/user-install-dirs";
 
 export type PassiveServiceStatus = "ready" | "degraded" | "offline" | "missing" | "unknown" | "blocked";
 
@@ -146,31 +147,19 @@ function buildNativeRuntimeSnapshot(deps: PassiveInventoryCollectorDeps = {}): G
   };
 }
 
+// Detection previously only ever scanned the Gateway's own process PATH
+// (whatever launchd/systemd/the parent process handed it) — frequently
+// narrower than an interactive login shell's, which is the literal reason
+// `claude`/`codex` could report "Not installed" on a box where `which
+// claude` in a Terminal finds it just fine (confirmed real case: Claude
+// Code's native installer puts the binary at `~/.local/bin/claude`, on a
+// login shell's PATH via .zshrc/.bashrc/.profile but NOT on the Gateway's).
+// resolveCommandPath (shared with llm/cli-login-session.ts's sign-in spawn
+// and llm/cli-installer.ts's install verification — see its own doc
+// comment) now also checks the standard user-level CLI install locations on
+// macOS + Linux, in ADDITION to (never instead of) PATH.
 function defaultCommandExists(command: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | null {
-  const candidates: string[] = [];
-  if (path.isAbsolute(command) || command.includes("/") || command.includes("\\")) {
-    candidates.push(command);
-  } else {
-    const pathValue = env.PATH || "";
-    const extensions = platform === "win32"
-      ? String(env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
-      : [""];
-    for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
-      for (const extension of extensions) {
-        candidates.push(path.join(directory, `${command}${extension}`));
-      }
-    }
-  }
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    } catch {
-      // Ignore inaccessible PATH entries.
-    }
-  }
-  return null;
+  return resolveCommandPath(command, env, platform);
 }
 
 function defaultRunCommand(command: string, args: string[], timeoutMs: number): Promise<CommandResult> {

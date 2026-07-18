@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 import {
   CliLoginSessionManager,
@@ -172,6 +175,31 @@ test("not_installed: start() throws before spawning when the binary isn't on PAT
   assert.equal(spawned, false);
 });
 
+test("real detection: start() finds the binary in ~/.local/bin even when it is not on PATH", async (t) => {
+  // commandExists is deliberately NOT overridden below — this exercises the
+  // real, production defaultCommandExists()/resolveCommandPath() fallback-dir
+  // logic (shared with health/service-inventory.ts's passive detection), not
+  // a test double of it. Without this fix, a box could show "Claude Code:
+  // installed" on the health dashboard while clicking "Sign in" still threw
+  // not_installed — the same PATH gap hit a second time in a second lookup.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "empyralis-cli-login-detect-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const localBin = path.join(home, ".local", "bin");
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.writeFileSync(path.join(localBin, "claude"), "#!/bin/sh\necho fake-claude\n", { mode: 0o755 });
+
+  const fake = makeFakeChild();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    // Deliberately narrow — does NOT include localBin — reproducing the
+    // real Gateway-process-PATH gap, not a full interactive shell PATH.
+    env: { HOME: home, PATH: "/usr/bin:/bin" },
+  });
+
+  const result = await manager.start({ runId: "run-local-bin", runtime: "claude_code" });
+  assert.equal(result.status, "started", "the binary in ~/.local/bin must resolve instead of throwing not_installed");
+});
+
 test("exit code 0 reports done/ok true; nonzero reports done/ok false with error_kind", async () => {
   const okChild = makeFakeChild();
   const failChild = makeFakeChild();
@@ -303,6 +331,49 @@ test("real Codex output: the device code on the line AFTER the prompt is capture
     codePromptEvents[1].text,
     "158R-XDWM5",
     "the bare code value, stripped of ANSI codes, must be forwarded as its own event",
+  );
+});
+
+test("real Codex 0.144.1 output: ANSI-wrapped URL directly followed by an ANSI-wrapped code line, with NO instruction sentence, still forwards both", async () => {
+  const fake = makeFakeChild();
+  const { events, publish } = collectingPublisher();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    commandExists: () => "/usr/bin/codex",
+  });
+  manager.setEventPublisher(publish);
+
+  await manager.start({ runId: "run-codex-0-144-1", runtime: "codex" });
+  // Exact real captured output from `codex login --device-auth` on 0.144.1:
+  // the URL and the device code, each on their own ANSI-colored line, with
+  // no "Enter this one-time code" (or any other) instruction line between
+  // them. Before the fix, CODE_PROMPT_PATTERN never matched anything here,
+  // so awaitingCodexCodeValue never got set, and the bare code line matched
+  // neither URL_PATTERN nor CODE_PROMPT_PATTERN — it was silently dropped,
+  // leaving the sign-in UI with a link but no code to enter (an effective
+  // hang: "waiting for the sign-in link" never resolves into something the
+  // user can finish).
+  fake.emitStdout("\x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n");
+  fake.emitStdout("\x1b[94mCSXL-XXXXX\x1b[0m\n");
+
+  const outputEvents = events.filter((e): e is CliLoginOutputEvent => e.event === "output");
+  const urlEvents = outputEvents.filter((e) => e.kind === "url");
+  const codePromptEvents = outputEvents.filter((e) => e.kind === "code_prompt");
+  assert.equal(urlEvents.length, 1, "the URL line must be extracted and forwarded");
+  assert.equal(
+    urlEvents[0].text,
+    "https://auth.openai.com/codex/device",
+    "the URL must be forwarded with ANSI codes stripped, not embedded in escape bytes",
+  );
+  assert.equal(
+    codePromptEvents.length,
+    1,
+    "the bare device code, with no preceding instruction line, must still be extracted and forwarded",
+  );
+  assert.equal(
+    codePromptEvents[0].text,
+    "CSXL-XXXXX",
+    "the device code must be forwarded stripped of ANSI codes, verbatim",
   );
 });
 

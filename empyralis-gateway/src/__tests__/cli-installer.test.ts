@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 import {
   installCliSubscriptionRuntime,
@@ -234,4 +237,40 @@ test("ENOENT spawn error is reported as npm_missing, not a generic crash", async
     assert.equal(err.kind, "npm_missing");
     return true;
   });
+});
+
+test("real detection: npm preflight and post-install verification both find binaries in ~/.local/bin even when not on PATH", async (t) => {
+  // commandExists is deliberately NOT overridden below — this exercises the
+  // real, production defaultCommandExists()/resolveCommandPath() fallback-dir
+  // logic (shared with health/service-inventory.ts's passive detection and
+  // llm/cli-login-session.ts's sign-in spawn), not a test double of it.
+  // Without this fix, `npm install -g` could genuinely succeed and still be
+  // reported back to the user as a crash ("still not on PATH afterward")
+  // purely because the freshly-linked binary landed in ~/.local/bin, which
+  // the Gateway's own process PATH never included.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "empyralis-cli-installer-detect-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const localBin = path.join(home, ".local", "bin");
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.writeFileSync(path.join(localBin, "npm"), "#!/bin/sh\necho fake-npm\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(localBin, "claude"), "#!/bin/sh\necho fake-claude\n", { mode: 0o755 });
+
+  const installChild = makeFakeChild();
+  const lsChild = makeFakeChild();
+  const promise = installCliSubscriptionRuntime(
+    { runtime: "claude_code", timeoutMs: 5_000 },
+    {
+      spawnImpl: spawnImplQueue([installChild, lsChild]),
+      // Deliberately narrow — does NOT include localBin — reproducing the
+      // real Gateway-process-PATH gap, not a full interactive shell PATH.
+      env: { HOME: home, PATH: "/usr/bin:/bin" },
+    },
+  );
+  installChild.emitClose(0);
+  await flushMicrotasks();
+  lsChild.emitStdout("+-- @anthropic-ai/claude-code@2.1.205\n");
+  lsChild.emitClose(0);
+  const result = await promise;
+  assert.equal(result.installed, true);
+  assert.equal(result.version, "2.1.205");
 });
