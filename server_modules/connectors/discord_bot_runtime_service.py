@@ -128,6 +128,14 @@ class DiscordBotRuntimeService:
         # same Discord bot token's inbound stream. Released in stop().
         self._locked_credentials: List[tuple] = []
         self._statuses: List[DiscordBotRuntimeStatus] = []
+        # FIX (mention/reply addressing gate): the bot's own Discord user id,
+        # resolved once the gateway client for each connector has finished
+        # logging in (see start(), same value used for slash-command
+        # registration). handle_parsed_event() merges this in as a fallback
+        # for should_trigger_agent_run() when the connector row's persisted
+        # metadata doesn't already carry a bot_id (e.g. the DISCORD_BOT_TOKEN
+        # env fallback synthesizes an empty-metadata connector row).
+        self._bot_user_ids: Dict[str, str] = {}
 
     def connector_rows(self) -> List[Dict[str, Any]]:
         return _connector_rows(self.load_vault())
@@ -279,6 +287,7 @@ class DiscordBotRuntimeService:
                             break
                 time.sleep(0.5)
             if _app_id:
+                self._bot_user_ids[connector_id] = _app_id
                 try:
                     import asyncio as _asyncio_disc
                     _asyncio_disc.ensure_future(
@@ -353,6 +362,17 @@ class DiscordBotRuntimeService:
             return {"ok": True, "handled": True, "triggered": False, "reason": "bot_authored"}
         metadata = connector_entry.get("metadata") if isinstance(connector_entry.get("metadata"), dict) else {}
         workspace_id = _normalize_workspace_id(connector_entry.get("workspace_id"))
+        # FIX (mention/reply addressing gate): should_trigger_agent_run needs
+        # the bot's own user id to tell "our bot was @mentioned" apart from
+        # "someone else in this guild message was @mentioned". Prefer
+        # whatever's already persisted on the connector row (captured from
+        # /users/@me at connect time); fall back to the id resolved from the
+        # live gateway client in start() above when metadata doesn't have one.
+        if not str(metadata.get("bot_id") or "").strip():
+            connector_id = str(connector_entry.get("id") or "").strip()
+            live_bot_id = self._bot_user_ids.get(connector_id, "")
+            if live_bot_id:
+                metadata = {**metadata, "bot_id": live_bot_id}
         if not event_matches_connector(parsed, credentials, metadata):
             return {"ok": True, "handled": False, "triggered": False, "reason": "connector_mismatch"}
         if not should_trigger_agent_run(parsed, credentials, metadata=metadata):
@@ -365,13 +385,17 @@ class DiscordBotRuntimeService:
                 connector_entry=connector_entry,
             )
 
-        # ── DM events do NOT reach this handler ──
-        # DiscordGatewayListener.on_message (discord_connector.py:1056-1058)
-        # intercepts DMs and routes them through _handle_dm_via_gateway()
-        # (Path C) BEFORE calling self._on_event.  Consequently,
-        # message_type="direct_message" is unreachable here.
-        # The canonical DM path is _handle_dm_via_gateway() in
-        # discord_connector.py.  Guild messages continue below.
+        # ── TRUE 1:1 DM events do NOT reach this handler ──
+        # DiscordGatewayListener.on_message intercepts a true 1:1 DM and
+        # routes it through _handle_dm_via_gateway() (Path C) BEFORE calling
+        # self._on_event.  Consequently, message_type="direct_message" is
+        # unreachable here — the canonical 1:1 DM path is
+        # _handle_dm_via_gateway() in discord_connector.py.
+        # A Group DM is NOT a 1:1 DM (see on_message's is_group_dm check) —
+        # it DOES reach this handler, as a "mention"-typed (or plain
+        # "message"-typed, silently dropped just below) event, gated by
+        # should_trigger_agent_run exactly like a guild message. Guild
+        # messages and Group DMs both continue below.
 
         goal = build_run_goal_from_event(parsed)
         if not goal:

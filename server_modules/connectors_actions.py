@@ -1164,6 +1164,28 @@ async def slack_events_webhook(request: Request):
                 goal = slack_build_run_goal_from_event(parsed)
                 if not goal:
                     continue
+
+                # ── Deduplication guard ──────────────────────────────────────
+                # Slack's Events API retries a delivery (same event_id) up to
+                # 3x within a few seconds when it doesn't receive a fast
+                # enough ack (X-Slack-Retry-Num/X-Slack-Retry-Reason are set
+                # on the retried requests). Without this guard,
+                # route_inbound_channel_message ran the full agent turn — and
+                # posted a reply — once per retry. Mirrors the Discord
+                # webhook's dedup guard above (discord_webhook, ~line 1358).
+                _dedup_event_id = str(parsed.get("event_id") or "").strip()
+                if _dedup_event_id:
+                    from server_modules.connectors.slack_connector import _is_duplicate_slack_event
+                    if _is_duplicate_slack_event(_dedup_event_id, row_id):
+                        import logging as _sd_log
+                        _sd_log.getLogger(__name__).info(
+                            "Slack webhook dedup: skipping duplicate event_id=%s connector=%s retry_num=%s",
+                            _dedup_event_id,
+                            row_id,
+                            headers.get("x-slack-retry-num") or headers.get("X-Slack-Retry-Num") or "0",
+                        )
+                        continue
+
                 route_result = await agent_channel_router.route_inbound_channel_message(
                     tenant_id=await _resolve_connector_tenant_id(item, workspace_id),
                     workspace_id=workspace_id,

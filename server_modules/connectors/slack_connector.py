@@ -44,6 +44,50 @@ DEFAULT_SLACK_USER_SCOPES = [
 ]
 _TOKEN_REFRESH_SKEW_SECONDS = 60
 
+# ── Deduplication guard ─────────────────────────────────────────────────────
+# Slack's Events API retries a delivery (same event_id) up to 3x within a few
+# seconds when it doesn't receive a fast enough ack (X-Slack-Retry-Num is set
+# on the retried requests) — see slack_events_webhook in connectors_actions.py,
+# which runs a full synchronous agent turn per matching connector row and, up
+# through this fix, had no dedup guard, so each retry posted its own reply.
+# Mirrors discord_connector._is_duplicate_discord_message exactly. Keys are
+# "event_id:channel_origin" strings; entries older than 300 s are evicted on
+# access (lazy TTL).
+_DEDUP_CACHE: dict[str, float] = {}
+_DEDUP_MAX_SIZE = 2000
+_DEDUP_TTL_SECONDS = 300  # Slack's retry window is a few seconds; generous
+
+
+def _is_duplicate_slack_event(event_id: str, channel_origin: str) -> bool:
+    """Return True if this (event_id, channel_origin) was seen recently."""
+    import time as _time
+
+    if not event_id or not channel_origin:
+        return False
+    key = f"{event_id}:{channel_origin}"
+    now = _time.time()
+
+    # Lazy eviction — clean stale entries when the cache grows
+    if len(_DEDUP_CACHE) > _DEDUP_MAX_SIZE:
+        stale = [k for k, ts in _DEDUP_CACHE.items() if now - ts > _DEDUP_TTL_SECONDS]
+        for k in stale:
+            _DEDUP_CACHE.pop(k, None)
+
+    if key in _DEDUP_CACHE:
+        age = now - _DEDUP_CACHE[key]
+        if age < _DEDUP_TTL_SECONDS:
+            return True
+        # TTL expired — allow reprocessing
+        _DEDUP_CACHE.pop(key, None)
+
+    _DEDUP_CACHE[key] = now
+    return False
+
+
+def _clear_slack_dedup_cache() -> None:
+    """Test helper — clears the dedup cache."""
+    _DEDUP_CACHE.clear()
+
 
 def _env_first(*names: str) -> str:
     for name in names:
@@ -606,6 +650,11 @@ def parse_inbound_event(payload: Dict[str, Any]) -> Dict[str, Any]:
             "thread_ts": str(event.get("thread_ts") or event.get("ts") or "").strip() or None,
             "message_ts": str(event.get("client_msg_id") or event.get("ts") or "").strip() or None,
             "channel_type": str(event.get("channel_type") or "").strip() or None,
+            # Slack stamps `bot_id` on every bot/app-authored message
+            # (modern Bot-User apps posting via chat.postMessage included —
+            # see should_trigger_agent_run's bot_id check), independent of
+            # the legacy subtype:"bot_message" marker below.
+            "bot_id": str(event.get("bot_id") or "").strip() or None,
         }
     if event_type == "reaction_added":
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
@@ -688,6 +737,17 @@ def should_trigger_agent_run(
     bot = credentials.get("bot") if isinstance(credentials.get("bot"), dict) else {}
     bot_user_id = str(credentials.get("bot_user_id") or bot.get("user_id") or "").strip()
     if user_id and bot_user_id and user_id == bot_user_id:
+        return False
+    # FIX (bot-loop): any event carrying Slack's own `bot_id` field was
+    # posted by an app/bot (ours or another app's), not a human. Modern
+    # Bot-User apps posting via chat.postMessage don't reliably get the
+    # legacy subtype:"bot_message" marker checked just below, but Slack
+    # always stamps bot_id on bot-authored messages regardless of subtype —
+    # this is the primary, most robust self-loop guard. The user_id==
+    # bot_user_id check above and the subtype check below are additional
+    # belt-and-suspenders signals that don't depend on our own credentials
+    # having the right bot_user_id recorded.
+    if str(parsed.get("bot_id") or "").strip():
         return False
     subtype = str(parsed.get("subtype") or "").strip()
     if subtype in {"bot_message", "message_changed", "message_deleted"}:

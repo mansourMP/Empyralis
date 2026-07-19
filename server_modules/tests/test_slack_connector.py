@@ -200,6 +200,131 @@ class SlackConnectorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    # ── FIX 3a: bot_id parsing — drop bot-authored events (bot-loop guard) ──
+    # Before this fix, only the legacy subtype:"bot_message" was checked,
+    # which modern Bot-User apps posting via chat.postMessage don't reliably
+    # set. Slack always stamps the real `bot_id` field on bot-authored
+    # messages regardless of subtype — parse_inbound_event now surfaces it
+    # and should_trigger_agent_run drops any event that carries one.
+
+    def test_parse_inbound_event_captures_bot_id(self):
+        parsed = slack_connector.parse_inbound_event(
+            {
+                "type": "event_callback",
+                "team_id": "T123",
+                "event_id": "Ev-bot-1",
+                "event": {
+                    "type": "message",
+                    "channel": "C123",
+                    "user": "UBOT",
+                    "bot_id": "B0123456",
+                    "text": "a reply our own bot posted",
+                    "ts": "1712000001.000100",
+                },
+            }
+        )
+        self.assertEqual(parsed["bot_id"], "B0123456")
+
+    def test_parse_inbound_event_bot_id_absent_for_human_message(self):
+        parsed = slack_connector.parse_inbound_event(
+            {
+                "type": "event_callback",
+                "team_id": "T123",
+                "event_id": "Ev-human-1",
+                "event": {
+                    "type": "message",
+                    "channel": "C123",
+                    "user": "U999",
+                    "text": "hey there",
+                    "ts": "1712000002.000100",
+                },
+            }
+        )
+        self.assertIsNone(parsed["bot_id"])
+
+    def test_bot_authored_event_with_bot_id_does_not_trigger_even_without_legacy_subtype(self):
+        """The exact bug: a modern Bot-User app's chat.postMessage reply
+        carries `bot_id` but NOT subtype:"bot_message" — must still be
+        dropped, not treated as a fresh human mention/message."""
+        parsed = slack_connector.parse_inbound_event(
+            {
+                "type": "event_callback",
+                "team_id": "T123",
+                "event_id": "Ev-bot-2",
+                "event": {
+                    "type": "app_mention",
+                    "channel": "C123",
+                    "user": "UOTHER",  # NOT our own bot_user_id — the
+                    # user_id==bot_user_id check alone would miss this.
+                    "bot_id": "B0999999",
+                    "text": "<@BOT> some other app's bot pinged us",
+                    "ts": "1712000003.000100",
+                },
+            }
+        )
+        self.assertIsNone(parsed["subtype"], "test precondition: no legacy bot_message subtype present")
+        self.assertFalse(
+            slack_connector.should_trigger_agent_run(
+                parsed,
+                {"team_id": "T123", "bot_user_id": "BOT"},
+                metadata={"slack_channel_id": "C123"},
+            )
+        )
+
+    def test_human_message_without_bot_id_still_triggers(self):
+        """Sanity check: the new bot_id guard must not swallow real human
+        messages that simply have no bot_id at all."""
+        parsed = slack_connector.parse_inbound_event(
+            {
+                "type": "event_callback",
+                "team_id": "T123",
+                "event_id": "Ev-human-2",
+                "event": {
+                    "type": "app_mention",
+                    "channel": "C123",
+                    "user": "U123",
+                    "text": "<@BOT> hello",
+                    "ts": "1712000004.000100",
+                },
+            }
+        )
+        self.assertTrue(
+            slack_connector.should_trigger_agent_run(
+                parsed,
+                {"team_id": "T123", "bot_user_id": "BOT"},
+                metadata={"slack_channel_id": "C123"},
+            )
+        )
+
+    # ── FIX 3b: event_id dedup guard (Slack Events API retries) ─────────
+
+    def test_dedup_first_call_not_duplicate(self):
+        slack_connector._clear_slack_dedup_cache()
+        self.assertFalse(slack_connector._is_duplicate_slack_event("Ev-dedup-1", "cred-slack"))
+
+    def test_dedup_second_call_is_duplicate(self):
+        slack_connector._clear_slack_dedup_cache()
+        self.assertFalse(slack_connector._is_duplicate_slack_event("Ev-dedup-2", "cred-slack"))
+        self.assertTrue(slack_connector._is_duplicate_slack_event("Ev-dedup-2", "cred-slack"))
+
+    def test_dedup_different_connector_not_duplicate(self):
+        slack_connector._clear_slack_dedup_cache()
+        self.assertFalse(slack_connector._is_duplicate_slack_event("Ev-dedup-3", "cred-slack-a"))
+        self.assertFalse(slack_connector._is_duplicate_slack_event("Ev-dedup-3", "cred-slack-b"))
+
+    def test_dedup_empty_event_id_not_duplicate(self):
+        slack_connector._clear_slack_dedup_cache()
+        self.assertFalse(slack_connector._is_duplicate_slack_event("", "cred-slack"))
+        self.assertFalse(slack_connector._is_duplicate_slack_event("", "cred-slack"))
+
+    def test_dedup_expired_entry_reprocessed(self):
+        slack_connector._clear_slack_dedup_cache()
+        self.assertFalse(slack_connector._is_duplicate_slack_event("Ev-dedup-4", "cred-slack"))
+        import time as _t
+        key = "Ev-dedup-4:cred-slack"
+        slack_connector._DEDUP_CACHE[key] = _t.time() - slack_connector._DEDUP_TTL_SECONDS - 10
+        self.assertFalse(slack_connector._is_duplicate_slack_event("Ev-dedup-4", "cred-slack"))
+
     def test_slack_is_allowed_by_canonical_inbound_preflight(self):
         with (
             patch(
@@ -270,6 +395,61 @@ class SlackConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["endpoint_key"], "C123")
         self.assertEqual(kwargs["customer_message"], "<@BOT> hello")
         self.assertFalse(kwargs["allow_master_fallback"])
+
+    async def test_slack_webhook_retried_event_id_runs_the_agent_turn_only_once(self):
+        """FIX 3b: Slack's Events API retries a delivery (same event_id) up
+        to 3x within a few seconds when it doesn't get a fast enough ack
+        (X-Slack-Retry-Num is set on the retry). Before this fix there was
+        no dedup guard, so each retry ran its own agent turn and posted its
+        own reply."""
+        slack_connector._clear_slack_dedup_cache()
+        body = json.dumps({"type": "event_callback"}).encode("utf-8")
+        connector_row = {
+            "id": "cred-slack",
+            "provider": "slack",
+            "workspace_id": "default",
+            "tenant_id": "tenant-default",
+            "metadata": {"team_id": "T123", "channel_registry_bindings": {"slack": {"endpoint_key": "C123"}}},
+        }
+        parsed = {
+            "kind": "event",
+            "event_id": "Ev-retry-1",
+            "event_type": "app_mention",
+            "message_type": "mention",
+            "team_id": "T123",
+            "channel": "C123",
+            "user_id": "U123",
+            "text": "<@BOT> hello",
+            "ts": "1712000005.000100",
+            "thread_ts": "1712000005.000100",
+            "message_ts": "1712000005.000100",
+        }
+        route_message = AsyncMock(return_value={"ok": True, "run_id": "run-retry-1", "reply": "Working on it."})
+
+        with (
+            patch("server_modules.connectors_actions.slack_verify_request_signature", return_value=True),
+            patch("server_modules.connectors_actions.slack_parse_inbound_event", return_value=parsed),
+            patch("server_modules.connectors_actions.load_vault", return_value={"credentials": [connector_row]}),
+            patch("server_modules.connectors_actions.resolve_vault_credential", return_value={"team_id": "T123", "bot_user_id": "BOT"}),
+            patch("server_modules.connectors_actions._append_channel_event", return_value=None),
+            patch("server_modules.agent_channel_router.route_inbound_channel_message", new=route_message),
+        ):
+            first_result = await connectors_actions.slack_events_webhook(_request_from_body(body))
+
+            # Slack's retry: identical body/event_id, X-Slack-Retry-Num set.
+            retry_request = _request_from_body(
+                body,
+                headers=[(b"x-slack-retry-num", b"1"), (b"x-slack-retry-reason", b"http_timeout")],
+            )
+            second_result = await connectors_actions.slack_events_webhook(retry_request)
+
+        self.assertEqual(first_result["triggered"], 1)
+        self.assertEqual(first_result["run_id"], "run-retry-1")
+        # The retry still matches the connector row ("handled") but must NOT
+        # trigger a second agent turn or a second reply.
+        self.assertEqual(second_result["handled"], 1)
+        self.assertEqual(second_result["triggered"], 0)
+        route_message.assert_awaited_once()
 
     def test_slack_catalog_is_launchable_when_configured(self):
         catalog_item = next(item for item in connection_catalog_service.catalog_items() if item["id"] == "slack")

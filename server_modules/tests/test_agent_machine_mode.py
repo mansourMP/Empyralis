@@ -448,7 +448,12 @@ class AgentMachineModeTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     discord_connector.dispatch_inbound_event(
                         parsed,
-                        connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {}},
+                        # metadata.bot_id="999" matches the mention in the
+                        # payload above — the bot's own id being mentioned,
+                        # which must trigger and reach the "no canonical
+                        # ingress callback configured" RuntimeError this
+                        # test exists to prove.
+                        connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {"bot_id": "999"}},
                         credentials={"bot_token": "discord-token", "channel_id": "123", "guild_id": "456"},
                         append_event_fn=None,
                     )
@@ -477,7 +482,9 @@ class AgentMachineModeTests(unittest.TestCase):
             with patch.object(runtime_config, "AGENT_MACHINE_OWNER", "user-123"):
                 result = discord_connector.dispatch_inbound_event(
                     parsed,
-                    connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {}},
+                    # metadata.bot_id="999" matches the mention in the
+                    # payload above — the bot's own id being mentioned.
+                    connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {"bot_id": "999"}},
                     credentials={"bot_token": "discord-token", "channel_id": "123", "guild_id": "456"},
                     append_event_fn=None,
                     run_start_request_class=lambda **kwargs: SimpleNamespace(**kwargs),

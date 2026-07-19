@@ -101,12 +101,18 @@ class DiscordBotRuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
                 "user_id": "user-1",
                 "username": "Mansur",
                 "text": "hello",
+                # bot_id "999" matches metadata.bot_id below — this mention
+                # is addressed to the bot itself, the case that must trigger.
+                "mention_ids": ["999"],
             },
             connector_entry={
                 "id": "cred-discord",
                 "provider": "discord_bot",
                 "workspace_id": "workspace-1",
-                "metadata": {"channel_registry_bindings": {"discord": {"endpoint_key": "discord:123"}}},
+                "metadata": {
+                    "bot_id": "999",
+                    "channel_registry_bindings": {"discord": {"endpoint_key": "discord:123"}},
+                },
             },
             credentials={"bot_token": "token", "channel_id": "123"},
         )
@@ -144,6 +150,40 @@ class DiscordBotRuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "bot_authored")
         route_message.assert_not_awaited()
 
+    async def test_guild_mention_of_someone_else_does_not_route(self):
+        """FIX: a guild message mentioning some OTHER user (not the bot) must
+        stay silent — mentions/message_type=="mention" alone used to be
+        sufficient to trigger, regardless of who was actually mentioned."""
+        route_message = AsyncMock(return_value={"ok": True, "triggered": True, "run_id": "run-1"})
+        service = self._service(rows=[], route_message=route_message)
+
+        result = await service.handle_parsed_event(
+            {
+                "kind": "event",
+                "event_type": "message_create",
+                "message_type": "mention",
+                "channel_id": "123",
+                "guild_id": "456",
+                "message_id": "msg-2",
+                "user_id": "user-1",
+                "username": "Mansur",
+                "text": "<@555> can you help with this",
+                # "555" is some OTHER guild member, not the bot ("999").
+                "mention_ids": ["555"],
+            },
+            connector_entry={
+                "id": "cred-discord",
+                "provider": "discord_bot",
+                "workspace_id": "workspace-1",
+                "metadata": {"bot_id": "999"},
+            },
+            credentials={"bot_token": "token", "channel_id": "123"},
+        )
+
+        self.assertFalse(result["triggered"])
+        self.assertEqual(result["reason"], "not_triggered")
+        route_message.assert_not_awaited()
+
     async def test_mismatched_channel_does_not_route(self):
         route_message = AsyncMock(return_value={"ok": True, "run_id": "run-1"})
         service = self._service(rows=[], route_message=route_message)
@@ -178,9 +218,13 @@ class DiscordBotRuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
                 "guild_id": "456",
                 "message_id": "msg-1",
                 "text": "hello",
+                # bot_id "999" matches credentials.bot_id below (exercising
+                # the credentials-level fallback, since this connector_entry
+                # carries no metadata at all).
+                "mention_ids": ["999"],
             },
             connector_entry={"id": "cred-discord", "provider": "discord_bot", "workspace_id": "workspace-1"},
-            credentials={"bot_token": "token", "channel_id": "123"},
+            credentials={"bot_token": "token", "channel_id": "123", "bot_id": "999"},
         )
         await asyncio.sleep(0)
 
