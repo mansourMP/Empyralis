@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   hasExplicitTelegramMention,
   deriveTelegramInboundFields,
+  isBroadcastTelegramChat,
   TelegramPersonalRuntime,
 } from "../channels/telegram/runtime";
 import { GatewayStateDb } from "../state/db";
@@ -234,6 +235,34 @@ test("deriveTelegramInboundFields: Saved Messages (chat.self=true) is self-chat,
   });
   assert.equal(derived.isGroup, false);
   assert.equal(derived.isSelfChat, true);
+});
+
+// ---------------------------------------------------------------------------
+// isBroadcastTelegramChat: the broadcast-channel/group distinction
+// deriveTelegramInboundFields's own isGroup ("!isPrivate") deliberately does
+// NOT make — see that field's doc for why, and isBroadcastTelegramChat's doc
+// for why a broadcast channel needs a THIRD category (dropped outright, not
+// "isGroup=true" nor "isGroup=false").
+// ---------------------------------------------------------------------------
+
+test("isBroadcastTelegramChat: an Api.Channel with broadcast:true is a broadcast channel", () => {
+  assert.equal(isBroadcastTelegramChat({ broadcast: true, id: "-100999", title: "Announcements" }), true);
+});
+
+test("isBroadcastTelegramChat: an Api.Channel with broadcast:false (a supergroup/megagroup) is NOT a broadcast channel", () => {
+  assert.equal(isBroadcastTelegramChat({ broadcast: false, megagroup: true, id: "-100555", title: "Family Supergroup" }), false);
+});
+
+test("isBroadcastTelegramChat: a plain Api.Chat (basic group, no broadcast field at all) is NOT a broadcast channel", () => {
+  assert.equal(isBroadcastTelegramChat({ id: "-100777", title: "Family" }), false);
+});
+
+test("isBroadcastTelegramChat: a private Api.User peer (no broadcast field) is NOT a broadcast channel", () => {
+  assert.equal(isBroadcastTelegramChat({ id: "555444333", firstName: "Nadia" }), false);
+});
+
+test("isBroadcastTelegramChat: an unresolved/undefined chat entity is NOT a broadcast channel (fails closed to false, not to true)", () => {
+  assert.equal(isBroadcastTelegramChat(undefined), false);
 });
 
 // ---------------------------------------------------------------------------
