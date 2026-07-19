@@ -883,9 +883,9 @@ export function ChatComposer({
                   ref={commandPaletteRef}
                   className="app-chat-composer__command-palette"
                   role="dialog"
-                  aria-label="Sage actions"
+                  aria-label="AI actions"
                 >
-                  <div className="app-chat-composer__command-list" role="listbox" aria-label="Available Sage actions">
+                  <div className="app-chat-composer__command-list" role="listbox" aria-label="Available AI actions">
                     {filteredSlashCommands.map((command, index) => (
                       <button
                         key={command.id}

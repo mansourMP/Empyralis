@@ -106,7 +106,7 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
   const sageAgent = useMemo(() => findSageAgent(agents), [agents]);
   const agentLabel = useCallback(
     (agentId: string): string => {
-      if (!agentId) return sageAgent?.label || "Sage";
+      if (!agentId) return sageAgent?.label || "Ask AI";
       const a = agents.find((x) => x.agent_id === agentId);
       return a?.label || "Unnamed agent";
     },
@@ -258,7 +258,7 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
           <div className="fleet-work-empty-title">No conversations yet</div>
           <div className="fleet-work-empty-desc">
             When any of your agents talk with someone — over Telegram, WhatsApp, or any other connected channel,
-            including your own messages to Sage — every conversation shows up here, tagged by agent, channel, and
+            including your own messages to Ask AI — every conversation shows up here, tagged by agent, channel, and
             who it’s with.
           </div>
         </div>

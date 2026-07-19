@@ -219,7 +219,7 @@ export function FleetCommandPalette({
     const commandActions: Action[] = [
       {
         id: "chat-sage",
-        label: "Chat with Sage",
+        label: "Ask AI",
         hint: "→ chat",
         group: "Commands",
         icon: MessageSquare,

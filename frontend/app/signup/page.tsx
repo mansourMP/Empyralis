@@ -205,13 +205,13 @@ export default function SignupPage() {
           <div className="app-auth-hero__copy">
             <h1 className="app-auth-hero__title">Start simple, then expand into connected work.</h1>
             <p className="app-auth-hero__body">
-              Create one account for Sage, Build, Discover, and your connected apps. Start with a clean core, then add power on your terms.
+              Create one account for Ask AI, Build, Discover, and your connected apps. Start with a clean core, then add power on your terms.
             </p>
           </div>
           <div className="app-auth-hero__rail">
             <div className="app-auth-hero__point">
               <strong>Chat first</strong>
-              <span>Fresh accounts land directly in Sage instead of a setup maze.</span>
+              <span>Fresh accounts land directly in Ask AI instead of a setup maze.</span>
             </div>
             <div className="app-auth-hero__point">
               <strong>Cheap default AI</strong>
@@ -229,7 +229,7 @@ export default function SignupPage() {
             <h2 className="app-auth-title">Sign up</h2>
             <p className="app-auth-subtitle">
               {channelAttribution
-                ? 'Create an Empyralis account to continue from Telegram, then finish inside Sage.'
+                ? 'Create an Empyralis account to continue from Telegram, then finish inside Ask AI.'
                 : 'Choose the live sign-in path you want now. You can connect the rest later from inside Empyralis.'}
             </p>
           </div>
