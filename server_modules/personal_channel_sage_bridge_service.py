@@ -152,6 +152,8 @@ def _owner_provenance_message(
     raw_text: str,
     display_name: Optional[str],
     channel_label: str,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> str:
     """Clean, unwrapped provenance header for a message ROBUSTLY identified
     as coming from the workspace OWNER's own identity — self-chat, or a
@@ -165,9 +167,33 @@ def _owner_provenance_message(
     boundary: display_name comes from the channel's own push_name field on
     a message already robustly confirmed to be from the owner's linked
     identity, so it cannot be spoofed by a stranger to claim ownership.
+
+    is_group / chat_label: part of the "family group" bug fix. This
+    function used to hardcode "direct message" unconditionally, even when
+    the caller had ALREADY correctly resolved is_group=True (an owner
+    posting inside a group they're a member of — see
+    _build_unified_sage_personal_reply_async's is_group docstring). The
+    model was then told "From: <name> (owner) · <channel> · direct
+    message" for what was actually a message in a shared group with other,
+    non-owner participants watching — indistinguishable, from the model's
+    point of view, from the owner privately DMing it. That framing is what
+    made the agent treat a group turn exactly like a private 1:1 command.
+    chat_label (the actual group/channel name, e.g. a Telegram supergroup's
+    title) is untrusted, attacker-influenceable text — sanitized/truncated
+    by the caller (see _sanitize_channel_label) before it ever reaches
+    here; only ever used for a human-readable label, never a trust
+    boundary.
     """
     name = str(display_name or "").strip() or "the workspace owner"
     label = str(channel_label or "").strip() or "this channel"
+    if is_group:
+        group_name = str(chat_label or "").strip()
+        where = f'the "{group_name}" group chat' if group_name else "a group chat"
+        return (
+            f"From: {name} (owner) · {label} · message posted in {where}, "
+            "visible to other participants who are NOT the workspace owner\n\n"
+            f"{raw_text}"
+        )
     return f"From: {name} (owner) · {label} · direct message\n\n{raw_text}"
 
 
@@ -208,6 +234,35 @@ def _sanitize_channel_label(value: Optional[str]) -> str:
     return text[:_CHANNEL_LABEL_MAX_CHARS].strip()
 
 
+def _personal_channel_guard_metadata(
+    *, remote_jid: str, is_group: bool, chat_label: Optional[str],
+) -> Dict[str, Any]:
+    """Metadata threaded into external_content_guard.wrap_external_content
+    for a non-owner personal-channel sender ("family group" bug fix, other
+    half). _owner_provenance_message's is_group/chat_label doc covers the
+    OWNER branch; this covers the EXTERNAL/non-owner branch, which needs
+    the same explicit "you are one of possibly many people in a shared
+    chat" signal — without it, a message that DOES pass the group gate
+    (mentioned or a reply to Sage) still reached the model with zero
+    indication it was a group message at all: Source/Sender/Channel lines
+    only, the same as an ordinary 1:1 stranger DM. Chat-Type/Group-Name are
+    deliberately Title-Cased (unlike "remote_jid") to render legibly
+    alongside wrap_external_content's own Source:/Sender:/Channel: lines —
+    external_content_guard._metadata_lines passes extra dict keys through
+    unchanged, no automatic case conversion. chat_label is untrusted,
+    attacker-influenceable text (any group member/admin can set a group's
+    name) — sanitized/truncated via _sanitize_channel_label before it
+    reaches the model, same as everywhere else chat_label is used.
+    """
+    metadata: Dict[str, Any] = {"remote_jid": str(remote_jid or "").strip()}
+    if is_group:
+        metadata["Chat-Type"] = "group"
+        group_name = _sanitize_channel_label(chat_label)
+        if group_name:
+            metadata["Group-Name"] = group_name
+    return metadata
+
+
 @contextmanager
 def _without_direct_chat_runtime_tools(runtime_exports: Any):
     saved = {
@@ -240,6 +295,8 @@ def _build_personal_reply(
     fallback_label: str,
     source_event_id: Optional[str] = None,
     is_owner: bool = False,
+    is_group: bool = False,
+    chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     normalized_text = str(text or "").strip()
     if not normalized_text:
@@ -252,18 +309,24 @@ def _build_personal_reply(
         # primary path) for the full rationale; this legacy no-tools
         # fallback needs the same fix so a silent-turn retry doesn't
         # re-wrap the owner's own message as untrusted external content.
+        # is_group/chat_label: same "family group" bug fix as the primary
+        # path — see _owner_provenance_message's docstring.
         turn_message = _owner_provenance_message(
             raw_text=normalized_text, display_name=push_name, channel_label=fallback_label,
+            is_group=is_group, chat_label=chat_label,
         )
     else:
         # EXTERNAL / non-owner / unknown sender — UNCHANGED prompt-injection
-        # boundary.
+        # boundary; metadata gained an explicit chat-type/group-name signal
+        # (see _personal_channel_guard_metadata's docstring).
         guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
             surface_channel=surface_channel,
             text=normalized_text,
             sender=push_name or remote_jid,
             source_event_id=source_event_id,
-            metadata={"remote_jid": str(remote_jid or "").strip()},
+            metadata=_personal_channel_guard_metadata(
+                remote_jid=remote_jid, is_group=is_group, chat_label=chat_label,
+            ),
         )
         turn_message = guarded.text
     runtime_context = channel_lane_contract_service.build_personal_gateway_runtime_context(
@@ -388,19 +451,28 @@ async def _build_unified_sage_personal_reply_async(
 
     if is_owner:
         # OWNER — clean provenance + full trust. No SECURITY NOTICE, no
-        # untrusted-content wrapper markers.
+        # untrusted-content wrapper markers. is_group/chat_label: "family
+        # group" bug fix — see _owner_provenance_message's docstring for
+        # why this can no longer say "direct message" unconditionally.
         turn_message = _owner_provenance_message(
             raw_text=raw_text, display_name=push_name, channel_label=fallback_label,
+            is_group=is_group, chat_label=chat_label,
         )
     else:
         # EXTERNAL / non-owner / unknown sender — this is the
-        # prompt-injection boundary. UNCHANGED from prior behavior.
+        # prompt-injection boundary. The SECURITY NOTICE/wrapper itself is
+        # UNCHANGED from prior behavior; the metadata now carries an
+        # explicit chat-type/group-name signal in a group turn (see
+        # _personal_channel_guard_metadata's docstring) — same "family
+        # group" bug fix, other branch.
         guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
             surface_channel=surface_channel,
             text=raw_text,
             sender=push_name or remote_jid,
             source_event_id=source_event_id,
-            metadata={"remote_jid": str(remote_jid or "").strip()},
+            metadata=_personal_channel_guard_metadata(
+                remote_jid=remote_jid, is_group=is_group, chat_label=chat_label,
+            ),
         )
         turn_message = guarded.text
     if not str(turn_message or "").strip():
@@ -872,6 +944,8 @@ def build_whatsapp_personal_reply(
         fallback_label="WhatsApp",
         source_event_id=source_event_id,
         is_owner=is_owner,
+        is_group=is_group,
+        chat_label=chat_label,
     )
 
 
@@ -918,4 +992,6 @@ def build_telegram_personal_reply(
         fallback_label="Telegram",
         source_event_id=source_event_id,
         is_owner=is_owner,
+        is_group=is_group,
+        chat_label=chat_label,
     )

@@ -464,6 +464,191 @@ export const SELF_CHAT_BREAKER_WINDOW_MS = 60_000;
  *  why. */
 export const SELF_CHAT_BREAKER_MAX_TURNS = 6;
 
+/**
+ * True when `rawMessage` contains an EXPLICIT mention of `self` (the
+ * connected account): an @username entity whose text matches
+ * self.username, or a text-mention entity carrying self.userId directly.
+ *
+ * Deliberately NOT Telegram's own raw `mentioned` bit
+ * (rawMessage.mentioned) — the getAdapter() NewMessage handler used to read
+ * that directly, and it is a broader signal than it looks. Per MTProto,
+ * Message.mentioned is true for an explicit @mention OR for a plain reply
+ * to a message the peer (here: the connected account) sent — see
+ * node_modules/telegram/tl/api.d.ts's Message.mentioned. For a full-account
+ * session that peer is the human OWNER, not the agent: there is no separate
+ * bot identity Telegram could flag as "mentioned". In an active group where
+ * the owner is a normal, chatty participant, replies to the owner's own
+ * messages happen constantly for reasons that have nothing to do with
+ * anyone wanting the agent's attention — this was THE root cause of the
+ * "family group" bug (the agent answering every message in a 20-person
+ * family group as though each one were addressed to it): most of those
+ * messages were plain replies to something the owner, a real family
+ * member, had said earlier, which set Telegram's `mentioned` bit exactly
+ * as designed — for the human, not the assistant.
+ *
+ * Mirrors WhatsApp's message-mapper.ts, which never reads a platform-wide
+ * "mentioned" flag either — it scans contextInfo.mentionedJid for the
+ * owner's own jid explicitly. A reply to a message SAGE ITSELF sent remains
+ * a separate, correct trigger via is_reply_to_sage/sentMessageIds
+ * (resolved in handleInboundMessage) — this function only narrows what
+ * counts as an explicit @mention, it does not touch reply-to-Sage at all.
+ */
+export function hasExplicitTelegramMention(
+  rawMessage: { message?: unknown; entities?: unknown } | undefined,
+  self: { userId?: string; username?: string },
+): boolean {
+  const entities = Array.isArray(rawMessage?.entities)
+    ? (rawMessage!.entities as Array<Record<string, unknown>>)
+    : [];
+  if (entities.length === 0) {
+    return false;
+  }
+  const selfUserId = String(self.userId || "").trim();
+  const selfUsername = String(self.username || "").trim().toLowerCase();
+  if (!selfUserId && !selfUsername) {
+    return false;
+  }
+  // Sliced from the RAW (untrimmed) message text — entity offsets are
+  // computed by Telegram against the original string; slicing the
+  // caller's already-trimmed `text` would shift offsets whenever the
+  // message has leading whitespace.
+  const fullText = String(rawMessage?.message ?? "");
+  for (const entity of entities) {
+    const className = String((entity as { className?: unknown })?.className || "");
+    if (className === "MessageEntityMentionName") {
+      // Text-mention entity: carries the mentioned user's id directly, no
+      // @username text involved (e.g. tapped from Telegram's mention picker).
+      const userId = String((entity as { userId?: unknown })?.userId ?? "").trim();
+      if (selfUserId && userId === selfUserId) {
+        return true;
+      }
+      continue;
+    }
+    if (className === "MessageEntityMention" && selfUsername) {
+      // Plain @username entity: only an offset/length into the text, so
+      // the actual "@username" substring must be sliced out and compared.
+      const offset = Number((entity as { offset?: unknown })?.offset) || 0;
+      const length = Number((entity as { length?: unknown })?.length) || 0;
+      const slice = fullText
+        .slice(offset, offset + length)
+        .trim()
+        .replace(/^@/, "")
+        .toLowerCase();
+      if (slice === selfUsername) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Pure computation of every signal the NewMessage event handler (in
+ * getAdapter()'s `connect`) derives from an already-resolved GramJS
+ * chat/sender/rawMessage triple plus the connected account's own identity.
+ * Split out from that handler specifically so this mapping is
+ * unit-testable against synthetic GramJS-shaped fixtures (see
+ * telegram-inbound-mapping.test.ts) WITHOUT a real TelegramClient/network
+ * connection — before this split, EVERY existing Telegram gateway test
+ * exercised the group/mention GATE (handleInboundMessage) with is_group/
+ * is_mentioned already resolved and handed in as test fixtures; none of
+ * them ever drove a real-shaped GramJS event through the code that
+ * actually COMPUTES those booleans in production. That untested seam is
+ * exactly where the "family group" bug lived (see
+ * hasExplicitTelegramMention's doc).
+ *
+ * The event handler itself still owns the two actual network/cache calls
+ * (event.getChat()/event.getSender()) and the media-download side effect;
+ * everything derivable from their results lives here instead.
+ *
+ * Field notes:
+ *  - isGroup: `!isPrivate`. `isPrivate` (GramJS's ChatGetter.isPrivate
+ *    getter, node_modules/telegram/tl/custom/chatGetter.js) is a
+ *    synchronous, cache-independent check of the message's own peer type:
+ *    true only for Api.PeerUser (a DM or self-chat/Saved Messages — both
+ *    are "you and one other PeerUser"). A group (Api.PeerChat) or
+ *    supergroup/channel (Api.PeerChannel) peer is never PeerUser, so
+ *    `!isPrivate` is true for both — this is a DIFFERENT, and safer,
+ *    computation than ChatGetter's own separate `isGroup` getter, which
+ *    additionally tries to distinguish a supergroup from a broadcast
+ *    channel via the chat entity's `broadcast` flag and can return
+ *    `undefined` (neither true nor false) when that entity isn't yet
+ *    resolved/cached — exactly the failure mode that left a family group
+ *    ungated in the (separate, unused-in-prod) Cloud Session Manager
+ *    reimplementation of this same handler
+ *    (cloud-session-manager/src/telegram/client-factory.js), which reads
+ *    `message.isGroup` (the cache-dependent getter) instead. `!isPrivate`
+ *    never has that ambiguous case — it errs toward treating "unknown
+ *    chat type" as a group, the same fail-closed posture WhatsApp/local
+ *    bridges use for their own is_group.
+ *  - isMentioned: hasExplicitTelegramMention() against `self` — see that
+ *    function's doc for why this replaced a raw `rawMessage.mentioned`
+ *    read.
+ *  - isSelfChat: true only for Telegram's own "Saved Messages" — isPrivate
+ *    alone can't distinguish that from an ordinary 1:1 DM (both are
+ *    PeerUser peers); `chat.self` is Telegram's own flag, set server-side
+ *    on exactly one User entity: the currently authenticated account's
+ *    own (node_modules/telegram/tl/api.d.ts's User.self). A group/channel
+ *    chat entity has no `.self` field at all, so this is false for every
+ *    group message unconditionally.
+ *  - replyToExternalMessageId: the id of the message being replied to, if
+ *    any — handleInboundMessage compares it against sentMessageIds to
+ *    resolve is_reply_to_sage (a SEPARATE, still-correct "addressed"
+ *    signal: a reply to a message SAGE ITSELF sent, not covered by
+ *    isMentioned at all).
+ *  - chatTitle: the group/channel's title, when GramJS resolved one on the
+ *    same already-fetched chat entity (a private chat's entity is a User
+ *    with no .title; a group/supergroup/channel's is a Chat/Channel, which
+ *    has one) — no extra network call, unlike WhatsApp's groupMetadata
+ *    lookup.
+ */
+export function deriveTelegramInboundFields(params: {
+  isPrivate: boolean | undefined;
+  chat: { username?: unknown; id?: unknown; title?: unknown; self?: unknown } | undefined;
+  sender: { username?: unknown; id?: unknown; firstName?: unknown; lastName?: unknown } | undefined;
+  rawMessage:
+    | {
+        message?: unknown;
+        entities?: unknown;
+        mentioned?: unknown;
+        replyTo?: { replyToMsgId?: unknown } | undefined;
+        peerId?: { channelId?: unknown; chatId?: unknown; userId?: unknown } | undefined;
+      }
+    | undefined;
+  self: { userId?: string; username?: string };
+}): {
+  remoteJid: string;
+  senderJid: string | undefined;
+  pushName: string | undefined;
+  isGroup: boolean;
+  isSelfChat: boolean;
+  isMentioned: boolean;
+  replyToExternalMessageId: string | undefined;
+  chatTitle: string | undefined;
+} {
+  const { chat, sender, rawMessage, self } = params;
+  const remoteJid = String(
+    chat?.username
+    ?? chat?.id
+    ?? rawMessage?.peerId?.channelId
+    ?? rawMessage?.peerId?.chatId
+    ?? rawMessage?.peerId?.userId
+    ?? "",
+  ).trim();
+  const senderJid = String(sender?.username ?? sender?.id ?? remoteJid).trim() || undefined;
+  const pushName = (
+    [sender?.firstName, sender?.lastName].filter(Boolean).join(" ").trim()
+    || String(sender?.username ?? chat?.title ?? "").trim()
+    || undefined
+  );
+  const isGroup = !params.isPrivate;
+  const isSelfChat = Boolean(params.isPrivate) && Boolean(chat?.self);
+  const isMentioned = hasExplicitTelegramMention(rawMessage, self);
+  const replyToExternalMessageId = String(rawMessage?.replyTo?.replyToMsgId ?? "").trim() || undefined;
+  const chatTitle = String(chat?.title ?? "").trim() || undefined;
+  return { remoteJid, senderJid, pushName, isGroup, isSelfChat, isMentioned, replyToExternalMessageId, chatTitle };
+}
+
 export class TelegramPersonalRuntime {
   private readonly configStore: PersonalChannelConfigStore;
   private readonly sessionStore: TelegramSessionStore;
@@ -495,21 +680,51 @@ export class TelegramPersonalRuntime {
     { typing: TelegramTypingKeepalive; startedAt: number; client: TelegramAdapterClient }
   >();
   /**
-   * External message IDs this runtime has sent — EVERY chunk of a
-   * multi-part text reply and every media item, not just the "primary" one
-   * returned to the caller (see sendFinalOutbound). Used to resolve
-   * is_reply_to_sage (someone replying to a message Sage sent counts as
-   * "addressed" in a group, same as an explicit @mention) — mirrors
-   * WhatsApp runtime.ts's identically-named/purposed field exactly — AND,
-   * since GramJS's own outgoing sends now flow back through
-   * handleInboundMessage (see the NewMessage subscription comment in
-   * getAdapter()), reused as the primary self-chat loop-guard signal: an
-   * inbound self-chat event whose external_message_id is already in this
-   * set is unambiguously our own reply resurfacing, not a new owner
-   * command (see isOwnSelfChatEcho). Capped so a long-lived connection
-   * can't grow this unboundedly.
+   * External message IDs this runtime has sent, keyed by the remoteJid
+   * (chat) each id was sent INTO — EVERY chunk of a multi-part text reply
+   * and every media item, not just the "primary" one returned to the
+   * caller (see sendFinalOutbound). Used to resolve is_reply_to_sage
+   * (someone replying to a message Sage sent counts as "addressed" in a
+   * group, same as an explicit @mention) — mirrors WhatsApp runtime.ts's
+   * identically-named/purposed field in spirit — AND, since GramJS's own
+   * outgoing sends now flow back through handleInboundMessage (see the
+   * NewMessage subscription comment in getAdapter()), reused as the
+   * primary self-chat loop-guard signal: an inbound self-chat event whose
+   * external_message_id is already in this chat's set is unambiguously our
+   * own reply resurfacing, not a new owner command (see
+   * isOwnSelfChatEcho). Capped PER CHAT (not globally) so a long-lived
+   * connection can't grow this unboundedly.
+   *
+   * Per-chat, deliberately NOT a single flat Set (that was the prior
+   * shape, and the bug): Telegram message ids are small integers scoped to
+   * EACH chat's own independent sequence, not globally unique across
+   * chats. A single flat set of "every id Sage has ever sent, anywhere"
+   * inevitably collides with unrelated ids in a completely different,
+   * unrelated chat's own numbering — e.g. self-chat's send #42 and some
+   * busy family group's real message #42 are different messages that
+   * happen to share a number. That collision let a family member's reply
+   * to an ORDINARY message in their group (never anything Sage sent)
+   * incorrectly resolve is_reply_to_sage=true purely because the reply's
+   * target id happened to numerically match something Sage had sent
+   * elsewhere — part of the "family group" bug's root cause alongside
+   * hasExplicitTelegramMention's fix above.
    */
-  private sentMessageIds = new Set<string>();
+  private sentMessageIds = new Map<string, Set<string>>();
+
+  /** Records `id` as sent by this runtime into `remoteJid`, capping that
+   *  chat's own set at 500 entries — see sentMessageIds's field doc for
+   *  why this is per-chat, not a single shared cap. */
+  private rememberSentMessageId(remoteJid: string, id: string): void {
+    let ids = this.sentMessageIds.get(remoteJid);
+    if (!ids) {
+      ids = new Set<string>();
+      this.sentMessageIds.set(remoteJid, ids);
+    }
+    ids.add(id);
+    if (ids.size > 500) {
+      ids.clear();
+    }
+  }
   /**
    * The connected account's own identity, captured once at connect time
    * (see connectClientInternal) — lets sendFinalOutbound recognize "this
@@ -879,12 +1094,11 @@ export class TelegramPersonalRuntime {
       // gate (is_reply_to_sage) AND the self-chat loop guard's primary,
       // durable check (isOwnSelfChatEcho) — mirrors WhatsApp runtime.ts's
       // sendFinalOutbound, extended to cover every chunk/media item rather
-      // than only mapped's single "primary" id.
+      // than only mapped's single "primary" id. Recorded against THIS
+      // send's own remoteJid — see sentMessageIds's field doc for why a
+      // per-chat Map replaced a single flat Set here.
       for (const id of sentIds) {
-        this.sentMessageIds.add(id);
-      }
-      if (this.sentMessageIds.size > 500) {
-        this.sentMessageIds.clear();
+        this.rememberSentMessageId(remoteJid, id);
       }
       return mapped;
     } finally {
@@ -1148,10 +1362,14 @@ export class TelegramPersonalRuntime {
         return;
       }
     }
-    // Resolve is_reply_to_sage: the replied-to message was sent by Sage —
-    // mirrors WhatsApp runtime.ts's handleMessagesUpsert exactly.
+    // Resolve is_reply_to_sage: the replied-to message was sent by Sage
+    // INTO THIS SAME CHAT — mirrors WhatsApp runtime.ts's
+    // handleMessagesUpsert in spirit, scoped per-chat here (see
+    // sentMessageIds's field doc for why a global check was wrong).
     if (mapped.message.is_group && mapped.message.quoted_stanza_id) {
-      mapped.message.is_reply_to_sage = this.sentMessageIds.has(String(mapped.message.quoted_stanza_id));
+      mapped.message.is_reply_to_sage = Boolean(
+        this.sentMessageIds.get(mapped.message.remote_jid)?.has(String(mapped.message.quoted_stanza_id)),
+      );
     }
     // Group gate: skip group messages unless mentioned or replying to Sage.
     if (mapped.message.is_group && !mapped.message.is_mentioned && !mapped.message.is_reply_to_sage) {
@@ -1226,11 +1444,11 @@ export class TelegramPersonalRuntime {
    */
   private isOwnSelfChatEcho(message: { external_message_id: string; remote_jid: string; text: string }): boolean {
     const externalId = String(message.external_message_id || "").trim();
-    if (externalId && this.sentMessageIds.has(externalId)) {
+    const remoteJid = String(message.remote_jid || "").trim();
+    if (externalId && this.sentMessageIds.get(remoteJid)?.has(externalId)) {
       return true;
     }
     const text = String(message.text || "").trim();
-    const remoteJid = String(message.remote_jid || "").trim();
     const now = Date.now();
     let matched = false;
     for (let i = this.pendingSelfChatSends.length - 1; i >= 0; i -= 1) {
@@ -1529,6 +1747,19 @@ export class TelegramPersonalRuntime {
           });
         }
 
+        // Fetched BEFORE the event handler is registered (moved up from
+        // right before this function's `return` below, where it used to
+        // run AFTER addEventHandler) so the handler's closure can resolve
+        // hasExplicitTelegramMention() against the connected account's OWN
+        // id/username for every inbound event, including the very first
+        // one — see that function's doc for why this replaced the raw
+        // rawMessage.mentioned flag.
+        const me = await client.getMe();
+        const selfIdentityForMentions = {
+          userId: String(me?.id ?? "").trim() || undefined,
+          username: String(me?.username ?? "").trim() || undefined,
+        };
+
         let messageHandler: (message: TelegramInboundMessage) => void | Promise<void> = () => undefined;
         client.addEventHandler(
           async (event: any) => {
@@ -1548,76 +1779,24 @@ export class TelegramPersonalRuntime {
             }
             const chat = typeof event?.getChat === "function" ? await event.getChat() : undefined;
             const sender = typeof event?.getSender === "function" ? await event.getSender() : undefined;
-            const remoteJid = String(
-              chat?.username
-              ?? chat?.id
-              ?? rawMessage?.peerId?.channelId
-              ?? rawMessage?.peerId?.chatId
-              ?? rawMessage?.peerId?.userId
-              ?? "",
-            ).trim();
+            // Every derived signal (remoteJid/senderJid/pushName/isGroup/
+            // isSelfChat/isMentioned/replyToExternalMessageId/chatTitle) is
+            // computed by deriveTelegramInboundFields — see that function's
+            // doc for the full per-field rationale (in particular why
+            // isGroup uses `!isPrivate` and isMentioned uses
+            // hasExplicitTelegramMention rather than the raw
+            // rawMessage.mentioned bit).
+            const derived = deriveTelegramInboundFields({
+              isPrivate: event?.isPrivate,
+              chat,
+              sender,
+              rawMessage,
+              self: selfIdentityForMentions,
+            });
+            const { remoteJid, senderJid, pushName, isGroup, isSelfChat, isMentioned, replyToExternalMessageId, chatTitle } = derived;
             if (!remoteJid) {
               return;
             }
-            const senderJid = String(sender?.username ?? sender?.id ?? remoteJid).trim() || undefined;
-            const pushName = (
-              [sender?.firstName, sender?.lastName].filter(Boolean).join(" ").trim()
-              || String(sender?.username ?? chat?.title ?? "").trim()
-              || undefined
-            );
-            // Group/mention/reply detection — all three are server-computed
-            // GramJS/MTProto signals, not locally re-derived:
-            //  - isPrivate is a synchronous getter for PeerUser peers (DMs
-            //    AND self-chat/Saved Messages, both peerId === your own
-            //    user) and, for PeerChannel peers (supergroup vs broadcast
-            //    channel), depends on the chat entity's own `broadcast` flag
-            //    — which the getChat() call above already resolved, so
-            //    reading it here (not before) gives a real answer instead of
-            //    the getter's "undefined" ambiguous case. !isPrivate errs
-            //    toward treating "unknown chat type" as a group (safer
-            //    default — see message-mapper.ts's TelegramInboundMessage
-            //    doc: this is the same fail-closed posture WhatsApp/local
-            //    bridges use). This is the SINGLE source of truth for
-            //    is_group (also used by chat_title below) — a chat-entity-
-            //    derived signal (e.g. "has a resolved title") is a strictly
-            //    weaker proxy for the same fact and is not used here to
-            //    avoid the two ever disagreeing.
-            //  - rawMessage.mentioned is Telegram's own "you were addressed"
-            //    bit (true for an explicit @mention AND for a reply to a
-            //    message you sent) — a genuine MTProto flag, not text
-            //    parsing. is_reply_to_sage is ALSO independently resolved
-            //    below (sentMessageIds) for parity with WhatsApp's
-            //    contract; the two signals are OR'd by the gate either way.
-            //  - replyTo.replyToMsgId is the id of the message being
-            //    replied to, if any — handleInboundMessage compares it
-            //    against sentMessageIds to resolve is_reply_to_sage.
-            //  - isSelfChat: true when this is Telegram's "Saved Messages"
-            //    (the owner messaging themselves — the exact analog of
-            //    WhatsApp's is_self_chat command channel). isPrivate alone
-            //    can't tell self-chat apart from an ordinary 1:1 DM (both
-            //    are PeerUser peers); `chat.self` is Telegram's own flag,
-            //    set server-side on exactly one User entity: the currently
-            //    authenticated account's own (see
-            //    node_modules/telegram/tl/api.d.ts's User.self and
-            //    _handleRPCResult/_handleUpdate in
-            //    node_modules/telegram/network/mtprotoSender.js — this
-            //    reads the SAME already-fetched chat entity as chatTitle
-            //    below, no extra network call). A group/channel's chat
-            //    entity has no `.self` field at all, so this is false for
-            //    every group message unconditionally.
-            const isGroup = !event?.isPrivate;
-            const isSelfChat = Boolean(event?.isPrivate) && Boolean((chat as { self?: boolean } | undefined)?.self);
-            const isMentioned = Boolean(rawMessage?.mentioned);
-            const replyToExternalMessageId = String(rawMessage?.replyTo?.replyToMsgId ?? "").trim() || undefined;
-            // The group/channel's title, when GramJS resolved one on the
-            // same already-fetched chat entity (a private chat's entity is
-            // a User with no .title; a group/supergroup/channel's is a
-            // Chat/Channel, which has one) — no extra network call, unlike
-            // WhatsApp's groupMetadata lookup. Threaded through to the
-            // server as chat_title (see message-mapper.ts) so the
-            // owner-unified memory routing's activity-feed labeling works
-            // for Telegram groups the same way it does for WhatsApp.
-            const chatTitle = String(chat?.title ?? "").trim() || undefined;
             let media: TelegramInboundMediaItem[] | undefined;
             if (classification) {
               // Never let a download/disk-write failure sink the whole
@@ -1674,7 +1853,9 @@ export class TelegramPersonalRuntime {
           // not at subscription time.
           NewMessage ? new NewMessage({}) : undefined,
         );
-        const me = await client.getMe();
+        // `me` was already fetched above (before addEventHandler) so the
+        // handler's closure could see selfIdentityForMentions from its very
+        // first event — reused here rather than re-fetched.
         const account: TelegramLinkedAccount = {
           userId: String(me?.id ?? "").trim() || undefined,
           username: String(me?.username ?? "").trim() || undefined,

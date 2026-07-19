@@ -533,4 +533,80 @@ KEY ARCHITECTURAL INSIGHTS
 3. Session-Centric: Everything revolves around sessions. A session binds a conversation to a channel, stores model preference, history, usage stats, and task state.
 4. Gateway as Central Hub: The gateway process runs an HTTP+WS server that serves the control UI, proxies agent commands, manages cron, broadcasts events, and routes node connections.
 5. Agent-Channel Model: Agents are independent identities bound to channels. One agent can serve multiple channels. Channels can have multiple accounts.
+
+---
+GROUP/MENTION GATING — researched 2026-07-19 while root-causing Empyralis's
+"family group" bug (the agent answering every message in a 20-person
+Telegram group as though the owner had asked). Source:
+/opt/homebrew/lib/node_modules/openclaw/ (package.json version 2026.6.10 —
+verified via package.json, not assumed; newer install than the
+STEP-numbered sections above, whose file inventory was captured at
+v2026.5.27 — chunk hashes differ between installs, e.g. the Telegram
+message-context file is now bot-message-context.runtime-CU08Ix_N.js, not
+bot-Cg3cHBMq.js:6854).
+
+The core mechanism lives in dist/mention-gating-3P8aSD7o.js
+(src/channels/mention-gating.ts). `resolveInboundMentionDecision({facts,
+policy})` decides `shouldSkip` from:
+  facts:  canDetectMention, wasMentioned, hasAnyMention, implicitMentionKinds
+  policy: isGroup, requireMention, allowedImplicitMentionKinds,
+          allowTextCommands, hasControlCommand, commandAuthorized
+  shouldSkip = policy.requireMention && facts.canDetectMention && !effectiveWasMentioned
+  effectiveWasMentioned = facts.wasMentioned || implicitMention || shouldBypassMention
+
+Two things this buys OpenClaw that Empyralis's Telegram gateway (pre-fix)
+didn't have:
+
+1. `wasMentioned` is a FACT the channel plugin computes, not read from a
+   platform-wide "you were addressed" flag. For Telegram specifically,
+   OpenClaw's channel is bot-API-based — CONFIRMED via
+   package.json's own dependencies, not inferred from naming: `"grammy":
+   "1.43.0"` plus `@grammyjs/runner`/`@grammyjs/transformer-throttler`/
+   `@grammyjs/types` (grammY, the standard Telegram Bot API framework —
+   bot-token auth, not a user-session library like GramJS/Telethon). There
+   is no full-account/user-session Telegram mode: the one
+   telegram-account-flavored export
+   (dist/plugin-sdk/telegram-account.d.ts, itself marked `@deprecated`)
+   turns out to just be bot-TOKEN resolution across multiple configured
+   bot accounts (`ResolvedTelegramAccount.token`/`tokenSource: "env" |
+   "tokenFile" | "config" | "none"`), not a GramJS-style login. The bot
+   has its OWN identity (@BotUsername), distinct from any human account.
+   Telegram's own mention/reply semantics for a bot's messages are
+   inherently about THAT bot, never conflated with a human owner being
+   mentioned or replied to. Empyralis's Telegram
+   channel, by contrast, is a full-account GramJS session (the owner's own
+   personal Telegram, not a bot) — there is no separate "agent identity"
+   for Telegram to flag as mentioned, so reading the raw MTProto
+   `message.mentioned` bit (true for an explicit @mention OR a reply to a
+   message the account sent) meant "someone replied to the OWNER, a real
+   human participant in the group" registered as "the agent was addressed."
+   That conflation was the actual root cause (see
+   empyralis-gateway/src/channels/telegram/runtime.ts's
+   hasExplicitTelegramMention, fixed 2026-07-19: explicit @mention/text-
+   mention ENTITIES only, never the raw platform flag).
+
+2. `policy.isGroup`/`requireMention`/`allowedImplicitMentionKinds` are
+   explicit, per-provider-configurable policy inputs, not a single
+   hardcoded OR of two signals. dist/runtime-group-policy-BEjP88cf.js
+   additionally resolves a channel-level `groupPolicy: "open" | "allowlist"
+   | "disabled"` with distinct configured-vs-missing-provider fallbacks
+   (`resolveOpenProviderRuntimeGroupPolicy` defaults configured-but-silent
+   providers to "open", missing-config providers to "allowlist" — fail
+   CLOSED when nothing is configured at all). This is a SEPARATE axis from
+   mention detection: even in an "open" group, a sender still needs to
+   satisfy the mention/implicit-mention facts above to avoid `shouldSkip`.
+   Empyralis's personal-channel group gate has no equivalent
+   allowlist/open/disabled axis — every group is implicitly "open," gated
+   purely by mention/reply-to-Sage.
+
+Also relevant: this doc's own STEP 2 pipeline notes (above)
+already show `ChatType — "direct" or "group"` as a normalized field on
+every inbound ctxPayload, and the ingress resolver
+(createTelegramIngressResolver(...).event(...)) is handed `groupPolicy`/
+`groupAllowFrom` explicitly per call — group-vs-direct and
+sender-authorization are first-class, named inputs to ingress, not
+derived ad hoc inside a channel-specific handler the way Empyralis's
+Telegram/WhatsApp gateway runtimes each independently reimplement their
+own group gate today (real code duplication — see runtime.ts in both
+channels/telegram and channels/whatsapp).
 6. No Regex/KW Matching: Tool selection is 100% LLM-driven via function calling. There's no fallback regex or keyword-based tool dispatch.

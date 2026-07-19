@@ -222,8 +222,8 @@ test("LOOP GUARD: the agent's own reply into self-chat does NOT re-trigger a new
     const sentId = String(dispatchResult.external_message_id || "");
     assert.ok(sentId, "test precondition: the reply must have produced an external id");
     assert.ok(
-      (runtime as any).sentMessageIds.has(sentId),
-      "test precondition: the send must be tracked in sentMessageIds",
+      (runtime as any).sentMessageIds.get(SELF_CHAT_JID)?.has(sentId),
+      "test precondition: the send must be tracked in sentMessageIds under its own chat",
     );
     assert.equal(
       (runtime as any).activeTyping.size,
@@ -440,18 +440,22 @@ test("sendFinalOutbound records EVERY chunk's external id in sentMessageIds, not
     // > TELEGRAM_MESSAGE_LIMIT (4096) with no spaces forces a hard-cut split
     // into more than one chunk (see message-chunker.ts's splitLongLine).
     const longText = "a".repeat(5000);
-    const sizeBefore = (runtime as any).sentMessageIds.size;
+    const remoteJid = "444555666";
+    // sentMessageIds is now a Map<remoteJid, Set<id>> (per-chat) — this
+    // chat has no entries yet in a fresh runtime, so "before" is 0.
+    const sizeBefore = (runtime as any).sentMessageIds.get(remoteJid)?.size ?? 0;
     await (runtime as any).handleChannelOutbound({
       payload: {
         channel_key: TELEGRAM_PERSONAL_CHANNEL_KEY,
         provider: TELEGRAM_PERSONAL_PROVIDER,
         operation: "send_final",
         idempotency_key: "idem-chunked-1",
-        remote_jid: "444555666",
+        remote_jid: remoteJid,
         text: longText,
       },
     });
-    const added = (runtime as any).sentMessageIds.size - sizeBefore;
+    const sizeAfter = (runtime as any).sentMessageIds.get(remoteJid)?.size ?? 0;
+    const added = sizeAfter - sizeBefore;
     assert.ok(added >= 2, `expected at least 2 chunk ids to be tracked, got ${added}`);
   });
 });

@@ -135,7 +135,10 @@ test("Telegram group gate: replying to a message Sage sent is admitted and publi
         text: "dinner's at 7",
       },
     });
-    assert.ok((runtime as any).sentMessageIds.has("out-1"), "test precondition: the send above must have been tracked");
+    assert.ok(
+      (runtime as any).sentMessageIds.get("-100555")?.has("out-1"),
+      "test precondition: the send above must have been tracked under its own chat",
+    );
 
     await (runtime as any).handleInboundMessage({
       externalMessageId: "in-group-3",
