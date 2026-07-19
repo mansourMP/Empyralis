@@ -6,8 +6,10 @@
    (chrome.css) read these variables instead of defining their own colors.
 
    The palette is a near-neutral grayscale with a single reserved accent —
-   a reserved violet/purple (--accent, one base OKLCH value with derived
-   hover/strong/soft/muted/ring steps) — and the --brand-clay mark exception.
+   strict monochrome (--accent, one base OKLCH value with derived
+   hover/strong/soft/muted/ring steps; zero chroma — near-black in the light
+   theme, near-white in the dark theme, never a hue) — and the --brand-clay
+   mark exception.
    The accent appears almost never: reserved for the primary action button
    and focus rings — not nav items, not backgrounds. No accent fills on
    badges, chips, toggles, list rows, or hover states — those are neutral
@@ -92,13 +94,15 @@ html[data-theme="dark"] {
   --text-secondary: #c9ced6;
   --text-muted: #71717a;
 
-  /* Accent — a reserved violet/purple. One base OKLCH value; every derived
-     step follows it, so re-tuning the whole ramp means changing a single
-     value. */
-  --accent: oklch(57% 0.155 305);  /* violet/purple accent */
-  --accent-hover: color-mix(in oklch, var(--accent) 84%, #ffffff 16%);
-  --accent-strong: color-mix(in oklch, var(--accent) 78%, #ffffff 22%);
-  --accent-contrast: #ffffff;
+  /* Accent — strict monochrome, zero chroma. One base OKLCH value; every
+     derived step follows it, so re-tuning the whole ramp means changing a
+     single value. Dark theme: near-white, so the key action button and
+     focus ring read as bright neutral against the dark surfaces — never a
+     hue. */
+  --accent: oklch(96% 0 0);  /* near-white monochrome accent (dark theme) */
+  --accent-hover: color-mix(in oklch, var(--accent) 88%, #000000 12%);
+  --accent-strong: color-mix(in oklch, var(--accent) 76%, #000000 24%);
+  --accent-contrast: #0d0d0f;  /* near-black text/icon on the near-white accent surface */
   --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent);
   --accent-muted: color-mix(in oklch, var(--accent) 24%, transparent);
   --accent-ring: color-mix(in oklch, var(--accent) 55%, transparent);
@@ -154,12 +158,13 @@ html[data-theme="light"] {
   --text-secondary: #52525b;
   --text-muted: #a1a1aa;
 
-  /* Accent — same violet/purple, tuned to darken (not lighten) on hover so it
-     stays legible against light surfaces. */
-  --accent: oklch(57% 0.155 305);  /* violet/purple accent */
+  /* Accent — same strict monochrome, zero chroma. Light theme: near-black,
+     darkened further (not lightened) on hover so it stays legible against
+     light surfaces. */
+  --accent: oklch(20% 0 0);  /* near-black monochrome accent (light theme) */
   --accent-hover: color-mix(in oklch, var(--accent) 86%, #000000 14%);
-  --accent-strong: color-mix(in oklch, var(--accent) 80%, #000000 20%);
-  --accent-contrast: #ffffff;
+  --accent-strong: color-mix(in oklch, var(--accent) 78%, #000000 22%);
+  --accent-contrast: #ffffff;  /* white text/icon on the near-black accent surface */
   --accent-soft: color-mix(in oklch, var(--accent) 10%, transparent);
   --accent-muted: color-mix(in oklch, var(--accent) 18%, transparent);
   --accent-ring: color-mix(in oklch, var(--accent) 42%, transparent);
