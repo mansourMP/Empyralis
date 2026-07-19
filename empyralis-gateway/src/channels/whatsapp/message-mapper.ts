@@ -151,7 +151,26 @@ export function mapWhatsAppInboundMessage(
   if (!externalMessageId || !remoteJid || (!text && !media)) {
     return null;
   }
-  // Group detection: Baileys group JIDs end with "@g.us"
+  // FIX (group-gate bypass): WhatsApp Status updates ("status@broadcast",
+  // the one fixed JID for every status/story) and Channels/newsletters
+  // (JIDs ending "@newsletter") are one-to-many broadcasts, not
+  // conversations -- there is no real person on the other end of
+  // remoteJid to reply to. Neither ends in "@g.us", so without this check
+  // they fell through every group branch below with is_group=false and
+  // is_self_chat=false and were processed exactly like an ungated 1:1 DM,
+  // auto-replying into a status feed or a channel that has no "reply to
+  // the bot" semantics at all. Hard-dropped here, before any
+  // classification, so nothing downstream (the self-chat loop guard, the
+  // group gate, the debouncer) ever sees them.
+  if (remoteJid === "status@broadcast" || remoteJid.endsWith("@newsletter")) {
+    return null;
+  }
+  // Group detection: Baileys group JIDs end with "@g.us". This also
+  // correctly covers WhatsApp Community/announcement groups -- Baileys
+  // represents a Community's own announcement group as an ordinary
+  // "@g.us" JID (just with announce/isCommunity metadata attached), so it
+  // is not a distinct suffix to special-case here; it keeps the same group
+  // gate as any other group via this same check.
   const isGroup = remoteJid.endsWith("@g.us");
 
   // Mention and reply detection from extendedTextMessage contextInfo
