@@ -47,7 +47,7 @@ class BillingServiceTests(unittest.TestCase):
         self.assertTrue(summary["limits"]["hosted_ai_enabled"])
         self.assertEqual(summary["usage"]["specialists_in_use"], 0)
         self.assertEqual(summary["hosted_sage_ai"]["policy"], "enabled_with_cap")
-        self.assertEqual(summary["hosted_sage_ai"]["monthly_cap_usd"], 0.5)
+        self.assertEqual(summary["hosted_sage_ai"]["monthly_cap_usd"], 5.0)
         self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], 10000)
         self.assertTrue(summary["hosted_sage_ai"]["allowed"])
         self.assertEqual(summary["hosted_sage_ai"]["reason"], None)
@@ -228,7 +228,7 @@ class BillingServiceTests(unittest.TestCase):
 
         self.assertEqual(payload["purchase_kind"], "credits")
         self.assertEqual(payload["amount_usd"], 10.0)
-        self.assertEqual(payload["credits"], 200000)
+        self.assertEqual(payload["credits"], 20000)
         self.assertEqual(payload["checkout_session_id"], "cs_credit_123")
         self.assertEqual(request_args[0], "/checkout/sessions")
         self.assertEqual(request_args[1]["mode"], "payment")
@@ -426,7 +426,7 @@ class BillingServiceTests(unittest.TestCase):
         self.assertEqual(history["hosted_sage_ai"]["total_available_credits"], 28400)
         self.assertEqual(history["items"][0]["label"], "Hello")
         self.assertEqual(history["items"][0]["thread_id"], "thread_alpha")
-        self.assertEqual(history["items"][0]["credits"], -2800)
+        self.assertEqual(history["items"][0]["credits"], -280)
         self.assertEqual(history["items"][1]["credits"], 20000)
 
     def test_unified_credit_usage_merges_ai_and_runtime_ledger_rows(self):

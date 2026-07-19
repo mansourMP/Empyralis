@@ -5181,6 +5181,55 @@ async def handle_sage_chat(
             run_id=trace_id or None,
             mode=_sage_usage_mode,
         )
+
+        # ── Credit-system reconnect (2026-07-20) ──────────────────────
+        # Convert THIS turn's ground-truth cost (the same _sage_usd_cost
+        # the metering call above just recorded) into credits and debit
+        # the workspace's credit_balance_usd. Platform-paid turns only —
+        # BYOK/local turns aren't billed by Empyralis. This is the
+        # previously-DORMANT credit debit, reconnected right next to the
+        # metering call the earlier audit identified as the "next to"
+        # anchor point.
+        #
+        # Deliberately best-effort and non-blocking: the turn has already
+        # produced its reply by this point, so nothing here can affect the
+        # user's response. debit_workspace_credits_for_turn_atomic clamps
+        # at zero balance (never negative, never raises) and seeds a
+        # generous free floor on first touch — see billing_credit_config.py
+        # and control_plane_repository.py's "Direct per-turn credit debit"
+        # section for the full non-blocking-by-construction rationale.
+        if _sage_usage_mode == "platform_credits" and _sage_usd_cost is not None:
+            try:
+                from server_modules import billing_credit_config as _credit_cfg
+                from server_modules import control_plane_repository as _cpr
+
+                _credits_owed = _credit_cfg.credits_for_turn_cost_usd(_sage_usd_cost)
+                if _credits_owed > 0:
+                    # Native await straight to the repository — we're already
+                    # inside this async turn, so there's no need to go
+                    # through billing_service's sync-callers wrapper (which
+                    # exists for non-async call sites) and its asyncio
+                    # sync-bridge hop.
+                    _debit_result = await _cpr.debit_workspace_credits_for_turn_atomic(
+                        workspace_id=normalized_workspace_id,
+                        tenant_id=normalized_tenant_id,
+                        request_id=trace_id or str(uuid.uuid4()),
+                        credits_to_charge=_credits_owed,
+                        floor_usd=_credit_cfg.NEW_ACCOUNT_SIGNUP_CREDIT_USD,
+                        credits_per_usd=_credit_cfg.HOSTED_SAGE_AI_CREDITS_PER_USD,
+                    )
+                    if isinstance(_debit_result, dict) and _debit_result.get("insufficient"):
+                        logging.getLogger(__name__).warning(
+                            "credit_debit: workspace=%s ran short covering %s credits "
+                            "(only %s debited) for trace_id=%s — turn was NOT blocked.",
+                            normalized_workspace_id, _credits_owed,
+                            _debit_result.get("credits_debited"), trace_id,
+                        )
+            except Exception as _credit_debit_exc:
+                logging.getLogger(__name__).warning(
+                    "credit_debit: best-effort debit failed for workspace=%s trace_id=%s: %s",
+                    normalized_workspace_id, trace_id, _credit_debit_exc,
+                )
     except Exception:
         pass
 

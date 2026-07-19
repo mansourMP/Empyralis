@@ -667,6 +667,46 @@ a.fleet-breadcrumb:hover {
   white-space: nowrap;
 }
 
+/* Persistent credit-balance chip — always visible across the whole
+   workspace (not just the Billing page), directly below the pulse line.
+   Deliberately neutral: the purple accent is reserved for the Billing
+   page's top-up button, not this glance indicator (see billing/page.tsx). */
+.fleet-rail-credit-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 8px 0;
+  padding: 5px 8px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
+}
+.fleet-rail-credit-chip:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.fleet-rail-credit-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-medium);
+}
+.fleet-rail-credit-chip-unit {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+.fleet-rail--collapsed .fleet-rail-credit-chip {
+  justify-content: center;
+  margin: 4px 6px 0;
+  padding: 6px;
+}
+
 .fleet-rail-owner {
   position: relative;
   padding: 16px 8px 0;
@@ -753,13 +793,14 @@ a.fleet-breadcrumb:hover {
 
 .fleet-rail-account-popover {
   position: absolute;
-  /* .fleet-rail-controls (theme/collapse buttons) and .fleet-rail-pulse
-     (U3-G footer line) both sit directly above this trigger and are
+  /* .fleet-rail-controls (theme/collapse buttons), .fleet-rail-pulse
+     (U3-G footer line), and .fleet-rail-credit-chip (persistent credit
+     balance, 2026-07-20) all sit directly above this trigger and are
      shorter than the popover itself, so anchoring at the usual "+8px"
      would let the popover's own rows render on top of that clickable
-     area. Offset by their combined height (~56px) plus the normal 8px
+     area. Offset by their combined height (~84px) plus the normal 8px
      gap so the popover never overlaps another interactive element. */
-  bottom: calc(100% + 64px);
+  bottom: calc(100% + 92px);
   left: 8px;
   right: 8px;
   background: var(--bg-card);
@@ -1795,6 +1836,74 @@ a.fleet-breadcrumb:hover {
   white-space: nowrap;
 }
 
+/* Two-column variant (Category / Credits used) for the Billing page's
+   credit-usage-by-category table — the 4-column agent/cost/tokens/calls
+   grid above doesn't fit a 2-field row. */
+.fleet-usage-legend--credits {
+  --fleet-list-grid: minmax(160px, 1fr) 160px;
+}
+.fleet-usage-legend-row--muted {
+  color: var(--text-muted);
+}
+.fleet-usage-legend-row--muted .fleet-usage-legend-name,
+.fleet-usage-legend-row--muted .fleet-agent-cell-right {
+  color: var(--text-muted);
+}
+
+/* ── Credits panel (Billing page) — balance, top-up, usage-by-category ──── */
+.fleet-credits-panel {
+  margin-bottom: var(--space-6);
+  padding-bottom: var(--space-6);
+  border-bottom: 1px solid var(--border);
+}
+.fleet-stat-card--credits {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.fleet-stat-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-control);
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.fleet-stat-value--credits {
+  font-size: 28px;
+  font-weight: var(--weight-medium);
+  letter-spacing: -0.01em;
+}
+.fleet-credits-error {
+  margin-top: var(--space-3);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.fleet-credits-topup {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+.fleet-credits-topup-amounts {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-control);
+  background: var(--bg-panel);
+}
+.fleet-credits-topup-note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.fleet-credits-topup-note--error {
+  color: var(--destructive);
+}
+
 /* ── UI Phase 4: small dialog (New project) — same modal language, smaller ── */
 .fleet-small-dialog {
   width: 440px;
@@ -1909,6 +2018,22 @@ a.fleet-breadcrumb:hover {
 .fleet-btn--danger:hover:not(:disabled) {
   background: var(--destructive-hover);
   border-color: var(--destructive-hover);
+}
+
+/* Monochrome solid primary — classic black/white, no accent color. Used by
+   the Billing page's top-up button: --text-primary as fill (near-black in
+   light mode, near-white in dark mode) with --bg-page as the label color
+   automatically inverts correctly in both themes. Deliberately does not
+   use --accent — the credits/billing surface reads neutral only. */
+.fleet-btn--mono {
+  border-color: var(--text-primary);
+  background: var(--text-primary);
+  color: var(--bg-page);
+}
+
+.fleet-btn--mono:hover:not(:disabled) {
+  background: var(--text-secondary);
+  border-color: var(--text-secondary);
 }
 
 .fleet-btn-plus {

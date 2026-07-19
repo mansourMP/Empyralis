@@ -29,6 +29,7 @@ import { StatusDot } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
 import { FleetHelpButton } from "./FleetHelpButton";
 import { SageLauncher } from "./SageLauncher";
+import { CreditBalanceChip } from "./CreditBalanceChip";
 
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
@@ -420,6 +421,8 @@ export function PrimaryRail({
           {workingCount} working · {stoppedCount} stopped · {money(spendToday)} today
         </div>
       )}
+
+      <CreditBalanceChip workspaceId={workspaceId} collapsed={effectiveCollapsed} />
 
       <AccountMenu
         workspaceId={workspaceId}

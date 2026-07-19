@@ -1,5 +1,78 @@
+"""Single source of truth for the Empyralis hosted-AI credit economy.
+
+Every dollar-to-credit conversion, every free-allowance size, and every
+margin multiplier used anywhere in the platform (backend billing/
+entitlements, the credit-debit reconnect in ``sage_agent_runtime_service``,
+and the frontend billing page) is derived from the constants in this one
+file. If a number governing "how many credits does X cost" or "how
+generous is the free tier" needs tuning, it is tuned HERE — nowhere else
+should hardcode a dollar-to-credit rate or a free-allowance size.
+
+── THE MODEL ────────────────────────────────────────────────────────────
+
+1. Retail exchange rate — ``HOSTED_SAGE_AI_CREDITS_PER_USD``.
+   This is the ONE conversion between real dollars and the "credits" a
+   workspace sees: it prices both what a Stripe top-up buys
+   (``create_credit_purchase_checkout_session``) and what the balance/
+   usage UI displays (``credit_balance_for_workspace``,
+   ``workspace_billing_summary_for_workspace_id``). $1 buys
+   ``HOSTED_SAGE_AI_CREDITS_PER_USD`` credits; a credit is worth
+   ``1 / HOSTED_SAGE_AI_CREDITS_PER_USD`` dollars.
+
+2. Per-turn charge, WITH margin — ``credits_for_turn_cost_usd()``.
+   Every real hosted-AI turn logs a ground-truth provider cost in USD
+   (``usage_events``, via ``pricing_registry_service`` — e.g. DeepSeek's
+   published $0.14/$0.28 per-million-token input/output rate). We do not
+   charge the workspace's credit balance that raw cost 1:1 — we apply
+   ``CREDIT_COST_MARGIN_MULTIPLIER`` first, THEN convert to credits at the
+   retail rate above. That multiplier is the platform's margin over the
+   underlying provider cost (covers orchestration, storage, support, and
+   gross margin — not just the token bill).
+
+   Worked example (the reference "short hello → hello turn"): ~500 input
+   + 150 output tokens on deepseek-chat ($0.14 / $0.28 per 1M tokens):
+       raw_cost  = 500/1e6*0.14 + 150/1e6*0.28  ≈ $0.000112
+       billed    = raw_cost * CREDIT_COST_MARGIN_MULTIPLIER (3x) ≈ $0.000336
+       credits   = billed * HOSTED_SAGE_AI_CREDITS_PER_USD (2,000/$) ≈ 0.67
+       charged   = ceil(0.67), floored at MIN_CREDITS_CHARGED_PER_TURN  = 1 credit
+   A heavier turn (5,000 in / 1,500 out) costs about 7 credits under the
+   same formula — proportional, not flat — and a very large-context turn
+   (30,000 in / 5,000 out) costs about 34 credits. The unit stays legible
+   at both ends: a normal exchange reads as "1", a heavy one reads as a
+   small double-digit number, never a fraction and never an opaque cost
+   in micro-dollars.
+
+3. Free allowance — ``NEW_ACCOUNT_SIGNUP_CREDIT_USD``.
+   Every workspace (new AND pre-existing) is guaranteed at least this
+   many dollars of credit balance before any real per-turn debiting can
+   bring it below that floor — see
+   ``control_plane_repository._ensure_workspace_credit_balance_floor``,
+   applied lazily and idempotently the first time a workspace's balance
+   is touched by a real turn. At the default $5.00 and ~1 credit/turn,
+   that is several thousand free turns — nobody should ever see a "0
+   credits" wall during normal use or a demo.
+
+4. Non-blocking, by construction.
+   The per-turn debit (``control_plane_repository.
+   debit_workspace_credits_for_turn_atomic``) clamps at zero: it always
+   debits ``min(current_balance, credits_owed)`` and never raises for an
+   insufficient balance. A turn that would drive the balance negative
+   still completes; the shortfall is only logged (see
+   ``sage_agent_runtime_service``'s reconnect call site). This module
+   intentionally does NOT gate turns on remaining balance — that hard-
+   stop concern belongs to the pre-existing, separately-tested
+   ``entitlements_service.hosted_sage_ai_access_state`` policy gate
+   (unrelated dial, left untouched by this reconnect).
+
+── TUNING ───────────────────────────────────────────────────────────────
+
+Every constant below has an ``EMPYRALIS_*`` environment-variable override,
+so ops can retune the economy without a code change.
+"""
+
 from __future__ import annotations
 
+import math
 import os
 from typing import Any
 
@@ -15,18 +88,71 @@ def _env_non_negative_float(name: str, fallback: float) -> float:
     return max(0.0, parsed)
 
 
-DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = _env_non_negative_float(
-    "EMPYRALIS_DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD",
-    0.50,
-)
+def _env_positive_int(name: str, fallback: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(fallback)
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return int(fallback)
+    return max(1, parsed)
 
+
+# ── 1. Retail exchange rate ─────────────────────────────────────────────
+# $1 buys this many credits (Stripe top-up grant rate AND the display
+# rate for any "credits" figure shown anywhere in the product).
 HOSTED_SAGE_AI_CREDITS_PER_USD = int(
     round(
         _env_non_negative_float(
             "EMPYRALIS_DISPLAY_CREDITS_PER_USD",
-            20_000,
+            2_000,
         )
     )
+)
+
+# ── Legacy dormant-system fallback cap (kept for the pre-existing,
+#    separately-tested hosted_sage_ai_monthly_cap_usd entitlement gate —
+#    see entitlements_service.py. Bumped alongside the rest of the
+#    allowance for consistency even though real traffic does not
+#    currently feed this gate's ledger; see module docstring point 4.) ──
+DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = _env_non_negative_float(
+    "EMPYRALIS_DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD",
+    5.00,
+)
+
+# ── 3. Free allowance ───────────────────────────────────────────────────
+# One-time (new workspaces) / floor top-up (pre-existing workspaces) grant
+# in USD. At the default rate this is 5.00 * 2,000 = 10,000 credits.
+NEW_ACCOUNT_SIGNUP_CREDIT_USD = _env_non_negative_float(
+    "EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD",
+    5.00,
+)
+
+# Kept distinct from NEW_ACCOUNT_SIGNUP_CREDIT_USD (own env var) even
+# though both currently default to the same figure, so the two concepts
+# (a monthly $ cap on the legacy gate vs. a one-time/floor balance grant)
+# can be tuned independently later without a code change.
+NEW_ACCOUNT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = _env_non_negative_float(
+    "EMPYRALIS_NEW_ACCOUNT_HOSTED_SAGE_AI_MONTHLY_CAP_USD",
+    5.00,
+)
+
+# ── 2. Per-turn margin ──────────────────────────────────────────────────
+# Multiplier applied to a turn's ground-truth provider cost before it is
+# converted to credits and debited. > 1.0 means the platform charges more
+# credits than a 1:1 cost pass-through would imply — the margin.
+CREDIT_COST_MARGIN_MULTIPLIER = _env_non_negative_float(
+    "EMPYRALIS_CREDIT_COST_MARGIN_MULTIPLIER",
+    3.0,
+) or 1.0  # never let a misconfigured 0 zero out billed cost entirely
+
+# Never charge (or display) 0 credits for a turn that did real work — the
+# unit stays legible ("this turn cost credits", never "this turn cost
+# nothing" for a turn that plainly consumed tokens).
+MIN_CREDITS_CHARGED_PER_TURN = _env_positive_int(
+    "EMPYRALIS_MIN_CREDITS_CHARGED_PER_TURN",
+    1,
 )
 
 
@@ -38,8 +164,34 @@ def _safe_float(value: Any) -> float:
 
 
 def display_credits_for_usd(amount_usd: Any) -> int:
+    """Whole-credit DISPLAY conversion at the retail rate — no margin.
+    Used for balance/purchase-grant display, not per-turn charging."""
     return int(round(max(0.0, _safe_float(amount_usd)) * HOSTED_SAGE_AI_CREDITS_PER_USD))
 
 
 def display_credit_float_for_usd(amount_usd: Any) -> float:
     return round(max(0.0, _safe_float(amount_usd)) * HOSTED_SAGE_AI_CREDITS_PER_USD, 6)
+
+
+def billed_cost_usd_for_turn(raw_cost_usd: Any) -> float:
+    """Ground-truth provider cost -> billed cost, margin applied."""
+    raw = max(0.0, _safe_float(raw_cost_usd))
+    return round(raw * CREDIT_COST_MARGIN_MULTIPLIER, 8)
+
+
+def credits_for_turn_cost_usd(raw_cost_usd: Any) -> int:
+    """Ground-truth provider cost -> whole credits to charge for one turn.
+
+    Applies the margin multiplier, converts at the retail rate, rounds UP
+    to the next whole credit, and floors at MIN_CREDITS_CHARGED_PER_TURN
+    so any turn that did real work costs a legible, non-zero number of
+    credits. This is the ONLY function that should compute "how many
+    credits does this turn cost" — see sage_agent_runtime_service's
+    reconnect call site.
+    """
+    raw = max(0.0, _safe_float(raw_cost_usd))
+    if raw <= 0:
+        return 0
+    billed_usd = billed_cost_usd_for_turn(raw)
+    exact_credits = billed_usd * HOSTED_SAGE_AI_CREDITS_PER_USD
+    return max(MIN_CREDITS_CHARGED_PER_TURN, int(math.ceil(exact_credits)))
