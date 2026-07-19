@@ -129,6 +129,7 @@ from server_modules.connector_validators import (
     validate_miro_connector as _validate_miro_connector,
     validate_monday_connector as _validate_monday_connector,
     validate_notion_connector as _validate_notion_connector,
+    validate_generic_oauth_connector as _validate_generic_oauth_connector,
     validate_google_workspace_connector as _validate_google_workspace_connector,
     validate_microsoft_365_connector as _validate_microsoft_365_connector,
     validate_s3_connector as _validate_s3_connector,
@@ -933,6 +934,150 @@ CONNECTOR_CATALOG = {
     },
     "cloudflare": {
         "label": "Cloudflare",
+        "auth": ["access_token"],
+    },
+    "gusto": {
+        "label": "Gusto",
+        "auth": ["access_token"],
+    },
+    "deel": {
+        "label": "Deel",
+        "auth": ["access_token"],
+    },
+    "remote_com": {
+        "label": "Remote",
+        "auth": ["access_token"],
+    },
+    "ashby": {
+        "label": "Ashby",
+        "auth": ["access_token"],
+    },
+    "klaviyo": {
+        "label": "Klaviyo",
+        "auth": ["access_token"],
+    },
+    "customer_io": {
+        "label": "Customer.io",
+        "auth": ["access_token"],
+    },
+    "netlify": {
+        "label": "Netlify",
+        "auth": ["access_token"],
+    },
+    "supabase": {
+        "label": "Supabase",
+        "auth": ["access_token"],
+    },
+    "planetscale": {
+        "label": "PlanetScale",
+        "auth": ["access_token"],
+    },
+    "neon": {
+        "label": "Neon",
+        "auth": ["access_token"],
+    },
+    "railway": {
+        "label": "Railway",
+        "auth": ["access_token"],
+    },
+    "heroku": {
+        "label": "Heroku",
+        "auth": ["access_token"],
+    },
+    "sourcegraph": {
+        "label": "Sourcegraph",
+        "auth": ["access_token"],
+    },
+    "replit": {
+        "label": "Replit",
+        "auth": ["access_token"],
+    },
+    "postman": {
+        "label": "Postman",
+        "auth": ["access_token"],
+    },
+    "buildkite": {
+        "label": "Buildkite",
+        "auth": ["access_token"],
+    },
+    "socket": {
+        "label": "Socket",
+        "auth": ["access_token"],
+    },
+    "whimsical": {
+        "label": "Whimsical",
+        "auth": ["access_token"],
+    },
+    "ramp": {
+        "label": "Ramp",
+        "auth": ["access_token"],
+    },
+    "brex": {
+        "label": "Brex",
+        "auth": ["access_token"],
+    },
+    "mercury": {
+        "label": "Mercury",
+        "auth": ["access_token"],
+    },
+    "robinhood": {
+        "label": "Robinhood",
+        "auth": ["access_token"],
+    },
+    "amplitude": {
+        "label": "Amplitude",
+        "auth": ["access_token"],
+    },
+    "mixpanel": {
+        "label": "Mixpanel",
+        "auth": ["access_token"],
+    },
+    "posthog": {
+        "label": "PostHog",
+        "auth": ["access_token"],
+    },
+    "meta_ads": {
+        "label": "Meta Ads",
+        "auth": ["access_token"],
+    },
+    "semrush": {
+        "label": "Semrush",
+        "auth": ["access_token"],
+    },
+    "ahrefs": {
+        "label": "Ahrefs",
+        "auth": ["access_token"],
+    },
+    "close_crm": {
+        "label": "Close",
+        "auth": ["access_token"],
+    },
+    "apollo_io": {
+        "label": "Apollo.io",
+        "auth": ["access_token"],
+    },
+    "outreach": {
+        "label": "Outreach",
+        "auth": ["access_token"],
+    },
+    "salesloft": {
+        "label": "Salesloft",
+        "auth": ["access_token"],
+    },
+    "clay": {
+        "label": "Clay",
+        "auth": ["access_token"],
+    },
+    "fireflies": {
+        "label": "Fireflies.ai",
+        "auth": ["access_token"],
+    },
+    "fathom": {
+        "label": "Fathom",
+        "auth": ["access_token"],
+    },
+    "coda": {
+        "label": "Superhuman Docs (formerly Coda)",
         "auth": ["access_token"],
     },
     "s3": {

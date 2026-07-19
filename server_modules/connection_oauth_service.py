@@ -1264,6 +1264,750 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         registration_endpoint="https://mcp.cloudflare.com/register",
         dynamic_registration_opt_in_required=False,
     ),
+    # Gusto: official remote MCP server (https://mcp.api.gusto.com). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes curated to read-only HR/payroll
+    # data; payrolls:run/payrolls:write (executes payroll) and
+    # webhook_subscriptions:write deliberately excluded
+    "gusto": OAuthProviderConfig(
+        label="Gusto",
+        env_vars={
+            "client_id": ("GUSTO_CLIENT_ID",),
+            "client_secret": ("GUSTO_CLIENT_SECRET",),
+        },
+        scopes=("public", "companies:read", "employees:read", "employments:read", "jobs:read", "departments:read", "compensations:read", "contractors:read", "pay_schedules:read", "payrolls:read", "time_sheet:read"),
+        auth_url="https://mcp.api.gusto.com/oauth/authorize",
+        token_url="https://mcp.api.gusto.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.api.gusto.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Deel: official remote MCP server (https://api.letsdeel.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client. Scopes
+    # curated to core people/HR read+write; global-payroll/off-cycle-
+    # payments/invoice/treasury/withdrawals/equities/compensation-management write
+    # scopes (money movement) deliberately excluded
+    "deel": OAuthProviderConfig(
+        label="Deel",
+        env_vars={
+            "client_id": ("DEEL_CLIENT_ID",),
+            "client_secret": ("DEEL_CLIENT_SECRET",),
+        },
+        scopes=("people:read", "people:write", "worker:read", "worker:write", "profile:read", "time-off:read", "time-off:write", "timesheets:read", "timesheets:write", "contracts:read", "tasks:read", "tasks:write", "organizations:read"),
+        auth_url="https://api.letsdeel.com/oauth/authorize",
+        token_url="https://api.letsdeel.com/oauth/tokens",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://api.letsdeel.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Remote: official remote MCP server (https://mcp.remote.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported and
+    # token_endpoint_auth_methods_supported not declared in discovery -- left at
+    # field defaults rather than guessing. Auth server resolved via
+    # mcp.remote.com's oauth-protected-resource -> issuer chain to
+    # api.employ.remote.com
+    "remote_com": OAuthProviderConfig(
+        label="Remote",
+        env_vars={
+            "client_id": ("REMOTE_COM_CLIENT_ID",),
+            "client_secret": ("REMOTE_COM_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://api.employ.remote.com/oauth/authorize",
+        token_url="https://api.employ.remote.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.employ.remote.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Ashby: official remote MCP server (https://mcp.ashbyhq.com/mcp/v1). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). auth server on a DIFFERENT host (mcp-
+    # auth.ashbyhq.com/oidc) from the MCP endpoint (mcp.ashbyhq.com), resolved via
+    # oauth-protected-resource -> issuer chain, same pattern as Attio
+    "ashby": OAuthProviderConfig(
+        label="Ashby",
+        env_vars={
+            "client_id": ("ASHBY_CLIENT_ID",),
+            "client_secret": ("ASHBY_CLIENT_SECRET",),
+        },
+        scopes=("openid", "mcp", "offline_access"),
+        auth_url="https://mcp-auth.ashbyhq.com/oidc/auth",
+        token_url="https://mcp-auth.ashbyhq.com/oidc/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://mcp-auth.ashbyhq.com/oidc/me",
+        registration_endpoint="https://mcp-auth.ashbyhq.com/oidc/reg",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Klaviyo: official remote MCP server (https://mcp.klaviyo.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported not declared
+    "klaviyo": OAuthProviderConfig(
+        label="Klaviyo",
+        env_vars={
+            "client_id": ("KLAVIYO_CLIENT_ID",),
+            "client_secret": ("KLAVIYO_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://mcp.klaviyo.com/authorize",
+        token_url="https://mcp.klaviyo.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.klaviyo.com/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Customer.io: official remote MCP server (https://mcp.customer.io/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). scopes_supported not declared
+    "customer_io": OAuthProviderConfig(
+        label="Customer.io",
+        env_vars={
+            "client_id": ("CUSTOMER_IO_CLIENT_ID",),
+            "client_secret": ("CUSTOMER_IO_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://mcp.customer.io/oauth2/authorize",
+        token_url="https://mcp.customer.io/oauth2/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.customer.io/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Netlify: official remote MCP server (https://netlify-mcp.netlify.app/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "netlify": OAuthProviderConfig(
+        label="Netlify",
+        env_vars={
+            "client_id": ("NETLIFY_CLIENT_ID",),
+            "client_secret": ("NETLIFY_CLIENT_SECRET",),
+        },
+        scopes=("offline_access", "read", "write", "claudeai"),
+        auth_url="https://netlify-mcp.netlify.app/oauth-server/auth",
+        token_url="https://netlify-mcp.netlify.app/oauth-server/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://netlify-mcp.netlify.app/oauth-server/reg",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Supabase: official remote MCP server (https://mcp.supabase.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). auth server on a DIFFERENT host
+    # (api.supabase.com) from the MCP endpoint, resolved via oauth-protected-
+    # resource -> issuer chain
+    "supabase": OAuthProviderConfig(
+        label="Supabase",
+        env_vars={
+            "client_id": ("SUPABASE_CLIENT_ID",),
+            "client_secret": ("SUPABASE_CLIENT_SECRET",),
+        },
+        scopes=("organizations:read", "projects:read", "projects:write", "database:write", "database:read", "analytics:read", "secrets:read", "edge_functions:read", "edge_functions:write", "environment:read", "environment:write", "storage:read"),
+        auth_url="https://api.supabase.com/v1/oauth/authorize",
+        token_url="https://api.supabase.com/v1/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.supabase.com/platform/oauth/apps/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # PlanetScale: official remote MCP server
+    # (https://mcp.pscale.dev/mcp/planetscale). Confirmed live 2026-07-19 via GET
+    # .well-known/oauth-authorization-server (or oauth-protected-resource -> issuer
+    # chain). resolved via path-suffixed discovery (/.well-known/oauth-
+    # authorization-server/mcp/planetscale). Scopes curated to read-oriented +
+    # database creation; manage_passwords/manage_production_* (production
+    # credential management) deliberately excluded
+    "planetscale": OAuthProviderConfig(
+        label="PlanetScale",
+        env_vars={
+            "client_id": ("PLANETSCALE_CLIENT_ID",),
+            "client_secret": ("PLANETSCALE_CLIENT_SECRET",),
+        },
+        scopes=("email", "openid", "profile", "database:read_branches", "database:read_database", "database:read_deploy_requests", "organization:read_branches", "organization:read_databases", "organization:read_organization", "organization:create_databases", "user:read_organizations", "user:read_user"),
+        auth_url="https://app.planetscale.com/oauth/authorize",
+        token_url="https://auth.planetscale.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://auth.planetscale.com/oauth/userinfo",
+        registration_endpoint="https://auth.planetscale.com/oauth/registration",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Neon: official remote MCP server (https://mcp.neon.tech/mcp). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported also lists a "*"
+    # wildcard-all scope -- deliberately not requested, using the narrower
+    # read/write instead
+    "neon": OAuthProviderConfig(
+        label="Neon",
+        env_vars={
+            "client_id": ("NEON_CLIENT_ID",),
+            "client_secret": ("NEON_CLIENT_SECRET",),
+        },
+        scopes=("read", "write"),
+        auth_url="https://mcp.neon.tech/api/authorize",
+        token_url="https://mcp.neon.tech/api/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.neon.tech/api/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Railway: official remote MCP server (https://mcp.railway.com). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). live discovery's authorization_endpoint
+    # embeds ?resource=https://mcp.railway.com (RFC 8707 resource indicator) --
+    # moved into auth_params rather than auth_url since _build authorization_url
+    # always appends its own "?"+params (would double up)
+    "railway": OAuthProviderConfig(
+        label="Railway",
+        env_vars={
+            "client_id": ("RAILWAY_CLIENT_ID",),
+            "client_secret": ("RAILWAY_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "offline_access", "workspace:member"),
+        auth_url="https://backboard.railway.com/oauth/auth",
+        token_url="https://backboard.railway.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        auth_params={"resource": "https://mcp.railway.com"},
+        registration_endpoint="https://backboard.railway.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Heroku: official remote MCP server (https://mcp.heroku.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). token_endpoint_auth_methods_supported
+    # not declared -- left at field default (client_secret_post)
+    "heroku": OAuthProviderConfig(
+        label="Heroku",
+        env_vars={
+            "client_id": ("HEROKU_CLIENT_ID",),
+            "client_secret": ("HEROKU_CLIENT_SECRET",),
+        },
+        scopes=("openid", "offline_access"),
+        auth_url="https://mcp.heroku.com/auth",
+        token_url="https://mcp.heroku.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://mcp.heroku.com/me",
+        registration_endpoint="https://mcp.heroku.com/reg",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Sourcegraph: official remote MCP server (https://sourcegraph.com/.api/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). discovery also declares
+    # introspection_endpoint (not a bearer-GET userinfo endpoint) -- not used as
+    # profile_probe
+    "sourcegraph": OAuthProviderConfig(
+        label="Sourcegraph",
+        env_vars={
+            "client_id": ("SOURCEGRAPH_CLIENT_ID",),
+            "client_secret": ("SOURCEGRAPH_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "offline_access", "user:all", "mcp", "externalapi:read", "externalapi:write"),
+        auth_url="https://sourcegraph.com/.auth/idp/oauth/authorize",
+        token_url="https://sourcegraph.com/.auth/idp/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://sourcegraph.com/.auth/idp/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Replit: official remote MCP server (https://replit-mcp.com/server/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "replit": OAuthProviderConfig(
+        label="Replit",
+        env_vars={
+            "client_id": ("REPLIT_CLIENT_ID",),
+            "client_secret": ("REPLIT_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "offline_access", "apps:read", "apps:write"),
+        auth_url="https://replit.com/oidc/auth",
+        token_url="https://replit.com/oidc/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://replit.com/oidc/reg",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Postman: official remote MCP server (https://mcp.postman.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported not declared
+    "postman": OAuthProviderConfig(
+        label="Postman",
+        env_vars={
+            "client_id": ("POSTMAN_CLIENT_ID",),
+            "client_secret": ("POSTMAN_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://mcp.postman.com/authorize",
+        token_url="https://mcp.postman.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.postman.com/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Buildkite: official remote MCP server (https://mcp.buildkite.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "buildkite": OAuthProviderConfig(
+        label="Buildkite",
+        env_vars={
+            "client_id": ("BUILDKITE_CLIENT_ID",),
+            "client_secret": ("BUILDKITE_CLIENT_SECRET",),
+        },
+        scopes=("read", "write"),
+        auth_url="https://mcp.buildkite.com/oauth/authorize",
+        token_url="https://mcp.buildkite.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.buildkite.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Socket: official remote MCP server (https://mcp.socket.dev/). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none","client_secret_basic"] -- no
+    # client_secret_post, so token_auth switches to basic (same shape as
+    # Airtable/Mercury). scopes_supported has ~90 entries (full
+    # admin/webhook/token-management/policy-write surface) -- curated to a read-
+    # plus-core-scan subset; api-tokens:*/webhooks:*/integration:*/access-
+    # policy:*/security-policy:update (admin scopes) deliberately excluded
+    "socket": OAuthProviderConfig(
+        label="Socket",
+        env_vars={
+            "client_id": ("SOCKET_CLIENT_ID",),
+            "client_secret": ("SOCKET_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "alerts:list", "alerts:trend", "dependencies:list", "dependencies:trend", "full-scans:list", "full-scans:create", "packages:list", "repo:list", "report:list", "report:read", "security-policy:read", "socket-basics:read", "triage:alerts-list"),
+        auth_url="https://api.socket.dev/v1/oauth2/authorize",
+        token_url="https://api.socket.dev/v1/oauth2/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://api.socket.dev/v1/oauth2/userinfo",
+        token_auth="basic",
+        registration_endpoint="https://api.socket.dev/v1/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
+    ),
+    # Whimsical: official remote MCP server (https://mcp.whimsical.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). auth/token/register endpoints live
+    # on api.whimsical.com, a different host from the mcp.whimsical.com MCP
+    # endpoint
+    "whimsical": OAuthProviderConfig(
+        label="Whimsical",
+        env_vars={
+            "client_id": ("WHIMSICAL_CLIENT_ID",),
+            "client_secret": ("WHIMSICAL_CLIENT_SECRET",),
+        },
+        scopes=("mcp:read", "mcp:write", "profile"),
+        auth_url="https://api.whimsical.com/v1/oauth.authorize",
+        token_url="https://api.whimsical.com/v1/oauth.token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.whimsical.com/v1/oauth.register-mcp-client",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Ramp: official remote MCP server (https://mcp.ramp.com/mcp). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client.
+    # authorization_endpoint embeds ?auth_level=auto, moved into auth_params for
+    # the same double-"?" reason as Railway. Scopes curated to read-only
+    # reporting/bookkeeping; funds:write/x402:write/banking_drawdown_requests:write
+    # /bank_accounts:write/cards:write/approvals:write (money movement, card
+    # issuance, spend approval) deliberately excluded
+    "ramp": OAuthProviderConfig(
+        label="Ramp",
+        env_vars={
+            "client_id": ("RAMP_CLIENT_ID",),
+            "client_secret": ("RAMP_CLIENT_SECRET",),
+        },
+        scopes=("bills:read", "cards:read", "departments:read", "entities:read", "limits:read", "locations:read", "memos:read", "purchase_orders:read", "reimbursements:read", "spend_programs:read", "transactions:read", "users:read", "vendors:read", "accounting:read", "merchants:read", "spend_requests:read", "bank_accounts:read", "tasks:read", "trips:read"),
+        auth_url="https://mcp.ramp.com/oauth/authorize",
+        token_url="https://api.ramp.com/developer/v1/token/pkce",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        auth_params={"auth_level": "auto"},
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://mcp.ramp.com/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Brex: official remote MCP server (https://api.brex.com/mcp). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). registration_endpoint is a non-standard
+    # path (/v3/clients, not /register) -- confirmed live regardless. Scopes copied
+    # verbatim: already conservative (mostly *.readonly;
+    # expenses.card/expenses.bill are expense-record writes, not fund transfers)
+    "brex": OAuthProviderConfig(
+        label="Brex",
+        env_vars={
+            "client_id": ("BREX_CLIENT_ID",),
+            "client_secret": ("BREX_CLIENT_SECRET",),
+        },
+        scopes=("openid", "offline_access", "email", "users.readonly", "departments.readonly", "locations.readonly", "titles.readonly", "legal_entities.readonly", "cards.readonly", "companies.readonly", "budgets.readonly", "travel.trips.readonly", "expenses.card.readonly", "expenses.card", "expenses.bill", "accounts.cash.readonly", "vendors.readonly", "accounting.integration.read", "accounting.record.read"),
+        auth_url="https://accounts-api.brex.com/oauth2/default/v1/authorize",
+        token_url="https://accounts-api.brex.com/oauth2/default/v1/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.brex.com/v3/clients",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Mercury: official remote MCP server (https://mcp.mercury.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["client_secret_basic","none"] -- no
+    # client_secret_post, so token_auth switches to basic. No write scope even
+    # offered -- read-only by the provider's own design
+    "mercury": OAuthProviderConfig(
+        label="Mercury",
+        env_vars={
+            "client_id": ("MERCURY_CLIENT_ID",),
+            "client_secret": ("MERCURY_CLIENT_SECRET",),
+        },
+        scopes=("read", "offline_access"),
+        auth_url="https://mcp.mercury.com/authorize",
+        token_url="https://mcp.mercury.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        token_auth="basic",
+        registration_endpoint="https://mcp.mercury.com/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
+    ),
+    # Robinhood: official remote MCP server
+    # (https://agent.robinhood.com/mcp/trading). Confirmed live 2026-07-19 via GET
+    # .well-known/oauth-authorization-server (or oauth-protected-resource -> issuer
+    # chain). token_endpoint_auth_methods_supported=["none"] only -- public client.
+    # scopes_supported is exactly one opaque scope ("internal") -- no finer-grained
+    # alternative exists
+    "robinhood": OAuthProviderConfig(
+        label="Robinhood",
+        env_vars={
+            "client_id": ("ROBINHOOD_CLIENT_ID",),
+            "client_secret": ("ROBINHOOD_CLIENT_SECRET",),
+        },
+        scopes=("internal",),
+        auth_url="https://robinhood.com/oauth",
+        token_url="https://api.robinhood.com/oauth2/token/",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://agent.robinhood.com/oauth/trading/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Amplitude: official remote MCP server (https://mcp.amplitude.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "amplitude": OAuthProviderConfig(
+        label="Amplitude",
+        env_vars={
+            "client_id": ("AMPLITUDE_CLIENT_ID",),
+            "client_secret": ("AMPLITUDE_CLIENT_SECRET",),
+        },
+        scopes=("mcp:read", "mcp:write", "offline_access"),
+        auth_url="https://mcp.amplitude.com/authorize",
+        token_url="https://mcp.amplitude.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.amplitude.com/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Mixpanel: official remote MCP server (https://mcp.mixpanel.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). scopes copied verbatim -- all
+    # analytics/reporting-read scopes, no admin/destructive scope offered
+    "mixpanel": OAuthProviderConfig(
+        label="Mixpanel",
+        env_vars={
+            "client_id": ("MIXPANEL_CLIENT_ID",),
+            "client_secret": ("MIXPANEL_CLIENT_SECRET",),
+        },
+        scopes=("projects", "analysis", "events", "insights", "segmentation", "retention", "data:read", "funnels", "flows", "data_definitions", "bookmarks", "business_context", "cohorts", "dashboard_reports", "experiments", "feature_flags", "metrics", "user_details"),
+        auth_url="https://mixpanel.com/oauth/authorize",
+        token_url="https://mixpanel.com/oauth/token/",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mixpanel.com/oauth/mcp/register/",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # PostHog: official remote MCP server (https://mcp.posthog.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). auth server on a dedicated
+    # oauth.posthog.com host. scopes_supported has ~200 entries (full product
+    # surface incl. organization/billing/member-management/access-control) --
+    # curated to a core analytics/feature-flag subset; organization:write,
+    # organization_member:*, access_control:*, and similar admin scopes
+    # deliberately excluded
+    "posthog": OAuthProviderConfig(
+        label="PostHog",
+        env_vars={
+            "client_id": ("POSTHOG_CLIENT_ID",),
+            "client_secret": ("POSTHOG_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "insight:read", "insight:write", "dashboard:read", "dashboard:write", "event_definition:read", "feature_flag:read", "feature_flag:write", "action:read", "action:write", "annotation:read", "annotation:write", "cohort:read", "experiment:read", "person:read", "project:read", "query:read", "session_recording:read", "survey:read", "survey:write", "web_analytics:read"),
+        auth_url="https://oauth.posthog.com/oauth/authorize/",
+        token_url="https://oauth.posthog.com/oauth/token/",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://oauth.posthog.com/oauth/userinfo/",
+        registration_endpoint="https://oauth.posthog.com/oauth/register/",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Meta Ads: official remote MCP server (https://mcp.facebook.com/ads).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client.
+    # Authorization happens via Facebook's classic Graph API OAuth dialog
+    # (www.facebook.com), resolved via mcp.facebook.com/ads's own oauth-protected-
+    # resource -> issuer chain; the MCP endpoint IS the resource this token is
+    # minted for, so MCP-scoped validation against it is correct
+    "meta_ads": OAuthProviderConfig(
+        label="Meta Ads",
+        env_vars={
+            "client_id": ("META_ADS_CLIENT_ID",),
+            "client_secret": ("META_ADS_CLIENT_SECRET",),
+        },
+        scopes=("ads_management", "ads_read", "catalog_management", "business_management", "pages_show_list", "instagram_basic", "ads_mcp_management"),
+        auth_url="https://www.facebook.com/v25.0/dialog/oauth",
+        token_url="https://graph.facebook.com/v25.0/oauth/access_token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://mcp.facebook.com/.well-known/register/ads",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Semrush: official remote MCP server (https://mcp.semrush.com/v1/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client
+    "semrush": OAuthProviderConfig(
+        label="Semrush",
+        env_vars={
+            "client_id": ("SEMRUSH_CLIENT_ID",),
+            "client_secret": ("SEMRUSH_CLIENT_SECRET",),
+        },
+        scopes=("mcp.access",),
+        auth_url="https://api.semrush.com/apis/v4/auth/v0/oauth2/auth",
+        token_url="https://api.semrush.com/apis/v4-raw/auth/v1/oauth2/access_token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://api.semrush.com/apis/v4-raw/auth/v1/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Ahrefs: official remote MCP server (https://api.ahrefs.com/mcp/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). authorize/token/register span
+    # three different hosts (app.ahrefs.com / ahrefs.com / api.ahrefs.com) per live
+    # discovery. token_endpoint_auth_methods_supported not declared -- left at
+    # field default
+    "ahrefs": OAuthProviderConfig(
+        label="Ahrefs",
+        env_vars={
+            "client_id": ("AHREFS_CLIENT_ID",),
+            "client_secret": ("AHREFS_CLIENT_SECRET",),
+        },
+        scopes=("apiv3-mcp",),
+        auth_url="https://app.ahrefs.com/web/oauth/authorize",
+        token_url="https://ahrefs.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.ahrefs.com/mcp/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Close: official remote MCP server (https://mcp.close.com/mcp). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported not declared
+    "close_crm": OAuthProviderConfig(
+        label="Close",
+        env_vars={
+            "client_id": ("CLOSE_CRM_CLIENT_ID",),
+            "client_secret": ("CLOSE_CRM_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://app.close.com/oauth2/authorize/",
+        token_url="https://api.close.com/oauth2/token/",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.close.com/oauth2/register/",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Apollo.io: official remote MCP server (https://mcp.apollo.io/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported has ~70 entries --
+    # curated to core contact/company/opportunity/task read+write;
+    # email_account_purchase_*/domain_purchase_* (literal purchases) and
+    # admin/usage-stats scopes deliberately excluded
+    "apollo_io": OAuthProviderConfig(
+        label="Apollo.io",
+        env_vars={
+            "client_id": ("APOLLO_IO_CLIENT_ID",),
+            "client_secret": ("APOLLO_IO_CLIENT_SECRET",),
+        },
+        scopes=("read_user_profile", "contacts_search", "contact_read", "contact_write", "contact_update", "account_write", "account_update", "people_match", "organizations_enrich", "organizations_bulk_enrich", "opportunities_list", "opportunity_read", "opportunity_write", "tasks_list", "tasks_create", "emailer_campaigns_search", "emailer_messages_search", "tags_list", "lists_create"),
+        auth_url="https://mcp.apollo.io/mcp/oauth_metadata/redirect_to_authorize",
+        token_url="https://mcp.apollo.io/api/v1/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.apollo.io/api/v1/oauth/applications/register_oauth_client",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Outreach: official remote MCP server (https://api.outreach.io/mcp/).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "outreach": OAuthProviderConfig(
+        label="Outreach",
+        env_vars={
+            "client_id": ("OUTREACH_CLIENT_ID",),
+            "client_secret": ("OUTREACH_CLIENT_SECRET",),
+        },
+        scopes=("prospects.all",),
+        auth_url="https://api.outreach.io/mcpOAuth/authorize",
+        token_url="https://api.outreach.io/mcpOAuth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.outreach.io/mcpOAuth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Salesloft: official remote MCP server (https://mcp.salesloft.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). auth/token endpoints on
+    # accounts.salesloft.com, registration on mcp.salesloft.com -- different hosts
+    # per live discovery
+    "salesloft": OAuthProviderConfig(
+        label="Salesloft",
+        env_vars={
+            "client_id": ("SALESLOFT_CLIENT_ID",),
+            "client_secret": ("SALESLOFT_CLIENT_SECRET",),
+        },
+        scopes=("accounts:read", "conversations:read", "opportunities:read", "people:read", "team:read", "claudeai"),
+        auth_url="https://accounts.salesloft.com/oauth/authorize",
+        token_url="https://accounts.salesloft.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.salesloft.com/auth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Clay: official remote MCP server (https://api.clay.com/v3/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    "clay": OAuthProviderConfig(
+        label="Clay",
+        env_vars={
+            "client_id": ("CLAY_CLIENT_ID",),
+            "client_secret": ("CLAY_CLIENT_SECRET",),
+        },
+        scopes=("mcp",),
+        auth_url="https://app.clay.com/oauth/authorize",
+        token_url="https://api.clay.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.clay.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Fireflies.ai: official remote MCP server (https://api.fireflies.ai/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "fireflies": OAuthProviderConfig(
+        label="Fireflies.ai",
+        env_vars={
+            "client_id": ("FIREFLIES_CLIENT_ID",),
+            "client_secret": ("FIREFLIES_CLIENT_SECRET",),
+        },
+        scopes=("profile", "email"),
+        auth_url="https://api.fireflies.ai/authorize",
+        token_url="https://api.fireflies.ai/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.fireflies.ai/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Fathom: official remote MCP server (https://api.fathom.ai/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client.
+    # authorize endpoint on fathom.video, token endpoint on api.fathom.ai --
+    # different hosts per live discovery. Simple Icons "fathom" slug is the WRONG
+    # brand (Fathom Analytics, an unrelated company) -- logo intentionally NOT
+    # wired, uses a placeholder (see fleet-icons.ts)
+    "fathom": OAuthProviderConfig(
+        label="Fathom",
+        env_vars={
+            "client_id": ("FATHOM_CLIENT_ID",),
+            "client_secret": ("FATHOM_CLIENT_SECRET",),
+        },
+        scopes=("mcp",),
+        auth_url="https://fathom.video/mcp/oauth/authorize",
+        token_url="https://api.fathom.ai/mcp/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://api.fathom.ai/mcp/oauth/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Superhuman Docs (formerly Coda): official remote MCP server
+    # (https://docs.superhuman.com/apis/mcp). Confirmed live 2026-07-19 via GET
+    # .well-known/oauth-authorization-server (or oauth-protected-resource -> issuer
+    # chain). issuer resolves to tokens.grammarly.com (Coda/Superhuman Docs is now
+    # issued through Grammarly's shared identity service, post-acquisition) --
+    # confirmed via live oauth-protected-resource -> issuer chain from
+    # docs.superhuman.com
+    "coda": OAuthProviderConfig(
+        label="Superhuman Docs (formerly Coda)",
+        env_vars={
+            "client_id": ("CODA_CLIENT_ID",),
+            "client_secret": ("CODA_CLIENT_SECRET",),
+        },
+        scopes=("mcp:all",),
+        auth_url="https://tokens.grammarly.com/v4/api/oauth2/authorize",
+        token_url="https://tokens.grammarly.com/v4/api/oauth2/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://tokens.grammarly.com/v4/api/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+    ),
 }
 
 _CONNECTION_PROVIDER_ALIASES = {
@@ -1315,6 +2059,42 @@ _CONNECTION_PROVIDER_ALIASES = {
     "sentry": "sentry",
     "attio": "attio",
     "cloudflare": "cloudflare",
+    "gusto": "gusto",
+    "deel": "deel",
+    "remote_com": "remote_com",
+    "ashby": "ashby",
+    "klaviyo": "klaviyo",
+    "customer_io": "customer_io",
+    "netlify": "netlify",
+    "supabase": "supabase",
+    "planetscale": "planetscale",
+    "neon": "neon",
+    "railway": "railway",
+    "heroku": "heroku",
+    "sourcegraph": "sourcegraph",
+    "replit": "replit",
+    "postman": "postman",
+    "buildkite": "buildkite",
+    "socket": "socket",
+    "whimsical": "whimsical",
+    "ramp": "ramp",
+    "brex": "brex",
+    "mercury": "mercury",
+    "robinhood": "robinhood",
+    "amplitude": "amplitude",
+    "mixpanel": "mixpanel",
+    "posthog": "posthog",
+    "meta_ads": "meta_ads",
+    "semrush": "semrush",
+    "ahrefs": "ahrefs",
+    "close_crm": "close_crm",
+    "apollo_io": "apollo_io",
+    "outreach": "outreach",
+    "salesloft": "salesloft",
+    "clay": "clay",
+    "fireflies": "fireflies",
+    "fathom": "fathom",
+    "coda": "coda",
 }
 
 
@@ -2381,6 +3161,186 @@ APP_MCP_SERVER_MAP: Dict[str, List[Dict[str, Optional[str]]]] = {
     # https://mcp.cloudflare.com/.well-known/oauth-protected-resource/mcp.
     "cloudflare": [
         {"server_id": "cloudflare", "label": "Cloudflare (MCP)", "endpoint": "https://mcp.cloudflare.com/mcp"},
+    ],
+    # Gusto: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "gusto": [
+        {"server_id": "gusto", "label": "Gusto (MCP)", "endpoint": "https://mcp.api.gusto.com"},
+    ],
+    # Deel: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "deel": [
+        {"server_id": "deel", "label": "Deel (MCP)", "endpoint": "https://api.letsdeel.com/mcp"},
+    ],
+    # Remote: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "remote_com": [
+        {"server_id": "remote_com", "label": "Remote (MCP)", "endpoint": "https://mcp.remote.com/mcp"},
+    ],
+    # Ashby: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "ashby": [
+        {"server_id": "ashby", "label": "Ashby (MCP)", "endpoint": "https://mcp.ashbyhq.com/mcp/v1"},
+    ],
+    # Klaviyo: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "klaviyo": [
+        {"server_id": "klaviyo", "label": "Klaviyo (MCP)", "endpoint": "https://mcp.klaviyo.com/mcp"},
+    ],
+    # Customer.io: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "customer_io": [
+        {"server_id": "customer_io", "label": "Customer.io (MCP)", "endpoint": "https://mcp.customer.io/mcp"},
+    ],
+    # Netlify: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "netlify": [
+        {"server_id": "netlify", "label": "Netlify (MCP)", "endpoint": "https://netlify-mcp.netlify.app/mcp"},
+    ],
+    # Supabase: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "supabase": [
+        {"server_id": "supabase", "label": "Supabase (MCP)", "endpoint": "https://mcp.supabase.com/mcp"},
+    ],
+    # PlanetScale: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "planetscale": [
+        {"server_id": "planetscale", "label": "PlanetScale (MCP)", "endpoint": "https://mcp.pscale.dev/mcp/planetscale"},
+    ],
+    # Neon: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "neon": [
+        {"server_id": "neon", "label": "Neon (MCP)", "endpoint": "https://mcp.neon.tech/mcp"},
+    ],
+    # Railway: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "railway": [
+        {"server_id": "railway", "label": "Railway (MCP)", "endpoint": "https://mcp.railway.com"},
+    ],
+    # Heroku: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "heroku": [
+        {"server_id": "heroku", "label": "Heroku (MCP)", "endpoint": "https://mcp.heroku.com/mcp"},
+    ],
+    # Sourcegraph: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "sourcegraph": [
+        {"server_id": "sourcegraph", "label": "Sourcegraph (MCP)", "endpoint": "https://sourcegraph.com/.api/mcp"},
+    ],
+    # Replit: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "replit": [
+        {"server_id": "replit", "label": "Replit (MCP)", "endpoint": "https://replit-mcp.com/server/mcp"},
+    ],
+    # Postman: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "postman": [
+        {"server_id": "postman", "label": "Postman (MCP)", "endpoint": "https://mcp.postman.com/mcp"},
+    ],
+    # Buildkite: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "buildkite": [
+        {"server_id": "buildkite", "label": "Buildkite (MCP)", "endpoint": "https://mcp.buildkite.com/mcp"},
+    ],
+    # Socket: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "socket": [
+        {"server_id": "socket", "label": "Socket (MCP)", "endpoint": "https://mcp.socket.dev/"},
+    ],
+    # Whimsical: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "whimsical": [
+        {"server_id": "whimsical", "label": "Whimsical (MCP)", "endpoint": "https://mcp.whimsical.com/mcp"},
+    ],
+    # Ramp: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "ramp": [
+        {"server_id": "ramp", "label": "Ramp (MCP)", "endpoint": "https://mcp.ramp.com/mcp"},
+    ],
+    # Brex: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "brex": [
+        {"server_id": "brex", "label": "Brex (MCP)", "endpoint": "https://api.brex.com/mcp"},
+    ],
+    # Mercury: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "mercury": [
+        {"server_id": "mercury", "label": "Mercury (MCP)", "endpoint": "https://mcp.mercury.com/mcp"},
+    ],
+    # Robinhood: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "robinhood": [
+        {"server_id": "robinhood", "label": "Robinhood (MCP)", "endpoint": "https://agent.robinhood.com/mcp/trading"},
+    ],
+    # Amplitude: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "amplitude": [
+        {"server_id": "amplitude", "label": "Amplitude (MCP)", "endpoint": "https://mcp.amplitude.com/mcp"},
+    ],
+    # Mixpanel: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "mixpanel": [
+        {"server_id": "mixpanel", "label": "Mixpanel (MCP)", "endpoint": "https://mcp.mixpanel.com/mcp"},
+    ],
+    # PostHog: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "posthog": [
+        {"server_id": "posthog", "label": "PostHog (MCP)", "endpoint": "https://mcp.posthog.com/mcp"},
+    ],
+    # Meta Ads: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "meta_ads": [
+        {"server_id": "meta_ads", "label": "Meta Ads (MCP)", "endpoint": "https://mcp.facebook.com/ads"},
+    ],
+    # Semrush: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "semrush": [
+        {"server_id": "semrush", "label": "Semrush (MCP)", "endpoint": "https://mcp.semrush.com/v1/mcp"},
+    ],
+    # Ahrefs: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "ahrefs": [
+        {"server_id": "ahrefs", "label": "Ahrefs (MCP)", "endpoint": "https://api.ahrefs.com/mcp/mcp"},
+    ],
+    # Close: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "close_crm": [
+        {"server_id": "close_crm", "label": "Close (MCP)", "endpoint": "https://mcp.close.com/mcp"},
+    ],
+    # Apollo.io: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "apollo_io": [
+        {"server_id": "apollo_io", "label": "Apollo.io (MCP)", "endpoint": "https://mcp.apollo.io/mcp"},
+    ],
+    # Outreach: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "outreach": [
+        {"server_id": "outreach", "label": "Outreach (MCP)", "endpoint": "https://api.outreach.io/mcp/"},
+    ],
+    # Salesloft: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "salesloft": [
+        {"server_id": "salesloft", "label": "Salesloft (MCP)", "endpoint": "https://mcp.salesloft.com/mcp"},
+    ],
+    # Clay: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "clay": [
+        {"server_id": "clay", "label": "Clay (MCP)", "endpoint": "https://api.clay.com/v3/mcp"},
+    ],
+    # Fireflies.ai: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "fireflies": [
+        {"server_id": "fireflies", "label": "Fireflies.ai (MCP)", "endpoint": "https://api.fireflies.ai/mcp"},
+    ],
+    # Fathom: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "fathom": [
+        {"server_id": "fathom", "label": "Fathom (MCP)", "endpoint": "https://api.fathom.ai/mcp"},
+    ],
+    # Superhuman Docs (formerly Coda): official remote MCP server. Auth: OAuth 2.0
+    # + PKCE + DCR. Confirmed live 2026-07-19.
+    "coda": [
+        {"server_id": "coda", "label": "Superhuman Docs (formerly Coda) (MCP)", "endpoint": "https://docs.superhuman.com/apis/mcp"},
     ],
 }
 

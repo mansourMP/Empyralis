@@ -1749,7 +1749,20 @@ async def create_connector_vault(body: ConnectorCreate):
         elif connector == "irc":
             test = validate_irc_connector(credentials)
         else:
-            raise RuntimeError(f"Unsupported connector '{connector}'")
+            # Generic fallback: ANY connector wired into connection_oauth_
+            # service.OAUTH_PROVIDER_CONFIGS (the 40 net-new Tier-1 DCR
+            # connectors plus zapier/paypal/sentry/attio/cloudflare) works
+            # here with no per-provider elif branch -- validate_generic_
+            # oauth_connector decides MCP-scoped vs. classic-bearer
+            # validation the same data-driven way every named branch above
+            # does. Only a connector absent from OAUTH_PROVIDER_CONFIGS
+            # entirely still hits "Unsupported connector".
+            from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS
+            if connector in OAUTH_PROVIDER_CONFIGS:
+                test = validate_generic_oauth_connector(connector, credentials)
+                credentials = test.get("credentials") if isinstance(test.get("credentials"), dict) else credentials
+            else:
+                raise RuntimeError(f"Unsupported connector '{connector}'")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -2379,7 +2392,17 @@ async def test_connector_vault(credential_id: str, workspace_id: Optional[str] =
             _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
             raise HTTPException(status_code=400, detail=str(exc))
     else:
-        raise HTTPException(status_code=400, detail=f"Unsupported connector '{connector}'")
+        # Generic fallback -- same reasoning as create_connector_vault's
+        # final else branch above: any connector wired into OAUTH_PROVIDER_
+        # CONFIGS re-validates here with no per-provider elif branch needed.
+        from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS
+        if connector not in OAUTH_PROVIDER_CONFIGS:
+            raise HTTPException(status_code=400, detail=f"Unsupported connector '{connector}'")
+        try:
+            test_result = validate_generic_oauth_connector(connector, credentials)
+        except Exception as exc:
+            _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
+            raise HTTPException(status_code=400, detail=str(exc))
 
     _persist_capability_verification(test_result)
     return test_result

@@ -60,4 +60,47 @@ export const CONNECTOR_ICONS: Record<string, string> = {
   wechat_work: "/brand-assets/channels/wechat.svg",
   instagram_business: "/brand-assets/apps/instagram.svg",
   webhook: "/brand-assets/generic/webhook.svg",
+  // 2026-07-19 connector wiring (40 Tier-1 verified DCR connectors, minus
+  // sentry/paypal/attio skipped as exact duplicates of already-wired
+  // connectors above). Real Simple Icons brand SVGs where a verified slug
+  // exists; a neutral monogram placeholder (see the SVG's own <!-- --> note)
+  // for the rest, including "fathom" (Simple Icons' "fathom" slug is the
+  // WRONG brand, Fathom Analytics) and "klaviyo" (the directory's assumed
+  // slug does not actually exist in Simple Icons -- verified live).
+  netlify: "/brand-assets/apps/netlify.svg",
+  supabase: "/brand-assets/apps/supabase.svg",
+  planetscale: "/brand-assets/apps/planetscale.svg",
+  neon: "/brand-assets/apps/neon.svg",
+  railway: "/brand-assets/apps/railway.svg",
+  replit: "/brand-assets/apps/replit.svg",
+  postman: "/brand-assets/apps/postman.svg",
+  buildkite: "/brand-assets/apps/buildkite.svg",
+  socket: "/brand-assets/apps/socket.svg",
+  brex: "/brand-assets/apps/brex.svg",
+  robinhood: "/brand-assets/apps/robinhood.svg",
+  mixpanel: "/brand-assets/apps/mixpanel.svg",
+  posthog: "/brand-assets/apps/posthog.svg",
+  meta_ads: "/brand-assets/apps/meta.svg",
+  semrush: "/brand-assets/apps/semrush.svg",
+  coda: "/brand-assets/apps/coda.svg",
+  gusto: "/brand-assets/apps/gusto.svg",
+  deel: "/brand-assets/apps/deel.svg",
+  remote_com: "/brand-assets/apps/remote.svg",
+  ashby: "/brand-assets/apps/ashby.svg",
+  klaviyo: "/brand-assets/apps/klaviyo.svg",
+  customer_io: "/brand-assets/apps/customer-io.svg",
+  heroku: "/brand-assets/apps/heroku.svg",
+  sourcegraph: "/brand-assets/apps/sourcegraph.svg",
+  whimsical: "/brand-assets/apps/whimsical.svg",
+  ramp: "/brand-assets/apps/ramp.svg",
+  mercury: "/brand-assets/apps/mercury.svg",
+  amplitude: "/brand-assets/apps/amplitude.svg",
+  ahrefs: "/brand-assets/apps/ahrefs.svg",
+  close_crm: "/brand-assets/apps/close.svg",
+  apollo_io: "/brand-assets/apps/apollo.svg",
+  outreach: "/brand-assets/apps/outreach.svg",
+  salesloft: "/brand-assets/apps/salesloft.svg",
+  clay: "/brand-assets/apps/clay.svg",
+  fireflies: "/brand-assets/apps/fireflies.svg",
+  fathom: "/brand-assets/apps/fathom.svg",
 };

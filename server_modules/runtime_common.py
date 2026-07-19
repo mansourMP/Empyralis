@@ -620,6 +620,7 @@ def resolve_default_vault_credential(provider, workspace_id=None, **scope):
 
 _codex_token_from_vault = lambda: _codex_token_from_vault_impl(CODEX_AUTH_FILE, _safe_read_json)
 
+validate_generic_oauth_connector = lambda connector, credentials: _validate_generic_oauth_connector(connector, credentials, http_json_request)
 validate_google_workspace_connector = lambda credentials: _validate_google_workspace_connector(credentials, http_json_request)
 validate_microsoft_365_connector = lambda credentials: _validate_microsoft_365_connector(credentials, http_json_request)
 validate_smtp_connector = lambda credentials: _validate_smtp_connector(credentials, http_json_request)

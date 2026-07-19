@@ -70,6 +70,43 @@ def validate_github_connector(credentials: Dict[str, Any], http_json_request: Ht
 # dead for a connection that actually completes.
 # ---------------------------------------------------------------------------
 
+# Connectors whose Dynamic Client Registration (RFC 7591) mints a client
+# against the SAME OAuth app/host as their classic REST API -- confirmed via
+# each provider's own discovery-document evidence trail in connection_oauth_
+# service.OAUTH_PROVIDER_CONFIGS (see the "airtable"/"dropbox" entries'
+# comments there). The resulting token is a genuine general-purpose classic-
+# API token, not narrowly MCP-scoped, so it correctly authenticates against
+# the classic profile_probe validate_oauth_bearer_connector calls. Every
+# OTHER DCR-capable connector's MCP app is a dedicated, separate OAuth app
+# from its classic API (or has no classic API at all) -- its token must be
+# proven via a live MCP handshake (validate_mcp_scoped_oauth_connector)
+# instead, or the classic profile_probe rejects it outright.
+_CLASSIC_TOKEN_DCR_CONNECTOR_IDS = frozenset({"airtable", "dropbox"})
+
+
+def _connector_requires_mcp_scoped_validation(provider: str) -> bool:
+    """True if `provider`'s OAuth token should be proven via a live MCP
+    handshake (validate_mcp_scoped_oauth_connector) rather than a classic
+    REST profile probe. Generic and data-driven -- ANY connector wired into
+    connection_oauth_service.OAUTH_PROVIDER_CONFIGS with a registration_
+    endpoint (i.e. DCR-capable) qualifies, except the small, evidence-backed
+    _CLASSIC_TOKEN_DCR_CONNECTOR_IDS carve-out above. This is what makes new
+    connectors work end-to-end the moment they're added to OAUTH_PROVIDER_
+    CONFIGS -- no per-provider routing edit needed here or in
+    connectors_actions.py's create_connector_vault/test_connector_vault.
+    """
+    normalized = str(provider or "").strip().lower()
+    if not normalized or normalized in _CLASSIC_TOKEN_DCR_CONNECTOR_IDS:
+        return False
+    # Deferred import: see the identical comment on validate_mcp_scoped_
+    # oauth_connector below -- connection_oauth_service imports
+    # connectors_actions (which loads this module) at module scope, so this
+    # module must not import connection_oauth_service at module scope.
+    from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS
+
+    config = OAUTH_PROVIDER_CONFIGS.get(normalized)
+    return bool(config and config.registration_endpoint)
+
 
 def validate_mcp_scoped_oauth_connector(
     credentials: Dict[str, Any],
@@ -144,6 +181,65 @@ def validate_mcp_scoped_oauth_connector(
     }
 
 
+# ---------------------------------------------------------------------------
+# Generic fallback -- validates ANY connector wired into connection_oauth_
+# service.OAUTH_PROVIDER_CONFIGS that has no bespoke validate_<provider>_
+# connector function of its own in this module. This is the mechanism that
+# makes create_connector_vault/test_connector_vault "just work" for a new
+# connector the moment it's added to OAUTH_PROVIDER_CONFIGS + APP_MCP_
+# SERVER_MAP -- no per-provider validator function, no per-provider elif
+# branch, no risk of a fresh connection 400ing with "Unsupported connector"
+# or hitting a classic-API probe a DCR-minted MCP-scoped token can't pass.
+# Routes through the same generic, data-driven decision _connector_requires_
+# mcp_scoped_validation uses for every named wrapper above.
+# ---------------------------------------------------------------------------
+
+
+def validate_generic_oauth_connector(
+    provider: str,
+    credentials: Dict[str, Any],
+    http_json_request: HttpJsonRequest | None = None,
+) -> Dict[str, Any]:
+    normalized_provider = str(provider or "").strip().lower()
+    # Deferred import: see the identical comment on validate_mcp_scoped_
+    # oauth_connector above.
+    from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS
+
+    config = OAUTH_PROVIDER_CONFIGS.get(normalized_provider)
+    label = (config.label if config else "") or normalized_provider.replace("_", " ").title() or normalized_provider
+
+    if _connector_requires_mcp_scoped_validation(normalized_provider):
+        return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider=normalized_provider, label=label)
+
+    profile_probe = config.profile_probe if config else None
+    if profile_probe and http_json_request is not None:
+        return validate_oauth_bearer_connector(
+            credentials,
+            http_json_request,
+            provider=normalized_provider,
+            label=label,
+            profile_probe=profile_probe,
+        )
+
+    # Nothing to probe against (no MCP endpoint, no classic profile_probe,
+    # or no http_json_request supplied) -- trust the token exchange itself
+    # succeeded, the same fallback validate_mcp_scoped_oauth_connector uses
+    # above when a provider has no APP_MCP_SERVER_MAP endpoint on file.
+    access_token = str(credentials.get("access_token") or credentials.get("oauth_access_token") or credentials.get("token") or "").strip()
+    if not access_token:
+        raise RuntimeError(f"{label} access_token is required.")
+    auth_mode = str(credentials.get("auth_mode") or "oauth").strip().lower() or "oauth"
+    return {
+        "ok": True,
+        "status": 200,
+        "message": f"{label} connector is valid.",
+        "profile": {},
+        "provider": normalized_provider,
+        "auth_mode": auth_mode,
+        "credentials": {**credentials, "access_token": access_token, "auth_mode": auth_mode},
+    }
+
+
 def validate_notion_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest | None = None) -> Dict[str, Any]:
     return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="notion", label="Notion")
 
@@ -168,6 +264,12 @@ def validate_oauth_bearer_connector(
     label: str,
     profile_probe: str,
 ) -> Dict[str, Any]:
+    if _connector_requires_mcp_scoped_validation(provider):
+        # This provider gained DCR against a dedicated MCP-only OAuth app
+        # since profile_probe below was wired -- the classic REST endpoint
+        # would reject the resulting token. See _connector_requires_mcp_
+        # scoped_validation's docstring.
+        return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider=provider, label=label)
     access_token = str(credentials.get("access_token") or credentials.get("oauth_access_token") or credentials.get("token") or "").strip()
     if not access_token:
         raise RuntimeError(f"{label} access_token is required.")
@@ -298,6 +400,8 @@ def validate_webflow_connector(credentials: Dict[str, Any], http_json_request: H
 
 
 def validate_monday_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
+    if _connector_requires_mcp_scoped_validation("monday"):
+        return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="monday", label="monday.com")
     access_token = str(credentials.get("access_token") or credentials.get("oauth_access_token") or credentials.get("token") or "").strip()
     if not access_token:
         raise RuntimeError("monday.com access_token is required.")
@@ -434,6 +538,8 @@ def validate_docusign_connector(credentials: Dict[str, Any], http_json_request: 
 
 
 def validate_square_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
+    if _connector_requires_mcp_scoped_validation("square"):
+        return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="square", label="Square")
     access_token = str(credentials.get("access_token") or credentials.get("oauth_access_token") or credentials.get("token") or "").strip()
     if not access_token:
         raise RuntimeError("Square access_token is required.")
