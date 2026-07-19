@@ -639,6 +639,46 @@ def _mention_ids_from_payload(payload: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _resolve_discord_bot_id(credentials: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> str:
+    """Resolve the bot's own Discord user id from whatever we have on hand.
+
+    Checked in order: the connector's persisted metadata ``bot_id`` (captured
+    from ``/users/@me`` at connect time — see
+    ``connectors_actions.create_connector_vault``), the same keys directly on
+    credentials, then ``application_id`` (equal to the bot's own user id for
+    a standard single-application Discord bot). Returns "" when none are
+    configured — callers must treat that as "identity unknown", never as
+    "anything goes".
+    """
+    metadata_value = metadata if isinstance(metadata, dict) else {}
+    credentials_value = credentials if isinstance(credentials, dict) else {}
+    for source in (metadata_value, credentials_value):
+        for key in ("bot_id", "bot_user_id", "application_id"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _message_addressed_to_bot(parsed: Dict[str, Any], bot_id: str) -> bool:
+    """True when ``bot_id`` is explicitly @mentioned in the message, or the
+    message is a reply to one of the bot's own prior messages.
+
+    A guild message (or Group DM) can @mention or reply to any number of
+    unrelated users — a non-empty mentions/reply signal on its own proves
+    nothing about whether *this* bot was addressed. Without ``bot_id`` there
+    is nothing to compare against, so this always returns False rather than
+    guessing.
+    """
+    if not bot_id:
+        return False
+    mention_ids = parsed.get("mention_ids") if isinstance(parsed.get("mention_ids"), list) else []
+    if bot_id in {str(item).strip() for item in mention_ids}:
+        return True
+    referenced_author_id = str(parsed.get("referenced_message_author_id") or "").strip()
+    return bool(referenced_author_id) and referenced_author_id == bot_id
+
+
 def parse_inbound_event(payload: Dict[str, Any], *, event_type: str = "") -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError("Discord inbound payload must be an object.")
@@ -681,10 +721,25 @@ def parse_inbound_event(payload: Dict[str, Any], *, event_type: str = "") -> Dic
     author = data.get("author") if isinstance(data.get("author"), dict) else {}
 
     if gateway_event in {"MESSAGE_CREATE", ""} and str(data.get("content") or "").strip():
+        # is_group_dm is threaded in by DiscordGatewayListener.on_message for
+        # a live Group DM message (see there) — it has no guild_id (like any
+        # DM) but, unlike a true 1:1 DM, is a multi-party room that must stay
+        # on the mention/reply-gated "mention" branch below instead of the
+        # unconditional "direct_message" one.
+        is_group_dm = bool(data.get("is_group_dm"))
+        mention_ids = _mention_ids_from_payload(data)
+        referenced_message = data.get("referenced_message") if isinstance(data.get("referenced_message"), dict) else {}
+        referenced_author = referenced_message.get("author") if isinstance(referenced_message.get("author"), dict) else {}
+        referenced_message_author_id = str(referenced_author.get("id") or "").strip()
+
         message_type = "message"
-        if _mention_ids_from_payload(data):
+        if mention_ids or referenced_message_author_id:
             message_type = "mention"
-        if str((data.get("channel_id") or "")).strip() and str(data.get("guild_id") or "").strip() == "":
+        if (
+            str((data.get("channel_id") or "")).strip()
+            and str(data.get("guild_id") or "").strip() == ""
+            and not is_group_dm
+        ):
             message_type = "direct_message"
         return {
             "kind": "event",
@@ -697,7 +752,9 @@ def parse_inbound_event(payload: Dict[str, Any], *, event_type: str = "") -> Dic
             "user_id": str(author.get("id") or "").strip() or None,
             "username": str(author.get("username") or author.get("global_name") or "").strip() or None,
             "text": str(data.get("content") or "").strip(),
-            "mention_ids": _mention_ids_from_payload(data),
+            "mention_ids": mention_ids,
+            "referenced_message_author_id": referenced_message_author_id or None,
+            "is_group_dm": is_group_dm,
             "raw_event": data,
         }
 
@@ -787,7 +844,16 @@ def should_trigger_agent_run(
         except re.error:
             return trigger_pattern.lower() in text.lower()
     message_type = str(parsed.get("message_type") or "").strip().lower()
-    return message_type in {"mention", "direct_message"}
+    if message_type == "mention":
+        # FIX: a guild message (or Group DM) can @mention or reply to any
+        # number of unrelated users — parse_inbound_event setting
+        # message_type="mention" only means SOMEONE was mentioned/replied
+        # to, not that it was us. Only trigger when the bot's own id is
+        # actually in the mix; an unresolved bot id (nothing configured
+        # anywhere) fails closed via _message_addressed_to_bot.
+        bot_id = _resolve_discord_bot_id(credentials, metadata_value)
+        return _message_addressed_to_bot(parsed, bot_id)
+    return message_type == "direct_message"
 
 
 def build_run_goal_from_event(parsed: Dict[str, Any]) -> str:
@@ -944,18 +1010,47 @@ def dispatch_inbound_event(
     return {"ok": True, "triggered": bool(run_id), "run_id": run_id or None}
 
 
+def _is_group_dm_message(message: Any) -> bool:
+    """True when ``message`` (a discord.py ``Message``, or any object
+    exposing the same shape) arrived in a Group DM channel — multiple
+    recipients, no guild — as opposed to a true 1:1 DM or a guild channel.
+
+    ``guild is None`` is true for EVERY DM channel, 1:1 and Group DM alike,
+    so it cannot distinguish them on its own; a Group DM channel additionally
+    exposes either a ``recipients`` list with more than one member or a
+    ``type`` of ``"group"`` (discord.py's ``ChannelType.group``), which a
+    true 1:1 ``DMChannel`` does not. Pure duck-typing via ``getattr`` —
+    works against a real discord.py ``GroupChannel``/``DMChannel`` or a
+    plain test double, and has no import-time dependency on discord.py
+    being installed (unlike ``DiscordGatewayListener``, which requires it).
+    """
+    if getattr(message, "guild", None) is not None:
+        return False
+    channel_obj = getattr(message, "channel", None)
+    recipients = getattr(channel_obj, "recipients", None)
+    channel_type_value = getattr(channel_obj, "type", None)
+    channel_type_name = str(getattr(channel_type_value, "name", channel_type_value) or "").strip().lower()
+    return (isinstance(recipients, (list, tuple)) and len(recipients) > 1) or channel_type_name == "group"
+
+
 async def _handle_dm_via_gateway(message: Any) -> None:
-    """CANONICAL Discord DM handler (Path C).
+    """CANONICAL Discord DM handler (Path C) — TRUE 1:1 DMs only.
 
     Processes a direct message through Sage and replies via the Gateway
     WebSocket.  Uses ``message.channel.send()`` (the native discord.py method)
     instead of the REST API.
 
-    This is the *single source of truth* for Discord DM text messages.
-    All DMs arrive through the Gateway WebSocket and are intercepted by
-    ``DiscordGatewayListener.on_message`` BEFORE the ``_on_event`` callback
+    This is the *single source of truth* for Discord 1:1 DM text messages.
+    All true 1:1 DMs arrive through the Gateway WebSocket and are intercepted
+    by ``DiscordGatewayListener.on_message`` BEFORE the ``_on_event`` callback
     fires — so the DM handler in ``DiscordBotRuntimeService.handle_parsed_event``
-    (Path A) is never reached for DMs.
+    (Path A) is never reached for them.
+
+    A Group DM (multiple recipients, same JID-less ``guild is None`` shape as
+    a 1:1 DM) is deliberately NOT routed here — ``on_message`` distinguishes
+    it and sends it through the same mention/reply-gated
+    ``parse_inbound_event`` → ``_on_event`` → ``handle_parsed_event`` path a
+    guild message takes, so it only ever replies when actually addressed.
 
     Slash commands / interactions in DMs are handled separately by the
     HTTP Interactions endpoint in ``connectors_actions.discord_webhook``
@@ -1132,11 +1227,34 @@ class DiscordGatewayListener:
             if self._allowed_channel_ids and channel_id not in self._allowed_channel_ids:
                 return
 
-            # ── DM: reply directly via gateway WebSocket (no REST API) ──
-            is_dm = getattr(message, "guild", None) is None
-            if is_dm:
+            # ── Group DM detection ──────────────────────────────────────
+            # guild is None for EVERY DM channel (true 1:1 and multi-party
+            # Group DM alike) — a bare `guild is None` check conflated the
+            # two, so a Group DM got the same zero-gate treatment as a real
+            # 1:1 line to the bot and replied to every message any member
+            # sent. See _is_group_dm_message's docstring for the detection.
+            guild = getattr(message, "guild", None)
+            is_group_dm = _is_group_dm_message(message)
+
+            # ── True 1:1 DM: reply directly via gateway WebSocket (no REST API) ──
+            # A Group DM is a multi-party room like a guild channel, not a
+            # private line to the bot, so it deliberately does NOT take this
+            # unconditional path — it falls through to the mention/reply
+            # -gated parse_inbound_event/should_trigger_agent_run path below,
+            # same as a guild message.
+            if guild is None and not is_group_dm:
                 await _handle_dm_via_gateway(message)
                 return
+
+            # Reply-to-bot detection (needed for both guild messages and
+            # Group DMs): resolve the author of whatever message this one is
+            # replying to, when discord.py has it cached/resolved.
+            reference = getattr(message, "reference", None)
+            referenced_author_id = ""
+            if reference is not None:
+                resolved = getattr(reference, "resolved", None)
+                if resolved is not None:
+                    referenced_author_id = str(getattr(getattr(resolved, "author", None), "id", "") or "").strip()
 
             parsed = parse_inbound_event(
                 {
@@ -1144,7 +1262,7 @@ class DiscordGatewayListener:
                     "d": {
                         "id": str(getattr(message, "id", "") or ""),
                         "channel_id": channel_id,
-                        "guild_id": str(getattr(getattr(message, "guild", None), "id", "") or ""),
+                        "guild_id": str(getattr(guild, "id", "") or ""),
                         "content": str(getattr(message, "content", "") or ""),
                         "author": {
                             "id": str(getattr(getattr(message, "author", None), "id", "") or ""),
@@ -1154,6 +1272,10 @@ class DiscordGatewayListener:
                             {"id": str(getattr(item, "id", "") or "")}
                             for item in list(getattr(message, "mentions", []) or [])
                         ],
+                        "referenced_message": (
+                            {"author": {"id": referenced_author_id}} if referenced_author_id else None
+                        ),
+                        "is_group_dm": is_group_dm,
                     },
                 }
             )

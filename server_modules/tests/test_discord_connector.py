@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from server_modules.connectors import discord_connector
 
@@ -87,7 +88,10 @@ class DiscordConnectorTests(unittest.TestCase):
 
         result = discord_connector.dispatch_inbound_event(
             parsed,
-            connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {}},
+            # metadata.bot_id="999" matches the mention in the payload above
+            # (<@999> / mentions:[{"id":"999"}]) — this is the bot's own id
+            # being mentioned, the addressed-to-us case that must trigger.
+            connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {"bot_id": "999"}},
             credentials={"bot_token": "discord-token", "channel_id": "123", "guild_id": "456"},
             append_event_fn=fake_append_event,
             execute_agent_turn_request=fake_execute_agent_turn_request,
@@ -121,7 +125,9 @@ class DiscordConnectorTests(unittest.TestCase):
 
         result = discord_connector.dispatch_inbound_event(
             parsed,
-            connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {}},
+            # metadata.bot_id="999" matches the mention in the payload above
+            # — the bot's own id being mentioned, which must trigger.
+            connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {"bot_id": "999"}},
             credentials={"bot_token": "discord-token", "channel_id": "123", "guild_id": "456"},
             append_event_fn=None,
             run_start_request_class=lambda **kwargs: SimpleNamespace(**kwargs),
@@ -154,7 +160,11 @@ class DiscordConnectorTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             discord_connector.dispatch_inbound_event(
                 parsed,
-                connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {}},
+                # metadata.bot_id="999" matches the mention in the payload
+                # above, so this event actually triggers and reaches the
+                # "no canonical ingress callback configured" RuntimeError
+                # this test exists to prove.
+                connector_entry={"id": "cred-discord", "workspace_id": "default", "metadata": {"bot_id": "999"}},
                 credentials={"bot_token": "discord-token", "channel_id": "123", "guild_id": "456"},
                 append_event_fn=None,
             )
@@ -238,6 +248,327 @@ class DiscordConnectorTests(unittest.TestCase):
         # Reset for other tests
         discord_connector._clear_discord_dedup_cache()
         discord_connector._DEDUP_MAX_SIZE = 2000
+
+    # ── FIX 1: guild @mention/reply must be addressed to THIS bot ──────
+    # Before this fix, _mention_ids_from_payload set message_type="mention"
+    # for ANY non-empty mentions list, and should_trigger_agent_run treated
+    # every "mention" as triggering — so a guild message mentioning some
+    # unrelated member made the agent reply anyway. The bot's own id was
+    # never compared against the mention list anywhere.
+
+    def _guild_mention_payload(self, *, mention_ids, text="hello", referenced_message=None):
+        data = {
+            "id": "msg-fix1",
+            "channel_id": "123",
+            "guild_id": "456",
+            "content": text,
+            "author": {"id": "user-1", "username": "alice"},
+            "mentions": [{"id": mid} for mid in mention_ids],
+        }
+        if referenced_message is not None:
+            data["referenced_message"] = referenced_message
+        return discord_connector.parse_inbound_event({"t": "MESSAGE_CREATE", "d": data})
+
+    def test_guild_mention_of_non_bot_user_does_not_trigger(self):
+        """Mentioning some OTHER guild member (not the bot) must stay silent."""
+        parsed = self._guild_mention_payload(mention_ids=["555"], text="<@555> can you take this")
+        self.assertEqual(parsed["message_type"], "mention")
+        self.assertFalse(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_guild_mention_of_bot_triggers(self):
+        """Mentioning the bot's own id must trigger."""
+        parsed = self._guild_mention_payload(mention_ids=["999"], text="<@999> please investigate")
+        self.assertEqual(parsed["message_type"], "mention")
+        self.assertTrue(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_guild_mention_of_bot_among_others_still_triggers(self):
+        """The bot being ONE of several mentions is still addressed to it."""
+        parsed = self._guild_mention_payload(mention_ids=["555", "999"], text="<@555> <@999> thoughts?")
+        self.assertTrue(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_guild_reply_to_bot_message_triggers_without_explicit_mention(self):
+        """A reply to one of the bot's own prior messages triggers even with
+        no @mention text at all (Discord replies don't always carry one)."""
+        parsed = self._guild_mention_payload(
+            mention_ids=[],
+            text="sounds good, do it",
+            referenced_message={"author": {"id": "999"}},
+        )
+        self.assertEqual(parsed["message_type"], "mention")
+        self.assertTrue(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_guild_reply_to_someone_elses_message_does_not_trigger(self):
+        """A reply to a DIFFERENT member's message (not the bot's) stays silent."""
+        parsed = self._guild_mention_payload(
+            mention_ids=[],
+            text="sounds good",
+            referenced_message={"author": {"id": "555"}},
+        )
+        self.assertFalse(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_guild_mention_fails_closed_when_bot_id_is_unresolvable(self):
+        """With no bot_id configured anywhere (metadata, credentials), a
+        mention must NOT trigger — unknown identity fails closed, not open."""
+        parsed = self._guild_mention_payload(mention_ids=["999"], text="<@999> hello")
+        self.assertFalse(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={},
+            )
+        )
+
+    def test_resolve_discord_bot_id_prefers_metadata_then_credentials_then_application_id(self):
+        self.assertEqual(
+            discord_connector._resolve_discord_bot_id({"bot_id": "from-creds"}, {"bot_id": "from-metadata"}),
+            "from-metadata",
+        )
+        self.assertEqual(discord_connector._resolve_discord_bot_id({"bot_id": "from-creds"}, {}), "from-creds")
+        self.assertEqual(
+            discord_connector._resolve_discord_bot_id({"application_id": "app-1"}, {}),
+            "app-1",
+        )
+        self.assertEqual(discord_connector._resolve_discord_bot_id({}, {}), "")
+
+    # ── FIX 2: Group DM must be mention/reply-gated, true 1:1 DM stays open ──
+    # Before this fix, DiscordGatewayListener.on_message's `guild is None`
+    # check treated a multi-party Group DM exactly like a true 1:1 DM and
+    # replied to every message, unconditionally, from any participant.
+
+    def test_is_group_dm_message_true_via_recipients_list(self):
+        message = SimpleNamespace(
+            guild=None,
+            channel=SimpleNamespace(recipients=[SimpleNamespace(id="1"), SimpleNamespace(id="2")]),
+        )
+        self.assertTrue(discord_connector._is_group_dm_message(message))
+
+    def test_is_group_dm_message_true_via_channel_type_group(self):
+        message = SimpleNamespace(guild=None, channel=SimpleNamespace(type=SimpleNamespace(name="group")))
+        self.assertTrue(discord_connector._is_group_dm_message(message))
+
+    def test_is_group_dm_message_false_for_true_one_on_one_dm(self):
+        message = SimpleNamespace(
+            guild=None,
+            channel=SimpleNamespace(recipients=[SimpleNamespace(id="1")], type=SimpleNamespace(name="private")),
+        )
+        self.assertFalse(discord_connector._is_group_dm_message(message))
+
+    def test_is_group_dm_message_false_for_guild_channel(self):
+        message = SimpleNamespace(guild=SimpleNamespace(id="456"), channel=SimpleNamespace(recipients=[1, 2, 3]))
+        self.assertFalse(discord_connector._is_group_dm_message(message))
+
+    def _group_dm_payload(self, *, mention_ids=(), text="hello", referenced_message=None):
+        data = {
+            "id": "msg-groupdm",
+            "channel_id": "gdm-1",
+            "guild_id": "",
+            "content": text,
+            "author": {"id": "user-1", "username": "alice"},
+            "mentions": [{"id": mid} for mid in mention_ids],
+            "is_group_dm": True,
+        }
+        if referenced_message is not None:
+            data["referenced_message"] = referenced_message
+        return discord_connector.parse_inbound_event({"t": "MESSAGE_CREATE", "d": data})
+
+    def test_group_dm_message_not_addressing_bot_stays_silent(self):
+        """A Group DM message that neither mentions nor replies to the bot
+        must NOT trigger — this is the exact bug: zero addressing check
+        meant every Group DM message triggered a reply."""
+        parsed = self._group_dm_payload(text="what time works for everyone?")
+        self.assertIsNone(parsed["guild_id"])
+        self.assertNotEqual(parsed["message_type"], "direct_message", "a Group DM must not collapse into the unconditional 1:1 DM path")
+        self.assertFalse(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t"},
+                metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_group_dm_message_mentioning_bot_triggers(self):
+        """A Group DM message that DOES @mention the bot still triggers —
+        proves the gate isn't over-broad, only unaddressed messages are silent."""
+        parsed = self._group_dm_payload(mention_ids=["999"], text="<@999> what do you think?")
+        self.assertTrue(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t"},
+                metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_true_one_on_one_dm_still_triggers_unconditionally(self):
+        """A real 1:1 DM (is_group_dm not set) keeps triggering regardless
+        of mention — Group DM gating must not regress this."""
+        parsed = discord_connector.parse_inbound_event(
+            {
+                "t": "MESSAGE_CREATE",
+                "d": {
+                    "id": "msg-dm-1",
+                    "channel_id": "dm-1",
+                    "guild_id": "",
+                    "content": "hey, are you there?",
+                    "author": {"id": "user-1", "username": "alice"},
+                    "mentions": [],
+                },
+            }
+        )
+        self.assertEqual(parsed["message_type"], "direct_message")
+        self.assertTrue(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t"},
+                metadata={},
+            )
+        )
+
+
+class DiscordDmGatewayHandlerTests(unittest.IsolatedAsyncioTestCase):
+    """Live coverage for _handle_dm_via_gateway — the CANONICAL, currently
+    active Discord 1:1 DM handler (Path C, see its docstring). Touched by
+    FIX 2 (on_message now routes only a true 1:1 DM here, a Group DM takes
+    the mention-gated path instead) — added because no test previously
+    exercised this handler at all.
+
+    NOTE: test_discord_sage_ingress.py has 5 pre-existing failures at this
+    baseline commit — it tests an OLDER DM handler location
+    (DiscordBotRuntimeService.handle_parsed_event) that a prior refactor
+    moved away from; those failures are unrelated to this fix and are left
+    alone (out of scope — see the task's verification notes).
+    """
+
+    def setUp(self):
+        discord_connector._clear_discord_dedup_cache()
+
+    def _make_message(self, *, text, author_id="user-1", author_name="alice", message_id="dm-msg-1"):
+        sent: list[str] = []
+
+        async def _send(content):
+            sent.append(content)
+
+        message = SimpleNamespace(
+            content=text,
+            id=message_id,
+            author=SimpleNamespace(id=author_id, name=author_name),
+            channel=SimpleNamespace(send=_send),
+        )
+        return message, sent
+
+    async def test_dm_without_paired_workspace_prompts_for_pair_code(self):
+        message, sent = self._make_message(text="hello there")
+        with patch(
+            "server_modules.discord_pairing_service.get_workspace_for_discord_user",
+            return_value="",
+        ):
+            await discord_connector._handle_dm_via_gateway(message)
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("/pair", sent[0])
+
+    async def test_dm_with_paired_workspace_routes_through_sage_and_replies(self):
+        sage_result = SimpleNamespace(message="Nothing urgent right now.")
+        message, sent = self._make_message(text="what's on my plate today")
+        with (
+            patch(
+                "server_modules.discord_pairing_service.get_workspace_for_discord_user",
+                return_value="ws-1",
+            ),
+            patch(
+                "server_modules.sage_command_dispatcher.dispatch_command",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=sage_result),
+            ) as mock_turn,
+            patch(
+                "server_modules.channel_adapter.filter_channel_outbound_reply",
+                side_effect=lambda text: text,
+            ),
+        ):
+            await discord_connector._handle_dm_via_gateway(message)
+
+        mock_turn.assert_awaited_once()
+        call_kwargs = mock_turn.await_args.kwargs
+        self.assertEqual(call_kwargs["workspace_id"], "ws-1")
+        self.assertEqual(call_kwargs["channel_origin"], "discord_personal")
+        self.assertEqual(call_kwargs["channel_sender_id"], "user-1")
+        self.assertEqual(sent, ["Nothing urgent right now."])
+
+    async def test_pair_command_links_workspace_and_confirms(self):
+        message, sent = self._make_message(text="/pair ABC123")
+        with (
+            patch(
+                "server_modules.sage_telegram_hosted_service.consume_pairing_code",
+                return_value="ws-9",
+            ),
+            patch("server_modules.discord_pairing_service.pair_discord_workspace") as mock_pair,
+        ):
+            await discord_connector._handle_dm_via_gateway(message)
+
+        mock_pair.assert_called_once_with("user-1", "ws-9")
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Connected", sent[0])
+
+    async def test_duplicate_message_id_is_not_double_processed(self):
+        """A retried/duplicate gateway delivery of the same DM message id
+        must not run a second Sage turn or send a second reply."""
+        sage_result = SimpleNamespace(message="Reply once.")
+        message, sent = self._make_message(text="hi", message_id="dm-dedup-1")
+        with (
+            patch(
+                "server_modules.discord_pairing_service.get_workspace_for_discord_user",
+                return_value="ws-1",
+            ),
+            patch(
+                "server_modules.sage_command_dispatcher.dispatch_command",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=sage_result),
+            ) as mock_turn,
+            patch(
+                "server_modules.channel_adapter.filter_channel_outbound_reply",
+                side_effect=lambda text: text,
+            ),
+        ):
+            await discord_connector._handle_dm_via_gateway(message)
+            await discord_connector._handle_dm_via_gateway(message)
+
+        mock_turn.assert_awaited_once()
+        self.assertEqual(sent, ["Reply once."])
 
 
 if __name__ == "__main__":
