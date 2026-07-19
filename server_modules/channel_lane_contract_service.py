@@ -191,6 +191,21 @@ STUDIO_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
         "session_owner": "cloud_connector",
     },
     {
+        # Plain SMS via a dedicated Twilio number per agent — reuses the same
+        # Twilio Messages API plumbing as whatsapp_twilio, minus the
+        # `whatsapp:` address prefix (see WhatsAppTransportService.send_sms).
+        "channel_key": "sms_twilio",
+        "label": "SMS (Twilio)",
+        "provider": "twilio_sms",
+        "runtime_lane": STUDIO_CONNECTOR_RUNTIME_LANE,
+        "stage": "live",
+        "status": "working_when_configured",
+        "live_capable": "true",
+        "launch_allowed": "true",
+        "family": "studio_business",
+        "session_owner": "cloud_connector",
+    },
+    {
         "channel_key": "apple_messages_business",
         "label": "Apple Messages for Business",
         "provider": "apple_messages_business_msp",
@@ -347,6 +362,44 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "connector_id": "whatsapp_twilio",
         "surface_support": ["studio"],
         "capabilities": ["inbound", "outbound", "business_messaging"],
+    },
+    {
+        # "Each agent gets its own phone number to text with." Cloud webhook
+        # channel (no gateway/hardware pairing) on the same Studio connector
+        # lane as Slack/Discord bot. The platform holds ONE master Twilio
+        # account (no customer keys) — provisioning searches + buys a number
+        # under it and points the number's SmsUrl at
+        # /channels/sms/twilio/webhook. Gated on TWILIO_ACCOUNT_SID /
+        # TWILIO_AUTH_TOKEN; unset ⇒ "not configured on this deployment".
+        "channel_key": "sms_twilio",
+        "binding_channel_key": "sms",
+        "label": "SMS via Twilio",
+        "provider": "twilio_sms",
+        "runtime_lane": STUDIO_CONNECTOR_RUNTIME_LANE,
+        "category": "customer_chat",
+        "stage": "live",
+        "status": "working_when_configured",
+        "live_capable": True,
+        "launch_allowed": True,
+        "requires_agent_computer": False,
+        "account_provider": "sms_twilio",
+        "connector_id": "sms_twilio",
+        "surface_support": ["studio"],
+        "capabilities": ["inbound", "outbound", "sms", "dedicated_number"],
+        # Per-message + monthly-number cost is a Twilio pass-through. These
+        # are indicative Twilio US list prices (subject to change by Twilio;
+        # carrier A2P fees extra) surfaced so the cost is never hidden — they
+        # are NOT yet metered against workspace credits. The exact billing
+        # hook point is documented in sms_twilio_provisioning_service.py.
+        "pricing": {
+            "model": "usage_metered_passthrough",
+            "currency": "USD",
+            "number_rental_per_month": 1.15,
+            "outbound_per_segment": 0.0079,
+            "inbound_per_segment": 0.0079,
+            "metered": False,
+            "provider": "twilio",
+        },
     },
     {
         "channel_key": "apple_messages_business",
@@ -690,6 +743,10 @@ RESERVED_PRIVATE_RUNTIME_CHANNELS: tuple[Dict[str, str], ...] = (
 PUBLIC_STUDIO_WEBHOOK_ROUTES: Dict[str, Dict[str, str]] = {
     "/channels/whatsapp/twilio/webhook": {
         "provider": "twilio_whatsapp",
+        "runtime_lane": STUDIO_CONNECTOR_RUNTIME_LANE,
+    },
+    "/channels/sms/twilio/webhook": {
+        "provider": "twilio_sms",
         "runtime_lane": STUDIO_CONNECTOR_RUNTIME_LANE,
     },
     "/channels/telegram/webhook": {

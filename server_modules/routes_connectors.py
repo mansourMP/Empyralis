@@ -189,6 +189,16 @@ async def whatsapp_twilio_webhook(request: Request):
     )
 
 
+async def sms_twilio_webhook(request: Request):
+    # This route stays public because Twilio signs each request with the
+    # platform account's auth token (validated in actions.sms_twilio_webhook).
+    return await _dispatch_public_studio_webhook(
+        request=request,
+        path=str(request.url.path),
+        delegate=lambda: actions.sms_twilio_webhook(request),
+    )
+
+
 async def telegram_webhook(request: Request, connector_id: str):
     # This route stays public because Telegram authenticates through the webhook secret boundary.
     return await _dispatch_public_studio_webhook(
@@ -544,6 +554,7 @@ router.add_api_route("/connectors/vault/{connector_id}/google-drive", browse_goo
 router.add_api_route("/connectors/vault/{connector_id}/google-doc", create_google_connector_document, methods=['POST'])
 router.add_api_route("/connectors/vault/{connector_id}/google-sheet", create_google_connector_spreadsheet, methods=['POST'])
 router.add_api_route("/channels/whatsapp/twilio/webhook", whatsapp_twilio_webhook, methods=['POST'])
+router.add_api_route("/channels/sms/twilio/webhook", sms_twilio_webhook, methods=['POST'])
 router.add_api_route("/channels/telegram/webhook/{connector_id}", telegram_webhook, methods=['POST'])
 router.add_api_route("/channels/slack/events", slack_events_webhook, methods=['POST'])
 router.add_api_route("/channels/github/webhook", github_webhook, methods=['POST'])

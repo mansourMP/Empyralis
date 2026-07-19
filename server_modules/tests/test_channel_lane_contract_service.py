@@ -16,6 +16,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
 
         webhook_paths = {
             "/channels/whatsapp/twilio/webhook",
+            "/channels/sms/twilio/webhook",
             "/channels/telegram/webhook/{connector_id}",
             "/channels/slack/events",
             "/channels/github/webhook",
@@ -87,13 +88,18 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
 
         self.assertEqual(
             [entry["channel_key"] for entry in studio_catalog],
-            ["web_chat", "email", "telegram_bot", "whatsapp_twilio", "apple_messages_business", "slack", "discord_bot"],
+            ["web_chat", "email", "telegram_bot", "whatsapp_twilio", "sms_twilio", "apple_messages_business", "slack", "discord_bot"],
         )
         by_key = {entry["channel_key"]: entry for entry in studio_catalog}
         self.assertEqual(by_key["web_chat"]["status"], "roadmap")
         self.assertEqual(by_key["email"]["status"], "partial")
         self.assertEqual(by_key["telegram_bot"]["status"], "working_when_configured")
         self.assertEqual(by_key["whatsapp_twilio"]["status"], "out_of_scope")
+        # SMS (Twilio) is a live, launchable cloud channel — each agent gets
+        # its own phone number, reusing the WhatsApp-Twilio Messages plumbing.
+        self.assertEqual(by_key["sms_twilio"]["status"], "working_when_configured")
+        self.assertEqual(by_key["sms_twilio"]["provider"], "twilio_sms")
+        self.assertEqual(by_key["sms_twilio"]["launch_allowed"], "true")
         self.assertEqual(by_key["apple_messages_business"]["status"], "roadmap")
         self.assertEqual(by_key["slack"]["status"], "working_when_configured")
         self.assertEqual(by_key["discord_bot"]["status"], "working_when_configured")
@@ -102,7 +108,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
             all(
                 entry["launch_allowed"] == "false"
                 for entry in studio_catalog
-                if entry["channel_key"] not in {"telegram_bot", "slack", "discord_bot"}
+                if entry["channel_key"] not in {"telegram_bot", "sms_twilio", "slack", "discord_bot"}
             )
         )
         self.assertTrue(
@@ -119,7 +125,16 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         catalog = service.platform_channel_catalog()
         by_key = {entry["channel_key"]: entry for entry in catalog}
 
-        self.assertEqual(len(catalog), 25)
+        self.assertEqual(len(catalog), 26)
+        # SMS via Twilio — a live business channel on the Studio connector lane
+        # (the "each agent gets its own phone number" feature).
+        self.assertEqual(by_key["sms_twilio"]["provider"], "twilio_sms")
+        self.assertEqual(by_key["sms_twilio"]["binding_channel_key"], "sms")
+        self.assertEqual(by_key["sms_twilio"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
+        self.assertTrue(by_key["sms_twilio"]["live_capable"])
+        self.assertTrue(by_key["sms_twilio"]["launch_allowed"])
+        self.assertFalse(by_key["sms_twilio"]["requires_agent_computer"])
+        self.assertEqual(by_key["sms_twilio"]["product_surface"], "business_channel")
         self.assertEqual(by_key["telegram_bot"]["binding_channel_key"], "telegram")
         self.assertEqual(by_key["telegram_bot"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
         self.assertEqual(by_key["telegram_personal"]["runtime_lane"], service.PERSONAL_GATEWAY_RUNTIME_LANE)
