@@ -212,6 +212,120 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"event"', _call_kwargs["message"])
         self.assertIn('"push"', _call_kwargs["message"])
 
+    # ── FIX (systemic backend-safety task): `metadata` used to be accepted
+    # by route_inbound_channel_message and never read again anywhere in
+    # this function -- silently dropped, so the model never learned
+    # whether a Studio-connector turn (Slack/Discord/GitHub/Telegram-
+    # hosted) came from a shared, multi-person channel, or which one. See
+    # _studio_channel_context_prefix's docstring for the full fix.
+
+    async def test_group_metadata_is_threaded_into_the_message(self):
+        """The core fix: is_group/chat_type/chat_label in metadata reach
+        the actual message text execute_sage_turn receives."""
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(
+                message="Sure thing.",
+                trace_id="trace-group-1",
+            )),
+        ) as execute_mock:
+            result = await agent_channel_router.route_inbound_channel_message(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                channel_key="slack",
+                endpoint_key="C123456",
+                customer_message="what time is the standup",
+                actor_id="U789",
+                actor_display_name="Slack User",
+                message_id="slack-msg-group-1",
+                metadata={
+                    "connector_id": "conn-1",
+                    "slack_channel_id": "C123456",
+                    "is_group": True,
+                    "chat_type": "slack_channel",
+                    "chat_label": "#engineering",
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        sent_message = execute_mock.call_args.kwargs["message"]
+        self.assertIn("#engineering", sent_message)
+        self.assertIn("slack_channel", sent_message)
+        self.assertIn("shared channel", sent_message.lower())
+        self.assertIn("what time is the standup", sent_message)
+
+    async def test_non_group_metadata_says_private_not_shared(self):
+        """is_group=False must say "private", never "shared channel" --
+        proves this isn't a hardcoded always-group assumption."""
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(message="ok", trace_id="trace-dm-1")),
+        ) as execute_mock:
+            await agent_channel_router.route_inbound_channel_message(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                channel_key="slack",
+                customer_message="hey",
+                actor_id="U789",
+                metadata={"is_group": False, "chat_type": "slack_dm"},
+            )
+
+        sent_message = execute_mock.call_args.kwargs["message"]
+        self.assertIn("private", sent_message.lower())
+        self.assertNotIn("shared channel", sent_message.lower())
+
+    async def test_metadata_without_group_context_keys_leaves_message_unchanged(self):
+        """Regression guard: today's REAL connectors_actions.py webhook
+        metadata shape (connector_id, slack_channel_id, delivery_source,
+        etc. -- confirmed by inspection of slack_events_webhook /
+        discord_events_webhook / github_events_webhook) never carries
+        is_group/chat_type/chat_label. This must stay a safe no-op against
+        that real shape -- not just against metadata=None, which the
+        other tests in this class already cover."""
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(message="ok", trace_id="trace-noop-1")),
+        ) as execute_mock:
+            await agent_channel_router.route_inbound_channel_message(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                channel_key="slack",
+                customer_message="Check inventory for brake pads",
+                actor_id="U789",
+                metadata={
+                    "connector_id": "conn-1",
+                    "delivery_source": "webhook",
+                    "slack_team_id": "T1",
+                    "slack_channel_id": "C123456",
+                    "slack_thread_ts": None,
+                    "slack_message_ts": "123.456",
+                    "source_event_id": "evt-1",
+                },
+            )
+
+        self.assertEqual(execute_mock.call_args.kwargs["message"], "Check inventory for brake pads")
+
+    async def test_directive_message_is_never_prefixed_even_with_group_metadata(self):
+        """A leading "/" message must reach execute_sage_turn byte-for-byte
+        unprefixed regardless of metadata -- command_registry's directive
+        parser matches on the message literally starting with "/"; a
+        context prefix would silently break every Studio-connector
+        directive the moment a connector starts sending this metadata."""
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(message="ok", trace_id="trace-cmd-1")),
+        ) as execute_mock:
+            await agent_channel_router.route_inbound_channel_message(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                channel_key="slack",
+                customer_message="/model claude",
+                actor_id="U789",
+                metadata={"is_group": True, "chat_type": "slack_channel", "chat_label": "#engineering"},
+            )
+
+        self.assertEqual(execute_mock.call_args.kwargs["message"], "/model claude")
+
     async def test_empty_customer_message_returns_error(self):
         """Empty or None customer_message returns empty_message status."""
         result = await agent_channel_router.route_inbound_channel_message(

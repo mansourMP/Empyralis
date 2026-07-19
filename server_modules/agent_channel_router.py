@@ -2273,6 +2273,81 @@ def _coerce_customer_message_text(customer_message: Any) -> str:
     return str(customer_message).strip()
 
 
+_STUDIO_CHANNEL_LABEL_MAX_CHARS = 80
+
+
+def _sanitize_studio_channel_label(value: Any) -> str:
+    """Best-effort-clean a human-readable channel/group label from
+    connector-supplied metadata before it is baked into the message text a
+    model turn consumes. Untrusted, connector/attacker-influenceable text
+    (e.g. a Slack channel name any member can rename) — never a trust
+    boundary. Collapses whitespace/newlines (so it cannot forge a fake line
+    break inside the turn message) and truncates so one hostile channel
+    name can't bloat every turn — the same treatment
+    personal_channel_sage_bridge_service._sanitize_channel_label gives the
+    equivalent personal-channel field; kept as a small local copy here
+    rather than imported, so this generic Studio-connector router doesn't
+    take on a dependency on the personal-channel module's naming domain for
+    a two-line string helper."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = " ".join(text.split())
+    return text[:_STUDIO_CHANNEL_LABEL_MAX_CHARS].strip()
+
+
+def _studio_channel_context_prefix(*, channel_key: str, metadata: Optional[Dict[str, Any]]) -> str:
+    """Render is_group/chat_type/chat_label from a Studio-connector's
+    inbound `metadata` into a short context line prepended to the message
+    text the model turn actually consumes.
+
+    FIX (systemic backend-safety task): `metadata` used to be accepted by
+    route_inbound_channel_message and never read again anywhere in this
+    function -- a connector could compute a real is_group/chat_type/
+    chat_label signal (mirroring the same convention
+    personal_channel_sage_bridge_service already uses for personal
+    channels -- _owner_provenance_message / _personal_channel_guard_metadata,
+    the "family group" bug fix) and it would be silently discarded here:
+    the model never learned whether a Slack/Discord/GitHub/Telegram-hosted
+    turn came from a shared, multi-person channel, or which one.
+    execute_sage_turn has no dedicated group-context parameter --
+    channel_origin (_SAGE_CHANNEL_ORIGIN_MAP) is a fixed system enum, a
+    "which platform" signal, not a per-message "which room" one -- so this
+    is threaded the same way an owner-provenance header is: prefixed onto
+    the message text itself, the one thing every downstream consumer of a
+    Sage turn actually reads.
+
+    Returns "" (add nothing) when metadata carries NONE of these three
+    keys -- the real shape every current connectors_actions.py webhook
+    handler sends today (confirmed by inspection: the slack/discord/github
+    webhook handlers' metadata all carry connector- and provider-specific
+    IDs -- slack_channel_id, discord_guild_id, github_repository -- never a
+    generic is_group/chat_type/chat_label key), so this is forward-
+    compatible plumbing against a future connector update, not a behavior
+    change against today's real traffic -- same framing as this file's
+    other "safe no-op today" comments.
+
+    Deliberately does NOT attempt to infer is_group from a provider-
+    specific id shape itself (e.g. a Slack channel id's D/C/G prefix) --
+    that is connector domain knowledge that belongs in the connector
+    computing metadata (out of this router's scope), not guessed at here.
+    """
+    meta = metadata if isinstance(metadata, dict) else {}
+    if "is_group" not in meta and "chat_type" not in meta and "chat_label" not in meta:
+        return ""
+    chat_type = _sanitize_studio_channel_label(meta.get("chat_type")) or str(channel_key or "").strip() or "channel"
+    chat_label = _sanitize_studio_channel_label(meta.get("chat_label"))
+    is_group = meta.get("is_group")
+    where = f'{chat_type} "{chat_label}"' if chat_label else chat_type
+    if is_group is None:
+        group_note = ""
+    elif bool(is_group):
+        group_note = ", a shared channel visible to other participants"
+    else:
+        group_note = ", a private conversation"
+    return f"[Posted in {where}{group_note}]\n\n"
+
+
 async def route_inbound_channel_message(
     *,
     tenant_id: Optional[str] = None,
@@ -2305,6 +2380,16 @@ async def route_inbound_channel_message(
     no real caller ever passed them (confirmed by grep), and the earlier
     resolution they fed had zero writers for the shape it matched on, so
     it could never have worked regardless.
+
+    metadata: connector-supplied context for this inbound message
+    (connector_id, delivery_source, and provider-specific ids like
+    slack_channel_id/discord_guild_id/github_repository today — see
+    connectors_actions.py's webhook handlers). Three keys, if present,
+    are threaded into the model turn: is_group (bool), chat_type (str),
+    chat_label (str) — see _studio_channel_context_prefix's docstring for
+    the fix this is (`metadata` used to be accepted here and never read
+    again at all) and exactly why "the message text itself" is the
+    threading point, not a dedicated execute_sage_turn parameter.
     """
     resolved_workspace_id = str(workspace_id or "").strip()
     resolved_channel_key = str(channel_key or "").strip().lower()
@@ -2361,13 +2446,31 @@ async def route_inbound_channel_message(
 
         run_id = trace_id or f"chan-{uuid4().hex[:12]}"
 
+        # is_group/chat_type/chat_label context (see
+        # _studio_channel_context_prefix's docstring for the fix this is).
+        # Skipped for a directive/command message (leading "/", e.g.
+        # "/model claude" or "/new") -- execute_sage_turn's own directive
+        # parser (command_registry.process_message) matches on the message
+        # literally starting with "/"; prefixing context text here would
+        # silently break every Studio-connector directive the moment a
+        # connector starts sending this metadata. A directive is a
+        # structured command, not a conversational turn the model
+        # free-form interprets, so it never needed the framing anyway --
+        # same reasoning personal_channel_sage_bridge_service's provenance
+        # header is applied to the free-form message, never a command.
+        context_prefix = (
+            "" if message_text.startswith("/")
+            else _studio_channel_context_prefix(channel_key=resolved_channel_key, metadata=metadata)
+        )
+        effective_message = f"{context_prefix}{message_text}" if context_prefix else message_text
+
         try:
             from server_modules.sage_turn_adapter import execute_sage_turn
 
             sage_result = await execute_sage_turn(
                 workspace_id=resolved_workspace_id,
                 tenant_id=tenant_id or "",
-                message=message_text,
+                message=effective_message,
                 surface="chat",
                 channel_origin=channel_origin,
                 channel_sender_id=str(actor_id or ""),
