@@ -13,6 +13,7 @@ import {
   Loader2,
   Lock,
   MessageSquare,
+  PanelRightClose,
   PanelRightOpen,
   Pencil,
   Play,
@@ -180,6 +181,11 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "memory", label: "Memory", icon: Brain },
 ];
 
+// Same localStorage-persisted-collapse idiom as the primary rail's
+// COLLAPSED_KEY (fleet-preferences.ts) — a distinct key because this is a
+// per-page (agent detail), not per-account, preference.
+const PROPERTIES_COLLAPSED_KEY = "fleet:agent-detail-properties-collapsed";
+
 /**
  * Agent detail — a routed page (top tabs + a permanent properties panel that
  * never reflows the content column). Every tab has real data or an
@@ -230,6 +236,32 @@ export function FleetAgentDetail({
   // Chat tab's mobile-only properties drawer (see propertiesContent below) —
   // every other tab keeps the permanent column, so this stays false and unused there.
   const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
+  // Desktop/tablet Properties RAIL collapse — same idiom as the primary
+  // rail's own collapse (fleet-preferences.ts's COLLAPSED_KEY): default
+  // expanded, hydrated from localStorage after mount (avoids an SSR/
+  // hydration mismatch), persisted on every toggle. Independent of
+  // mobilePropertiesOpen above — that's the <=768px Chat-tab overlay drawer;
+  // this is the persistent right rail every other tab (and Chat on
+  // desktop/tablet) shows, now a real collapse instead of an always-on column.
+  const [propertiesCollapsed, setPropertiesCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(PROPERTIES_COLLAPSED_KEY) === "1") setPropertiesCollapsed(true);
+    } catch {
+      /* localStorage unavailable — keep default (expanded) */
+    }
+  }, []);
+  const togglePropertiesCollapsed = useCallback(() => {
+    setPropertiesCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(PROPERTIES_COLLAPSED_KEY, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
   const { channels, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
@@ -353,7 +385,11 @@ export function FleetAgentDetail({
     </PanelSection>
   );
   const propertiesPanel = (
-    <aside className="fleet-detail-properties" aria-label="Properties">
+    <aside
+      className={`fleet-detail-properties${propertiesCollapsed ? " fleet-detail-properties--collapsed" : ""}`}
+      aria-label="Properties"
+      aria-hidden={propertiesCollapsed || undefined}
+    >
       {propertiesContent}
     </aside>
   );
@@ -361,11 +397,13 @@ export function FleetAgentDetail({
   const inner = (
     <>
       {/* Tabs live at the TOP, under the breadcrumb — one navigation only.
-          No trailing action here on desktop: the properties column to the
-          right is permanent on detail pages, never a toggle (that pattern is
-          LIST pages only — see FleetToolbar). The lone exception is a
-          mobile-only Properties toggle on the Chat tab (see propertiesContent
-          above) — CSS keeps it hidden except at <=768px. */}
+          The properties column to the right is a collapsible RIGHT RAIL
+          (fleet-detail-properties-rail-toggle below), mirroring the primary
+          rail's own collapse (PrimaryRail.tsx's fleet-rail-control-btn--
+          collapse) rather than the list pages' overlay toggle (FleetToolbar).
+          The lone exception is a mobile-only Properties DRAWER toggle on the
+          Chat tab (see propertiesContent above) — CSS keeps it hidden except
+          at <=768px, where it replaces the rail toggle for that one tab. */}
       <div className="fleet-detail-tabbar">
         <nav className="fleet-detail-toptabs" aria-label="Agent sections">
           {TABS.map((tab) => {
@@ -386,6 +424,16 @@ export function FleetAgentDetail({
             );
           })}
         </nav>
+        <button
+          type="button"
+          className="fleet-icon-btn fleet-detail-properties-rail-toggle"
+          onClick={togglePropertiesCollapsed}
+          aria-label={propertiesCollapsed ? "Show properties" : "Hide properties"}
+          aria-expanded={!propertiesCollapsed}
+          title={propertiesCollapsed ? "Show properties" : "Hide properties"}
+        >
+          {propertiesCollapsed ? <PanelRightOpen size={16} strokeWidth={1.75} /> : <PanelRightClose size={16} strokeWidth={1.75} />}
+        </button>
         {activeTab === "chat" && (
           <button
             type="button"
@@ -399,10 +447,12 @@ export function FleetAgentDetail({
         )}
       </div>
 
-      {/* Columns: main content sheet + the permanent properties column, a
-          real flex sibling that always reserves its width — it never opens,
-          closes, or reflows the sheet next to it (desktop/tablet, and every
-          mobile tab except Chat — see propertiesContent above). */}
+      {/* Columns: main content sheet + the properties rail, a flex sibling
+          that reserves its width while expanded and collapses to zero (the
+          sheet reclaiming that width) via propertiesCollapsed/the rail
+          toggle above — same collapse contract as the primary rail, just on
+          the right edge (desktop/tablet, and every mobile tab except Chat —
+          see propertiesContent above). */}
       <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
           {activeTab === "overview" && (
