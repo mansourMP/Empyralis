@@ -23,17 +23,23 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 
-def _telegram_update(*, update_id: int, chat_id: int, chat_type: str, text: str, from_id: int, message_id: int = 1, first_name: str = "Someone") -> dict:
-    return {
-        "update_id": update_id,
-        "message": {
-            "message_id": message_id,
-            "date": 1700000000,
-            "chat": {"id": chat_id, "type": chat_type, "title": "Some Chat" if chat_type != "private" else None},
-            "from": {"id": from_id, "first_name": first_name, "is_bot": False},
-            "text": text,
-        },
+def _telegram_update(*, update_id: int, chat_id: int, chat_type: str, text: str, from_id: int, message_id: int = 1, first_name: str = "Someone", addressed: bool = False) -> dict:
+    message: dict = {
+        "message_id": message_id,
+        "date": 1700000000,
+        "chat": {"id": chat_id, "type": chat_type, "title": "Some Chat" if chat_type != "private" else None},
+        "from": {"id": from_id, "first_name": first_name, "is_bot": False},
+        "text": text,
     }
+    if addressed:
+        # These sender-identity tests are about _process_update's sender_id
+        # threading, not the group-addressing gate (see
+        # test_telegram_hosted_group_gate.py for that) — a group fixture
+        # must reply-to-bot (matching is_message_addressed_to_bot's default
+        # SAGE_TELEGRAM_HOSTED_BOT_USER_ID fallback) so it isn't silenced by
+        # that separate, later gate before sender_id is ever observed.
+        message["reply_to_message"] = {"message_id": 1, "from": {"id": 8870032163}}
+    return {"update_id": update_id, "message": message}
 
 
 class PairingIsPrivateChatOnlyTests(unittest.IsolatedAsyncioTestCase):
@@ -185,10 +191,10 @@ class ProcessUpdateSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
         with patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
              patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe):
             await hosted._process_update(
-                _telegram_update(update_id=1, chat_id=-100555, chat_type="group", text="hi from alice", from_id=111, first_name="Alice")
+                _telegram_update(update_id=1, chat_id=-100555, chat_type="group", text="hi from alice", from_id=111, first_name="Alice", addressed=True)
             )
             await hosted._process_update(
-                _telegram_update(update_id=2, chat_id=-100555, chat_type="group", text="hi from bob", from_id=222, first_name="Bob")
+                _telegram_update(update_id=2, chat_id=-100555, chat_type="group", text="hi from bob", from_id=222, first_name="Bob", addressed=True)
             )
 
         self.assertEqual(len(captured_sender_ids), 2)
@@ -210,7 +216,7 @@ class ProcessUpdateSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
         with patch("server_modules.sage_command_dispatcher.dispatch_command", new=_fake_dispatch_command), \
              patch.object(hosted, "send_message_safe", new=AsyncMock(return_value=True)):
             await hosted._process_update(
-                _telegram_update(update_id=3, chat_id=-100555, chat_type="group", text="/compact", from_id=333, first_name="Carol")
+                _telegram_update(update_id=3, chat_id=-100555, chat_type="group", text="/compact", from_id=333, first_name="Carol", addressed=True)
             )
 
         self.assertEqual(captured.get("sender_id"), "333")

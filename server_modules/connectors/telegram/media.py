@@ -133,6 +133,7 @@ class TelegramMediaService:
                                     "file_name": str(document.get("file_name") or "").strip(),
                                 }
                             )
+                reply_to_from = reply_to.get("from") if isinstance(reply_to.get("from"), dict) else {}
                 return {
                     "text": text,
                     "chat": candidate.get("chat") if isinstance(candidate.get("chat"), dict) else {},
@@ -142,6 +143,12 @@ class TelegramMediaService:
                     "date": candidate.get("date"),
                     "kind": key,
                     "attachments": attachments,
+                    # Group-addressing signals (see agent.routing_service.
+                    # is_addressed_to_bot): a real Bot-API `entities` mention
+                    # naming the bot, or a direct reply to a message the bot
+                    # itself sent.
+                    "entities": candidate.get("entities") if isinstance(candidate.get("entities"), list) else [],
+                    "reply_to_from_id": str(reply_to_from.get("id") or "") if reply_to_from else "",
                 }
         return None
 

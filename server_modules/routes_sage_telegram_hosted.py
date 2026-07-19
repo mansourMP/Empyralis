@@ -157,6 +157,15 @@ async def telegram_webhook(request: Request) -> dict:
     if chat_id is None:
         return {"ok": True}
 
+    # Group gate: a group/supergroup can only reach this point already
+    # paired (handle_inbound_message's private-chat-only pairing check
+    # blocks any NEW group pairing) — but legacy state can still hold an
+    # old pairing, and this is the defense-in-depth backstop regardless.
+    # Ordinary, un-addressed group chatter must never trigger a reply.
+    if str(parsed.get("chat_type") or "").strip().lower() in {"group", "supergroup"}:
+        if not hosted.is_message_addressed_to_bot(parsed):
+            return {"ok": True}
+
     workspace_id = hosted.get_workspace_for_chat(chat_id)
     if workspace_id is None:
         # Stale pair — the chat_id was paired but the workspace is gone.
@@ -279,6 +288,9 @@ async def telegram_agent_byo_webhook(agent_install_id: str, request: Request) ->
         chat_id=parsed["chat_id"],
         message=parsed["text"],
         sender_id=str(parsed.get("from_id") or ""),
+        chat_type=str(parsed.get("chat_type") or ""),
+        entities=parsed.get("entities"),
+        reply_to_from_id=str(parsed.get("reply_to_from_id") or ""),
         reply_to_message_id=parsed.get("message_id"),
     )
     if result.get("routed") and not result.get("reply_sent", True):
@@ -304,6 +316,11 @@ async def dev_poll_once() -> dict:
         if chat_id is None:
             processed += 1
             continue
+        # Group gate — see telegram_webhook's identical check above.
+        if str(parsed.get("chat_type") or "").strip().lower() in {"group", "supergroup"}:
+            if not hosted.is_message_addressed_to_bot(parsed):
+                processed += 1
+                continue
         workspace_id = hosted.get_workspace_for_chat(chat_id)
         if workspace_id is None:
             # Stale pair — tell the user

@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, List, Optional
 
+from server_modules.agent.routing_service import is_addressed_to_bot
 from server_modules.direct_tool_config_service import run_async_tool_call
+
+
+_GROUP_ADDRESSING_CHAT_TYPES = {"group", "supergroup"}
 
 
 def _route_inbound_channel_message(**kwargs: Any) -> Dict[str, Any]:
@@ -293,6 +297,51 @@ class TelegramIngressService:
             ).strip()
             or None
         )
+
+        # Group-addressing gate: route_message()'s prefix convention
+        # (profile["prefix"] / require_prefix) is necessary but not
+        # sufficient — a free-text profile has no prefix at all, so under
+        # the "allow any chat" config public-deployed-agent connectors use,
+        # ordinary group/supergroup chatter with nobody asking for the
+        # bot's attention used to reach a live, dispatched reply. This has
+        # to be an early return here (mirroring missing_message/bot_sender/
+        # chat_mismatch above), NOT a downgrade of routed/action below:
+        # dispatch_telegram_envelope's public-deployed-agent branch
+        # (_dispatch_public_deployed_agent_envelope) never reads
+        # envelope["action"] at all — it forwards message_text to the
+        # canonical channel router unconditionally — so mutating
+        # routed/action would silently do nothing for that branch, which is
+        # exactly the "allow any chat" incident's own branch. An early
+        # return here short-circuits BOTH dispatch branches identically,
+        # and also skips store_attachments (an unaddressed group message's
+        # photo is never even downloaded). Skipped entirely when the
+        # message already used the connector's own prefix (a deliberate,
+        # explicit invocation, not "ordinary chatter") — only the
+        # free-text fallthrough needs this. Private DMs are always
+        # implicitly addressed.
+        chat_type = str(chat.get("type") or "").strip().lower()
+        if chat_type in _GROUP_ADDRESSING_CHAT_TYPES:
+            prefix = str(profile.get("prefix") or "").strip()
+            prefix_used = bool(prefix) and message_text.strip().lower().startswith(prefix.lower())
+            if not prefix_used:
+                # "The stored bot identity": the connector's own registered
+                # endpoint_key (its Telegram @username), already resolved
+                # elsewhere in this file with no extra network call — see
+                # _channel_endpoint_key. A connector with no stored username
+                # (an operator connector without a channel-registry
+                # binding) simply never matches a mention, which fails
+                # closed to "not addressed" rather than guessing.
+                bot_username = self._channel_endpoint_key(entry=entry, connector_id=connector_id)
+                addressed = is_addressed_to_bot(
+                    text=message_text,
+                    entities=message.get("entities") if isinstance(message.get("entities"), list) else [],
+                    reply_to_from_id=str(message.get("reply_to_from_id") or ""),
+                    bot_id="",
+                    bot_username=bot_username,
+                )
+                if not addressed:
+                    return {"handled": False, "reason": "group_not_addressed", "update_id": update_id}
+
         raw_attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
         stored_attachments = self.store_attachments(
             bot_token=bot_token,

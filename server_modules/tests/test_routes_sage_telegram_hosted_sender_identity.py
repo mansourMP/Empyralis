@@ -29,17 +29,23 @@ def _build_app() -> FastAPI:
     return app
 
 
-def _telegram_message_update(*, update_id: int, chat_id: int, chat_type: str, from_id: int, text: str, message_id: int = 1, first_name: str = "Zoe") -> dict:
-    return {
-        "update_id": update_id,
-        "message": {
-            "message_id": message_id,
-            "date": 1700000000,
-            "chat": {"id": chat_id, "type": chat_type},
-            "from": {"id": from_id, "first_name": first_name, "is_bot": False},
-            "text": text,
-        },
+def _telegram_message_update(*, update_id: int, chat_id: int, chat_type: str, from_id: int, text: str, message_id: int = 1, first_name: str = "Zoe", addressed: bool = False) -> dict:
+    message: dict = {
+        "message_id": message_id,
+        "date": 1700000000,
+        "chat": {"id": chat_id, "type": chat_type},
+        "from": {"id": from_id, "first_name": first_name, "is_bot": False},
+        "text": text,
     }
+    if addressed:
+        # These sender-identity tests are about routes_sage_telegram_hosted
+        # threading the real sender_id, not the group-addressing gate — a
+        # group fixture must reply-to-bot (matching
+        # is_message_addressed_to_bot's default SAGE_TELEGRAM_HOSTED_BOT_USER_ID
+        # fallback) so it isn't silenced by that separate, later gate
+        # before sender_id is ever observed.
+        message["reply_to_message"] = {"message_id": 1, "from": {"id": 8870032163}}
+    return {"update_id": update_id, "message": message}
 
 
 class TelegramWebhookSenderIdentityTests(unittest.TestCase):
@@ -61,7 +67,7 @@ class TelegramWebhookSenderIdentityTests(unittest.TestCase):
             captured.update(kwargs)
             return True
 
-        body = _telegram_message_update(update_id=1, chat_id=-100555, chat_type="group", from_id=999888, text="hello team")
+        body = _telegram_message_update(update_id=1, chat_id=-100555, chat_type="group", from_id=999888, text="hello team", addressed=True)
         with patch.object(hosted, "is_configured", return_value=True), \
              patch.object(hosted, "is_webhook_secret_configured", return_value=True), \
              patch.object(hosted, "verify_webhook_signature", return_value=True), \
@@ -83,7 +89,7 @@ class TelegramWebhookSenderIdentityTests(unittest.TestCase):
             captured.update(kwargs)
             return "compacted"
 
-        body = _telegram_message_update(update_id=2, chat_id=-100555, chat_type="group", from_id=777666, text="/compact")
+        body = _telegram_message_update(update_id=2, chat_id=-100555, chat_type="group", from_id=777666, text="/compact", addressed=True)
         with patch.object(hosted, "is_configured", return_value=True), \
              patch.object(hosted, "is_webhook_secret_configured", return_value=True), \
              patch.object(hosted, "verify_webhook_signature", return_value=True), \
@@ -111,12 +117,12 @@ class TelegramWebhookSenderIdentityTests(unittest.TestCase):
              patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_reply):
             self.client.post(
                 "/sage/telegram-hosted/webhook",
-                json=_telegram_message_update(update_id=3, chat_id=-100555, chat_type="group", from_id=111, text="hi", first_name="Alice"),
+                json=_telegram_message_update(update_id=3, chat_id=-100555, chat_type="group", from_id=111, text="hi", first_name="Alice", addressed=True),
                 headers={"X-Telegram-Bot-Api-Secret-Token": "whatever"},
             )
             self.client.post(
                 "/sage/telegram-hosted/webhook",
-                json=_telegram_message_update(update_id=4, chat_id=-100555, chat_type="group", from_id=222, text="hi", first_name="Bob"),
+                json=_telegram_message_update(update_id=4, chat_id=-100555, chat_type="group", from_id=222, text="hi", first_name="Bob", addressed=True),
                 headers={"X-Telegram-Bot-Api-Secret-Token": "whatever"},
             )
 
