@@ -6,6 +6,7 @@ import { HelpCircle } from "lucide-react";
 const SHORTCUTS: { keys: string; label: string }[] = [
   { keys: "⌘K", label: "Command palette" },
   { keys: "G I", label: "Go to Inbox" },
+  { keys: "G C", label: "Go to Conversations" },
   { keys: "G P", label: "Go to Projects" },
   { keys: "G A", label: "Go to Agents" },
   { keys: "G H", label: "Go to Hardware" },

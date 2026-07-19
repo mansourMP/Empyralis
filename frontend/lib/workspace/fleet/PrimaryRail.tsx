@@ -11,6 +11,7 @@ import {
   FolderKanban,
   Inbox,
   LogOut,
+  MessagesSquare,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
@@ -37,6 +38,7 @@ type RailNavItem = { key: string; label: string; segment: string; icon: LucideIc
 // Rail vocabulary. `chord` is the second key of Linear-style "g then <key>".
 const RAIL_ITEMS: RailNavItem[] = [
   { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i" },
+  { key: "conversations", label: "Conversations", segment: "conversations", icon: MessagesSquare, chord: "c" },
   { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
   { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a" },
   { key: "hardware", label: "Hardware", segment: "hardware", icon: Cpu, chord: "h" },

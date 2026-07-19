@@ -148,6 +148,7 @@ export function HeaderAction({ children }: { children: ReactNode }) {
 const STATIC_LABELS: Record<string, string> = {
   fleet: "Home",
   inbox: "Inbox",
+  conversations: "Conversations",
   projects: "Projects",
   agents: "Agents",
   hardware: "Hardware",

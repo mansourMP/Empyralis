@@ -14,6 +14,7 @@ import { FleetContentFrame } from "./FleetContentFrame";
  */
 const SHELL_SEGMENTS = new Set([
   "inbox",
+  "conversations",
   "projects",
   "agents",
   "hardware",
