@@ -125,6 +125,28 @@ class DmPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(decision["allowed"])
         self.assertTrue(decision["is_owner"])
 
+    async def test_signal_owner_only_default_allows_self_chat(self) -> None:
+        """Mirrors test_telegram_owner_only_default_allows_self_chat above,
+        for Signal's local-bridge handler — signal-cli-bridge.ts's
+        mapSignalCliReceiveNotification now computes is_self_chat for a
+        "Note to Self" send (fromMe && remoteJid === the bridge's own
+        configured account), threaded through by local-bridge-runtime.ts's
+        mapInboundEvent. _is_owner_message's is_self_chat check is
+        channel-agnostic, so this needed no _enforce_dm_policy change either
+        — only _handle_local_bridge_gateway_channel_inbound's from_me gate
+        (tested below) needed the WhatsApp/Telegram carve-out."""
+        decision = await personal_channels_service._enforce_dm_policy(
+            registration=self.registration,
+            channel_key="signal_personal",
+            agent_id="",
+            message={"sender_jid": "+15551234567", "is_self_chat": True},
+            remote_jid="+15551234567",
+            existing_state=None,
+            label="Signal",
+        )
+        self.assertTrue(decision["allowed"])
+        self.assertTrue(decision["is_owner"])
+
     async def test_owner_only_allows_sender_matching_linked_identity(self) -> None:
         """Telegram's is_self_chat signal (see
         test_telegram_owner_only_default_allows_self_chat above) only ever
@@ -664,6 +686,97 @@ class DmPolicyInboundIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(result.get("blocked"))
         self.assertIsNone(result.get("outbound"))
+
+    async def test_local_bridge_self_chat_message_passes_the_gate_even_with_from_me_true(self) -> None:
+        """Mirrors test_telegram_self_chat_message_passes_the_gate_even_with_from_me_true
+        above, for _handle_local_bridge_gateway_channel_inbound (Signal/
+        iMessage/WeChat's shared handler) — a genuine Signal "Note to Self"
+        message is always from_me (only the linked account can post into
+        its own self-conversation), and before this fix the handler's
+        unconditional `if message.get("from_me"): ignore` dropped it
+        regardless of is_self_chat. This is the exact scenario that
+        carve-out (mirroring the WhatsApp/Telegram handlers) exists for.
+        _is_owner_message's is_self_chat shortcut then does the rest — no
+        local-bridge-specific owner-identity resolution was needed despite
+        the pre-existing gap test_local_bridge_stranger_is_blocked_by_default
+        documents above."""
+        with (
+            patch(
+                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                return_value=_ALLOW_DISPATCH_DECISION,
+            ),
+            patch(
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_personal_channel_reply_async",
+                new=AsyncMock(return_value={"text": "On it.", "source": "sage"}),
+            ) as build_reply_mock,
+            patch(
+                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                new=AsyncMock(return_value={"external_message_id": "sig-out-1"}),
+                create=True,
+            ) as dispatch_mock,
+            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
+        ):
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
+                gateway_id="gw-dm-1",
+                registration=self.registration,
+                payload={
+                    "message": {
+                        "external_message_id": "sig-owner-1",
+                        "remote_jid": "+15551234567",
+                        "sender_jid": "+15551234567",
+                        "push_name": "Me",
+                        "text": "remind me to call mom",
+                        "from_me": True,
+                        "is_self_chat": True,
+                    },
+                },
+                channel_key="signal_personal",
+                provider="signal_local_bridge",
+                label="Signal",
+            )
+        build_reply_mock.assert_called_once()
+        dispatch_mock.assert_awaited_once()
+        self.assertFalse(result.get("blocked", False))
+        self.assertNotEqual(result.get("ignored"), True)
+        self.assertEqual(result["outbound"]["status"], "delivered")
+
+    async def test_local_bridge_ordinary_outgoing_message_is_still_ignored(self) -> None:
+        """Regression/distinguishing coverage for the same carve-out: an
+        ordinary outgoing Signal message to someone else (from_me: True,
+        is_self_chat: False/absent) must still be ignored exactly as
+        before — the from_me-unless-self-chat carve-out must not
+        accidentally let every outgoing local-bridge message through."""
+        with (
+            patch(
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_personal_channel_reply_async"
+            ) as build_reply_mock,
+            patch(
+                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                new=AsyncMock(side_effect=AssertionError("must not dispatch for an ordinary outgoing echo")),
+                create=True,
+            ),
+        ):
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
+                gateway_id="gw-dm-1",
+                registration=self.registration,
+                payload={
+                    "message": {
+                        "external_message_id": "sig-outgoing-1",
+                        "remote_jid": "+15557654321",
+                        "sender_jid": "+15557654321",
+                        "push_name": "A Contact",
+                        "text": "see you at 7",
+                        "from_me": True,
+                        "is_self_chat": False,
+                    },
+                },
+                channel_key="signal_personal",
+                provider="signal_local_bridge",
+                label="Signal",
+            )
+        build_reply_mock.assert_not_called()
+        self.assertTrue(result.get("ignored"))
+        self.assertEqual(result.get("reason"), "from_me")
 
 
 if __name__ == "__main__":

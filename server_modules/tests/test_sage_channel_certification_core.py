@@ -889,11 +889,33 @@ class LocalBridgePersonalChannelsCertification(unittest.TestCase):
     """Per the 'no fake runtime' rule, only channels with a concrete runtime
     contract can be live_when_configured."""
 
-    def test_signal_marked_planned_until_bridge_certified(self):
+    def test_signal_is_live_when_configured_with_local_bridge_runtime(self):
+        """Signal is a first-class, owner-connectable gateway channel (like
+        Telegram/WhatsApp/iMessage) because it has a concrete runtime
+        contract: a real signal-cli bridge adapter
+        (empyralis-gateway/src/bridges/signal-cli-bridge.ts) and the generic
+        Agent Computer local-bridge client that talks to it — the exact same
+        shape as iMessage's BlueBubbles adapter below. It stays
+        live_when_configured (not unconditionally "live") because a real
+        signal-cli install must still be connected and certified per-instance
+        before it's actually usable.
+
+        Was asserted "planned"/setup_available=False/runtime_usable=False —
+        stale even before the channel_lane_contract_service.py catalog fix
+        (a separate file this test doesn't touch): this catalog's own
+        signal_personal _item() had already carried live_when_configured/
+        True/True (identical to imessage_personal/wechat_personal below)
+        since before that fix; this assertion just never caught up. That
+        catalog fix was about a DIFFERENT, real bug — CHANNEL_PLATFORM_CATALOG
+        and PERSONAL_CHANNEL_ROADMAP (channel_lane_contract_service.py)
+        separately marked Signal not-live/not-launch-allowed while THIS
+        catalog (connection_catalog_service.py) already had it right, which
+        is exactly the kind of drift this test exists to catch — it just
+        wasn't asserting the value that would have caught it."""
         item = _catalog_item("signal_personal")
-        self.assertEqual(item["launch_status"], "planned")
-        self.assertFalse(item["setup_available"])
-        self.assertFalse(item["runtime_usable"])
+        self.assertEqual(item["launch_status"], "live_when_configured")
+        self.assertTrue(item["setup_available"])
+        self.assertTrue(item["runtime_usable"])
         self.assertEqual(item["lane"], connection_catalog_service.LANE_SAGE_PERSONAL_CHANNEL)
         self.assertEqual(item["provider"], "signal_local_bridge")
         self.assertEqual(item["setup_kind"], "local_bridge")

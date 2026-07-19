@@ -12,6 +12,7 @@ type BridgeEvent = {
   text: string;
   received_at: string;
   from_me?: boolean;
+  is_self_chat?: boolean;
   is_group?: boolean;
   is_mentioned?: boolean;
   is_reply_to_sage?: boolean;
@@ -115,6 +116,29 @@ function buildSignalCliSendParams(account: string | undefined, remoteJid: string
   return params;
 }
 
+/** Params for signal-cli's JSON-RPC "sendTyping" method — recipient/groupId
+ *  + account exactly like buildSignalCliSendParams above, plus `stop: true`
+ *  to clear an in-flight typing indicator. Verified against OpenClaw's
+ *  compiled Signal extension (sendTypingSignal in its send-*.js bundle),
+ *  which builds the identical {recipient|groupId, account?, stop?} shape
+ *  before calling signalRpcRequest("sendTyping", params, ...) — not
+ *  guessed. */
+function buildSignalCliTypingParams(account: string | undefined, remoteJid: string, stop: boolean): JsonObject {
+  const params: JsonObject = {};
+  if (account) {
+    params.account = account;
+  }
+  if (remoteJid.startsWith("group:")) {
+    params.groupId = remoteJid.slice("group:".length);
+  } else {
+    params.recipient = [remoteJid];
+  }
+  if (stop) {
+    params.stop = true;
+  }
+  return params;
+}
+
 async function callSignalCliRpc(
   signalCliBaseUrl: string,
   method: string,
@@ -190,13 +214,32 @@ function signalMentionsMatchAccount(mentions: unknown, account: string): boolean
   });
 }
 
+/** signal-cli's own JsonAttachment (org.asamk.signal.json.JsonAttachment)
+ *  array on a dataMessage/sentMessage — each entry carries at least `id`
+ *  and `contentType` (a MIME string); see AsamK/signal-cli's JSON-RPC
+ *  output schema (verified against OpenClaw's compiled Signal extension,
+ *  which reads the identical `attachment.contentType`/`attachment.id`
+ *  fields). This bridge does not fetch attachment bytes — that's a real,
+ *  separate gap (see docs/OpenClaw.md's Signal section) — but an
+ *  attachment-only message (no caption) must still produce SOME text, or
+ *  local-bridge-runtime.ts's mapInboundEvent (which requires a non-empty
+ *  text field) silently drops the message entirely. Mirrors
+ *  bluebubbles-bridge.ts's identical `<media:attachment> (N)` fallback for
+ *  iMessage. */
+function signalAttachmentPlaceholder(attachments: unknown): string {
+  const list = Array.isArray(attachments) ? attachments : [];
+  return list.length ? `<media:attachment> (${list.length})` : "";
+}
+
 export interface MapSignalCliReceiveOptions {
   /** This bridge's own signal-cli account (EMPYRALIS_SIGNAL_CLI_ACCOUNT,
    *  typically an E.164 phone number) — compared against
-   *  dataMessage.mentions[].number to resolve is_mentioned. Mention
-   *  detection is skipped (stays false) when this isn't configured, since
-   *  there is then no reliable identity to match against — safe default,
-   *  the group gate still applies via is_group. */
+   *  dataMessage.mentions[].number to resolve is_mentioned, and against a
+   *  fromMe message's own remoteJid to resolve is_self_chat (a "Note to
+   *  Self" send has destination === this same account). Both stay false
+   *  when this isn't configured, since there is then no reliable identity
+   *  to match against — safe default, the group gate still applies via
+   *  is_group. */
   account?: string;
   /** External message ids (signal-cli timestamps, stringified) this bridge
    *  has itself sent successfully — see SENT_MESSAGE_ID_CACHE_LIMIT. A
@@ -221,11 +264,20 @@ export function mapSignalCliReceiveNotification(
   const sentMessage = asObject(syncMessage.sentMessage);
   const incomingText = eventText(dataMessage.message);
   const syncText = eventText(sentMessage.message);
-  const text = incomingText || syncText;
+  // Attachment-only (no caption) messages have empty incomingText/syncText
+  // but a non-empty attachments array — without this, such a message would
+  // fail the `if (!text) return null` check below and vanish silently. See
+  // signalAttachmentPlaceholder's doc comment for what this fallback is
+  // (and isn't).
+  const incomingAttachments = Array.isArray(dataMessage.attachments) ? dataMessage.attachments : [];
+  const syncAttachments = Array.isArray(sentMessage.attachments) ? sentMessage.attachments : [];
+  const hasIncoming = Boolean(incomingText) || incomingAttachments.length > 0;
+  const hasSync = Boolean(syncText) || syncAttachments.length > 0;
+  const text = incomingText || syncText || signalAttachmentPlaceholder(hasIncoming ? incomingAttachments : syncAttachments);
   if (!text) {
     return null;
   }
-  const fromMe = !incomingText && Boolean(syncText);
+  const fromMe = !hasIncoming && hasSync;
   // A group message's dataMessage/sentMessage carries groupInfo.groupId
   // instead of (only) an individual source/destination — checked first so
   // remoteJid below prefers the group's own address over the individual
@@ -239,6 +291,7 @@ export function mapSignalCliReceiveNotification(
     return null;
   }
   const timestamp = envelope.timestamp || dataMessage.timestamp || sentMessage.timestamp;
+  const externalMessageId = eventText(timestamp) || randomUUID();
   // Mention/reply detection only makes sense for a genuine incoming group
   // message — a self-sent echo (fromMe, via syncMessage) can't mention or
   // reply to "Sage" in any meaningful sense.
@@ -249,14 +302,49 @@ export function mapSignalCliReceiveNotification(
   const isReplyToSage = isGroup && !fromMe && quoteId
     ? Boolean(options.sentMessageIds?.has(quoteId))
     : false;
+  // "Note to Self": a fromMe sync whose destination IS this bridge's own
+  // configured account — the Signal analog of WhatsApp's/Telegram's
+  // is_self_chat command channel (see whatsapp/message-mapper.ts's
+  // identical `remoteJid === ownedJid` contract). Structurally just an
+  // ordinary 1:1 send that happens to target yourself; groups are excluded
+  // since a group remoteJid ("group:...") can never equal a bare account id.
+  const isSelfChat = fromMe && !isGroup && Boolean(options.account) && remoteJid === eventText(options.account);
+  // LOOP GUARD: self-chat is deliberately let through the from_me gate
+  // downstream (personal_channels_service.py's
+  // _handle_local_bridge_gateway_channel_inbound) as an owner command
+  // channel — but signal-cli syncs EVERY send this bridge itself makes
+  // (including Sage's own reply INTO self-chat) back through this exact
+  // "receive" notification path via syncMessage.sentMessage, the same
+  // mechanism fromMe/hasSync above already rely on. Without this guard,
+  // Sage's own self-chat reply would echo back as a fresh
+  // is_self_chat=true "command," re-triggering another agent turn,
+  // forever — the exact bug class WhatsApp's/Telegram's own self-chat
+  // loop guards exist for (see whatsapp/runtime.ts's isOwnSelfChatEcho and
+  // whatsapp-self-chat.test.ts). sentMessageIds already records every
+  // timestamp this bridge's own /messages handler successfully sent (see
+  // MapSignalCliReceiveOptions doc comment above); a Signal sync echo's
+  // envelope timestamp equals the ORIGINAL send's timestamp (the same
+  // identity relationship is_reply_to_sage's quote-matching above already
+  // depends on), so membership here reliably means "this is our own echo,
+  // not a new owner message." Unlike WhatsApp/Telegram (live socket
+  // events), this bridge is polled over HTTP by local-bridge-runtime.ts
+  // (5s default interval) rather than delivered instantly, which gives
+  // sentMessageIds.add() (synchronous, right after the send RPC resolves)
+  // ample time to land before the next poll — so no WhatsApp-style
+  // race-window/text-match fallback layer is needed here.
+  const isSelfChatEcho = isSelfChat && Boolean(options.sentMessageIds?.has(externalMessageId));
+  if (isSelfChatEcho) {
+    return null;
+  }
   return {
-    external_message_id: eventText(timestamp) || randomUUID(),
+    external_message_id: externalMessageId,
     remote_jid: remoteJid,
     sender_jid: source || undefined,
     push_name: eventText(envelope.sourceName) || undefined,
     text,
     received_at: eventTimestamp(timestamp),
     from_me: fromMe,
+    is_self_chat: isSelfChat,
     is_group: isGroup,
     is_mentioned: isMentioned,
     is_reply_to_sage: isReplyToSage,
@@ -423,6 +511,42 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
         const items = eventsByChannel.get(SIGNAL_CHANNEL_KEY) || [];
         eventsByChannel.set(SIGNAL_CHANNEL_KEY, []);
         sendJson(response, 200, { items });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/typing") {
+        const body = await parseJsonBody(request);
+        const channelKey = normalizeChannelKey(body.channel_key);
+        const remoteJid = eventText(body.remote_jid);
+        const action = eventText(body.action) === "stop" ? "stop" : "start";
+        if (channelKey !== SIGNAL_CHANNEL_KEY) {
+          sendJson(response, 400, { error: "unsupported_channel" });
+          return;
+        }
+        if (!remoteJid) {
+          sendJson(response, 400, { error: "remote_jid_required" });
+          return;
+        }
+        try {
+          await callSignalCliRpc(
+            signalCliBaseUrl,
+            "sendTyping",
+            buildSignalCliTypingParams(account, remoteJid, action === "stop"),
+          );
+          sendJson(response, 200, { ok: true, channel_key: SIGNAL_CHANNEL_KEY, action });
+        } catch (error) {
+          // Typing indicators are cosmetic. A signal-cli build without
+          // sendTyping support, or a transient RPC hiccup, must never look
+          // like a message-delivery failure to the caller (which already
+          // treats this endpoint as best-effort — see
+          // local-bridge-runtime.ts's sendTypingAction) — a soft 200 keeps
+          // it that way instead of surfacing as a 5xx.
+          sendJson(response, 200, {
+            ok: false,
+            channel_key: SIGNAL_CHANNEL_KEY,
+            action,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         return;
       }
       sendJson(response, 404, { error: "not_found" });
