@@ -538,6 +538,116 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         self.assertNotIn("Chat-Type", sent_message)
         self.assertNotIn("Group-Name", sent_message)
 
+    # ── Systemic verification (backend-safety task): the tests above only
+    # ever exercise this rendering through build_telegram_personal_reply.
+    # _owner_provenance_message / _personal_channel_guard_metadata are
+    # channel-agnostic — every build_*_personal_reply* entry point funnels
+    # through the SAME _build_unified_sage_personal_reply(_async) — but
+    # that makes it a real risk that one of the OTHER thin wrappers has a
+    # typo'd/omitted kwarg that silently drops the signal before it ever
+    # reaches the shared function. These three prove the actual rendered
+    # text per remaining channel family: WhatsApp (build_whatsapp_personal_reply),
+    # Telegram-cloud (build_telegram_personal_reply_async — the exact async
+    # entry handle_cloud_channel_inbound calls), and local-bridge
+    # (build_personal_channel_reply_async — shared by Signal/iMessage/WeChat).
+
+    def test_whatsapp_group_message_is_told_this_is_a_group_not_a_direct_message(self) -> None:
+        """Mirrors test_owner_in_group_is_told_this_is_a_group_not_a_direct_message
+        above, for WhatsApp's own entry point instead of Telegram's."""
+        with (
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                new=AsyncMock(return_value={"message": "sure thing"}),
+            ) as turn_mock,
+        ):
+            personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+                workspace_id="workspace-1",
+                gateway_id="gateway-1",
+                remote_jid="120363-group@g.us",
+                text="what does Posle mean?",
+                push_name="Mansur",
+                is_owner=True,
+                is_group=True,
+                chat_label="Family",
+            )
+        sent_message = turn_mock.call_args.kwargs["message"]
+        self.assertNotIn("SECURITY NOTICE", sent_message)
+        self.assertNotIn("direct message", sent_message)
+        self.assertIn("Family", sent_message)
+        self.assertIn("group", sent_message.lower())
+        self.assertIn("NOT the workspace owner", sent_message)
+
+    def test_telegram_cloud_async_group_message_is_told_this_is_a_group_not_a_direct_message(self) -> None:
+        """The exact async entry point personal_channels_service.handle_cloud_channel_inbound
+        calls (build_telegram_personal_reply_async) — is_owner is always
+        False there (see handle_cloud_channel_inbound's own comment: no
+        dmPolicy/_is_owner_message equivalent for that path), so this
+        exercises the EXTERNAL/non-owner rendering branch, not the owner
+        one the other two tests here use."""
+        async def run_case():
+            with patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                new=AsyncMock(return_value={"message": "'Posle' means 'later'."}),
+            ) as turn_mock:
+                await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
+                    workspace_id="workspace-1",
+                    gateway_id="cloud:csm-sess-1",
+                    remote_jid="111222",
+                    text="Posle",
+                    push_name="Aunt Nadia",
+                    is_owner=False,
+                    is_group=True,
+                    chat_label="Family",
+                )
+                return turn_mock.call_args.kwargs["message"]
+
+        sent_message = asyncio.run(run_case())
+        self.assertIn("SECURITY NOTICE", sent_message)
+        self.assertIn("EXTERNAL_UNTRUSTED_CONTENT", sent_message)
+        self.assertIn("Sender: Aunt Nadia", sent_message)
+        self.assertNotIn("(owner)", sent_message)
+        self.assertIn("Chat-Type: group", sent_message)
+        self.assertIn("Group-Name: Family", sent_message)
+
+    def test_local_bridge_group_message_is_told_this_is_a_group_not_a_direct_message(self) -> None:
+        """build_personal_channel_reply_async is the one bridge entry point
+        shared by all three local-bridge families (Signal/iMessage/WeChat —
+        see personal_channels_service._deliver_local_bridge_personal_reply).
+        Loops surface_channel across all three real personal-channel keys
+        to prove the rendering doesn't silently depend on which one is
+        passed."""
+        for surface_channel, fallback_label in (
+            ("signal_personal", "Signal"),
+            ("imessage_personal", "iMessage"),
+            ("wechat_personal", "WeChat"),
+        ):
+            with self.subTest(surface_channel=surface_channel):
+                async def run_case():
+                    with patch(
+                        "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                        new=AsyncMock(return_value={"message": "sure thing"}),
+                    ) as turn_mock:
+                        await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+                            surface_channel=surface_channel,
+                            workspace_id="workspace-1",
+                            gateway_id="gateway-1",
+                            remote_jid="group:family",
+                            text="what does Posle mean?",
+                            push_name="Mansur",
+                            fallback_label=fallback_label,
+                            is_owner=True,
+                            is_group=True,
+                            chat_label="Family",
+                        )
+                        return turn_mock.call_args.kwargs["message"]
+
+                sent_message = asyncio.run(run_case())
+                self.assertNotIn("SECURITY NOTICE", sent_message)
+                self.assertNotIn("direct message", sent_message)
+                self.assertIn("Family", sent_message)
+                self.assertIn("group", sent_message.lower())
+                self.assertIn("NOT the workspace owner", sent_message)
+
     def test_memory_persists_clean_raw_text_not_wrapped_or_provenanced_text(self) -> None:
         """agent_conversation_memory must store the CLEAN raw message in
         BOTH branches — never guarded.text (SECURITY NOTICE-wrapped) and

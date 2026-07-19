@@ -534,5 +534,202 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result.get("reason"), "group_no_mention")
 
 
+class GroupContextThreadingTests(unittest.IsolatedAsyncioTestCase):
+    """Systemic backend-safety verification: every personal-channel handler
+    that lets a group message reach the model at all must also thread
+    is_group/chat_label into the Sage bridge call — otherwise the group
+    gate above only decides WHETHER to reply, and the model still never
+    learns it's IN a group once it does (the exact "family group"
+    mislabeling bug _owner_provenance_message / _personal_channel_guard_metadata
+    were fixed for — see test_personal_channel_sage_bridge_service.py's
+    OwnerAwareProvenanceTests for the rendering-level proof that a
+    True/label pair actually produces "group" wording, never "direct
+    message").
+
+    None of the gate tests above (TelegramGroupGateTests /
+    LocalBridgeGroupGateTests) ever inspect the mocked bridge call's
+    kwargs — only assert_called_once()/assert_not_called() — so none of
+    them would have caught is_group/chat_label silently failing to reach
+    the bridge. These do, for three of the four personal-channel handler
+    families: WhatsApp, Telegram (gateway), and local-bridge (Signal/
+    iMessage/WeChat) — all already threaded it correctly. See
+    test_cloud_channel_group_gate.py for the fourth family, Telegram-cloud
+    (handle_cloud_channel_inbound), which this same investigation found
+    ACTUALLY broken — it computed is_group for its own gate but never
+    forwarded it to the bridge call — and fixed."""
+
+    def setUp(self) -> None:
+        global personal_channels_service, personal_channels_repository
+        personal_channels_service = importlib.import_module("server_modules.personal_channels_service")
+        personal_channels_repository = importlib.import_module("server_modules.personal_channels_repository")
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        db_path = Path(self.tmpdir.name) / "personal-channels.sqlite3"
+        personal_channels_repository.init_personal_channels_db(db_path)
+        self.db_patcher = patch.object(personal_channels_repository, "PERSONAL_CHANNELS_DB_FILE", db_path)
+        self.db_patcher.start()
+
+        self.registration = {
+            "gateway_id": "gw-thread-1",
+            "workspace_id": "default",
+            "tenant_id": "tenant-1",
+            "device_trust_state": "trusted",
+            "active_session_id": "sess-1",
+        }
+        # dmPolicy is orthogonal to this fix (see FIX 1 /
+        # test_personal_channels_dm_policy.py) — mocked to ALLOW here purely
+        # so a group turn actually reaches the bridge call this test
+        # inspects, isolating ONE thing: does is_group/chat_label reach it.
+        self.allowed_decision = {
+            "allowed": True, "mode": "open", "sender_id": "111222",
+            "is_owner": False, "system_reply": None, "config_changed": False,
+        }
+
+    def tearDown(self) -> None:
+        self.db_patcher.stop()
+        self.tmpdir.cleanup()
+
+    async def test_whatsapp_group_message_threads_is_group_and_chat_label(self) -> None:
+        with (
+            patch(
+                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                return_value=_ALLOW_DISPATCH_DECISION,
+            ),
+            patch(
+                "server_modules.personal_channels_service._enforce_dm_policy",
+                new=AsyncMock(return_value=self.allowed_decision),
+            ),
+            patch(
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
+                return_value={"text": "Dinner's at 7.", "source": "sage"},
+            ) as build_reply_mock,
+            patch(
+                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                new=AsyncMock(return_value={"external_message_id": "wa-out-thread-1"}),
+                create=True,
+            ),
+        ):
+            await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
+                gateway_id="gw-thread-1",
+                registration=self.registration,
+                payload={
+                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
+                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
+                    "message": {
+                        "external_message_id": "wa-group-thread-1",
+                        "remote_jid": "120363-group@g.us",
+                        "sender_jid": "111222@s.whatsapp.net",
+                        "push_name": "Family Member",
+                        "text": "@sage what time is dinner",
+                        "from_me": False,
+                        "is_group": True,
+                        "is_mentioned": True,
+                        "is_reply_to_sage": False,
+                        "chat_title": "Family",
+                    },
+                },
+            )
+        build_reply_mock.assert_called_once()
+        call_kwargs = build_reply_mock.call_args.kwargs
+        self.assertTrue(call_kwargs.get("is_group"))
+        self.assertEqual(call_kwargs.get("chat_label"), "Family")
+
+    async def test_telegram_group_message_threads_is_group_and_chat_label(self) -> None:
+        with (
+            patch(
+                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                return_value=_ALLOW_DISPATCH_DECISION,
+            ),
+            patch(
+                "server_modules.personal_channels_service._enforce_dm_policy",
+                new=AsyncMock(return_value=self.allowed_decision),
+            ),
+            patch(
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
+                return_value={"text": "Dinner's at 7.", "source": "sage"},
+            ) as build_reply_mock,
+            patch(
+                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                new=AsyncMock(return_value={"external_message_id": "tg-out-thread-1"}),
+                create=True,
+            ),
+        ):
+            await personal_channels_service._handle_telegram_gateway_channel_inbound(
+                gateway_id="gw-thread-1",
+                registration=self.registration,
+                payload={
+                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
+                    "message": {
+                        "external_message_id": "tg-group-thread-1",
+                        "remote_jid": "-100555",
+                        "sender_jid": "111222",
+                        "push_name": "Family Member",
+                        "text": "@sage_owner what time is dinner",
+                        "from_me": False,
+                        "is_group": True,
+                        "is_mentioned": True,
+                        "is_reply_to_sage": False,
+                        "chat_title": "Family",
+                    },
+                },
+            )
+        build_reply_mock.assert_called_once()
+        call_kwargs = build_reply_mock.call_args.kwargs
+        self.assertTrue(call_kwargs.get("is_group"))
+        self.assertEqual(call_kwargs.get("chat_label"), "Family")
+
+    async def test_local_bridge_group_message_threads_is_group_and_chat_label(self) -> None:
+        """Signal/iMessage/WeChat all share
+        _handle_local_bridge_gateway_channel_inbound — proves the threading
+        holds across all three, not just one."""
+        for channel_key, meta in personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS.items():
+            with self.subTest(channel_key=channel_key):
+                with (
+                    patch(
+                        "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                        return_value=_ALLOW_DISPATCH_DECISION,
+                    ),
+                    patch(
+                        "server_modules.personal_channels_service._enforce_dm_policy",
+                        new=AsyncMock(return_value=self.allowed_decision),
+                    ),
+                    patch(
+                        "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_personal_channel_reply_async",
+                        new=AsyncMock(return_value={"text": "Dinner's at 7.", "source": "sage"}),
+                    ) as build_reply_mock,
+                    patch(
+                        "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                        new=AsyncMock(return_value={"external_message_id": f"{channel_key}-out-thread-1"}),
+                        create=True,
+                    ),
+                ):
+                    await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
+                        gateway_id="gw-thread-1",
+                        registration=self.registration,
+                        payload={
+                            "message": {
+                                "external_message_id": f"{channel_key}-group-thread-1",
+                                "remote_jid": "group:family",
+                                "sender_jid": "+15557654321",
+                                "push_name": "Family Member",
+                                "text": "@sage what time is dinner",
+                                "from_me": False,
+                                "is_group": True,
+                                "is_mentioned": True,
+                                "is_reply_to_sage": False,
+                                "chat_title": "Family",
+                            },
+                        },
+                        channel_key=channel_key,
+                        provider=meta["provider"],
+                        label=meta["label"],
+                    )
+                build_reply_mock.assert_awaited_once()
+                call_kwargs = build_reply_mock.call_args.kwargs
+                self.assertTrue(call_kwargs.get("is_group"))
+                self.assertEqual(call_kwargs.get("chat_label"), "Family")
+
+
 if __name__ == "__main__":
     unittest.main()
