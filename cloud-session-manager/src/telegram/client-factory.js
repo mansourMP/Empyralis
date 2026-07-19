@@ -5,6 +5,25 @@ import { mapTelegramInboundMessage } from "./message-mapper.js";
 const dynamicImport = new Function("specifier", "return import(specifier)");
 
 /**
+ * True when `chat` (an already-resolved GramJS chat entity, from
+ * event.getChat()) is a broadcast channel — Api.Channel with
+ * broadcast: true — as opposed to a group/supergroup or a private peer.
+ * Mirrors empyralis-gateway/src/channels/telegram/runtime.ts's
+ * isBroadcastTelegramChat (kept as an independent implementation — no
+ * shared package between the two services — but must stay behaviorally
+ * identical). See that function's doc for the full incident this closes:
+ * without it, a broadcast channel's post fell under the SAME group
+ * mention-gate an ordinary group message gets, and broadcast content
+ * routinely @-mentions unrelated usernames (cross-promo, credits) that can
+ * coincidentally match the linked account's own username — which used to
+ * get treated as "addressed" and post a live reply INTO the broadcast
+ * channel.
+ */
+export function isBroadcastTelegramChat(chat) {
+  return Boolean(chat?.broadcast);
+}
+
+/**
  * Create a connected GramJS TelegramClient for an existing session.
  *
  * Extracted from empyralis-gateway/src/channels/telegram/runtime.ts:493-538,
@@ -51,17 +70,49 @@ export async function createTelegramClient({ sessionString, onInboundMessage, lo
   let _linkedUsername = "";
 
   // Add NewMessage event handler BEFORE connecting
-  client.addEventHandler((event) => {
+  client.addEventHandler(async (event) => {
     try {
       const message = event?.message;
       if (!message) return;
 
-      // Group detection: GramJS message.isGroup or chat className check
-      const isGroup = Boolean(
-        message.isGroup ||
-        (message.chat?.className === "Chat" && !message.chat?.isPrivate) ||
-        message.chat?.className === "Channel"
-      );
+      // Resolved once, reused for both the broadcast check and isGroup/
+      // isSelfChat below — a single network/cache call, not per-field.
+      const chat = typeof event?.getChat === "function" ? await event.getChat() : message.chat;
+
+      // Broadcast channels are dropped outright, before any group/mention
+      // processing — see isBroadcastTelegramChat's doc.
+      if (isBroadcastTelegramChat(chat)) {
+        return;
+      }
+
+      // isGroup/isSelfChat via event.isPrivate + chat.self (GramJS's own
+      // server-computed peer-type signals — mirrors
+      // empyralis-gateway/src/channels/telegram/runtime.ts's
+      // deriveTelegramInboundFields exactly, which explains at length why
+      // this is safer than the getters this used to read).
+      //
+      // What this replaces was broken two separate ways:
+      //  1. isGroup used message.isGroup (a cache-dependent GramJS getter)
+      //     OR'd with a chat.className check that treated EVERY Channel
+      //     entity — a supergroup AND a broadcast channel alike — as a
+      //     group. The gateway's own runtime.ts doc comment (afdf884e4)
+      //     calls this out by name: "exactly the failure mode that left a
+      //     family group ungated in the (separate, unused-in-prod) Cloud
+      //     Session Manager reimplementation of this same handler
+      //     (cloud-session-manager/src/telegram/client-factory.js), which
+      //     reads message.isGroup (the cache-dependent getter) instead."
+      //  2. isSelfChat compared chatId to senderId. For an INCOMING
+      //     private message those are always equal (the peer, which IS
+      //     the sender), so this was true for every ordinary 1:1 DM too —
+      //     and for an OUTGOING self-chat message, GramJS often omits
+      //     from_id entirely (out:true already signals authorship), so
+      //     senderId resolves to "" and chatId !== "" made isSelfChat
+      //     FALSE for a genuine self-chat send — dropping the owner's own
+      //     Saved-Messages command at inbound-handler.js's
+      //     `fromMe && !isSelfChat` gate.
+      const isPrivate = Boolean(event?.isPrivate ?? message.isPrivate);
+      const isGroup = !isPrivate;
+      const isSelfChat = isPrivate && Boolean(chat?.self);
 
       // Extract entities for mention detection
       const entities = message.entities || message.raw?.entities || [];
@@ -77,7 +128,7 @@ export async function createTelegramClient({ sessionString, onInboundMessage, lo
         text: String(message.text || message.message || ""),
         receivedAt: new Date().toISOString(),
         fromMe: Boolean(message.out || message.outgoing),
-        isSelfChat: String(message.chatId || message.peerId || "") === String(message.senderId || message.sender?.userId || ""),
+        isSelfChat,
         isGroup,
         entities,
         replyToMsgId,
@@ -303,10 +354,25 @@ export async function verifySignInCode({ tempSessionId, phoneCodeHash, phoneNumb
           },
         };
       };
-      client.addEventHandler((event) => {
+      client.addEventHandler(async (event) => {
         try {
           const message = event?.message;
           if (!message) return;
+
+          // Same fix as createTelegramClient's handler above (this is a
+          // second, independent event-handler registration used right
+          // after a fresh interactive sign-in, before any reconnect swaps
+          // in the "official" handler) — see that one's comments for the
+          // full rationale on both the broadcast drop and the isGroup/
+          // isSelfChat heuristics this replaces.
+          const chat = typeof event?.getChat === "function" ? await event.getChat() : message.chat;
+          if (isBroadcastTelegramChat(chat)) {
+            return;
+          }
+          const isPrivate = Boolean(event?.isPrivate ?? message.isPrivate);
+          const isGroup = !isPrivate;
+          const isSelfChat = isPrivate && Boolean(chat?.self);
+
           const raw = {
             externalMessageId: String(message.id || ""),
             remoteJid: String(message.chatId || message.peerId || ""),
@@ -315,12 +381,8 @@ export async function verifySignInCode({ tempSessionId, phoneCodeHash, phoneNumb
             text: String(message.text || message.message || ""),
             receivedAt: new Date().toISOString(),
             fromMe: Boolean(message.out || message.outgoing),
-            isSelfChat: String(message.chatId || message.peerId || "") === String(message.senderId || message.sender?.userId || ""),
-            isGroup: Boolean(
-              message.isGroup ||
-              (message.chat?.className === "Chat" && !message.chat?.isPrivate) ||
-              message.chat?.className === "Channel"
-            ),
+            isSelfChat,
+            isGroup,
             entities: message.entities || message.raw?.entities || [],
             replyToMsgId: message.replyTo?.replyToMsgId || message.replyToMsgId || null,
           };

@@ -742,6 +742,9 @@ def parse_telegram_update(body: dict) -> Optional[Dict[str, Any]]:
             text = "[🎤 Voice message]"
     if not text and not media_files:
         return None
+    reply_to_message = message.get("reply_to_message") if isinstance(message.get("reply_to_message"), dict) else {}
+    reply_to_from = reply_to_message.get("from") if isinstance(reply_to_message.get("from"), dict) else {}
+    entities = message.get("entities") if isinstance(message.get("entities"), list) else []
     return {
         "message_id": message.get("message_id"),
         "chat_id": str(chat.get("id", "")),
@@ -752,7 +755,98 @@ def parse_telegram_update(body: dict) -> Optional[Dict[str, Any]]:
         "from_first_name": _text((message.get("from") or {}).get("first_name")),
         "date": message.get("date"),
         "media": media_files,
+        # Group-addressing signals (used by is_message_addressed_to_bot):
+        # a real Bot-API `entities` mention naming this bot, or a direct
+        # reply to a message THIS bot sent.
+        "entities": entities,
+        "reply_to_from_id": str(reply_to_from.get("id", "")) if reply_to_from else "",
     }
+
+
+def _bot_own_id() -> str:
+    """The hosted bot's own numeric Telegram user id — a stored identity
+    (env var, matching the pattern _bot_username() already uses), not a
+    live getMe() lookup. Same default already relied on by the echo-loop
+    check in _process_update."""
+    return str(os.getenv("SAGE_TELEGRAM_HOSTED_BOT_USER_ID", "8870032163")).strip()
+
+
+_GROUP_ADDRESSING_CHAT_TYPES = {"group", "supergroup"}
+
+
+def text_addresses_bot(*, text: str, entities: Any, reply_to_from_id: str, bot_id: str, bot_username: str) -> bool:
+    """Core, bot-identity-agnostic addressing check: True when `entities`
+    contains a real Bot-API mention naming `bot_username`/`bot_id` (a
+    `mention` entity resolved against the raw text, or a `text_mention`
+    entity carrying the id directly), or `reply_to_from_id` equals `bot_id`
+    (a direct reply to a message that bot itself sent).
+
+    There is no Telegram Bot API equivalent of a client-side "mentioned"
+    flag to lean on (unlike the gateway's full-account GramJS session, which
+    had — and had to stop trusting — rawMessage.mentioned; see
+    hasExplicitTelegramMention in empyralis-gateway/.../telegram/runtime.ts).
+    A bot only ever sees explicit entities and reply_to_message, so those
+    are the only two signals this checks.
+
+    Shared by is_message_addressed_to_bot (the single hosted "Sage on
+    Telegram" bot, identity from env/cache) and
+    hosted_bot_provisioning_service's per-agent BYO bots (identity resolved
+    per bot_token via getMe, since a BYO bot's numeric id is never
+    persisted — only its bot_username is, at provisioning time) — every
+    Telegram bot identity this platform runs needs the exact same
+    entities/reply_to matching, just against a different bot_id/bot_username
+    pair. Callers are responsible for only invoking this for group/
+    supergroup chats — a private DM is always implicitly addressed and must
+    not be routed through this function.
+    """
+    bot_id = str(bot_id or "").strip()
+    reply_to_from_id = str(reply_to_from_id or "").strip()
+    if bot_id and reply_to_from_id and reply_to_from_id == bot_id:
+        return True
+
+    bot_username = str(bot_username or "").strip().lstrip("@").lower()
+    entity_list = entities if isinstance(entities, list) else []
+    if not entity_list:
+        return False
+    text = str(text or "")
+    for entity in entity_list:
+        if not isinstance(entity, dict):
+            continue
+        entity_type = str(entity.get("type") or "").strip().lower()
+        if entity_type == "text_mention":
+            mentioned_user = entity.get("user") if isinstance(entity.get("user"), dict) else {}
+            if bot_id and str(mentioned_user.get("id") or "").strip() == bot_id:
+                return True
+            continue
+        if entity_type != "mention" or not bot_username:
+            continue
+        try:
+            offset = int(entity.get("offset") or 0)
+            length = int(entity.get("length") or 0)
+        except (TypeError, ValueError):
+            continue
+        if offset < 0 or length <= 0 or offset + length > len(text):
+            continue
+        slice_text = text[offset : offset + length].strip().lstrip("@").lower()
+        if slice_text == bot_username:
+            return True
+    return False
+
+
+def is_message_addressed_to_bot(parsed: dict) -> bool:
+    """True when a group/supergroup message explicitly addresses the single
+    shared hosted "Sage on Telegram" bot — see text_addresses_bot's doc for
+    the actual matching rules. Callers are responsible for only invoking
+    this for group/supergroup chats — a private DM is always implicitly
+    addressed and must not be routed through this function.
+    """
+    return text_addresses_bot(
+        text=str(parsed.get("text") or ""),
+        entities=parsed.get("entities"),
+        reply_to_from_id=str(parsed.get("reply_to_from_id") or ""),
+        bot_id=_bot_own_id(),
+        bot_username=_bot_username(),
+    )
 
 
 async def handle_inbound_message(parsed: dict) -> Optional[str]:
@@ -761,6 +855,20 @@ async def handle_inbound_message(parsed: dict) -> Optional[str]:
     message_id = parsed.get("message_id")
 
     if not is_paired(chat_id):
+        # Pairing (and even the "how to pair" reply) is private-chat only.
+        # Without this check, ANYONE typing "/start <token>" inside a group
+        # the bot had been added to permanently paired the WHOLE group to
+        # that workspace — every member's message then reached this
+        # function already "paired" (see is_message_addressed_to_bot below
+        # for the follow-on group-mention gate that still applies once
+        # paired). And short of a successful pairing, an unpaired group got
+        # the "Welcome to Empyralis... pairing code" reply on EVERY single
+        # message, since this branch used to reply unconditionally either
+        # way — a standing spam source in any group/channel the bot was
+        # merely added to, paired or not.
+        if str(parsed.get("chat_type") or "").strip().lower() != "private":
+            return None
+
         # Handle /start with deep-link token (e.g., "/start abc123...")
         pairing_input = text.strip()
         if pairing_input.startswith("/start"):
@@ -1261,6 +1369,16 @@ async def _process_update(update: dict) -> bool:
     chat_id = await handle_inbound_message(parsed)
     if chat_id is None:
         return False
+    # Group gate: a group/supergroup chat can only reach this point already
+    # paired (handle_inbound_message's private-chat-only pairing check
+    # blocks any NEW group pairing) — but legacy state from before that fix
+    # can still hold an old group pairing, and this is the defense-in-depth
+    # backstop regardless. Ordinary, un-addressed group chatter must never
+    # trigger a reply; see is_message_addressed_to_bot's doc.
+    if str(parsed.get("chat_type") or "").strip().lower() in _GROUP_ADDRESSING_CHAT_TYPES:
+        if not is_message_addressed_to_bot(parsed):
+            LOGGER.info("Sage Telegram hosted: skipping unaddressed group message chat_id=%s", chat_id)
+            return False
     workspace_id = get_workspace_for_chat(chat_id)
     if workspace_id is None:
         # Stale pair — tell the user instead of going silent
@@ -1273,6 +1391,17 @@ async def _process_update(update: dict) -> bool:
     message_text = str(parsed.get("text") or "").strip()
     msg_id = str(parsed.get("message_id") or "")
 
+    # sender_id is the actual per-message Telegram user id, never the chat
+    # id — a group chat_id is shared by every member, so substituting it
+    # here collapsed every distinct sender into one identity (a stranger's
+    # message would carry the exact same sender_id an owner's message in
+    # that same chat would). from_id was already resolved above for the
+    # echo-loop check; reused here as the real identity signal for command
+    # permission checks (_is_sender_owner), audit trails, and any future
+    # per-sender scoping. Falls back to chat_id only in the pathological
+    # case where Telegram omitted `from` entirely (never a real 1:1 DM).
+    real_sender_id = from_id or str(chat_id)
+
     # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
     from server_modules.sage_command_dispatcher import dispatch_command
     cmd_reply = await dispatch_command(
@@ -1280,7 +1409,7 @@ async def _process_update(update: dict) -> bool:
         workspace_id=workspace_id,
         thread_id="sage-main",
         channel_origin="telegram_hosted",
-        sender_id=str(chat_id),
+        sender_id=real_sender_id,
     )
     if cmd_reply is not None:
         await send_message_safe(chat_id, cmd_reply, reply_to_message_id=parsed.get("message_id"))
@@ -1297,7 +1426,7 @@ async def _process_update(update: dict) -> bool:
         workspace_id=workspace_id,
         message=message_text,
         channel_origin="telegram_hosted",
-        sender_id=str(chat_id),
+        sender_id=real_sender_id,
         sender_name=str(parsed.get("from_first_name", "")).strip(),
         reply_to_id=msg_id,
     )

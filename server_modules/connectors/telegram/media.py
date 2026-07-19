@@ -66,11 +66,20 @@ class TelegramMediaService:
     def extract_message(self, update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(update, dict):
             return None
+        # channel_post / edited_channel_post are deliberately NOT extracted.
+        # A broadcast channel's post has no real per-user sender (Telegram
+        # sets `from` to the channel's own admin bot identity or omits it),
+        # and under the "allow any chat" config public-deployed-agent
+        # connectors use, extracting one here let it flow all the way to a
+        # live dispatched reply — the "comments under every post" incident: a
+        # bot administering a broadcast channel replied to every post as
+        # though it were a private message. Path B's parse_telegram_update
+        # (sage_telegram_hosted_service.py) only ever read message/
+        # edited_message for the same reason; this hard-drops the same two
+        # keys here instead of relying on a downstream gate to catch it.
         for key in (
             "message",
             "edited_message",
-            "channel_post",
-            "edited_channel_post",
             "business_message",
             "edited_business_message",
         ):
@@ -124,6 +133,7 @@ class TelegramMediaService:
                                     "file_name": str(document.get("file_name") or "").strip(),
                                 }
                             )
+                reply_to_from = reply_to.get("from") if isinstance(reply_to.get("from"), dict) else {}
                 return {
                     "text": text,
                     "chat": candidate.get("chat") if isinstance(candidate.get("chat"), dict) else {},
@@ -133,6 +143,12 @@ class TelegramMediaService:
                     "date": candidate.get("date"),
                     "kind": key,
                     "attachments": attachments,
+                    # Group-addressing signals (see agent.routing_service.
+                    # is_addressed_to_bot): a real Bot-API `entities` mention
+                    # naming the bot, or a direct reply to a message the bot
+                    # itself sent.
+                    "entities": candidate.get("entities") if isinstance(candidate.get("entities"), list) else [],
+                    "reply_to_from_id": str(reply_to_from.get("id") or "") if reply_to_from else "",
                 }
         return None
 

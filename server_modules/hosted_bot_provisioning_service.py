@@ -80,6 +80,36 @@ async def get_me(token: str) -> dict:
     return data.get("result") or {}
 
 
+# bot_id (unlike bot_username) is never persisted on the channel binding —
+# assign_byo_bot() resolves it once at provisioning time purely to validate
+# the token and then discards it. Resolved again here, once per process per
+# credential, via getMe, and cached — mirrors sage_telegram_hosted_service's
+# own _CACHED_BOT_USERNAME pattern for the single shared hosted bot.
+_BYO_BOT_ID_CACHE: Dict[str, str] = {}  # credential_id -> numeric bot id
+
+
+async def resolve_byo_bot_id(*, credential_id: str, token: str) -> str:
+    """Best-effort numeric Telegram id for a BYO bot. Returns "" (never
+    raises) on any getMe failure — callers must treat that as "the
+    reply-to-bot addressing signal is unavailable", not as an error; the
+    bot_username-based mention check (always available, stored at
+    provisioning time) still applies independently."""
+    cred_key = str(credential_id or "").strip()
+    if cred_key:
+        cached = _BYO_BOT_ID_CACHE.get(cred_key)
+        if cached:
+            return cached
+    try:
+        me = await get_me(token)
+    except Exception as exc:
+        LOGGER.warning("resolve_byo_bot_id: getMe failed (non-fatal, mention-only gating still applies): %s", exc)
+        return ""
+    bot_id = str(me.get("id") or "").strip()
+    if cred_key and bot_id:
+        _BYO_BOT_ID_CACHE[cred_key] = bot_id
+    return bot_id
+
+
 async def set_webhook(token: str, *, url: str, secret_token: str) -> dict:
     return await telegram_api(token, "setWebhook", {
         "url": url,
@@ -379,12 +409,25 @@ async def route_agent_inbound(
     agent_install_id: str,
     chat_id: str,
     message: str,
+    sender_id: str = "",
+    chat_type: str = "",
+    entities: Optional[list] = None,
+    reply_to_from_id: str = "",
     reply_to_message_id: Optional[int] = None,
     deliver: bool = True,
 ) -> Dict[str, Any]:
     """Route an inbound message from an agent's own BYO bot and run a REAL
     turn as THAT agent — its own persona, model/provider binding, and memory
     scope, in its own thread — replying via the bot's own token.
+
+    Group gate: chat_type/entities/reply_to_from_id are optional (webhook
+    payloads from before this fix, or callers that don't have them, get
+    "" / None — never gated) but when chat_type is group/supergroup, a real
+    turn only runs if the message explicitly addresses THIS bot (see
+    text_addresses_bot). A BYO bot is a real, discoverable Telegram bot
+    that anyone can add to any group — without this, every group message
+    ran a full, billed turn as though it were a private conversation with
+    the agent.
     """
     binding = await bindings.get_channel_binding_by_agent_unscoped(
         agent_install_id=agent_install_id, channel_key=CHANNEL_KEY_TELEGRAM,
@@ -420,6 +463,28 @@ async def route_agent_inbound(
             "bot_username": bot_username,
             "reply_sent": False,
         }
+
+    if str(chat_type or "").strip().lower() in {"group", "supergroup"}:
+        from server_modules.sage_telegram_hosted_service import text_addresses_bot
+
+        bot_id = await resolve_byo_bot_id(credential_id=credential_id, token=token)
+        if not text_addresses_bot(
+            text=str(message or ""),
+            entities=entities,
+            reply_to_from_id=reply_to_from_id,
+            bot_id=bot_id,
+            bot_username=bot_username,
+        ):
+            return {
+                "routed": True,
+                "processed": False,
+                "reason": "group_not_addressed",
+                "agent_install_id": agent_install_id,
+                "agent_label": label,
+                "workspace_id": workspace_id,
+                "bot_username": bot_username,
+                "reply_sent": True,
+            }
 
     from server_modules import specialist_runtime_context as _src
 
@@ -458,12 +523,20 @@ async def route_agent_inbound(
 
     from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
 
+    # The real per-message Telegram user id, never the chat id — a group
+    # chat_id is shared by every member (a BYO bot can be added to a group
+    # by anyone since it's a real, discoverable Telegram bot), so
+    # substituting it collapsed every distinct sender into the same
+    # identity. Falls back to chat_id only if the caller has no sender_id
+    # (Telegram omitted `from` entirely — never a real 1:1 DM).
+    real_sender_id = str(sender_id or "").strip() or str(chat_id)
+
     delivered = await dispatch_sage_reply_safe(
         transport=transport,
         workspace_id=workspace_id,
         message=str(message or ""),
         channel_origin="telegram_agent_byo",
-        sender_id=str(chat_id),
+        sender_id=real_sender_id,
         thread_id=thread_id,
         reply_to_id=str(reply_to_message_id or "") or None,
         specialist_context=specialist_context,

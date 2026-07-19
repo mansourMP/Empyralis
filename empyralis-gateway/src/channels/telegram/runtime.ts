@@ -543,6 +543,40 @@ export function hasExplicitTelegramMention(
 }
 
 /**
+ * True when `chat` (an already-resolved GramJS chat entity, straight off
+ * `event.getChat()` — not the cache-dependent `.isGroup`/`.isChannel`
+ * getters) is a broadcast channel: an `Api.Channel` with `broadcast: true`,
+ * Telegram's one-to-many announcement channel, as opposed to a basic group,
+ * a supergroup/megagroup (also `Api.Channel`, but `broadcast: false`), or a
+ * private peer (`Api.User`, which has no `.broadcast` field at all — so
+ * `Boolean(undefined)` correctly resolves to `false` for it, same as for a
+ * plain `Api.Chat`).
+ *
+ * `deriveTelegramInboundFields`'s own field notes explain why `isGroup`
+ * uses `!isPrivate` rather than GramJS's own `isGroup`/`isChannel` getters
+ * (they can return `undefined` when the entity isn't yet cached). That
+ * reasoning does NOT extend to broadcast — `!isPrivate` is `true` for a
+ * broadcast channel exactly like it is for a real group, which used to
+ * route a channel post through the SAME mention-gate a group message gets.
+ * That gate is too permissive for broadcast content: a channel's posts
+ * routinely @-mention all kinds of unrelated usernames (cross-promo,
+ * credits), and if one happened to match this account's own username, the
+ * post was treated as "addressed" and got a live reply POSTED INTO THE
+ * BROADCAST CHANNEL, visible to every subscriber — the "comments under
+ * every post" incident, gateway-side (see media.py's extract_message for
+ * the Telegram-Hosted-bot-side twin of this same bug). A channel post also
+ * has no real per-user sender — GramJS resolves the channel's own entity
+ * as "sender" for an anonymous post — so attributing it to anyone, let
+ * alone the owner, is meaningless regardless. The call site in
+ * getAdapter()'s NewMessage handler drops a broadcast message outright,
+ * before event.getSender() is even called, rather than routing it through
+ * the group mention-gate at all.
+ */
+export function isBroadcastTelegramChat(chat: { broadcast?: unknown; [key: string]: unknown } | undefined): boolean {
+  return Boolean(chat?.broadcast);
+}
+
+/**
  * Pure computation of every signal the NewMessage event handler (in
  * getAdapter()'s `connect`) derives from an already-resolved GramJS
  * chat/sender/rawMessage triple plus the connected account's own identity.
@@ -1778,6 +1812,15 @@ export class TelegramPersonalRuntime {
               return;
             }
             const chat = typeof event?.getChat === "function" ? await event.getChat() : undefined;
+            // Broadcast channels are dropped outright, before sender
+            // resolution or any downstream processing — see
+            // isBroadcastTelegramChat's doc for why this can't be folded
+            // into the ordinary group mention-gate (afdf884e4's isGroup/
+            // isMentioned fixes below are preserved unchanged; this is an
+            // additive, independent check ahead of them).
+            if (isBroadcastTelegramChat(chat)) {
+              return;
+            }
             const sender = typeof event?.getSender === "function" ? await event.getSender() : undefined;
             // Every derived signal (remoteJid/senderJid/pushName/isGroup/
             // isSelfChat/isMentioned/replyToExternalMessageId/chatTitle) is

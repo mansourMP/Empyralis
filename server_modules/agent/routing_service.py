@@ -1,7 +1,75 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+
+def is_addressed_to_bot(
+    *,
+    text: str,
+    entities: Optional[List[Dict[str, Any]]],
+    reply_to_from_id: str,
+    bot_id: str,
+    bot_username: str,
+) -> bool:
+    """True when a group/supergroup message explicitly addresses this bot:
+    a real Bot-API `entities` mention naming it (by username, or for a
+    `text_mention` entity, its user id directly), or a direct reply to a
+    message the bot itself sent (reply_to_from_id == bot_id).
+
+    This is the addressing signal that was completely missing for Telegram
+    connectors — the ONLY existing gate was route_message()'s prefix
+    convention below (require_prefix / a leading "/empyralis"), which is
+    off by default for "allow any chat" free-text profiles. Under that
+    config, a group/supergroup message with no prefix and no mention used
+    to reach a live, dispatched reply for ordinary chatter with nobody
+    asking for the bot's attention. A private DM is always implicitly
+    addressed and must never be routed through this function — callers are
+    responsible for only calling this for group/supergroup chats.
+
+    There is no Telegram Bot API equivalent of a client-side "mentioned"
+    flag (unlike the gateway's full-account GramJS session, which had — and
+    had to stop trusting — rawMessage.mentioned; see
+    hasExplicitTelegramMention in empyralis-gateway's telegram/runtime.ts).
+    A bot only ever sees explicit `entities` and `reply_to_message`, so
+    those are the only two signals this checks. Mirrors
+    sage_telegram_hosted_service.text_addresses_bot exactly (same matching
+    rules, independently implemented — Path A and Path B are separate
+    stacks by design) so a group is protected the same way regardless of
+    which Telegram surface it came through.
+    """
+    clean_bot_id = str(bot_id or "").strip()
+    clean_reply_id = str(reply_to_from_id or "").strip()
+    if clean_bot_id and clean_reply_id and clean_bot_id == clean_reply_id:
+        return True
+
+    clean_username = str(bot_username or "").strip().lstrip("@").lower()
+    entity_list = entities if isinstance(entities, list) else []
+    if not entity_list:
+        return False
+    haystack = str(text or "")
+    for entity in entity_list:
+        if not isinstance(entity, dict):
+            continue
+        entity_type = str(entity.get("type") or "").strip().lower()
+        if entity_type == "text_mention":
+            mentioned_user = entity.get("user") if isinstance(entity.get("user"), dict) else {}
+            if clean_bot_id and str(mentioned_user.get("id") or "").strip() == clean_bot_id:
+                return True
+            continue
+        if entity_type != "mention" or not clean_username:
+            continue
+        try:
+            offset = int(entity.get("offset") or 0)
+            length = int(entity.get("length") or 0)
+        except (TypeError, ValueError):
+            continue
+        if offset < 0 or length <= 0 or offset + length > len(haystack):
+            continue
+        slice_text = haystack[offset : offset + length].strip().lstrip("@").lower()
+        if slice_text == clean_username:
+            return True
+    return False
 
 
 class TelegramRoutingService:
