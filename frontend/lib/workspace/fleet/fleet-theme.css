@@ -669,7 +669,7 @@ a.fleet-breadcrumb:hover {
 
 /* Persistent credit-balance chip — always visible across the whole
    workspace (not just the Billing page), directly below the pulse line.
-   Deliberately neutral: the purple accent is reserved for the Billing
+   Deliberately neutral: the accent is reserved for the Billing
    page's top-up button, not this glance indicator (see billing/page.tsx). */
 .fleet-rail-credit-chip {
   display: flex;
