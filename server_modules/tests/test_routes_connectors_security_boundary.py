@@ -57,6 +57,7 @@ class ConnectorRouteSecurityBoundaryTests(unittest.TestCase):
             {
                 "/channels/telegram/webhook/{connector_id}",
                 "/channels/whatsapp/twilio/webhook",
+                "/channels/sms/twilio/webhook",
                 "/channels/slack/events",
                 "/channels/github/webhook",
                 "/connectors/discord/webhook",
