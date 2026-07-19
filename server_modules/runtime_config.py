@@ -914,6 +914,26 @@ CONNECTOR_CATALOG = {
         "label": "Higgsfield",
         "auth": ["access_token"],
     },
+    "zapier": {
+        "label": "Zapier",
+        "auth": ["access_token"],
+    },
+    "paypal": {
+        "label": "PayPal",
+        "auth": ["access_token"],
+    },
+    "sentry": {
+        "label": "Sentry",
+        "auth": ["access_token"],
+    },
+    "attio": {
+        "label": "Attio",
+        "auth": ["access_token"],
+    },
+    "cloudflare": {
+        "label": "Cloudflare",
+        "auth": ["access_token"],
+    },
     "s3": {
         "label": "Amazon S3",
         "auth": ["aws_access_key_id", "aws_secret_access_key", "region"],
