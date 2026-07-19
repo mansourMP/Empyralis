@@ -658,6 +658,7 @@ validate_notion_connector = lambda credentials: _validate_notion_connector(crede
 validate_linear_connector = lambda credentials: _validate_linear_connector(credentials, http_json_request)
 validate_instagram_business_connector = lambda credentials: _validate_instagram_business_connector(credentials, http_json_request)
 validate_irc_connector = lambda credentials: _validate_irc_connector(credentials)
+validate_higgsfield_connector = lambda credentials: _validate_higgsfield_connector(credentials, http_json_request)
 
 
 def list_recent_connector_messages(

@@ -951,7 +951,46 @@ def oauth_provider_configured(provider: str) -> bool:
 # ensure_oauth_configured() call (and exception) they always used.
 # ---------------------------------------------------------------------------
 
-_DYNAMIC_CLIENT_CACHE: Dict[tuple[str, str], tuple[str, str]] = {}
+# Safety margin before a cached client_secret's real expiry at which it's
+# already treated as unusable and re-registered — refreshing a few minutes
+# early is cheap; a token exchange racing the actual expiry instant is not.
+_DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS = 300
+
+
+def _coerce_epoch_seconds(value: Any) -> int:
+    """Best-effort int coercion for RFC 7591 client_id_issued_at /
+    client_secret_expires_at fields — both are supposed to be JSON numbers,
+    but a provider returning a string, null, or garbage must degrade to "no
+    value" rather than raise out of registration bookkeeping."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+@dataclass(frozen=True)
+class _DynamicClientRegistration:
+    """A cached RFC 7591 client registration, plus the two timing fields the
+    registration response can carry (client_id_issued_at, client_secret_
+    expires_at). Per RFC 7591 §3.2.1, client_secret_expires_at of 0 (or the
+    field being absent, which _coerce_epoch_seconds also normalizes to 0)
+    means the secret does not expire — Higgsfield returns exactly that.
+    Linear, live-verified 2026-07-19, returns a real 24-hour
+    client_secret_expires_at, so a cache with no expiry awareness silently
+    outlives the secret and every subsequent token exchange/refresh 401s."""
+
+    client_id: str
+    client_secret: str
+    client_id_issued_at: int = 0
+    client_secret_expires_at: int = 0
+
+    def is_expired(self, *, safety_margin_seconds: int = _DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS) -> bool:
+        if self.client_secret_expires_at <= 0:
+            return False  # 0 / absent = never expires (RFC 7591 §3.2.1)
+        return time.time() >= (self.client_secret_expires_at - safety_margin_seconds)
+
+
+_DYNAMIC_CLIENT_CACHE: Dict[tuple[str, str], _DynamicClientRegistration] = {}
 _DYNAMIC_CLIENT_CACHE_LOCK = threading.Lock()
 
 
@@ -968,15 +1007,21 @@ def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirec
     the life of the process, keyed by (provider, redirect_uri) — a client
     registration is bound to the redirect_uris declared at registration time,
     so a cached entry is only reusable for the exact redirect_uri it was
-    registered with (stable in practice: one production origin per deploy)."""
+    registered with (stable in practice: one production origin per deploy).
+
+    A cached entry whose client_secret_expires_at has passed (or is within
+    _DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS of passing) is treated as
+    absent and transparently re-registered — see _DynamicClientRegistration.
+    is_expired(). Entries with client_secret_expires_at == 0 (or missing
+    from the registration response) never expire, per RFC 7591."""
     cache_key = (provider, redirect_uri)
     cached = _DYNAMIC_CLIENT_CACHE.get(cache_key)
-    if cached:
-        return cached
+    if cached is not None and not cached.is_expired():
+        return (cached.client_id, cached.client_secret)
     with _DYNAMIC_CLIENT_CACHE_LOCK:
         cached = _DYNAMIC_CLIENT_CACHE.get(cache_key)
-        if cached:
-            return cached
+        if cached is not None and not cached.is_expired():
+            return (cached.client_id, cached.client_secret)
         if not config.registration_endpoint:
             raise HTTPException(status_code=409, detail=f"{_connector_label(provider)} has no dynamic registration endpoint configured.")
         payload = {
@@ -1010,10 +1055,21 @@ def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirec
                 detail=f"{_connector_label(provider)} dynamic client registration did not return a client_id.",
             )
         dynamic_client_secret = str(registration.get("client_secret") or "").strip()
-        result = (dynamic_client_id, dynamic_client_secret)
-        _DYNAMIC_CLIENT_CACHE[cache_key] = result
-        _log.info("Dynamically registered OAuth client for %s (redirect_uri=%s)", provider, redirect_uri)
-        return result
+        entry = _DynamicClientRegistration(
+            client_id=dynamic_client_id,
+            client_secret=dynamic_client_secret,
+            client_id_issued_at=_coerce_epoch_seconds(registration.get("client_id_issued_at")),
+            client_secret_expires_at=_coerce_epoch_seconds(registration.get("client_secret_expires_at")),
+        )
+        _DYNAMIC_CLIENT_CACHE[cache_key] = entry
+        if cached is not None:
+            _log.info(
+                "Re-registered OAuth client for %s (redirect_uri=%s) — previous client_secret was expired or expiring within %ds",
+                provider, redirect_uri, _DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS,
+            )
+        else:
+            _log.info("Dynamically registered OAuth client for %s (redirect_uri=%s)", provider, redirect_uri)
+        return (entry.client_id, entry.client_secret)
 
 
 def _resolve_oauth_client(provider: str, redirect_uri: str) -> tuple[str, str]:
@@ -1041,15 +1097,22 @@ def _resolve_oauth_client_for_refresh(provider: str) -> tuple[str, str]:
     refresh where no live Request/redirect_uri is available. Reuses whichever
     dynamically-registered client is already cached for this provider (it was
     registered during the original start_oauth call that produced the
-    credential now being refreshed)."""
+    credential now being refreshed).
+
+    Unlike _register_dynamic_client, this path has no redirect_uri and so
+    can never re-register an expired entry (RFC 7591 registration requires
+    declaring redirect_uris) -- an expired cache entry is skipped rather
+    than handed back, so a refresh attempt fails fast locally (falling
+    through to `raise`) instead of spending a network round trip on a
+    client_secret the token endpoint is guaranteed to reject."""
     try:
         return ensure_oauth_configured(provider)
     except HTTPException:
         config = OAUTH_PROVIDER_CONFIGS.get(str(provider or "").strip().lower())
         if config is not None and config.registration_endpoint:
-            for (cached_provider, _redirect_uri), credentials in _DYNAMIC_CLIENT_CACHE.items():
-                if cached_provider == provider:
-                    return credentials
+            for (cached_provider, _redirect_uri), entry in _DYNAMIC_CLIENT_CACHE.items():
+                if cached_provider == provider and not entry.is_expired():
+                    return (entry.client_id, entry.client_secret)
         raise
 
 

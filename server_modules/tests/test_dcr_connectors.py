@@ -34,10 +34,20 @@ true.
 
 from __future__ import annotations
 
+import time
+import unittest
+from unittest.mock import patch
+
 import pytest
+from fastapi import HTTPException
 
 from server_modules import connection_catalog_service
 from server_modules import connection_oauth_service as service
+from server_modules import connector_validators
+from server_modules import connectors_actions
+from server_modules import mcp_registry_service
+from server_modules import runtime_models
+from server_modules.schemas import ConnectorCreate
 
 
 _PROVIDERS = ("stripe", "linear", "notion", "asana", "canva", "airtable", "clickup")
@@ -414,3 +424,361 @@ def test_provider_still_resolves_in_the_catalog(provider) -> None:
     assert item["setup_kind"] == "oauth"
     assert item["setup_available"] is True
     assert item["runtime_provider"] == provider
+
+
+# ---------------------------------------------------------------------------
+# 6. Gap 1 -- post-auth validation must prove the token against the
+#    connector's MCP resource (a live initialize + tools/list handshake via
+#    mcp_registry_service), NOT the classic REST API a DCR/MCP-scoped token
+#    was never issued for. Before this fix, create_connector_vault("stripe")
+#    ran validate_stripe_connector's classic api.stripe.com/v1/account probe
+#    with an MCP-scoped token and 400'd immediately after the user connected
+#    -- the connection looked broken the moment it was made. validate_stripe_
+#    connector / validate_linear_connector / validate_notion_connector /
+#    validate_asana_connector / validate_canva_connector / validate_clickup_
+#    connector / validate_higgsfield_connector (connector_validators.py) now
+#    all route through validate_mcp_scoped_oauth_connector. Airtable is the
+#    deliberate exception (its MCP resource shares its classic auth server)
+#    and keeps validate_oauth_bearer_connector's classic REST profile_probe.
+# ---------------------------------------------------------------------------
+
+_MCP_SCOPED_PROVIDERS = ("stripe", "linear", "notion", "asana", "canva", "clickup", "higgsfield")
+
+
+@pytest.mark.parametrize("provider", _MCP_SCOPED_PROVIDERS)
+def test_mcp_scoped_connectors_validate_via_live_mcp_call_not_classic_api(monkeypatch, provider) -> None:
+    calls: list[dict] = []
+
+    def fake_discover(*, transport, endpoint, server_id, credential):
+        calls.append(
+            {"transport": transport, "endpoint": endpoint, "server_id": server_id, "credential": credential}
+        )
+        return [{"name": "tool_one"}, {"name": "tool_two"}]
+
+    monkeypatch.setattr(mcp_registry_service, "discover_mcp_server_tools", fake_discover)
+
+    def fail_classic_http(*_args, **_kwargs):
+        raise AssertionError(f"{provider}: must not probe a classic REST endpoint for an MCP-scoped token")
+
+    validator = getattr(connector_validators, f"validate_{provider}_connector")
+    result = validator({"access_token": "mcp-scoped-token"}, fail_classic_http)
+
+    assert result["ok"] is True
+    assert result["mcp_tool_count"] == 2
+    assert len(calls) == 1
+    assert calls[0]["transport"] == "streamable_http"
+    assert calls[0]["server_id"] == provider
+    assert calls[0]["credential"] == {"access_token": "mcp-scoped-token"}
+    expected_endpoint = service.APP_MCP_SERVER_MAP[provider][0]["endpoint"]
+    assert calls[0]["endpoint"] == expected_endpoint
+
+
+@pytest.mark.parametrize("provider", _MCP_SCOPED_PROVIDERS)
+def test_mcp_scoped_connector_validation_fails_when_mcp_rejects_token(monkeypatch, provider) -> None:
+    def fake_discover(**_kwargs):
+        raise RuntimeError("401 Unauthorized")
+
+    monkeypatch.setattr(mcp_registry_service, "discover_mcp_server_tools", fake_discover)
+
+    validator = getattr(connector_validators, f"validate_{provider}_connector")
+    with pytest.raises(RuntimeError):
+        validator({"access_token": "bad-token"}, None)
+
+
+@pytest.mark.parametrize("provider", _MCP_SCOPED_PROVIDERS)
+def test_mcp_scoped_connector_validation_requires_access_token(provider) -> None:
+    validator = getattr(connector_validators, f"validate_{provider}_connector")
+    with pytest.raises(RuntimeError):
+        validator({}, None)
+
+
+def test_airtable_keeps_the_classic_profile_probe() -> None:
+    """Regression guard: Airtable's MCP resource shares its classic auth
+    server (see OAUTH_PROVIDER_CONFIGS['airtable']'s discovery notes), so it
+    must keep validate_oauth_bearer_connector's classic REST probe -- not
+    the MCP-scoped path the other 6 + Higgsfield now use."""
+    import inspect
+
+    source = inspect.getsource(connector_validators.validate_airtable_connector)
+    assert "validate_oauth_bearer_connector" in source
+    assert "validate_mcp_scoped_oauth_connector" not in source
+
+
+# ---------------------------------------------------------------------------
+# 7. Gap 1 + Gap 2, through the real create_connector_vault entry point (the
+#    function that runs right after OAuth succeeds). Before this fix:
+#    create_connector_vault("stripe", ...) hit classic api.stripe.com with
+#    an MCP-scoped token and raised HTTPException(400); create_connector_
+#    vault had NO "higgsfield" branch at all, so a fresh Higgsfield
+#    connection 400'd with "Unsupported connector 'higgsfield'" regardless
+#    of token validity.
+# ---------------------------------------------------------------------------
+
+class CreateConnectorVaultMcpValidationTests(unittest.IsolatedAsyncioTestCase):
+    async def _create(self, connector: str, *, label: str):
+        # _find_duplicate_connector_entry (which reaches Postgres via
+        # server.load_vault) and upsert_credential (the single-row Postgres
+        # write) are the two control-plane-DB touches create_connector_vault
+        # makes around the validation branch -- both stubbed so the test
+        # exercises the Gap 1/Gap 2 validation path without a live DB (the
+        # same Postgres dependency that env-skips the existing create_
+        # connector_vault tests in this harness). _find_duplicate is stubbed
+        # to "no duplicate" rather than via load_vault so it can't reach the
+        # real server.load_vault regardless of module-init ordering.
+        with (
+            patch("server_modules.connectors_actions._find_duplicate_connector_entry", return_value=None),
+            patch("server_modules.connectors_actions.upsert_credential", side_effect=lambda entry: entry),
+            patch.dict(
+                runtime_models._CONNECTOR_CATALOG,
+                {connector: {"label": label, "auth": ["access_token"]}},
+                clear=False,
+            ),
+        ):
+            return await connectors_actions.create_connector_vault(
+                ConnectorCreate(
+                    label=label,
+                    connector=connector,
+                    workspace_id="ws-1",
+                    credentials={"access_token": "mcp-scoped-token"},
+                )
+            )
+
+    async def test_stripe_connector_creation_succeeds_with_mcp_scoped_token(self):
+        calls: list[str] = []
+
+        def fake_discover(*, transport, endpoint, server_id, credential):
+            calls.append(endpoint)
+            return [{"name": "create_payment_link"}]
+
+        with patch.object(mcp_registry_service, "discover_mcp_server_tools", fake_discover):
+            result = await self._create("stripe", label="Stripe")
+
+        self.assertEqual(result["connector"], "stripe")
+        self.assertTrue(result["test"]["ok"])
+        # Proves the probe went to the MCP endpoint, not classic api.stripe.com.
+        self.assertEqual(calls, ["https://mcp.stripe.com"])
+
+    async def test_stripe_connector_creation_still_fails_loudly_on_a_bad_token(self):
+        """The fix must not turn every Stripe connection into an
+        unconditional success -- a token the MCP server itself rejects must
+        still surface as a 400, just from the right endpoint."""
+        with patch.object(mcp_registry_service, "discover_mcp_server_tools", side_effect=RuntimeError("401")):
+            with self.assertRaises(HTTPException) as exc_info:
+                await self._create("stripe", label="Stripe")
+        self.assertEqual(exc_info.exception.status_code, 400)
+
+    async def test_higgsfield_connector_creation_no_longer_400s(self):
+        with patch.object(mcp_registry_service, "discover_mcp_server_tools", return_value=[{"name": "generate_image"}]):
+            result = await self._create("higgsfield", label="Higgsfield")
+
+        self.assertEqual(result["connector"], "higgsfield")
+        self.assertTrue(result["test"]["ok"])
+
+
+# ---------------------------------------------------------------------------
+# 8. Gap 3 -- a cached DCR client's client_secret can itself expire (RFC
+#    7591 client_secret_expires_at). _DYNAMIC_CLIENT_CACHE must track it and
+#    transparently re-register once a cached entry is expired or expiring
+#    within the safety margin, instead of caching a client for the life of
+#    the process and letting every subsequent token exchange/refresh 401
+#    once the real provider-side secret has expired (a live registration
+#    against Linear returned a real 24-hour client_secret_expires_at).
+# ---------------------------------------------------------------------------
+
+def test_expired_client_secret_triggers_reregistration(monkeypatch) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
+
+    redirect_uri = "https://app.example.com/api/connections/oauth/linear/callback"
+    cache_key = ("linear", redirect_uri)
+    service._DYNAMIC_CLIENT_CACHE[cache_key] = service._DynamicClientRegistration(
+        client_id="stale-client-id",
+        client_secret="stale-client-secret",
+        client_secret_expires_at=int(time.time()) - 3600,  # expired an hour ago
+    )
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_post_json(url, payload, *, headers=None):
+        calls.append((url, payload))
+        return {
+            "client_id": "fresh-client-id",
+            "client_secret": "fresh-client-secret",
+            "client_secret_expires_at": int(time.time()) + 86400,
+        }
+
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+
+    client_id, client_secret = service._resolve_oauth_client("linear", redirect_uri)
+
+    assert (client_id, client_secret) == ("fresh-client-id", "fresh-client-secret")
+    assert len(calls) == 1
+    cached = service._DYNAMIC_CLIENT_CACHE[cache_key]
+    assert cached.client_id == "fresh-client-id"
+    assert cached.client_secret_expires_at > int(time.time())
+
+
+def test_client_secret_expiring_within_safety_margin_triggers_reregistration(monkeypatch) -> None:
+    """Even before the literal expiry instant, an entry within the 5-minute
+    safety margin must be treated as expired -- a token exchange racing the
+    real expiry moment is exactly the failure mode the margin exists to
+    avoid."""
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
+
+    redirect_uri = "https://app.example.com/api/connections/oauth/notion/callback"
+    cache_key = ("notion", redirect_uri)
+    service._DYNAMIC_CLIENT_CACHE[cache_key] = service._DynamicClientRegistration(
+        client_id="soon-to-expire-id",
+        client_secret="soon-to-expire-secret",
+        client_secret_expires_at=int(time.time()) + 60,  # 1 minute left; margin is 5
+    )
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_post_json(url, payload, *, headers=None):
+        calls.append((url, payload))
+        return {"client_id": "new-id", "client_secret": "new-secret", "client_secret_expires_at": 0}
+
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+
+    client_id, _client_secret = service._resolve_oauth_client("notion", redirect_uri)
+    assert client_id == "new-id"
+    assert len(calls) == 1
+
+
+def test_client_secret_expires_at_zero_never_expires() -> None:
+    """RFC 7591 sec 3.2.1: client_secret_expires_at == 0 means the secret
+    never expires -- Higgsfield returns exactly this. Must not be treated
+    as already-expired (a naive `now >= expires_at` check would trip on 0
+    immediately)."""
+    entry = service._DynamicClientRegistration(
+        client_id="cid", client_secret="csecret", client_secret_expires_at=0,
+    )
+    assert entry.is_expired() is False
+
+
+def test_client_secret_expires_at_absent_is_treated_as_never_expiring(monkeypatch) -> None:
+    """A registration response with no client_secret_expires_at field at all
+    (coerced to 0 by _coerce_epoch_seconds) must behave identically to an
+    explicit 0: not expired, and a second resolve call must hit the cache
+    rather than re-register."""
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
+    monkeypatch.setenv("HIGGSFIELD_OAUTH_ENABLED", "true")
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_post_json(url, payload, *, headers=None):
+        calls.append((url, payload))
+        return {"client_id": "cid", "client_secret": "csecret"}  # no expiry fields at all
+
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+
+    redirect_uri = "https://app.example.com/api/connections/oauth/higgsfield/callback"
+    client_id, client_secret = service._resolve_oauth_client("higgsfield", redirect_uri)
+    assert (client_id, client_secret) == ("cid", "csecret")
+
+    cached = service._DYNAMIC_CLIENT_CACHE[("higgsfield", redirect_uri)]
+    assert cached.client_secret_expires_at == 0
+    assert cached.is_expired() is False
+
+    # Second resolve for the same (provider, redirect_uri) must hit the
+    # cache -- a 0/absent expiry never goes stale.
+    client_id_2, client_secret_2 = service._resolve_oauth_client("higgsfield", redirect_uri)
+    assert (client_id_2, client_secret_2) == ("cid", "csecret")
+    assert len(calls) == 1
+
+
+def test_client_id_issued_at_is_captured(monkeypatch) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
+
+    issued_at = int(time.time())
+    monkeypatch.setattr(
+        service,
+        "_post_json",
+        lambda url, payload, **_kw: {
+            "client_id": "cid",
+            "client_secret": "csecret",
+            "client_id_issued_at": issued_at,
+            "client_secret_expires_at": issued_at + 86400,
+        },
+    )
+
+    redirect_uri = "https://app.example.com/api/connections/oauth/asana/callback"
+    service._resolve_oauth_client("asana", redirect_uri)
+
+    cached = service._DYNAMIC_CLIENT_CACHE[("asana", redirect_uri)]
+    assert cached.client_id_issued_at == issued_at
+
+
+def test_garbage_expiry_values_degrade_to_never_expiring(monkeypatch) -> None:
+    """_coerce_epoch_seconds must turn a non-numeric / null client_secret_
+    expires_at into 0 (never-expires) rather than raise out of registration
+    bookkeeping -- a provider returning a malformed field must not brick the
+    whole connect."""
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
+
+    monkeypatch.setattr(
+        service,
+        "_post_json",
+        lambda url, payload, **_kw: {
+            "client_id": "cid",
+            "client_secret": "csecret",
+            "client_secret_expires_at": "not-a-number",
+            "client_id_issued_at": None,
+        },
+    )
+
+    redirect_uri = "https://app.example.com/api/connections/oauth/canva/callback"
+    client_id, _secret = service._resolve_oauth_client("canva", redirect_uri)
+    assert client_id == "cid"
+    cached = service._DYNAMIC_CLIENT_CACHE[("canva", redirect_uri)]
+    assert cached.client_secret_expires_at == 0
+    assert cached.client_id_issued_at == 0
+    assert cached.is_expired() is False
+
+
+def test_resolve_oauth_client_for_refresh_skips_expired_cached_entry(monkeypatch) -> None:
+    """Unlike _resolve_oauth_client, the background-refresh path has no
+    redirect_uri and so can never re-register -- an expired cached entry
+    must be skipped (falling through to the same 'not configured' failure
+    as no cache entry at all) rather than handed back so a refresh attempt
+    wastes a network round trip on a client_secret the token endpoint is
+    guaranteed to reject."""
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
+
+    redirect_uri = "https://app.example.com/api/connections/oauth/linear/callback"
+    service._DYNAMIC_CLIENT_CACHE[("linear", redirect_uri)] = service._DynamicClientRegistration(
+        client_id="stale-id",
+        client_secret="stale-secret",
+        client_secret_expires_at=int(time.time()) - 10,
+    )
+
+    try:
+        service._resolve_oauth_client_for_refresh("linear")
+    except Exception as exc:
+        assert "not configured" in str(exc)
+    else:
+        raise AssertionError("expected ensure_oauth_configured's 409 to propagate for an expired cache entry")
+
+
+def test_resolve_oauth_client_for_refresh_reuses_non_expired_cached_entry(monkeypatch) -> None:
+    """Regression guard for the same function: a cache entry that is NOT
+    expired must still be reused for background refresh, exactly as before
+    this fix."""
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
+
+    redirect_uri = "https://app.example.com/api/connections/oauth/linear/callback"
+    service._DYNAMIC_CLIENT_CACHE[("linear", redirect_uri)] = service._DynamicClientRegistration(
+        client_id="fresh-id",
+        client_secret="fresh-secret",
+        client_secret_expires_at=int(time.time()) + 86400,
+    )
+
+    client_id, client_secret = service._resolve_oauth_client_for_refresh("linear")
+    assert (client_id, client_secret) == ("fresh-id", "fresh-secret")

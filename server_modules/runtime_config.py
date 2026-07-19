@@ -121,6 +121,7 @@ from server_modules.connector_validators import (
     validate_figma_connector as _validate_figma_connector,
     validate_github_connector as _validate_github_connector,
     validate_gitlab_connector as _validate_gitlab_connector,
+    validate_higgsfield_connector as _validate_higgsfield_connector,
     validate_hubspot_connector as _validate_hubspot_connector,
     validate_intercom_connector as _validate_intercom_connector,
     validate_jira_connector as _validate_jira_connector,
