@@ -379,6 +379,7 @@ async def route_agent_inbound(
     agent_install_id: str,
     chat_id: str,
     message: str,
+    sender_id: str = "",
     reply_to_message_id: Optional[int] = None,
     deliver: bool = True,
 ) -> Dict[str, Any]:
@@ -458,12 +459,20 @@ async def route_agent_inbound(
 
     from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
 
+    # The real per-message Telegram user id, never the chat id — a group
+    # chat_id is shared by every member (a BYO bot can be added to a group
+    # by anyone since it's a real, discoverable Telegram bot), so
+    # substituting it collapsed every distinct sender into the same
+    # identity. Falls back to chat_id only if the caller has no sender_id
+    # (Telegram omitted `from` entirely — never a real 1:1 DM).
+    real_sender_id = str(sender_id or "").strip() or str(chat_id)
+
     delivered = await dispatch_sage_reply_safe(
         transport=transport,
         workspace_id=workspace_id,
         message=str(message or ""),
         channel_origin="telegram_agent_byo",
-        sender_id=str(chat_id),
+        sender_id=real_sender_id,
         thread_id=thread_id,
         reply_to_id=str(reply_to_message_id or "") or None,
         specialist_context=specialist_context,

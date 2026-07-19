@@ -168,6 +168,13 @@ async def telegram_webhook(request: Request) -> dict:
         )
         return {"ok": True}
 
+    # The real per-message Telegram user id, never the chat id — a group
+    # chat_id is shared by every member, so substituting it collapsed every
+    # distinct sender into the same identity for command permission checks
+    # (_is_sender_owner) and audit trails. Falls back to chat_id only if
+    # Telegram omitted `from` entirely (never a real 1:1 DM).
+    real_sender_id = str(parsed.get("from_id") or "").strip() or str(chat_id)
+
     # ── Channel-specific: media attachment resolution ──
     message_text = str(parsed.get("text") or "").strip()
     _attachments: list[dict] = []
@@ -197,7 +204,7 @@ async def telegram_webhook(request: Request) -> dict:
         workspace_id=workspace_id,
         thread_id="sage-main",
         channel_origin="telegram_hosted",
-        sender_id=str(chat_id),
+        sender_id=real_sender_id,
     )
     if cmd_reply is not None:
         await hosted.send_message_safe(
@@ -219,7 +226,7 @@ async def telegram_webhook(request: Request) -> dict:
         message=message_text if message_text else "[Media]",
         attachments=_attachments if _attachments else None,
         channel_origin="telegram_hosted",
-        sender_id=str(chat_id),
+        sender_id=real_sender_id,
         sender_name=str(parsed.get("from_first_name", "")).strip(),
         reply_to_id=str(parsed.get("message_id") or ""),
     )
@@ -271,6 +278,7 @@ async def telegram_agent_byo_webhook(agent_install_id: str, request: Request) ->
         agent_install_id=agent_install_id,
         chat_id=parsed["chat_id"],
         message=parsed["text"],
+        sender_id=str(parsed.get("from_id") or ""),
         reply_to_message_id=parsed.get("message_id"),
     )
     if result.get("routed") and not result.get("reply_sent", True):
@@ -306,6 +314,9 @@ async def dev_poll_once() -> dict:
             processed += 1
             continue
         message_text = str(parsed.get("text") or "").strip()
+        # Real per-message Telegram user id — see telegram_webhook's
+        # identical comment above for why chat_id must not stand in here.
+        real_sender_id = str(parsed.get("from_id") or "").strip() or str(chat_id)
 
         # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
         from server_modules.sage_command_dispatcher import dispatch_command
@@ -314,7 +325,7 @@ async def dev_poll_once() -> dict:
             workspace_id=workspace_id,
             thread_id="sage-main",
             channel_origin="telegram_hosted",
-            sender_id=str(chat_id),
+            sender_id=real_sender_id,
         )
         if cmd_reply is not None:
             await hosted.send_message_safe(
@@ -333,7 +344,7 @@ async def dev_poll_once() -> dict:
             workspace_id=workspace_id,
             message=message_text,
             channel_origin="telegram_hosted",
-            sender_id=str(chat_id),
+            sender_id=real_sender_id,
             sender_name=str(parsed.get("from_first_name", "")).strip(),
             reply_to_id=str(parsed.get("message_id") or ""),
         )

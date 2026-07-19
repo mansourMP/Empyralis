@@ -761,6 +761,20 @@ async def handle_inbound_message(parsed: dict) -> Optional[str]:
     message_id = parsed.get("message_id")
 
     if not is_paired(chat_id):
+        # Pairing (and even the "how to pair" reply) is private-chat only.
+        # Without this check, ANYONE typing "/start <token>" inside a group
+        # the bot had been added to permanently paired the WHOLE group to
+        # that workspace — every member's message then reached this
+        # function already "paired" (see is_message_addressed_to_bot below
+        # for the follow-on group-mention gate that still applies once
+        # paired). And short of a successful pairing, an unpaired group got
+        # the "Welcome to Empyralis... pairing code" reply on EVERY single
+        # message, since this branch used to reply unconditionally either
+        # way — a standing spam source in any group/channel the bot was
+        # merely added to, paired or not.
+        if str(parsed.get("chat_type") or "").strip().lower() != "private":
+            return None
+
         # Handle /start with deep-link token (e.g., "/start abc123...")
         pairing_input = text.strip()
         if pairing_input.startswith("/start"):
@@ -1273,6 +1287,17 @@ async def _process_update(update: dict) -> bool:
     message_text = str(parsed.get("text") or "").strip()
     msg_id = str(parsed.get("message_id") or "")
 
+    # sender_id is the actual per-message Telegram user id, never the chat
+    # id — a group chat_id is shared by every member, so substituting it
+    # here collapsed every distinct sender into one identity (a stranger's
+    # message would carry the exact same sender_id an owner's message in
+    # that same chat would). from_id was already resolved above for the
+    # echo-loop check; reused here as the real identity signal for command
+    # permission checks (_is_sender_owner), audit trails, and any future
+    # per-sender scoping. Falls back to chat_id only in the pathological
+    # case where Telegram omitted `from` entirely (never a real 1:1 DM).
+    real_sender_id = from_id or str(chat_id)
+
     # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
     from server_modules.sage_command_dispatcher import dispatch_command
     cmd_reply = await dispatch_command(
@@ -1280,7 +1305,7 @@ async def _process_update(update: dict) -> bool:
         workspace_id=workspace_id,
         thread_id="sage-main",
         channel_origin="telegram_hosted",
-        sender_id=str(chat_id),
+        sender_id=real_sender_id,
     )
     if cmd_reply is not None:
         await send_message_safe(chat_id, cmd_reply, reply_to_message_id=parsed.get("message_id"))
@@ -1297,7 +1322,7 @@ async def _process_update(update: dict) -> bool:
         workspace_id=workspace_id,
         message=message_text,
         channel_origin="telegram_hosted",
-        sender_id=str(chat_id),
+        sender_id=real_sender_id,
         sender_name=str(parsed.get("from_first_name", "")).strip(),
         reply_to_id=msg_id,
     )
