@@ -1,14 +1,11 @@
 import importlib
-import tempfile
 import unittest
 from contextlib import asynccontextmanager
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from server_modules import (
     agent_channel_router,
     channel_concurrency_service,
-    personal_channels_repository,
     safe_mode_service,
 )
 from server_modules.agent_manifest import AgentManifest
@@ -526,185 +523,21 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
 # ── Natural replies: personal-channel auto-replies must not force a
 # Telegram/WhatsApp quote-reply bubble ──────────────────────────────────
 #
-# _deliver_whatsapp_personal_reply, _handle_telegram_gateway_channel_inbound,
-# and _deliver_local_bridge_personal_reply each dispatch the agent's
-# automatic reply to an inbound personal-channel message. They used to pass
-# reply_to_external_message_id=external_message_id unconditionally to
-# gateway_protocol_service.dispatch_channel_outbound, which forces every
-# auto-reply to render as a formal "reply-to-THIS-message" quote bubble --
-# robotic, and not how OpenClaw (the reference) behaves (reply-to threading
-# defaults OFF for Telegram/WhatsApp there). These tests prove the three
-# auto-reply dispatch sites now send reply_to_external_message_id=None, and
-# that the explicit "reply to X" send path (send_whatsapp_personal_message
-# et al., used by e.g. an approved agent tool call) is untouched and still
-# forwards whatever id the caller supplies.
-
-class AgentChannelRouterNaturalReplyTests(unittest.IsolatedAsyncioTestCase):
-    _ALLOW_DISPATCH_DECISION = {
-        "ok": True,
-        "decision": "allow",
-        "reason": "gateway_service_operation_allowed",
-        "operation": "protocol_route",
-        "next_action": "dispatch_gateway_operation",
-    }
-
-    def setUp(self) -> None:
-        global agent_channel_router, personal_channels_repository
-        agent_channel_router = importlib.import_module("server_modules.agent_channel_router")
-        personal_channels_repository = importlib.import_module("server_modules.personal_channels_repository")
-
-        self.tmpdir = tempfile.TemporaryDirectory()
-        db_path = Path(self.tmpdir.name) / "personal-channels.sqlite3"
-        personal_channels_repository.init_personal_channels_db(db_path)
-        self.db_patcher = patch.object(personal_channels_repository, "PERSONAL_CHANNELS_DB_FILE", db_path)
-        self.db_patcher.start()
-
-        self.registration = {
-            "gateway_id": "gw-natural-1",
-            "workspace_id": "ws-1",
-            "tenant_id": "tenant-1",
-            "device_trust_state": "trusted",
-            "active_session_id": "sess-1",
-        }
-
-    def tearDown(self) -> None:
-        self.db_patcher.stop()
-        self.tmpdir.cleanup()
-
-    async def test_whatsapp_auto_reply_dispatches_without_reply_to_id(self) -> None:
-        with (
-            patch(
-                "server_modules.agent_channel_router.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=self._ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.agent_channel_router.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
-                return_value={"text": "Sure, on it.", "source": "sage"},
-            ),
-            patch(
-                "server_modules.agent_channel_router.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "wa-out-1"}),
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.agent_channel_router.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await agent_channel_router._deliver_whatsapp_personal_reply(
-                gateway_id="gw-natural-1",
-                registration=self.registration,
-                inbound={"external_message_id": "wa-in-1", "remote_jid": "15551234567@s.whatsapp.net"},
-                remote_jid="15551234567@s.whatsapp.net",
-                external_message_id="wa-in-1",
-                text="hey are you around?",
-                push_name="Mansur",
-                duplicate=False,
-            )
-
-        dispatch_mock.assert_awaited_once()
-        self.assertIsNone(dispatch_mock.call_args.kwargs["reply_to_external_message_id"])
-        self.assertEqual(result["outbound"]["status"], "delivered")
-
-    async def test_telegram_auto_reply_dispatches_without_reply_to_id(self) -> None:
-        with (
-            patch(
-                "server_modules.agent_channel_router.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=self._ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.agent_channel_router.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "Sure, on it.", "source": "sage"},
-            ),
-            patch(
-                "server_modules.agent_channel_router.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-1"}),
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.agent_channel_router.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await agent_channel_router._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-natural-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": agent_channel_router.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": agent_channel_router.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-in-1",
-                        "remote_jid": "123456789",
-                        "sender_jid": "123456789",
-                        "push_name": "Mansur",
-                        "text": "hey are you around?",
-                        "from_me": False,
-                    },
-                },
-            )
-
-        dispatch_mock.assert_awaited_once()
-        self.assertIsNone(dispatch_mock.call_args.kwargs["reply_to_external_message_id"])
-        self.assertEqual(result["outbound"]["status"], "delivered")
-
-    async def test_local_bridge_auto_reply_dispatches_without_reply_to_id(self) -> None:
-        with (
-            patch(
-                "server_modules.agent_channel_router.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=self._ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.agent_channel_router.personal_channel_sage_bridge_service.build_personal_channel_reply_async",
-                new=AsyncMock(return_value={"text": "Sure, on it.", "source": "sage"}),
-                create=True,
-            ),
-            patch(
-                "server_modules.agent_channel_router.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "sig-out-1"}),
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.agent_channel_router.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await agent_channel_router._deliver_local_bridge_personal_reply(
-                gateway_id="gw-natural-1",
-                registration=self.registration,
-                inbound={"external_message_id": "sig-in-1", "remote_jid": "signal-user-1"},
-                remote_jid="signal-user-1",
-                external_message_id="sig-in-1",
-                text="hey are you around?",
-                push_name="Mansur",
-                duplicate=False,
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
-                label="Signal",
-            )
-
-        dispatch_mock.assert_awaited_once()
-        self.assertIsNone(dispatch_mock.call_args.kwargs["reply_to_external_message_id"])
-        self.assertEqual(result["outbound"]["status"], "delivered")
-
-    async def test_whatsapp_explicit_reply_still_forwards_caller_supplied_id(self) -> None:
-        """Guard-rail for scope: send_whatsapp_personal_message is the
-        explicit "reply to X" path (e.g. an approved agent tool call), not
-        an auto-reply -- it must keep forwarding whatever id the caller
-        passes. This fix only removes the *forced* id on the automatic-
-        reply path; it must not touch explicit sends."""
-        with (
-            patch(
-                "server_modules.agent_channel_router.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=self._ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.agent_channel_router.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "wa-out-2"}),
-                create=True,
-            ) as dispatch_mock,
-        ):
-            await agent_channel_router.send_whatsapp_personal_message(
-                gateway_id="gw-natural-1",
-                registration=self.registration,
-                remote_jid="15551234567@s.whatsapp.net",
-                text="Replying to your earlier question",
-                idempotency_key="explicit-send-1",
-                reply_to_external_message_id="wa-in-earlier",
-            )
-
-        dispatch_mock.assert_awaited_once()
-        self.assertEqual(dispatch_mock.call_args.kwargs["reply_to_external_message_id"], "wa-in-earlier")
+# This class used to duplicate personal_channels_service.py's own
+# PersonalChannelsServiceNaturalReplyTests (test_personal_channels_service_
+# natural_reply.py) byte-for-byte, testing agent_channel_router's dead
+# duplicate handlers (_deliver_whatsapp_personal_reply,
+# _handle_telegram_gateway_channel_inbound,
+# _deliver_local_bridge_personal_reply, send_whatsapp_personal_message)
+# instead of the live personal_channels_service.py functions the Gateway
+# actually calls (gateway_protocol_service.py -> personal_channels_service.
+# handle_gateway_channel_inbound; agent_channel_router.py's copies had zero
+# external callers -- confirmed by a full-repo grep before deletion, see
+# the FIX 4 backend-safety task commit this comment was added in). Removed
+# alongside that dead handler family in agent_channel_router.py itself;
+# test_personal_channels_service_natural_reply.py already covers the exact
+# same four behaviors (identical test names) against the real, live code
+# path -- no coverage was lost.
 
 
 if __name__ == "__main__":
