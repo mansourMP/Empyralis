@@ -3403,9 +3403,10 @@ async def handle_cloud_channel_inbound(
             today, so whatsapp_personal never actually arrives here)
         message: {external_message_id, sender_id, sender_name, text,
             received_at} today; optionally is_group/is_mentioned/
-            is_reply_to_sage if a future upstream adds them (see the group
-            gate below — those fields default to "not a group" when absent,
-            so this stays backward compatible with the current wire shape)
+            is_reply_to_sage/chat_title if a future upstream adds them (see
+            the group gate below — those fields default to "not a group"
+            when absent, so this stays backward compatible with the current
+            wire shape)
         workspace_id: workspace UUID from cloud session (defaults to "default" for backward compat)
     """
     if not _CLOUD_SESSION_MANAGER_ENABLED:
@@ -3525,6 +3526,22 @@ async def handle_cloud_channel_inbound(
     # identity the way the Gateway-based handlers below do — see
     # HARD CONSTRAINTS in fix/owner-aware-provenance: uncertain identity
     # must default to the guarded/external path, never to owner trust.
+    #
+    # is_group/chat_label: the SAME "family group" bug fix as the three
+    # Gateway handlers (see _handle_telegram_gateway_channel_inbound's
+    # matching build_telegram_personal_reply call) — this used to build the
+    # reply with zero group signal even for a message that had ALREADY
+    # passed the is_group/is_mentioned gate above, so the model was never
+    # told an addressed group turn was a group turn at all (it reached
+    # _personal_channel_guard_metadata's Chat-Type/Group-Name branch with
+    # is_group hardcoded False, the exact class of bug this fix line
+    # closes). Wired from the same message.get("is_group")/"chat_title"
+    # fields the gate above reads; per this function's own docstring the
+    # live wire never sets them today (cloud-session-manager strips them
+    # upstream), so this is forward-compatible plumbing, not a behavior
+    # change against current production traffic — identical in spirit to
+    # the Gateway handlers' own "safe no-op today" comments on this same
+    # field.
     reply = await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
         workspace_id=resolved_workspace_id,
         gateway_id=f"cloud:{session_id}",
@@ -3532,6 +3549,8 @@ async def handle_cloud_channel_inbound(
         text=text,
         push_name=push_name,
         source_event_id=external_message_id,
+        is_group=bool(message.get("is_group")),
+        chat_label=str(message.get("chat_title") or "").strip() or None,
     )
 
     # ABSOLUTE RULE: no hardcoded platform status/error message may EVER be

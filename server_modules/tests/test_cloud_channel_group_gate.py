@@ -176,6 +176,87 @@ class CloudChannelGroupGateTests(unittest.IsolatedAsyncioTestCase):
         dispatch_mock.assert_awaited_once()
         self.assertEqual(result.get("status"), "replied")
 
+    async def test_mentioned_group_message_threads_group_context_into_the_bridge(self) -> None:
+        """FIX (systemic group-context threading): handle_cloud_channel_inbound
+        computes is_group for its OWN gate (see
+        test_mentioned_group_message_is_not_gated above) but used to stop
+        there — the actual call into build_telegram_personal_reply_async
+        never received is_group/chat_label at all, so a group message that
+        correctly passed the gate still reached the model with ZERO group
+        signal, rendered exactly like a 1:1 DM (the same "family group" bug
+        class _owner_provenance_message / _personal_channel_guard_metadata
+        were fixed for on the Gateway handlers — see
+        test_personal_channel_group_gate.py and
+        test_personal_channel_sage_bridge_service.py's
+        OwnerAwareProvenanceTests). Proves the threading itself, independent
+        of test_mentioned_group_message_is_not_gated's gating-only
+        assertion. chat_title is speculative (see this module's docstring:
+        the live wire never sends it today) but the plumbing must exist for
+        when it does."""
+        with (
+            patch(
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply_async",
+                new=AsyncMock(return_value={"text": "Dinner's at 7.", "source": "sage"}),
+            ) as build_reply_mock,
+            patch(
+                "server_modules.personal_channels_service.dispatch_cloud_channel_outbound",
+                new=AsyncMock(return_value={"ok": True, "status": 200, "message_id": "out-6"}),
+            ),
+        ):
+            await personal_channels_service.handle_cloud_channel_inbound(
+                session_id="csm-sess-6",
+                channel_key="telegram_personal",
+                workspace_id="default",
+                message={
+                    "external_message_id": "csm-group-6",
+                    "sender_id": "111222",
+                    "sender_name": "Owner",
+                    "text": "@sage_owner what time is dinner",
+                    "received_at": "2026-07-19T00:00:00Z",
+                    "is_group": True,
+                    "is_mentioned": True,
+                    "is_reply_to_sage": False,
+                    "chat_title": "Family",
+                },
+            )
+        build_reply_mock.assert_awaited_once()
+        call_kwargs = build_reply_mock.call_args.kwargs
+        self.assertTrue(call_kwargs.get("is_group"))
+        self.assertEqual(call_kwargs.get("chat_label"), "Family")
+
+    async def test_direct_message_threads_is_group_false_and_no_chat_label(self) -> None:
+        """Regression guard for the fix above: the DM path (is_group
+        absent — the 100% real-world wire shape today, per this module's
+        own docstring) must keep threading is_group=False/chat_label=None
+        now that the plumbing exists — never start claiming every DM is a
+        group."""
+        with (
+            patch(
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply_async",
+                new=AsyncMock(return_value={"text": "On it.", "source": "sage"}),
+            ) as build_reply_mock,
+            patch(
+                "server_modules.personal_channels_service.dispatch_cloud_channel_outbound",
+                new=AsyncMock(return_value={"ok": True, "status": 200, "message_id": "out-7"}),
+            ),
+        ):
+            await personal_channels_service.handle_cloud_channel_inbound(
+                session_id="csm-sess-7",
+                channel_key="telegram_personal",
+                workspace_id="default",
+                message={
+                    "external_message_id": "csm-dm-7",
+                    "sender_id": "111222",
+                    "sender_name": "Owner",
+                    "text": "remind me to call mom",
+                    "received_at": "2026-07-19T00:00:00Z",
+                },
+            )
+        build_reply_mock.assert_awaited_once()
+        call_kwargs = build_reply_mock.call_args.kwargs
+        self.assertFalse(call_kwargs.get("is_group"))
+        self.assertIsNone(call_kwargs.get("chat_label"))
+
     async def test_group_fields_absent_entirely_defaults_to_ungated(self) -> None:
         """The real-world shape every cloud-session-manager webhook call has
         today (see buildSignedInbound in cloud-session-manager/src/telegram/
