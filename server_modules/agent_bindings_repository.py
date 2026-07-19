@@ -208,6 +208,89 @@ async def list_workspace_channel_bindings(
     )
 
 
+# ── Inbound-owner conflict helpers ──────────────────────────────────────────
+# Shared by every channel-bind path (Slack/Discord/Telegram/GitHub/...) that
+# needs to turn uq_agent_channel_bindings_inbound_owner_v2's DB-level
+# guarantee (control_plane_repository.py) into a specific, human-readable
+# error instead of leaking a raw asyncpg constraint-violation string to the
+# frontend. discord_bot_provisioning_service.py already carried a local,
+# duplicated version of the detection half of this (_is_inbound_owner_
+# conflict) -- these are the shared, reusable versions, plus the soft
+# pre-check and label lookup needed to name WHICH agent already owns the
+# channel.
+
+async def find_inbound_owner_conflict(
+    *, tenant_id: str, workspace_id: str, channel_key: str, endpoint_key: str,
+    exclude_agent_install_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Soft pre-check: does another agent already hold inbound-owner status
+    for this exact (channel_key, endpoint_key)? Returns that binding row
+    (with 'agent_install_id') if so, else None.
+
+    This is advisory only -- a friendlier, earlier error than waiting on the
+    DB round-trip -- and is NOT the source of truth: two concurrent binds
+    can both pass this check, so callers must still rely on the unique index
+    (via is_inbound_owner_conflict on the actual write) as the race-free
+    guarantee. Mirrors the pattern discord_bot_provisioning_service.
+    assign_agent_discord established for Discord, generalized for reuse."""
+    rows = await list_workspace_channel_bindings(
+        tenant_id=tenant_id, workspace_id=workspace_id, enabled_only=True,
+    )
+    normalized_endpoint = str(endpoint_key or "").strip().lower()
+    excluded_agent = str(exclude_agent_install_id or "").strip()
+    for row in rows:
+        if str(row.get("key") or "") != str(channel_key or ""):
+            continue
+        if str(row.get("agent_install_id") or "").strip() == excluded_agent:
+            continue
+        meta = row.get("binding") or {}
+        if str(meta.get("endpoint_key") or "").strip().lower() != normalized_endpoint:
+            continue
+        if str(meta.get("is_inbound_owner") or "").strip().lower() != "true":
+            continue
+        return row
+    return None
+
+
+def is_inbound_owner_conflict(exc: BaseException) -> bool:
+    """True when an exception is the inbound-owner unique-index violation
+    (uq_agent_channel_bindings_inbound_owner_v2) -- the DB-level, race-free
+    version of the guarantee find_inbound_owner_conflict only checks
+    optimistically. Matches by substring so it survives index-name
+    revisions (e.g. the Phase 3D ..._inbound_owner_v2 rebuild)."""
+    constraint = str(getattr(exc, "constraint_name", "") or "")
+    return "inbound_owner" in constraint or "inbound_owner" in str(exc)
+
+
+async def get_agent_install_label(
+    agent_install_id: str, *, tenant_id: str, workspace_id: str,
+) -> Optional[str]:
+    """Best-effort, tenant/workspace-scoped lookup of an agent's display
+    label -- used to enrich a channel-ownership-conflict message with WHICH
+    agent already owns the channel, instead of a bare 'another agent'.
+    Returns None (never raises) on any lookup failure so a label miss can
+    never block the conflict error itself from being raised."""
+    try:
+        pool = await control_plane_repository.ensure_control_plane_schema()
+        if pool is None:
+            return None
+        row = await control_plane_repository.rls_fetchrow(
+            pool,
+            "SELECT label FROM workspace_agent_installs WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
+            str(agent_install_id or "").strip(),
+            str(tenant_id or "").strip(),
+            str(workspace_id or "").strip(),
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+    except Exception:
+        return None
+    if row is None:
+        return None
+    label = str(dict(row).get("label") or "").strip()
+    return label or None
+
+
 async def delete_channel_binding(
     *, tenant_id: str, workspace_id: str, agent_install_id: str, channel_key: str,
 ) -> bool:

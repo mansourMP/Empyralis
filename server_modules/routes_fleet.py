@@ -34,6 +34,28 @@ async def _resolve_tenant(workspace_id: str) -> str:
     return await control_plane_repository.resolve_tenant_id_for_workspace(workspace_id, default="default")
 
 
+async def _channel_already_owned_message(
+    subject: str, conflict: Dict[str, Any], *, tenant_id: str, workspace_id: str,
+) -> str:
+    """Build a specific, human-readable channel-ownership-conflict message,
+    naming WHICH agent already owns the channel when a label is cheaply
+    resolvable -- falling back to a still-specific "another agent" copy
+    when it isn't (e.g. the owning agent was deleted, or the label lookup
+    fails). `subject` is the channel description, e.g. "This Slack channel"
+    or "Discord bot @sagebot"."""
+    from server_modules import agent_bindings_repository as bindings
+
+    owner_id = str((conflict or {}).get("agent_install_id") or "").strip()
+    label = None
+    if owner_id:
+        label = await bindings.get_agent_install_label(owner_id, tenant_id=tenant_id, workspace_id=workspace_id)
+    owner_desc = f'"{label}"' if label else "another agent"
+    return (
+        f"{subject} is already connected to {owner_desc}. "
+        "A channel can only be owned by one agent at a time."
+    )
+
+
 @router.get("/api/w/{workspace_id}/fleet/usage")
 async def fleet_usage(
     request: Request,
@@ -1009,6 +1031,8 @@ async def fleet_assign_agent_telegram(
             agent_install_id=agent_id, workspace_id=resolved_workspace_id, tenant_id=tenant_id, token=body.token,
         )
         return {"ok": True, "channel": result}
+    except prov.TelegramBotAlreadyBoundError as exc:
+        return {"ok": False, "error": str(exc), "reason": "already_bound"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -1107,14 +1131,13 @@ async def fleet_assign_agent_slack(
     (agent_channel_router._resolve_agent_for_inbound matches on this exact
     endpoint_key).
 
-    NOTE: unlike Discord/Telegram, this channel_key ("slack") is not yet
-    in uq_agent_channel_bindings_inbound_owner_v2's covered list
-    (control_plane_repository.py) -- two agents in the same workspace
-    could both claim the same Slack channel today with no DB-level
-    rejection, only last-write-wins. is_inbound_owner is still set to
-    match the existing convention so enabling that guarantee later is a
-    pure index change, not a data migration. Out of scope here (that
-    file is shared, high-blast-radius schema/migration code)."""
+    'slack' is covered by uq_agent_channel_bindings_inbound_owner_v2
+    (control_plane_repository.py, closed by commit b7f17d367) -- two agents
+    in the same workspace cannot both claim the same Slack channel: the
+    soft pre-check below gives a friendly, specific error immediately, and
+    the unique index is the DB-level, race-free backstop if two binds land
+    concurrently (translated to the same friendly copy, not left as a raw
+    constraint-violation string)."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import agent_bindings_repository as bindings
 
@@ -1123,6 +1146,20 @@ async def fleet_assign_agent_slack(
         return {"ok": False, "error": "slack_channel_id is required."}
 
     tenant_id = await _resolve_tenant(resolved_workspace_id)
+
+    conflict = await bindings.find_inbound_owner_conflict(
+        tenant_id=tenant_id, workspace_id=resolved_workspace_id,
+        channel_key="slack", endpoint_key=channel_id, exclude_agent_install_id=agent_id,
+    )
+    if conflict is not None:
+        return {
+            "ok": False,
+            "error": await _channel_already_owned_message(
+                "This Slack channel", conflict, tenant_id=tenant_id, workspace_id=resolved_workspace_id,
+            ),
+            "reason": "already_bound",
+        }
+
     try:
         result = await bindings.upsert_channel_binding(
             tenant_id=tenant_id, workspace_id=resolved_workspace_id, agent_install_id=agent_id,
@@ -1137,6 +1174,13 @@ async def fleet_assign_agent_slack(
             return {"ok": False, "error": "Channel binding could not be saved."}
         return {"ok": True, "channel": {"channel_key": "slack", "endpoint_key": channel_id}}
     except Exception as exc:
+        if bindings.is_inbound_owner_conflict(exc):
+            return {
+                "ok": False,
+                "error": "This Slack channel is already connected to another agent. "
+                         "A channel can only be owned by one agent at a time.",
+                "reason": "already_bound",
+            }
         return {"ok": False, "error": str(exc)}
 
 

@@ -103,6 +103,93 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
         self.assertEqual(kwargs["agent_install_id"], "agent-1")
         self.assertEqual(kwargs["channel_key"], "slack")
 
+    def test_assign_rejects_a_channel_already_owned_by_another_agent(self):
+        """FIX 2: the soft pre-check must reject before ever calling
+        upsert_channel_binding, and the error text must be specific (not a
+        raw DB string) -- see agent_bindings_repository.
+        find_inbound_owner_conflict."""
+        body = routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="C123456")
+        conflict_row = {"agent_install_id": "agent-owner", "key": "slack"}
+        with (
+            patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+            patch(
+                "server_modules.agent_bindings_repository.find_inbound_owner_conflict",
+                new=AsyncMock(return_value=conflict_row),
+            ),
+            patch(
+                "server_modules.agent_bindings_repository.get_agent_install_label",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "server_modules.agent_bindings_repository.upsert_channel_binding",
+                new=AsyncMock(),
+            ) as upsert_mock,
+            _bypass_workspace_access(),
+        ):
+            result = _run(routes_fleet.fleet_assign_agent_slack(
+                request=None, workspace_id="ws-1", body=body, agent_id="agent-2", current_user=_owner_user(),
+            ))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("reason"), "already_bound")
+        self.assertIn("already connected", result["error"].lower())
+        self.assertIn("one agent at a time", result["error"].lower())
+        upsert_mock.assert_not_awaited()
+
+    def test_assign_conflict_message_names_the_owning_agent_when_resolvable(self):
+        body = routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="C123456")
+        conflict_row = {"agent_install_id": "agent-owner", "key": "slack"}
+        with (
+            patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+            patch(
+                "server_modules.agent_bindings_repository.find_inbound_owner_conflict",
+                new=AsyncMock(return_value=conflict_row),
+            ),
+            patch(
+                "server_modules.agent_bindings_repository.get_agent_install_label",
+                new=AsyncMock(return_value="Support Bot"),
+            ),
+            _bypass_workspace_access(),
+        ):
+            result = _run(routes_fleet.fleet_assign_agent_slack(
+                request=None, workspace_id="ws-1", body=body, agent_id="agent-2", current_user=_owner_user(),
+            ))
+
+        self.assertFalse(result["ok"])
+        self.assertIn("Support Bot", result["error"])
+
+    def test_assign_translates_a_race_condition_db_violation_into_friendly_copy(self):
+        """The soft pre-check is advisory only -- if two binds land
+        concurrently, upsert_channel_binding itself can raise the raw
+        unique-index violation. That must be translated too, not leaked to
+        the frontend as a raw asyncpg/Postgres string."""
+        body = routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="C123456")
+        db_error = RuntimeError(
+            'duplicate key value violates unique constraint '
+            '"uq_agent_channel_bindings_inbound_owner_v2"'
+        )
+        with (
+            patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+            patch(
+                "server_modules.agent_bindings_repository.find_inbound_owner_conflict",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "server_modules.agent_bindings_repository.upsert_channel_binding",
+                new=AsyncMock(side_effect=db_error),
+            ),
+            _bypass_workspace_access(),
+        ):
+            result = _run(routes_fleet.fleet_assign_agent_slack(
+                request=None, workspace_id="ws-1", body=body, agent_id="agent-2", current_user=_owner_user(),
+            ))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("reason"), "already_bound")
+        self.assertNotIn("constraint", result["error"].lower())
+        self.assertNotIn("duplicate key", result["error"].lower())
+        self.assertIn("already connected", result["error"].lower())
+
     def test_two_agents_bind_two_different_channels_independently(self):
         """Mirrors the router-side proof: two POSTs for two different
         agents/channels must each write their own distinct row."""

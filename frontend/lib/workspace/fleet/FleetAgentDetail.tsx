@@ -44,6 +44,7 @@ import {
   previewFleetAgentSchedule,
   createFleetAgentSchedule,
   deleteFleetAgentSchedule,
+  friendlyChannelOwnershipError,
   type FleetAgent,
   type FleetAgentActivity,
   type FleetChannel,
@@ -1279,7 +1280,8 @@ export function ChannelsTab({
       setByoBotSaved(true);
       handleChannelsChanged();
     } catch (e) {
-      setByoBotError(e instanceof Error ? e.message : "Could not save the bot token.");
+      const message = e instanceof Error ? e.message : "Could not save the bot token.";
+      setByoBotError(friendlyChannelOwnershipError(message));
     } finally {
       setByoBotBusy(false);
     }
@@ -1356,7 +1358,8 @@ export function ChannelsTab({
       setSlackBindSaved(true);
       handleChannelsChanged();
     } catch (e) {
-      setSlackBindError(e instanceof Error ? e.message : "Could not save the channel binding.");
+      const message = e instanceof Error ? e.message : "Could not save the channel binding.";
+      setSlackBindError(friendlyChannelOwnershipError(message));
     } finally {
       setSlackBindBusy(false);
     }

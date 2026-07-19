@@ -1562,12 +1562,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_channel_execution_leases_active_threa
 -- migrations/fix_slack_channel_uniqueness.sql is what actually applies the
 -- corrected predicate (dedupe-then-rebuild) to an existing database; run it
 -- once, by hand, after review.
+--
+-- 'github' had the identical gap: it was already present in
+-- agent_specialist_repository._INBOUND_OWNER_CHANNEL_KEYS (the app-level
+-- pre-check), but missing from this index's predicate, so the app-level
+-- check-then-insert was not backed by a DB-level constraint and two
+-- concurrent binds could both win. Same no-op caveat applies: editing this
+-- string only takes effect for a database that creates
+-- uq_agent_channel_bindings_inbound_owner_v2 for the first time.
+-- migrations/fix_github_channel_uniqueness.sql applies the corrected
+-- predicate (dedupe-then-rebuild) to an existing database; run it once, by
+-- hand, after review.
 DROP INDEX IF EXISTS uq_agent_channel_bindings_active_inbound_owner;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_channel_bindings_inbound_owner_v2
     ON agent_channel_bindings(tenant_id, workspace_id, channel_key, lower((binding->>'endpoint_key')))
     WHERE enabled = TRUE
       AND channel_key IN ('telegram', 'telegram_bot', 'discord', 'discord_bot',
-                          'whatsapp', 'email', 'phone', 'web_chat', 'slack')
+                          'whatsapp', 'email', 'phone', 'web_chat', 'slack', 'github')
       AND lower(COALESCE(binding->>'is_inbound_owner', 'false')) = 'true'
       AND NULLIF(lower(COALESCE(binding->>'endpoint_key', '')), '') IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_turns_request_role

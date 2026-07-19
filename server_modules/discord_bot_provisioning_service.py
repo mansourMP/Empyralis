@@ -154,10 +154,15 @@ async def assign_agent_discord(
             continue
         meta = b.get("binding") or {}
         same_endpoint = str(meta.get("endpoint_key") or "").strip().lower() == bot_id.lower()
-        other_agent = str(b.get("agent_install_id") or "").strip() != str(agent_install_id or "").strip()
+        other_agent_id = str(b.get("agent_install_id") or "").strip()
+        other_agent = other_agent_id != str(agent_install_id or "").strip()
         if same_endpoint and str(meta.get("is_inbound_owner") or "").lower() == "true" and other_agent:
+            owner_label = await bindings.get_agent_install_label(
+                other_agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+            )
+            owner_desc = f'"{owner_label}"' if owner_label else "another agent"
             raise DiscordBotAlreadyBoundError(
-                f"Discord bot @{bot_username or bot_id} is already bound to another agent "
+                f"Discord bot @{bot_username or bot_id} is already bound to {owner_desc} "
                 f"in this workspace."
             )
 

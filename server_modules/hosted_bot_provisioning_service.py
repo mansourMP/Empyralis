@@ -196,11 +196,30 @@ def agent_bot_webhook_url(agent_install_id: str) -> str:
     return f"{base}/api/sage/telegram-hosted/webhook/byo/{agent_install_id}"
 
 
+class TelegramBotAlreadyBoundError(RuntimeError):
+    """Raised when a Telegram bot is already bound to a different agent."""
+
+
+def _already_bound_message(bot_username: str) -> str:
+    return (
+        f"Telegram bot @{bot_username} is already bound to another agent "
+        f"in this workspace."
+    )
+
+
 # ── Assignment / release ────────────────────────────────────────────────────
 
 async def assign_byo_bot(*, agent_install_id: str, workspace_id: str, tenant_id: str, token: str) -> Dict[str, Any]:
     """Validate a user's BotFather token, store it agent-scoped, register its
-    webhook, and write the enabled channel binding."""
+    webhook, and write the enabled channel binding.
+
+    The one-bot-one-agent guarantee is enforced structurally by
+    uq_agent_channel_bindings_inbound_owner_v2 (control_plane_repository.py,
+    covers 'telegram_bot') -- a second agent binding the same bot raises
+    TelegramBotAlreadyBoundError. A soft pre-check (mirroring
+    discord_bot_provisioning_service.assign_agent_discord) gives a friendly,
+    specific error immediately; the unique index is still the race-free
+    backstop if two binds land concurrently."""
     token = str(token or "").strip()
     if not token:
         raise RuntimeError("A bot token is required for a BYO Telegram bot.")
@@ -209,6 +228,14 @@ async def assign_byo_bot(*, agent_install_id: str, workspace_id: str, tenant_id:
     bot_id = str(me.get("id") or "").strip()
     if not bot_username:
         raise RuntimeError("Telegram getMe returned no username for this token.")
+
+    conflict = await bindings.find_inbound_owner_conflict(
+        tenant_id=tenant_id, workspace_id=workspace_id,
+        channel_key=CHANNEL_KEY_TELEGRAM, endpoint_key=bot_username,
+        exclude_agent_install_id=agent_install_id,
+    )
+    if conflict is not None:
+        raise TelegramBotAlreadyBoundError(_already_bound_message(bot_username))
 
     cred_id = store_byo_bot_credential(
         workspace_id=workspace_id, agent_install_id=agent_install_id,
@@ -225,18 +252,26 @@ async def assign_byo_bot(*, agent_install_id: str, workspace_id: str, tenant_id:
         except Exception as exc:
             LOGGER.warning("assign_byo_bot: setWebhook best-effort failed: %s", exc)
 
-    await bindings.upsert_channel_binding(
-        tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_install_id,
-        channel_key=CHANNEL_KEY_TELEGRAM, enabled=True,
-        binding={
-            "endpoint_key": bot_username,
-            "is_inbound_owner": True,
-            "source": "byo",
-            "credential_id": cred_id,
-            "bot_username": bot_username,
-            "webhook_secret": secret,
-        },
-    )
+    try:
+        await bindings.upsert_channel_binding(
+            tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_install_id,
+            channel_key=CHANNEL_KEY_TELEGRAM, enabled=True,
+            binding={
+                "endpoint_key": bot_username,
+                "is_inbound_owner": True,
+                "source": "byo",
+                "credential_id": cred_id,
+                "bot_username": bot_username,
+                "webhook_secret": secret,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — translate the structural guarantee
+        # Roll back the orphaned credential we just wrote, matching Discord's
+        # assign_agent_discord cleanup-on-conflict pattern.
+        delete_vault_credential_by_id(cred_id)
+        if bindings.is_inbound_owner_conflict(exc):
+            raise TelegramBotAlreadyBoundError(_already_bound_message(bot_username)) from exc
+        raise
     return {
         "source": "byo",
         "credential_id": cred_id,

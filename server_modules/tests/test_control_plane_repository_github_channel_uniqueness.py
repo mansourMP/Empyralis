@@ -1,19 +1,21 @@
 """Regression cover for the audit-confirmed gap: uq_agent_channel_bindings_
 inbound_owner_v2 (control_plane_repository.py) enforces one-inbound-owner-
-per-channel-endpoint for every channel_key EXCEPT 'slack', so two agents in
-the same workspace could each claim ownership of the same Slack channel with
-no DB-level rejection -- only last-write-wins, with non-deterministic
-runtime routing (agent_channel_router._resolve_agent_for_inbound picks
-whichever matching row its unordered scan hits first). routes_fleet.py's
-fleet_assign_agent_slack carried a NOTE documenting this exact gap.
+per-channel-endpoint for every channel_key that agent_specialist_repository.
+_INBOUND_OWNER_CHANNEL_KEYS names as requiring an inbound owner EXCEPT
+'github', so two agents in the same workspace could each claim ownership of
+the same GitHub channel (endpoint) with no DB-level rejection -- the
+app-level pre-check (agent_specialist_repository._assert_unique_inbound_
+channel_owners) already covered 'github', but check-then-insert is not
+atomic, so a race between two concurrent binds could let both win. Only
+last-write-wins on the column, and agent_channel_router's linear scan makes
+read-time resolution non-deterministic whenever more than one row matches.
+This is the same class of bug fixed for Slack by commit b7f17d367 /
+migrations/fix_slack_channel_uniqueness.sql.
 
 These tests are pure string/regex checks against the SQL source (no DB
-required, matching this repo's convention -- see test_preflight_rls.py's
-MigrationParserTests for the same style against migrations/enable_rls.sql).
-Real-Postgres proof that migrations/fix_slack_channel_uniqueness.sql is
-idempotent and safe against pre-existing duplicate data was done by hand
-against a scratch database as part of shipping this fix; see the commit /
-PR description for that transcript.
+required, matching this repo's convention -- see
+test_control_plane_repository_slack_channel_uniqueness.py and
+test_preflight_rls.py's MigrationParserTests for the same style).
 """
 
 from __future__ import annotations
@@ -24,23 +26,14 @@ from pathlib import Path
 from server_modules import control_plane_repository as repository
 
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION_PATH = ROOT / "migrations" / "fix_slack_channel_uniqueness.sql"
+MIGRATION_PATH = ROOT / "migrations" / "fix_github_channel_uniqueness.sql"
 
 INDEX_NAME = "uq_agent_channel_bindings_inbound_owner_v2"
 
-# Every channel_key the guarantee is supposed to cover after this fix
-# (commit b7f17d367). NOTE: the live schema in control_plane_repository.py
-# may have grown to cover additional channel_keys since -- e.g. 'github',
-# added later by migrations/fix_github_channel_uniqueness.sql, the same
-# class of bug fixed here for Slack. This set intentionally stays fixed to
-# what *this* migration file's own predicate captures, so these tests keep
-# testing this migration rather than silently re-deriving their expectation
-# from a schema string that will keep evolving as later fixes land. See
-# test_control_plane_repository_github_channel_uniqueness.py for the
-# equivalent up-to-date, full-coverage check.
+# Every channel_key the guarantee is supposed to cover after this fix.
 EXPECTED_CHANNEL_KEYS = {
     "telegram", "telegram_bot", "discord", "discord_bot",
-    "whatsapp", "email", "phone", "web_chat", "slack",
+    "whatsapp", "email", "phone", "web_chat", "slack", "github",
 }
 
 
@@ -59,26 +52,28 @@ def _extract_channel_keys(sql: str, *, index_name: str = INDEX_NAME) -> set[str]
     return {item.strip().strip("'") for item in match.group(1).split(",")}
 
 
-def test_schema_sql_covers_slack_in_the_inbound_owner_index() -> None:
-    """The bug: 'slack' was missing from this list, so
+def test_schema_sql_covers_github_in_the_inbound_owner_index() -> None:
+    """The bug: 'github' is present in agent_specialist_repository.
+    _INBOUND_OWNER_CHANNEL_KEYS (the app-level pre-check) but was missing
+    from this DB index's channel_key list, so
     uq_agent_channel_bindings_inbound_owner_v2 silently never applied to
-    Slack bindings at all."""
+    GitHub bindings at all -- the app-level check-then-insert race was not
+    backed by a DB-level constraint."""
     keys = _extract_channel_keys(repository.CONTROL_PLANE_SCHEMA_SQL)
-    assert "slack" in keys, (
-        "'slack' is missing from uq_agent_channel_bindings_inbound_owner_v2's "
+    assert "github" in keys, (
+        "'github' is missing from uq_agent_channel_bindings_inbound_owner_v2's "
         "channel_key allowlist in control_plane_repository.py -- two agents "
-        "in one workspace can bind the same Slack channel with no DB-level "
+        "in one workspace can bind the same GitHub channel with no DB-level "
         "rejection."
     )
 
 
 def test_schema_sql_still_covers_every_previously_guaranteed_channel() -> None:
-    """Regression guard: adding 'slack' must not have dropped any of the
-    channel keys the guarantee already covered. A subset check (not
-    equality) on purpose: the live schema may have grown to cover further
-    channel_keys since this fix shipped (e.g. 'github')."""
+    """Regression guard: adding 'github' must not have dropped any of the
+    channel keys the guarantee already covered (including 'slack', added by
+    b7f17d367)."""
     keys = _extract_channel_keys(repository.CONTROL_PLANE_SCHEMA_SQL)
-    assert EXPECTED_CHANNEL_KEYS <= keys
+    assert keys == EXPECTED_CHANNEL_KEYS
 
 
 def test_schema_sql_index_predicate_still_requires_inbound_owner_and_endpoint() -> None:
@@ -108,32 +103,26 @@ def test_migration_file_exists_and_is_registered_in_the_migrations_dir() -> None
 
 
 def test_migration_applies_the_identical_corrected_predicate() -> None:
-    """The migration's end-state index definition must match exactly what
-    control_plane_repository.py's CONTROL_PLANE_SCHEMA_SQL was creating for
-    a fresh database at the time this fix shipped -- i.e. this fix's own
-    scope, no more and no less. It is asserted as a subset of (not equal
-    to) the current live schema because later fixes (e.g. 'github') extend
-    the same index further; when every channel-specific migration has been
-    applied to a database, the union of their predicates converges with the
-    live schema -- see test_control_plane_repository_github_channel_
-    uniqueness.py for that full-coverage check."""
+    """The migration's end-state index definition must exactly match what
+    control_plane_repository.py now creates for a fresh database -- an
+    already-migrated database and a brand-new database must converge on the
+    same schema."""
     migration_keys = _extract_channel_keys(_read_migration())
     schema_keys = _extract_channel_keys(repository.CONTROL_PLANE_SCHEMA_SQL)
-    assert migration_keys == EXPECTED_CHANNEL_KEYS
-    assert migration_keys <= schema_keys
+    assert migration_keys == schema_keys == EXPECTED_CHANNEL_KEYS
 
 
-def test_migration_dedupes_slack_conflicts_before_rebuilding_the_index() -> None:
+def test_migration_dedupes_github_conflicts_before_rebuilding_the_index() -> None:
     """CRITICAL SAFETY property: a CREATE UNIQUE INDEX over data that
     already violates it fails outright. The migration must resolve any
-    pre-existing duplicate Slack inbound-owner bindings (there may be none
+    pre-existing duplicate GitHub inbound-owner bindings (there may be none
     in production today, but the migration must not assume that) *before*
     it drops/recreates the index, every time -- order matters, not just
     presence."""
     sql = _read_migration()
 
     # The dedupe is a `WITH ... UPDATE agent_channel_bindings ...` statement
-    # -- the CTE (which carries the `channel_key = 'slack'` scope) precedes
+    # -- the CTE (which carries the `channel_key = 'github'` scope) precedes
     # the UPDATE keyword textually, so the clause starts at the WITH, not at
     # the UPDATE.
     dedupe_match = re.search(r"WITH\s+\w+\s+AS\s*\(", sql, re.IGNORECASE)
@@ -153,12 +142,13 @@ def test_migration_dedupes_slack_conflicts_before_rebuilding_the_index() -> None
         "or the CREATE UNIQUE INDEX can fail on live duplicate data"
     )
 
-    # Scoped to channel_key = 'slack' -- every other covered channel_key has
-    # been enforced by some version of this index since it was introduced,
-    # so it cannot hold a live conflict; the dedupe should not silently
-    # touch unrelated rows.
+    # Scoped to channel_key = 'github' -- every other covered channel_key
+    # has been enforced by some version of this index since it was
+    # introduced (or, for 'slack', deduped by its own migration), so it
+    # cannot hold a live conflict this migration needs to resolve; the
+    # dedupe should not silently touch unrelated rows.
     dedupe_clause = sql[dedupe_match.start():drop_match.start()]
-    assert "channel_key = 'slack'" in dedupe_clause
+    assert "channel_key = 'github'" in dedupe_clause
 
     # The demotion must not delete data or disable the whole binding --
     # only strip inbound-owner status, so the losing agent's binding record

@@ -199,7 +199,35 @@ async def _assert_unique_inbound_channel_owners(
             endpoint_key,
         )
         if conflict is not None:
-            raise ChannelOwnershipConflictError(CHANNEL_OWNERSHIP_CONFLICT_MESSAGE)
+            raise ChannelOwnershipConflictError(
+                await _channel_ownership_conflict_message(connection, conflict, tenant_id=tenant_id, workspace_id=workspace_id)
+            )
+
+
+async def _channel_ownership_conflict_message(
+    connection: Any, conflict_row: Any, *, tenant_id: str, workspace_id: str,
+) -> str:
+    """Enrich CHANNEL_OWNERSHIP_CONFLICT_MESSAGE with WHICH agent already
+    owns the channel, when its label is cheaply resolvable on the same
+    connection/transaction -- falls back to the plain message (never raises)
+    so a label-lookup hiccup can't block the conflict error itself."""
+    try:
+        owner_id = str((conflict_row or {}).get("agent_install_id") or "").strip()
+        if not owner_id:
+            return CHANNEL_OWNERSHIP_CONFLICT_MESSAGE
+        owner_row = await connection.fetchrow(
+            "SELECT label FROM workspace_agent_installs WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
+            owner_id, tenant_id, workspace_id,
+        )
+        label = str((owner_row or {}).get("label") or "").strip() if owner_row is not None else ""
+    except Exception:
+        return CHANNEL_OWNERSHIP_CONFLICT_MESSAGE
+    if not label:
+        return CHANNEL_OWNERSHIP_CONFLICT_MESSAGE
+    return (
+        f'This channel is already connected to "{label}". '
+        "A channel can only be owned by one agent at a time."
+    )
 
 
 def _is_channel_ownership_unique_violation(error: Exception) -> bool:

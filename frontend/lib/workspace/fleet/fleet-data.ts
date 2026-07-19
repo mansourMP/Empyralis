@@ -362,6 +362,29 @@ export type FleetChannel = {
   setupAvailable: boolean;
 };
 
+// Every channel-bind path routes_fleet.py exposes (Slack/Discord/Telegram
+// today; more as they land) is backed by uq_agent_channel_bindings_
+// inbound_owner_v2 (control_plane_repository.py) — a channel can only ever
+// have one inbound-owner agent. The backend translates that DB-level
+// conflict into specific copy (bot username / channel description, and the
+// owning agent's name when it can resolve one cheaply — see
+// agent_bindings_repository.get_agent_install_label). This is a defense-in-
+// depth safety net for the rare case a raw Postgres constraint-violation
+// string ever slips through untranslated (e.g. a future channel-bind path
+// that hasn't been wired with the friendly translation yet) — it must never
+// dump database internals in front of a user. Mirrors the client-side
+// friendly-mapping pattern personal-channel-pairing.ts's
+// friendlyPersonalChannelError already established.
+export function friendlyChannelOwnershipError(raw: string): string {
+  const r = String(raw || "");
+  const looksLikeRawDbError =
+    /duplicate key value violates unique constraint/i.test(r) || /inbound_owner/i.test(r);
+  if (looksLikeRawDbError) {
+    return "This channel is already connected to another agent. A channel can only be owned by one agent at a time.";
+  }
+  return r;
+}
+
 export type FleetConnector = {
   id: string;
   label: string;
