@@ -3286,6 +3286,10 @@ a.fleet-breadcrumb:hover {
 .fleet-detail-properties--collapsed {
   width: 0;
   padding: 0;
+  /* box-sizing:border-box can't shrink a bordered box below its own border
+     width, so a still-1px-wide border-left would clamp this to 1px instead
+     of a true 0 — zero the width too, not just the color. */
+  border-left-width: 0;
   border-left-color: transparent;
   overflow: hidden;
 }

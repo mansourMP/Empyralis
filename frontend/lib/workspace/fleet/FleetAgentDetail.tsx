@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Brain,
@@ -236,20 +236,49 @@ export function FleetAgentDetail({
   // Chat tab's mobile-only properties drawer (see propertiesContent below) —
   // every other tab keeps the permanent column, so this stays false and unused there.
   const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
-  // Desktop/tablet Properties RAIL collapse — same idiom as the primary
-  // rail's own collapse (fleet-preferences.ts's COLLAPSED_KEY): default
-  // expanded, hydrated from localStorage after mount (avoids an SSR/
-  // hydration mismatch), persisted on every toggle. Independent of
-  // mobilePropertiesOpen above — that's the <=768px Chat-tab overlay drawer;
-  // this is the persistent right rail every other tab (and Chat on
-  // desktop/tablet) shows, now a real collapse instead of an always-on column.
-  const [propertiesCollapsed, setPropertiesCollapsed] = useState(false);
-  useEffect(() => {
+  // Desktop/tablet Properties RAIL collapse — same persisted-preference
+  // idiom as the primary rail's own collapse (fleet-preferences.ts's
+  // COLLAPSED_KEY). Default when nothing is saved yet: CLOSED.
+  //
+  // This page is genuinely SSR'd (a hard reload or a direct link hits the
+  // server, not just client-side navigation), which rules out the seemingly
+  // obvious "read localStorage straight in the useState initializer, guarded
+  // by typeof window" approach: verified in this exact build that it
+  // produces a real, permanently-stuck-wrong render for a returning visitor
+  // who'd previously left the rail OPEN. The server has no localStorage, so
+  // it always emits the closed markup; hydrating with a client initializer
+  // that reads "open" from localStorage makes React's *state* correct
+  // immediately, but React's hydration reconciler does not patch that class
+  // of attribute/child mismatch to match it — confirmed via the dev
+  // console's own "This won't be patched up" hydration warning, and by
+  // inspecting the live DOM afterward: the aside stayed visually collapsed
+  // (0-width) with the state already reporting expanded, un-fixable by any
+  // later render that merely reaches the same value again (React bails out
+  // on a same-value setState, so nothing ever re-triggers the patch).
+  //
+  // The fix that's actually hydration-safe: the initializer always returns
+  // the SSR-identical default (closed) — server and first client render
+  // agree, so hydration has nothing to patch and no warning fires — and a
+  // useLayoutEffect (not useEffect) performs the real localStorage read as
+  // a genuine value transition immediately after mount, synchronously
+  // before the browser's first paint. That's still the "no open-then-close
+  // flip" contract the initializer alone was meant to deliver (nothing is
+  // visible before this runs), it's just done as an honest post-mount state
+  // change instead of folding it into the value hydration already
+  // committed — so React actually applies it. A no-op on every ordinary
+  // in-app navigation between agents (Link clicks never involve SSR/
+  // hydration at all — the previous value simply carries over or the fresh
+  // instance's effect reads the same localStorage a soft nav would've too).
+  const [propertiesCollapsed, setPropertiesCollapsed] = useState(true);
+  useLayoutEffect(() => {
     try {
-      if (window.localStorage.getItem(PROPERTIES_COLLAPSED_KEY) === "1") setPropertiesCollapsed(true);
+      const stored = window.localStorage.getItem(PROPERTIES_COLLAPSED_KEY);
+      const shouldBeCollapsed = stored === null ? true : stored === "1";
+      setPropertiesCollapsed((prev) => (prev === shouldBeCollapsed ? prev : shouldBeCollapsed));
     } catch {
-      /* localStorage unavailable — keep default (expanded) */
+      /* localStorage unavailable — keep the default (closed) */
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const togglePropertiesCollapsed = useCallback(() => {
     setPropertiesCollapsed((prev) => {
@@ -384,6 +413,11 @@ export function FleetAgentDetail({
       <PanelRow label="Connectors" value={connectedConnectors} />
     </PanelSection>
   );
+  // No suppressHydrationWarning needed here: propertiesCollapsed's useState
+  // default (true/closed) is identical on the server and the first client
+  // render (see above), so there is nothing for hydration to mismatch on —
+  // the useLayoutEffect correction happens strictly after hydration commits,
+  // as an ordinary client-side state update.
   const propertiesPanel = (
     <aside
       className={`fleet-detail-properties${propertiesCollapsed ? " fleet-detail-properties--collapsed" : ""}`}
