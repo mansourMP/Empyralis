@@ -91,6 +91,33 @@ class DmPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(decision["system_reply"])
         self.assertFalse(decision["is_owner"])
 
+    async def test_unresolved_identity_config_is_owner_only_regardless_of_default_dm_policy_mode(self) -> None:
+        """Regression test for the exact ee3fca4f7c bug: the identity-less
+        fallback (agent_id="" / LEGACY_UNSCOPED_AGENT_ID — the PERMANENT
+        case for every local-bridge channel: Signal, iMessage, WeChat; see
+        personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS) must
+        always resolve to owner_only, hardcoded — never
+        DEFAULT_DM_POLICY_MODE. DEFAULT_DM_POLICY_MODE is currently "open"
+        (a deliberate, documented product decision for REAL resolved
+        agents, see its own comment) — this test proves that constant no
+        longer leaks into the separate, identity-less fallback the way it
+        did between ee3fca4f7c and this fix, regardless of what value that
+        constant holds. Exercises _load_agent_dm_policy_config directly
+        (one level below _enforce_dm_policy) so this fails loudly on the
+        exact function the bug lived in, independent of the gate's own
+        owner-detection short-circuit."""
+        self.assertEqual(personal_channels_service.DEFAULT_DM_POLICY_MODE, personal_channels_service.DM_POLICY_OPEN)
+        for agent_id in ("", personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID):
+            with self.subTest(agent_id=repr(agent_id)):
+                config = await personal_channels_service._load_agent_dm_policy_config(
+                    tenant_id="tenant-1",
+                    workspace_id="ws-1",
+                    agent_id=agent_id,
+                    channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
+                )
+                self.assertEqual(config["mode"], "owner_only")
+                self.assertEqual(config["allowlist"], [])
+
     async def test_owner_only_default_allows_self_chat(self) -> None:
         decision = await personal_channels_service._enforce_dm_policy(
             registration=self.registration,
@@ -664,6 +691,56 @@ class DmPolicyInboundIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(result.get("blocked"))
         self.assertIsNone(result.get("outbound"))
+
+    async def test_local_bridge_stranger_is_blocked_across_signal_imessage_wechat(self) -> None:
+        """FIX 1 regression, all three local-bridge families: the
+        identity-less fallback bug (agent_id="" resolving to
+        DEFAULT_DM_POLICY_MODE/open instead of the hardcoded owner_only its
+        own docstring/comments always claimed) did not depend on
+        channel_key at all, so it silently auto-replied to ANY stranger's
+        1:1 DM on Signal, iMessage, AND WeChat identically — not just
+        Signal, the only family test_local_bridge_stranger_is_blocked_by_default
+        above covers. All three share the exact same
+        _handle_local_bridge_gateway_channel_inbound entry point (see
+        personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS), so this
+        proves the fix landed on the shared function, not one channel's
+        call site."""
+        for channel_key, meta in personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS.items():
+            with self.subTest(channel_key=channel_key):
+                with (
+                    patch(
+                        "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                        return_value=_ALLOW_DISPATCH_DECISION,
+                    ),
+                    patch(
+                        "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                        new=AsyncMock(
+                            side_effect=AssertionError(f"must not auto-reply to a {channel_key} stranger")
+                        ),
+                        create=True,
+                    ),
+                    patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
+                ):
+                    result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
+                        gateway_id="gw-dm-1",
+                        registration=self.registration,
+                        payload={
+                            "message": {
+                                "external_message_id": f"{channel_key}-stranger-1",
+                                "remote_jid": f"{channel_key}-stranger-jid",
+                                "sender_jid": f"{channel_key}-stranger-jid",
+                                "push_name": "Rando",
+                                "text": "hi, who is this?",
+                                "from_me": False,
+                            },
+                        },
+                        channel_key=channel_key,
+                        provider=meta["provider"],
+                        label=meta["label"],
+                    )
+                self.assertTrue(result.get("blocked"), f"{channel_key} stranger should be blocked, not auto-replied to")
+                self.assertIsNone(result.get("outbound"))
+                self.assertEqual(result["policy"]["mode"], "owner_only")
 
 
 if __name__ == "__main__":

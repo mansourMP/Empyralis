@@ -665,11 +665,50 @@ DM_POLICY_MODES = {DM_POLICY_OWNER_ONLY, DM_POLICY_ALLOWLIST, DM_POLICY_PAIRING,
 # restrict any agent to owner_only / allowlist / pairing per channel. The strict
 # default (owner_only) is a product decision deferred to the owner, who can test
 # it on a live channel — flipping this constant is the one-line change to adopt it.
+#
+# SCOPE OF THIS CONSTANT — read before touching it. It governs ONE thing only:
+# the mode a REAL, resolved agent install falls back to when it has never
+# explicitly saved a dm_policy for this channel (_normalize_dm_policy_config's
+# "mode not in DM_POLICY_MODES" branch below). It must never be read by, or
+# substituted into, the SEPARATE fallback for when no real agent identity
+# could be resolved AT ALL — see _unresolved_identity_dm_policy_config, always
+# owner_only, hardcoded, independent of this constant.
+#
+# History of why that distinction now exists as two separate functions:
+# ed9c2cdd60 added a safe owner_only default (one constant, both fallbacks).
+# ee3fca4f7c flipped THIS constant to open as a deliberate live-agent-compat
+# product decision — but because both fallbacks still shared the one
+# constant at the time, that single-line change also silently reopened the
+# identity-less fallback (agent_id=="" — the PERMANENT case for local-bridge
+# Signal/iMessage/WeChat inbound, which has no per-agent identity table to
+# resolve against at all) to "reply to any stranger," directly contradicting
+# _load_agent_dm_policy_config's own docstring and the "every sender is
+# blocked" comment at its local-bridge call site. Splitting the two fallbacks
+# means a future change to this constant can never do that again.
 DEFAULT_DM_POLICY_MODE = DM_POLICY_OPEN
 
 
-def _default_dm_policy_config() -> Dict[str, Any]:
-    return {"mode": DEFAULT_DM_POLICY_MODE, "allowlist": [], "pending_pairing": {}}
+def _unresolved_identity_dm_policy_config() -> Dict[str, Any]:
+    """Fail-closed fallback for _load_agent_dm_policy_config when NO real
+    per-agent install could even be identified: no agent_id resolved at all
+    (personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID — the permanent
+    case for every local-bridge channel today, Signal/iMessage/WeChat, which
+    has no per-agent state table to resolve an owner identity against yet;
+    see _handle_local_bridge_gateway_channel_inbound's dmPolicy-gate
+    comment), or an install lookup that failed / returned nothing.
+
+    Deliberately NOT DEFAULT_DM_POLICY_MODE: that constant is the
+    configured-but-unset default for a REAL agent an owner can actually go
+    open Settings and change the policy for (see its own comment). There is
+    no agent to apply a per-agent policy to here, so there is no "the owner
+    already saw this and can adjust it" story to justify anything looser
+    than the strictest mode. Always owner_only, hardcoded, independent of
+    DEFAULT_DM_POLICY_MODE, so a future change to that constant (a live
+    product decision another engineer is entitled to make) can never
+    silently reopen this identity-less fallback too — see
+    DEFAULT_DM_POLICY_MODE's own comment for exactly that having already
+    happened once (ee3fca4f7c)."""
+    return {"mode": DM_POLICY_OWNER_ONLY, "allowlist": [], "pending_pairing": {}}
 
 
 def _normalize_dm_policy_config(raw: Any) -> Dict[str, Any]:
@@ -709,7 +748,7 @@ async def _load_agent_dm_policy_config(
     """
     normalized_agent_id = str(agent_id or "").strip()
     if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
-        return _default_dm_policy_config()
+        return _unresolved_identity_dm_policy_config()
     try:
         from server_modules import agent_registry_repository as _repo
 
@@ -720,9 +759,9 @@ async def _load_agent_dm_policy_config(
         )
     except Exception:
         _logger.warning("dm_policy: install lookup failed for agent_id=%s — defaulting to owner_only", normalized_agent_id, exc_info=True)
-        return _default_dm_policy_config()
+        return _unresolved_identity_dm_policy_config()
     if not isinstance(install, dict):
-        return _default_dm_policy_config()
+        return _unresolved_identity_dm_policy_config()
     meta = dict(install.get("install_metadata") or install.get("metadata") or {})
     all_policies = meta.get("dm_policy") if isinstance(meta.get("dm_policy"), dict) else {}
     return _normalize_dm_policy_config(all_policies.get(channel_key))
@@ -2695,13 +2734,17 @@ async def _handle_local_bridge_gateway_channel_inbound(
     )
     # ── dmPolicy gate ── Local-bridge channels (Signal/iMessage/WeChat)
     # don't yet resolve a per-agent owner identity (no equivalent of
-    # WhatsApp's linked_jid/is_self_chat, no agent-scoped state table —
-    # a separate, pre-existing gap; see _handle_local_bridge_gateway_channel_inbound's
-    # module-level notes). existing_state=None + agent_id="" means this
-    # always evaluates to the hard-coded owner_only default with no owner
-    # signal available, i.e. every sender is blocked until that gap is
-    # closed — strictly SAFER than the previous behavior (reply to
-    # everyone, unconditionally), never worse.
+    # WhatsApp's linked_jid/is_self_chat, no agent-scoped state table — a
+    # separate, pre-existing gap). existing_state=None + agent_id="" means
+    # this always evaluates to _unresolved_identity_dm_policy_config's
+    # hardcoded owner_only, with no owner signal available, i.e. every
+    # sender is blocked until that gap is closed — strictly SAFER than the
+    # pre-dmPolicy behavior (reply to everyone, unconditionally), never
+    # worse. (This comment was FALSE from ee3fca4f7c until the fallback
+    # split below it: agent_id="" used to resolve through
+    # DEFAULT_DM_POLICY_MODE, i.e. open — every local-bridge stranger got
+    # an automatic reply. See _unresolved_identity_dm_policy_config's
+    # docstring for the fix.)
     dm_decision = await _enforce_dm_policy(
         registration=registration,
         channel_key=channel_key,
