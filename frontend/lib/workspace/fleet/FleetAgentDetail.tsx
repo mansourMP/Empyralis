@@ -211,7 +211,21 @@ export function FleetAgentDetail({
    *  can refresh whatever list/breadcrumb sources agent.label. */
   onRenamed?: () => void;
 }) {
-  const [activeTab, setActiveTab] = useState<TabId>(initialTab || "overview");
+  // The URL's {tab} segment is the single source of truth for which tab
+  // renders — read directly from `initialTab` (resolved by the routed
+  // [tab]/page.tsx from its own route params) on every render, instead of
+  // copying it into a one-shot useState seed. That copy was the actual
+  // bug: a re-render mid-navigation (rapid tab clicks, or clicking a
+  // second tab while the first was still loading) could see `initialTab`
+  // transiently unresolved, and a sync effect here plus the parent's own
+  // unresolved-defaults-to-"overview" coercion combined to silently stomp
+  // whatever tab the user had just clicked back to Overview. Deriving
+  // instead of storing means there is no local copy to desync — whatever
+  // the URL says is what renders. [tab]/page.tsx now passes `undefined`
+  // (never a manufactured "overview") while a navigation is still
+  // resolving, so the "overview" fallback below only ever fires for a
+  // genuine first paint before routing has resolved at all.
+  const activeTab: TabId = initialTab || "overview";
   // Chat tab's mobile-only properties drawer (see propertiesContent below) —
   // every other tab keeps the permanent column, so this stays false and unused there.
   const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
@@ -263,14 +277,11 @@ export function FleetAgentDetail({
     return !connectorMissing;
   }).length;
 
-  // Page mode: keep the active tab in sync with the URL {tab} segment.
-  useEffect(() => {
-    if (initialTab) setActiveTab(initialTab);
-  }, [initialTab]);
-
+  // Tab clicks just navigate — activeTab above already tracks initialTab
+  // directly, so there's no local state to update here; the URL round-trips
+  // back through [tab]/page.tsx's params and the new tab renders from that.
   const selectTab = useCallback(
     (tab: TabId) => {
-      setActiveTab(tab);
       onTabChange?.(tab);
     },
     [onTabChange],
@@ -297,7 +308,7 @@ export function FleetAgentDetail({
   // Land keyboard/SR focus somewhere deliberate on mount rather than leaving
   // it on <body> — the active tab pill, since it's already the natural next
   // stop for arrow/tab navigation. Only on first mount, not on every tab
-  // switch (selectTab already moves visible state; native click/router
+  // switch (activeTab already tracks the URL; native click/router
   // navigation already handles focus for those).
   const activeTabRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {

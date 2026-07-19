@@ -17,8 +17,24 @@ export default function AgentDetailPage() {
   const workspaceId = String(params?.workspaceId || "");
   const projectId = String(params?.projectId || "");
   const agentId = String(params?.agentId || "");
-  const rawTab = String(params?.tab || "overview");
-  const tab: Tab = (VALID_TABS as readonly string[]).includes(rawTab) ? (rawTab as Tab) : "overview";
+  // `[tab]` is a required segment of this exact route, so a genuinely
+  // missing tab never lands here — that's .../agents/[agentId]/page.tsx's
+  // job, which redirects to /overview before this component ever mounts.
+  // A falsy params.tab here only ever means the client router hasn't
+  // resolved this navigation's params yet (mid-transition on a slow
+  // connection, or clicking a second tab while the first is still
+  // loading). Coercing that transient gap to the STRING "overview" used to
+  // be exactly what stomped a just-clicked tab back to Overview downstream
+  // in FleetAgentDetail, which treats any non-empty initialTab as a real
+  // instruction — so leave it `undefined` instead and let FleetAgentDetail
+  // keep showing whatever tab it last knew about until params catch up.
+  // Only an actually-present-but-unrecognized tab string (a bad/typo'd
+  // URL) defaults to "overview".
+  const rawTab = params?.tab;
+  const tab: Tab | undefined =
+    typeof rawTab === "string"
+      ? ((VALID_TABS as readonly string[]).includes(rawTab) ? (rawTab as Tab) : "overview")
+      : undefined;
 
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   const agentBase = `${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`;
