@@ -133,6 +133,11 @@ def _connector_public_metadata(connector: str, credentials: Dict[str, Any]) -> D
         "freshbooks",
         "vercel",
         "higgsfield",
+        "zapier",
+        "paypal",
+        "sentry",
+        "attio",
+        "cloudflare",
     }:
         for key in (
             "auth_mode",
@@ -303,6 +308,11 @@ def _connector_identity_signature(connector: str, credentials: Dict[str, Any]) -
         "freshbooks",
         "vercel",
         "higgsfield",
+        "zapier",
+        "paypal",
+        "sentry",
+        "attio",
+        "cloudflare",
     }:
         account_id = str(
             credentials.get("id")

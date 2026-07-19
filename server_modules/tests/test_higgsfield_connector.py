@@ -63,18 +63,39 @@ _DCR_CAPABLE_PROVIDERS = {
     "canva",
     "airtable",
     "clickup",
+    # 2026-07-19 connector sweep (see test_dcr_connectors.py and test_dcr_
+    # connector_sweep.py for the per-provider discovery evidence trail):
+    "dropbox",
+    "figma",
+    "todoist",
+    "calendly",
+    "jira",
+    "confluence",
+    "webflow",
+    "monday",
+    "gitlab",
+    "miro",
+    "intercom",
+    "square",
+    "typeform",
+    "vercel",
+    # Net-new connectors added in the same sweep, DCR-capable from the start:
+    "zapier",
+    "paypal",
+    "sentry",
+    "attio",
+    "cloudflare",
 }
 
 
 def test_only_dcr_capable_providers_declare_a_registration_endpoint() -> None:
     """The dynamic-client-registration extension must be inert for every
     provider that has a normal developer-console client_id/secret pair.
-    Higgsfield, Stripe, Linear, Notion, Asana, Canva, Airtable, and ClickUp
-    are the only ones with a live, confirmed RFC 7591 registration_endpoint
-    (see connection_oauth_service.OAUTH_PROVIDER_CONFIGS for the discovery
-    evidence on each) -- every other provider, including Zoom (confirmed to
-    have no registration_endpoint in its own discovery document), must stay
-    None."""
+    _DCR_CAPABLE_PROVIDERS above lists the full, live-confirmed set (see
+    connection_oauth_service.OAUTH_PROVIDER_CONFIGS for the discovery
+    evidence on each) -- every other provider, including Zoom, Box, Docusign,
+    HubSpot, and Salesforce (each confirmed to have no registration_endpoint
+    in its own reachable discovery document), must stay None."""
     for provider, config in service.OAUTH_PROVIDER_CONFIGS.items():
         if provider in _DCR_CAPABLE_PROVIDERS:
             assert config.registration_endpoint is not None, f"{provider}: expected a registration_endpoint"
@@ -135,19 +156,18 @@ def test_higgsfield_configured_with_dynamic_registration_flag_alone(monkeypatch)
 def test_other_providers_are_unaffected_by_the_dynamic_gate(monkeypatch) -> None:
     """Regression guard for the oauth_provider_configured() edit: a provider
     with no registration_endpoint must still return False on missing env
-    vars, flag or no flag. Dropbox (not one of the 8 DCR-capable providers)
-    stands in for "every provider that's still static-only" -- Notion can no
-    longer be used here since it's DCR-capable now (see
-    test_notion_*_connector.py's own configured-by-default tests)."""
-    monkeypatch.delenv("DROPBOX_OAUTH_CLIENT_ID", raising=False)
-    monkeypatch.delenv("DROPBOX_CLIENT_ID", raising=False)
-    monkeypatch.delenv("DROPBOX_APP_KEY", raising=False)
-    monkeypatch.delenv("DROPBOX_OAUTH_CLIENT_SECRET", raising=False)
-    monkeypatch.delenv("DROPBOX_CLIENT_SECRET", raising=False)
-    monkeypatch.delenv("DROPBOX_APP_SECRET", raising=False)
-    monkeypatch.setenv("DROPBOX_OAUTH_ENABLED", "true")  # must have no effect
+    vars, flag or no flag. Box (confirmed classic-only in the 2026-07-19
+    connector sweep -- its authoritative discovery document has no
+    registration_endpoint at all) stands in for "every provider that's still
+    static-only" -- Dropbox and Notion can no longer be used here since both
+    are DCR-capable now (see test_dcr_connectors.py / test_dcr_connector_
+    sweep.py and test_notion_*_connector.py's own configured-by-default
+    tests)."""
+    monkeypatch.delenv("BOX_CLIENT_ID", raising=False)
+    monkeypatch.delenv("BOX_CLIENT_SECRET", raising=False)
+    monkeypatch.setenv("BOX_OAUTH_ENABLED", "true")  # must have no effect
 
-    assert service.oauth_provider_configured("dropbox") is False
+    assert service.oauth_provider_configured("box") is False
 
 
 # ---------------------------------------------------------------------------
