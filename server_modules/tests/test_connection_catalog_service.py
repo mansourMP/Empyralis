@@ -40,7 +40,17 @@ def test_catalog_exposes_channel_certification_truth() -> None:
     assert by_id["telegram_personal"]["readiness_status"] == "launch_certified"
     assert by_id["telegram_personal"]["certification_required"] is False
     assert by_id["whatsapp_personal"]["readiness_status"] == "launch_certified"
-    assert by_id["signal_personal"]["readiness_status"] == "planned"
+    # Was "planned" — stale even before the channel_lane_contract_service.py
+    # catalog fix (a separate file this test doesn't touch): this catalog's
+    # own signal_personal _item() has carried launch_status="live_when_configured"
+    # + runtime_usable=True + setup_available=True (identical to
+    # imessage_personal/wechat_personal below) since before this fix, so
+    # _catalog_readiness already computed "implementation_ready" — this
+    # assertion just never caught up. Now asserted against all three
+    # local-bridge siblings together so they can't silently drift apart again.
+    assert by_id["signal_personal"]["readiness_status"] == "implementation_ready"
+    assert by_id["imessage_personal"]["readiness_status"] == "implementation_ready"
+    assert by_id["wechat_personal"]["readiness_status"] == "implementation_ready"
     assert by_id["signal_personal"]["requires_local_bridge"] is True
     assert by_id["signal_personal"]["certification_required"] is True
     assert by_id["signal_personal"]["certification_requirements"]

@@ -60,10 +60,15 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["stage"] for entry in personal_catalog],
-            # iMessage and WeChat are first-class, owner-connectable gateway
-            # channels like Telegram/WhatsApp — not "coming soon". Only Signal
-            # remains planned until its bridge runtime is certified.
-            ["live", "live", "planned", "live", "live", "live"],
+            # Signal, iMessage, and WeChat are all first-class,
+            # owner-connectable local-bridge gateway channels like
+            # Telegram/WhatsApp — none are "coming soon". Signal's catalog
+            # entry previously said "planned"/live_capable=false here while
+            # its handler, gateway runtime, and signal-cli bridge were
+            # already fully wired — that mismatch (not any real capability
+            # gap) is what made Signal read as disabled everywhere this
+            # roadmap feeds; see get_gateway_personal_channel_surfaces.
+            ["live", "live", "live", "live", "live", "live"],
         )
         self.assertTrue(
             all(
@@ -77,7 +82,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["live_capable"] for entry in personal_catalog],
-            ["true", "true", "false", "true", "true", "true"],
+            ["true", "true", "true", "true", "true", "true"],
         )
 
         self.assertEqual(
@@ -125,13 +130,18 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         self.assertEqual(by_key["telegram_personal"]["ownership_boundary"], "agent_computer")
         self.assertEqual(by_key["whatsapp_personal"]["surface_support"], ["sage"])
         self.assertEqual(by_key["signal_personal"]["status"], "agent_computer_bridge")
-        self.assertFalse(by_key["signal_personal"]["live_capable"])
-        # iMessage and WeChat are shipped, owner-connectable gateway channels
-        # (like Telegram/WhatsApp) — live_capable/launch_allowed are true. The
-        # "agent_computer_bridge" status (not "agent_computer_only") is the
-        # honest bit that survives: both require a real bridge process on the
-        # agent's own gateway (BlueBubbles on a Mac for iMessage; a best-effort
-        # local WeChat session bridge for WeChat) rather than a cloud path.
+        self.assertTrue(by_key["signal_personal"]["live_capable"])
+        self.assertTrue(by_key["signal_personal"]["launch_allowed"])
+        # Signal, iMessage, and WeChat are all shipped, owner-connectable
+        # gateway channels (like Telegram/WhatsApp) — live_capable/
+        # launch_allowed are true for all three. The "agent_computer_bridge"
+        # status (not "agent_computer_only") is the honest bit that
+        # survives: each requires a real bridge process on the agent's own
+        # gateway (signal-cli for Signal; BlueBubbles on a Mac for iMessage;
+        # a best-effort local WeChat session bridge for WeChat) rather than
+        # a cloud path — a deployment that hasn't configured that bridge's
+        # env vars still reads "not configured" via the bridge's own health
+        # check, not this catalog flag.
         self.assertEqual(by_key["imessage_personal"]["provider"], "bluebubbles_local_bridge")
         self.assertEqual(by_key["imessage_personal"]["status"], "agent_computer_bridge")
         self.assertTrue(by_key["imessage_personal"]["live_capable"])

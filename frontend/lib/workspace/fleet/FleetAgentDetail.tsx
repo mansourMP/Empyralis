@@ -1123,6 +1123,7 @@ const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
   { label: "Slack", id: "slack" },
   { label: "Discord", id: "discord_bot" },
   { label: "WhatsApp", id: "whatsapp_personal" },
+  { label: "Signal", id: "signal_personal" },
   { label: "iMessage", id: "imessage_personal" },
   { label: "WeChat", id: "wechat_personal" },
 ];
@@ -1151,6 +1152,9 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   whatsapp_personal: [
     { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number — scan a QR code or use a pairing code — running on this agent's own gateway. There is no chatbot/business-API mode.", real: true },
   ],
+  signal_personal: [
+    { key: "full_account", label: "Full account", body: "This agent's own Signal, via a signal-cli bridge running on hardware you control as this agent's gateway. Requires a real signal-cli install — there is no cloud path for Signal.", real: true },
+  ],
   imessage_personal: [
     { key: "full_account", label: "Full account", body: "This agent's own iMessage, via a Mac running BlueBubbles Server as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage.", real: true },
   ],
@@ -1159,19 +1163,24 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   ],
 };
 
-// Local-bridge channels (iMessage today; WeChat has no bridge to check at
-// all) have no in-app pairing step — the bridge runs on hardware the user
-// configures themselves. This shows the REAL health snapshot for one
-// channel_key on one gateway; there is no client-invented "connected" state,
-// and no button that claims to "connect" anything.
+// Local-bridge channels (Signal and iMessage today; WeChat has no bridge to
+// check at all) have no in-app pairing step — the bridge runs on hardware
+// the user configures themselves. This shows the REAL health snapshot for
+// one channel_key on one gateway; there is no client-invented "connected"
+// state, and no button that claims to "connect" anything.
+const LOCAL_BRIDGE_NO_GATEWAY_HINT: Record<string, string> = {
+  signal_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a signal-cli bridge.",
+  imessage_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a BlueBubbles Server on that Mac.",
+  wechat_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a WeChat bridge.",
+};
+
 function LocalBridgeChannelStatus({ channelKey, gatewayId }: { channelKey: string; gatewayId: string | null }) {
   const { items, loading } = useGatewayPersonalChannelSurfaces(gatewayId);
 
   if (!gatewayId) {
     return (
       <p className="fleet-channel-expand-hint">
-        This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a
-        BlueBubbles Server on that Mac.
+        {LOCAL_BRIDGE_NO_GATEWAY_HINT[channelKey] || "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at this channel's local bridge."}
       </p>
     );
   }
@@ -1728,6 +1737,17 @@ export function ChannelsTab({
                     agentId={agentId}
                     onConnected={handleChannelsChanged}
                   />
+                </div>
+              )}
+
+              {/* Signal: same local-bridge shape as iMessage — no phone/code/QR
+                   step of its own, the bridge (signal-cli) lives on hardware the
+                   user runs themselves, configured via env vars on this agent's
+                   gateway. The only honest thing to show is real bridge health,
+                   not a fake "connect" button. */}
+              {activePlatform.id === "signal_personal" && activeDoor?.key === "full_account" && (
+                <div style={{ marginTop: 12 }}>
+                  <LocalBridgeChannelStatus channelKey="signal_personal" gatewayId={agentGatewayId} />
                 </div>
               )}
 

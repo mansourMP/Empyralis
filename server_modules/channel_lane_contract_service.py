@@ -82,8 +82,20 @@ PERSONAL_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
         "label": "Signal",
         "provider": "signal_local_bridge",
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "stage": "planned",
-        "live_capable": "false",
+        # Live local-bridge channel, same family as iMessage/WeChat below —
+        # matches PERSONAL_CHANNEL_SPECS's signal_personal entry above and
+        # CHANNEL_PLATFORM_CATALOG's signal_personal entry further down.
+        # Previously "planned"/false here (while iMessage/WeChat were
+        # "live"/true) made get_gateway_personal_channel_surfaces compute
+        # live_capable=False for Signal even though the backend handler
+        # (_handle_local_bridge_gateway_channel_inbound), the gateway
+        # runtime (LocalBridgePersonalChannelRuntime), and the signal-cli
+        # bridge were all already fully wired — the same as iMessage/WeChat.
+        # A deployment that hasn't configured EMPYRALIS_SIGNAL_BRIDGE_URL
+        # still honestly reads "not configured" via the bridge health check,
+        # not this catalog flag.
+        "stage": "live",
+        "live_capable": "true",
         "family": "personal",
         "session_owner": "paired_gateway",
     },
@@ -608,9 +620,19 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
         "category": "personal_runtime",
         "stage": "live",
+        # "agent_computer_bridge" (not "agent_computer_only") — the same
+        # honest distinction from Telegram/WhatsApp that iMessage/WeChat
+        # below already use: this needs a real signal-cli bridge running on
+        # hardware the user controls, not a cloud path.
         "status": "agent_computer_bridge",
-        "live_capable": False,
-        "launch_allowed": False,
+        # live_capable/launch_allowed were False here (iMessage/WeChat below
+        # are both True) — that mismatch, not any real capability gap, is
+        # what made Signal disappear from get_gateway_personal_channel_surfaces
+        # and any other reader of this catalog. The signal-cli bridge
+        # (empyralis-gateway/src/bridges/signal-cli-bridge.ts) and its
+        # gateway runtime wiring are as real as BlueBubbles's/WeChat's.
+        "live_capable": True,
+        "launch_allowed": True,
         "requires_agent_computer": True,
         "account_provider": "signal_personal",
         "connector_id": None,

@@ -516,6 +516,174 @@ Model switch propagation: When a user runs /model gpt-5, it writes modelOverride
 Fallback: model-fallback--w47Y_pS.js provides runWithModelFallback() which retries with fallback models on failure. Fallbacks are configured per-agent via agents.defaults.model.fallbacks.
 
 ---
+STEP 11 — SIGNAL CHANNEL (researched 2026-07-19 for Empyralis Signal-parity work)
+
+Sources: /opt/homebrew/lib/node_modules/openclaw/docs/channels/signal.md,
+/opt/homebrew/lib/node_modules/openclaw/docs/plugins/reference/signal.md, and the
+compiled extensions/signal/src/monitor/event-handler.ts + send-*.js bundles
+(function names below are recovered from those bundles' own source-map comments,
+e.g. "//#region extensions/signal/src/monitor/event-handler.ts").
+
+Transport: gateway talks to `signal-cli` over HTTP, in one of two modes:
+- Native: JSON-RPC at `/api/v1/rpc`, SSE receive stream at `/api/v1/events`
+  (`apiMode: "native"`). This is the mode Empyralis's own
+  signal-cli-bridge.ts implements.
+- Container: bbernhard/signal-cli-rest-api Docker wrapper — REST `/v2/send`,
+  WebSocket `/v1/receive/{account}` (`apiMode: "container"`, requires
+  `MODE=json-rpc` on the container). `apiMode: "auto"` probes both and caches
+  the result 30s. Empyralis does not implement container mode — native only.
+
+Number model: the gateway is one Signal "device" (either linked via QR to an
+existing account, or a dedicated registered bot number). Running the bot on
+your OWN personal number makes it ignore your own messages (loop
+protection) — OpenClaw's docs explicitly recommend a SEPARATE bot number for
+"I text the bot and it replies." Empyralis's signal-cli-bridge.ts supports
+either mode identically (it just needs a JSON-RPC endpoint + account).
+
+DM / group access control:
+- `dmPolicy`: pairing (default) | allowlist | open | disabled. Pairing
+  issues a one-time challenge code (`openclaw pairing approve signal
+  <CODE>`), expires after 1h. UUID-only senders are stored as `uuid:<id>`.
+  Empyralis's own dmPolicy (personal_channels_service._enforce_dm_policy)
+  is architecturally the same shape (owner_only/allowlist/pairing/open) and
+  is SHARED across all personal channels including Signal — not something
+  built per this research pass, already correct going in.
+- `groupPolicy`: open | allowlist | disabled (default allowlist), with
+  per-group `requireMention` override and `groupAllowFrom`. Empyralis's
+  group gate (local-bridge-runtime.ts's pollInboundEvents + the backend
+  safety-net in personal_channels_service._handle_local_bridge_gateway_channel_inbound)
+  is simpler (always "must be mentioned or replying to Sage in a group,
+  no per-group config") but was ALREADY implemented before this research
+  pass — signal-cli-bridge.ts's mapSignalCliReceiveNotification already
+  computed is_group/is_mentioned/is_reply_to_sage correctly.
+- Session/routing model: DMs share the agent's main session; groups are
+  isolated per-group (`agent:<agentId>:signal:group:<groupId>`).
+
+Media + attachments (GAP — not built in this pass, see below): OpenClaw
+downloads attachment bytes via `deps.fetchAttachment({baseUrl, account,
+attachment, sender, groupId, maxBytes})`, where `attachment` is signal-cli's
+own JsonAttachment (`{id, contentType, ...}` — confirmed against the
+compiled bundle, not guessed). Caps: `mediaMaxMb` (default 8),
+`ignoreAttachments` to skip downloads entirely. When text is empty but
+attachments are present, OpenClaw's own fallback text is
+`<media:${kindFromMime(contentType)}>` (e.g. `<media:image>`) for a single
+attachment, or a summarized `[N images + M files ...]`-style string
+(`formatAttachmentSummaryPlaceholder`) for multiple. Voice notes use the
+signal-cli filename as a MIME fallback when contentType is missing (so
+transcription can still classify AAC voice memos).
+  Empyralis parity built in this pass: signal-cli-bridge.ts now emits the
+  SAME kind of fallback text for an attachment-only message
+  (`<media:attachment> (N)`, mirroring our own bluebubbles-bridge.ts's
+  identical convention rather than OpenClaw's exact string) so the message
+  no longer vanishes silently — but this is a TEXT PLACEHOLDER ONLY. Real
+  binary attachment download/forwarding (fetching bytes from signal-cli and
+  writing them to the gateway's shared media state dir in the
+  GatewayChannelInboundMediaItem contract every OTHER local-bridge channel
+  already leaves unbuilt too — see protocol/types.ts) remains a real,
+  documented gap, shared by Signal/iMessage/WeChat alike, not attempted here
+  since it needs a live signal-cli instance to build against safely.
+
+Typing indicators (BUILT in this pass): OpenClaw calls signal-cli's
+`sendTyping` JSON-RPC method via `sendTypingSignal(to, opts)` — params are
+`{recipient: [...] | groupId, account?, stop?: true}` (recovered directly
+from the compiled bundle, not guessed), refreshed while a reply is in
+flight, explicit `stop` when it lands. Empyralis's signal-cli-bridge.ts now
+exposes a `POST /typing {channel_key, remote_jid, action: start|stop}`
+endpoint calling the IDENTICAL `sendTyping` RPC shape, and
+local-bridge-runtime.ts (the shared machinery ALL THREE local-bridge
+channels use) now starts a typing keepalive the instant an inbound message
+is admitted and claims+stops it when the reply is dispatched — reusing the
+existing, already-shared channels/foundation/typing-keepalive.ts
+TypingKeepalive class WhatsApp/Telegram already use, same 3s
+refresh/60s-ceiling constants. Best-effort: a bridge that doesn't implement
+`/typing` (BlueBubbles, WeChat today) just never gets a successful call.
+
+Read receipts (NOT built — documented gap): OpenClaw calls signal-cli's
+`sendReceipt` JSON-RPC method via `sendReadReceiptSignal(to, targetTimestamp,
+opts)` — params are `{recipient: [...], targetTimestamp, type: "read",
+account?}` (also recovered directly from the compiled bundle). Gated by
+`channels.signal.sendReadReceipts` (off by default), DMs only (signal-cli
+has no group read receipts). NOT built for Empyralis Signal in this pass:
+neither Telegram nor WhatsApp (the "mature channels" parity bar this task
+was scoped against) have read receipts either, so building it only for
+Signal would create asymmetric, not-actually-matching parity. The exact RPC
+contract is recorded here for whoever picks this up — it's a small,
+low-risk addition once it's wanted, same shape as the typing endpoint above.
+
+Reactions (NOT built — documented gap, same reasoning as read receipts):
+OpenClaw's `message action=react` supports Signal reactions
+(`sendReactionSignal`/`removeReactionSignal`), including using 👍/👎
+reactions as exec/plugin approval responses (`approvals.exec`/
+`approvals.plugin`). Empyralis has NO reaction support on ANY personal
+channel yet — WhatsApp's and Telegram's own gateway manifests both
+explicitly declare `media: {..., reactions: false, ...}`
+(whatsapp/runtime.ts, telegram/runtime.ts) — so this is a platform-wide
+absent feature, not a Signal-specific gap, and out of scope for a
+Signal-vs-our-own-mature-channels parity pass.
+
+Self-chat / "Note to Self" as an owner command channel: OPENCLAW DOES NOT
+HAVE THIS for Signal. Its own inbound handler explicitly drops every
+`syncMessage` envelope unconditionally (`if ("syncMessage" in envelope)
+return;`) as a blanket loop-prevention measure — it has no concept of
+"the owner's self-conversation is a command channel," unlike Empyralis's
+own established WhatsApp/Telegram is_self_chat pattern (see
+whatsapp/message-mapper.ts's `is_self_chat: ownedJid ? remoteJid ===
+ownedJid : false`). This is an Empyralis-specific product decision being
+EXTENDED to Signal in this pass, not something ported from OpenClaw:
+signal-cli-bridge.ts now computes is_self_chat the same way (fromMe &&
+remoteJid === the bridge's own configured account && !isGroup), and
+personal_channels_service.py's shared local-bridge inbound handler now
+lets a self-chat message through the from_me gate exactly like the
+WhatsApp/Telegram handlers already do (`_is_owner_message`'s
+`is_self_chat` shortcut is channel-agnostic, so no separate backend
+change was needed once the Signal bridge/gateway-runtime layers
+supplied the field). A LOOP GUARD was required precisely because
+OpenClaw's blanket-drop approach doesn't need one: signal-cli syncs
+EVERY send the bridge itself makes back through the same receive path
+(the same mechanism the existing from_me/is_reply_to_sage logic already
+depends on), so without suppressing an echo of Sage's own self-chat
+reply (matched via the same sentMessageIds set already used for
+is_reply_to_sage), it would re-admit as a fresh command and loop forever
+— the identical bug class WhatsApp's/Telegram's own self-chat echo
+guards exist for (see empyralis-gateway/src/__tests__/whatsapp-self-chat.test.ts).
+
+Approval reactions: Signal exec/plugin approvals route through the
+top-level `approvals.exec`/`approvals.plugin` blocks (no
+`channels.signal.execApprovals`) — 👍 approves once, 👎 denies,
+`/approve <id> allow-always` for persistent approval. Not applicable to
+Empyralis today (no reaction support at all yet, see above).
+
+Text chunking: `textChunkLimit` (default 4000), optional
+`chunkMode: "newline"` to prefer splitting on blank lines before length
+chunking. Empyralis's signal-cli-bridge.ts does not chunk outbound text at
+all yet (sends the full string in one signal-cli `send` call) — worth
+noting if very long Sage replies into Signal turn out to hit signal-cli's
+own message-size limits, but not exercised or fixed in this pass (no
+evidence it's actually broken; flagged for awareness only).
+
+Multi-account: `channels.signal.accounts.<id>` with per-account
+config/groups overrides. Empyralis's signal-cli-bridge.ts is single-account
+only (one EMPYRALIS_SIGNAL_CLI_ACCOUNT per bridge process) — matches the
+existing single-account shape of every other local-bridge channel, not a
+gap specific to Signal.
+
+Summary table — Empyralis Signal vs OpenClaw Signal vs Empyralis's own
+mature Telegram/WhatsApp, as of this research pass:
+
+| Feature                        | OpenClaw Signal        | Empyralis Signal (after this pass) | Empyralis Telegram/WhatsApp |
+|---------------------------------|-------------------------|-------------------------------------|-------------------------------|
+| Catalog-listed as connectable    | n/a (not a product)     | YES (was the core bug — fixed)      | YES |
+| Send + receive text              | yes                     | yes                                 | yes |
+| Group support (mention/reply gate)| yes (configurable)     | yes (fixed gate, not configurable)  | yes |
+| Self-chat as owner command channel| NO (blanket-dropped)   | YES (built this pass, + loop guard) | yes |
+| Attachment text fallback (no drop)| yes (real download)    | yes (placeholder text only)         | yes (real download) |
+| Real attachment/media forwarding | yes                     | NO (documented gap)                 | yes |
+| Typing indicator                 | yes                     | YES (built this pass)               | yes |
+| Read receipts                    | yes (DM only)           | NO (documented gap, matches TG/WA)  | NO |
+| Reactions                        | yes                     | NO (documented gap, matches TG/WA)  | NO |
+| Error-silence (no raw errors to chat)| n/a                 | yes (shared _deliver_local_bridge_personal_reply "ABSOLUTE RULE")| yes |
+
+---
 STEP 1 — SOURCE LOCATIONS
 
 OpenClaw source was found at:
