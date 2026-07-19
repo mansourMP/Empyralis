@@ -1,0 +1,209 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import { Coins } from "lucide-react";
+
+import { useCreditBalance, useCreditUsageHistory, startCreditTopUp, type CreditUsageHistoryItem } from "./credit-balance";
+import { MultiSeriesChart, type ChartSeries } from "./fleet-sparkline";
+
+const TOP_UP_PRESETS_USD = [5, 10, 25];
+
+function dateKey(iso: string | null): string {
+  return (iso || "").slice(0, 10);
+}
+
+function lastNDays(n: number): string[] {
+  const out: string[] = [];
+  const now = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+function dayLabel(key: string): string {
+  const d = new Date(`${key}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return key;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+// Category grouping for the debit side of credit_transactions. "AI chat" is
+// the only real, populated category today (the direct per-turn debit this
+// panel reconnects); Hardware/Media are shown honestly at zero — those
+// surfaces exist in the product but aren't metered into credits yet (see
+// billing_credit_config.py's module docs and the platform's "no fake
+// coming-soon" rule) rather than being omitted or faked.
+function categoryForItem(item: CreditUsageHistoryItem): "AI chat" | "Other" {
+  const source = String(item.source || "").toLowerCase();
+  if (source === "hosted_sage_ai_turn" || source === "hosted_sage_ai") return "AI chat";
+  return "Other";
+}
+
+export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
+  const { balance, loading: balanceLoading, error: balanceError } = useCreditBalance(workspaceId);
+  const { history, loading: historyLoading } = useCreditUsageHistory(workspaceId, 200);
+
+  const [amountUsd, setAmountUsd] = useState<number>(10);
+  const [topUpState, setTopUpState] = useState<"idle" | "starting" | "not_configured" | "error">("idle");
+  const [topUpMessage, setTopUpMessage] = useState<string | null>(null);
+
+  const credits = balance?.credit_balance_credits ?? null;
+  const balanceUsd = balance?.credit_balance_usd ?? null;
+  const plan = (history?.plan as Record<string, unknown> | undefined) || {};
+  const hostedSageAi = (history?.hosted_sage_ai as Record<string, unknown> | undefined) || {};
+  const planLabel = typeof plan.label === "string" ? plan.label : null;
+  const monthlyCreditCap = typeof hostedSageAi.monthly_credit_cap === "number" ? hostedSageAi.monthly_credit_cap : null;
+
+  const debitItems = useMemo(
+    () => (history?.items || []).filter((item) => item.kind === "usage_debit"),
+    [history],
+  );
+
+  const days = useMemo(() => lastNDays(14), []);
+  const dailySeries: ChartSeries[] = useMemo(() => {
+    const byDate = new Map<string, number>();
+    for (const item of debitItems) {
+      const key = dateKey(item.created_at);
+      byDate.set(key, (byDate.get(key) || 0) + Math.abs(item.credits || 0));
+    }
+    return [
+      {
+        key: "credits",
+        color: "var(--text-secondary)",
+        values: days.map((d) => byDate.get(d) || 0),
+      },
+    ];
+  }, [debitItems, days]);
+
+  const categoryTotals = useMemo(() => {
+    const totals = { "AI chat": 0, Hardware: 0, Media: 0 };
+    for (const item of debitItems) {
+      const category = categoryForItem(item);
+      if (category === "AI chat") totals["AI chat"] += Math.abs(item.credits || 0);
+    }
+    return totals;
+  }, [debitItems]);
+
+  const totalUsed14d = useMemo(
+    () => dailySeries[0]?.values.reduce((a, b) => a + b, 0) ?? 0,
+    [dailySeries],
+  );
+  const hasAnyDebit = totalUsed14d > 0;
+
+  const handleTopUp = async () => {
+    setTopUpState("starting");
+    setTopUpMessage(null);
+    const result = await startCreditTopUp(workspaceId, amountUsd);
+    if (result.ok) {
+      window.location.href = result.checkoutUrl;
+      return;
+    }
+    if (result.notConfigured) {
+      setTopUpState("not_configured");
+      return;
+    }
+    setTopUpState("error");
+    setTopUpMessage(result.message);
+  };
+
+  return (
+    <section className="fleet-credits-panel">
+      <div className="fleet-stat-grid">
+        <div className="fleet-stat-card fleet-stat-card--credits">
+          <div className="fleet-stat-card-icon">
+            <Coins size={16} strokeWidth={1.75} />
+          </div>
+          <div>
+            <div className="fleet-stat-value fleet-stat-value--credits">
+              {balanceLoading || credits === null ? "…" : credits.toLocaleString("en-US")}
+            </div>
+            <div className="fleet-stat-label">
+              Credit balance{typeof balanceUsd === "number" ? ` · $${balanceUsd.toFixed(2)}` : ""}
+            </div>
+          </div>
+        </div>
+        <div className="fleet-stat-card">
+          <div className="fleet-stat-value">{planLabel || "—"}</div>
+          <div className="fleet-stat-label">Plan</div>
+        </div>
+        <div className="fleet-stat-card">
+          <div className="fleet-stat-value">
+            {monthlyCreditCap === null ? "—" : monthlyCreditCap.toLocaleString("en-US")}
+          </div>
+          <div className="fleet-stat-label">Monthly allowance (credits)</div>
+        </div>
+      </div>
+
+      {balanceError && <div className="fleet-credits-error">Could not load your credit balance.</div>}
+
+      <div className="fleet-credits-topup">
+        <div className="fleet-credits-topup-amounts" role="group" aria-label="Top-up amount">
+          {TOP_UP_PRESETS_USD.map((preset) => (
+            <button
+              key={preset}
+              type="button"
+              className={`fleet-segmented-btn${amountUsd === preset ? " fleet-segmented-btn--active" : ""}`}
+              onClick={() => setAmountUsd(preset)}
+            >
+              ${preset}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="fleet-btn fleet-btn--mono"
+          disabled={topUpState === "starting"}
+          onClick={() => { void handleTopUp(); }}
+        >
+          {topUpState === "starting" ? "Starting…" : `Top up $${amountUsd}`}
+        </button>
+        {topUpState === "not_configured" && (
+          <span className="fleet-credits-topup-note">
+            Top-up isn't configured yet — the platform owner needs to connect Stripe.
+          </span>
+        )}
+        {topUpState === "error" && topUpMessage && (
+          <span className="fleet-credits-topup-note fleet-credits-topup-note--error">{topUpMessage}</span>
+        )}
+      </div>
+
+      <div className="fleet-usage-chart-block" style={{ marginTop: "var(--space-5)" }}>
+        <div className="fleet-usage-chart-title">Credits used · last 14d</div>
+        {!historyLoading && !hasAnyDebit ? (
+          <div className="fleet-empty" style={{ marginTop: "var(--space-3)" }}>
+            <div className="fleet-empty-title">No credit usage yet</div>
+            <div className="fleet-empty-desc">Credits are used as your agents chat with hosted AI.</div>
+          </div>
+        ) : (
+          <>
+            <MultiSeriesChart series={dailySeries} height={120} />
+            <div className="fleet-usage-chart-axis">
+              <span>{dayLabel(days[0])}</span>
+              <span>{dayLabel(days[days.length - 1])}</span>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="fleet-usage-legend fleet-usage-legend--credits" style={{ marginTop: "var(--space-4)" }}>
+        <div className="fleet-usage-legend-header" aria-hidden>
+          <span>Category</span>
+          <span className="is-right">Credits used · 14d</span>
+        </div>
+        <div className="fleet-usage-legend-row">
+          <span className="fleet-usage-legend-name">AI chat</span>
+          <span className="fleet-agent-cell-right">{categoryTotals["AI chat"].toLocaleString("en-US")}</span>
+        </div>
+        <div className="fleet-usage-legend-row fleet-usage-legend-row--muted">
+          <span className="fleet-usage-legend-name">Hardware</span>
+          <span className="fleet-agent-cell-right">Not metered yet</span>
+        </div>
+        <div className="fleet-usage-legend-row fleet-usage-legend-row--muted">
+          <span className="fleet-usage-legend-name">Media (image / video)</span>
+          <span className="fleet-agent-cell-right">Not metered yet</span>
+        </div>
+      </div>
+    </section>
+  );
+}

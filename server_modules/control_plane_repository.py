@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from server_modules import billing_credit_config
 from server_modules import db as runtime_db
 from server_modules import credit_ledger_contract
 from server_modules import rust_runtime_kernel_client
@@ -38,24 +39,23 @@ def _env_non_negative_float(name: str, fallback: float) -> float:
     return max(0.0, parsed)
 
 
-NEW_ACCOUNT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = _env_non_negative_float(
-    "EMPYRALIS_NEW_ACCOUNT_HOSTED_SAGE_AI_MONTHLY_CAP_USD",
-    0.50,
-)
+# Both constants now live in billing_credit_config.py — the single
+# documented source of truth for the credit economy — and are re-exported
+# here under their historical names for backward compatibility (several
+# modules and tests import them directly off control_plane_repository).
+NEW_ACCOUNT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = billing_credit_config.NEW_ACCOUNT_HOSTED_SAGE_AI_MONTHLY_CAP_USD
 
-# One-time signup credit grant in USD.  0.50 USD × 20,000 credits/USD = 10,000 credits.
-# Overridable via env var EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD.
-NEW_ACCOUNT_SIGNUP_CREDIT_USD = _env_non_negative_float(
-    "EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD",
-    0.50,
-)
+# One-time signup credit grant in USD. Overridable via env var
+# EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD (see billing_credit_config.py).
+NEW_ACCOUNT_SIGNUP_CREDIT_USD = billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD
 
 # Display credits per USD — must match billing_credit_config.HOSTED_SAGE_AI_CREDITS_PER_USD.
-_SIGNUP_CREDITS_PER_USD = 20_000
+_SIGNUP_CREDITS_PER_USD = billing_credit_config.HOSTED_SAGE_AI_CREDITS_PER_USD
 
 
 def _new_workspace_billing_metadata() -> Dict[str, Any]:
     grant_usd = NEW_ACCOUNT_SIGNUP_CREDIT_USD
+    grant_credits = int(round(grant_usd * _SIGNUP_CREDITS_PER_USD))
     return {
         "billing": {
             "plan_id": "personal",
@@ -66,11 +66,11 @@ def _new_workspace_billing_metadata() -> Dict[str, Any]:
                 {
                     "kind": "bonus",
                     "amount_usd": grant_usd,
-                    "credits": int(round(grant_usd * _SIGNUP_CREDITS_PER_USD)),
+                    "credits": grant_credits,
                     "request_id": "",
                     "usage_month": "",
                     "source": "signup_grant",
-                    "label": "10,000 free platform AI credits",
+                    "label": f"{grant_credits:,} free platform AI credits",
                     "created_at": int(time.time()),
                 }
             ] if grant_usd > 0 else [],
@@ -5477,6 +5477,215 @@ async def debit_workspace_credit_balance_for_hosted_usage_atomic(
                 usage_month=clean_usage_month,
                 monthly_cost_usd=monthly_cost_usd,
                 monthly_cap_usd=monthly_cap_usd,
+                credits_per_usd=credits_per_usd,
+            )
+            await connection.execute(
+                """
+                UPDATE workspaces
+                SET metadata = $2::jsonb,
+                    updated_at = NOW()
+                WHERE workspace_id = $1
+                """,
+                clean_workspace_id,
+                _to_json(next_metadata, default={}),
+            )
+    _workspace_lookup_cache_drop(clean_workspace_id)
+    return result
+
+
+# ── Direct per-turn credit debit (2026-07-20 credit-system reconnect) ────
+#
+# The debit function above (_build_workspace_credit_debit_result /
+# debit_workspace_credit_balance_for_hosted_usage_atomic) implements the
+# pre-existing "free monthly $ cap, then draw down the purchased balance
+# for overage" model. It reads its monthly_cost_usd input from
+# workspace_hosted_ai_monthly_cost_ledger — a table real production
+# traffic has never written to (see direct_chat_runtime_service.py's
+# "DORMANT" docstring), so it has been a complete no-op for every real
+# workspace. This reconnect deliberately does NOT start writing to that
+# ledger: doing so would also start feeding
+# entitlements_service.hosted_sage_ai_access_state's pre-existing,
+# separately-tested "cap_reached" HARD STOP (sage_agent_runtime_service.
+# _resolve_cloud_provider raises when the platform's cost cap is
+# exhausted) — a real risk of blocking a live turn that this task
+# explicitly rules out ("never refuse").
+#
+# Instead, the functions below implement an independent, SIMPLER, always
+# non-blocking mechanic: every real hosted-AI turn directly debits its own
+# (margined, legible) credit cost from credit_balance_usd — the same $
+# field the purchase/display code already reads — clamped at zero. It
+# never touches the monthly-cap ledger and therefore can never trip the
+# hard-stop gate above; it can only ever reduce a balance towards (never
+# below) zero and log when it runs short.
+def _build_workspace_credit_turn_debit_result(
+    *,
+    metadata: Dict[str, Any],
+    request_id: str,
+    credits_to_charge: int,
+    floor_usd: float,
+    credits_per_usd: int,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    payload, wrapped = _workspace_admin_defaults_payload(metadata)
+    transactions = _workspace_credit_transactions(payload)
+    if any(str(item.get("request_id") or "").strip() == request_id for item in transactions):
+        # Already recorded for this turn (retry-safe / idempotent).
+        existing_balance = max(0.0, round(_billing_float(payload.get("credit_balance_usd"), 0.0), 6))
+        return _with_workspace_admin_defaults_payload(metadata, payload, wrapped=wrapped), {
+            "ok": True,
+            "credits_owed": max(0, int(credits_to_charge or 0)),
+            "credits_debited": 0,
+            "debited_usd": 0.0,
+            "credit_balance_usd": existing_balance,
+            "insufficient": False,
+            "reason": "already_recorded",
+        }
+
+    # ── Resolve current balance (same admin_defaults-first, billing-
+    #    fallback resolution as the overage debit above) ──
+    admin_has_balance = "credit_balance_usd" in payload
+    admin_balance = max(0.0, round(_billing_float(payload.get("credit_balance_usd"), 0.0), 6))
+    billing_meta = _coerce_dict(_coerce_dict(metadata).get("billing"))
+    billing_balance = max(0.0, round(_billing_float(billing_meta.get("credit_balance_usd"), 0.0), 6))
+    current_balance_usd = admin_balance if admin_has_balance else max(admin_balance, billing_balance)
+
+    # ── Safety-net floor top-up (Part 2's "generous free allowance for
+    #    every workspace, existing + new") — applied at most once per
+    #    workspace, marked by a dedicated transaction source so it never
+    #    re-fires just because usage later brings the balance back down. ──
+    backfilled = False
+    already_backfilled = any(
+        str(item.get("source") or "").strip() == "safety_backfill_grant" for item in transactions
+    )
+    clean_floor_usd = max(0.0, round(_billing_float(floor_usd, 0.0), 6))
+    if not already_backfilled and current_balance_usd < clean_floor_usd:
+        top_up_usd = round(clean_floor_usd - current_balance_usd, 6)
+        transactions.append(
+            {
+                "kind": "bonus",
+                "amount_usd": top_up_usd,
+                "credits": int(round(top_up_usd * max(0, int(credits_per_usd or 0)))),
+                "request_id": "",
+                "usage_month": "",
+                "source": "safety_backfill_grant",
+                "label": "Free credit allowance",
+                "created_at": int(time.time()),
+            }
+        )
+        current_balance_usd = clean_floor_usd
+        backfilled = True
+
+    credits_owed = max(0, int(credits_to_charge or 0))
+    owed_usd = round(credits_owed / max(1, int(credits_per_usd or 0)), 6) if credits_per_usd else 0.0
+    debited_usd = min(current_balance_usd, owed_usd)
+    next_balance_usd = max(0.0, round(current_balance_usd - debited_usd, 6))
+    credits_debited = int(round(debited_usd * max(0, int(credits_per_usd or 0))))
+    insufficient = debited_usd < owed_usd
+
+    if debited_usd > 0:
+        transactions.append(
+            {
+                "kind": "usage_debit",
+                "amount_usd": -debited_usd,
+                "credits": -credits_debited,
+                "request_id": request_id,
+                "usage_month": "",
+                "source": "hosted_sage_ai_turn",
+                "created_at": int(time.time()),
+            }
+        )
+
+    next_payload = {
+        **payload,
+        "credit_balance_usd": next_balance_usd,
+        "credit_transactions": transactions,
+    }
+    return _with_workspace_admin_defaults_payload(metadata, next_payload, wrapped=wrapped), {
+        "ok": True,
+        "credits_owed": credits_owed,
+        "credits_debited": credits_debited,
+        "debited_usd": debited_usd,
+        "credit_balance_usd": next_balance_usd,
+        "insufficient": insufficient,
+        "backfilled": backfilled,
+    }
+
+
+async def debit_workspace_credits_for_turn_atomic(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    request_id: str,
+    credits_to_charge: int,
+    floor_usd: float,
+    credits_per_usd: int,
+) -> Dict[str, Any]:
+    """Directly debit ``credits_to_charge`` credits from a workspace's
+    credit_balance_usd for ONE real turn. Idempotent per request_id.
+    Clamps at zero — NEVER raises for an insufficient balance; the result
+    dict's ``insufficient`` flag tells the caller to log a soft warning.
+    Independent of, and never touches, the separate monthly-cap ledger/
+    entitlement hard-stop gate — see the module comment above."""
+    clean_workspace_id = str(workspace_id or "").strip()
+    clean_tenant_id = str(tenant_id or "").strip()
+    clean_request_id = str(request_id or "").strip()
+    if not clean_workspace_id or not clean_tenant_id or not clean_request_id:
+        return {"ok": False, "credits_debited": 0, "debited_usd": 0.0, "reason": "missing_scope"}
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    row = fallback.execute(
+                        """
+                        SELECT workspace_id, tenant_id, name, workspace_type, metadata_json, created_at, updated_at
+                        FROM workspace_registry
+                        WHERE workspace_id = ?
+                        LIMIT 1
+                        """,
+                        (clean_workspace_id,),
+                    ).fetchone()
+                    existing_record = _local_workspace_record_from_row(row)
+                    if existing_record is None:
+                        return {"ok": False, "credits_debited": 0, "debited_usd": 0.0, "reason": "workspace_not_found"}
+                    if str(existing_record.get("tenant_id") or "").strip() != clean_tenant_id:
+                        return {"ok": False, "credits_debited": 0, "debited_usd": 0.0, "reason": "tenant_mismatch"}
+                    next_metadata, result = _build_workspace_credit_turn_debit_result(
+                        metadata=_coerce_dict(existing_record.get("metadata")),
+                        request_id=clean_request_id,
+                        credits_to_charge=credits_to_charge,
+                        floor_usd=floor_usd,
+                        credits_per_usd=credits_per_usd,
+                    )
+                    _upsert_local_workspace_registry(
+                        fallback,
+                        workspace_id=clean_workspace_id,
+                        tenant_id=clean_tenant_id,
+                        name=str(existing_record.get("name") or "").strip() or clean_workspace_id,
+                        workspace_type=existing_record.get("workspace_type") or "personal",
+                        metadata=next_metadata,
+                        created_at_ts=int(existing_record.get("created_at") or time.time()),
+                    )
+                    fallback.commit()
+            _workspace_lookup_cache_drop(clean_workspace_id)
+            return result
+        async with connection.transaction():
+            row = await connection.fetchrow(
+                """
+                SELECT id, tenant_id, workspace_id, metadata
+                FROM workspaces
+                WHERE workspace_id = $1
+                FOR UPDATE
+                """,
+                clean_workspace_id,
+            )
+            if row is None:
+                return {"ok": False, "credits_debited": 0, "debited_usd": 0.0, "reason": "workspace_not_found"}
+            if str(dict(row).get("tenant_id") or "").strip() != clean_tenant_id:
+                return {"ok": False, "credits_debited": 0, "debited_usd": 0.0, "reason": "tenant_mismatch"}
+            next_metadata, result = _build_workspace_credit_turn_debit_result(
+                metadata=_decode_json_object(dict(row).get("metadata")),
+                request_id=clean_request_id,
+                credits_to_charge=credits_to_charge,
+                floor_usd=floor_usd,
                 credits_per_usd=credits_per_usd,
             )
             await connection.execute(

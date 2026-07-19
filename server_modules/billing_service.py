@@ -452,6 +452,46 @@ def debit_workspace_credit_balance_for_hosted_usage(
     }
 
 
+def debit_workspace_credits_for_turn(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    request_id: str,
+    credits_to_charge: int,
+    floor_usd: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Reconnect point for the live handle_sage_chat pipeline (2026-07-20):
+    debit ``credits_to_charge`` directly from the workspace's
+    credit_balance_usd for one real turn, seeding a generous free floor
+    on first touch. See control_plane_repository.
+    debit_workspace_credits_for_turn_atomic for why this is a separate,
+    always-non-blocking mechanic from the legacy monthly-cap debit above.
+    """
+    clean_workspace_id = str(workspace_id or "").strip()
+    clean_tenant_id = str(tenant_id or "").strip()
+    clean_request_id = str(request_id or "").strip()
+    if not clean_workspace_id or not clean_tenant_id or not clean_request_id:
+        return {"ok": False, "credits_debited": 0, "debited_usd": 0.0, "reason": "missing_scope"}
+    resolved_floor_usd = (
+        billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD if floor_usd is None else float(floor_usd)
+    )
+    return run_async_tool_call(
+        control_plane_repository.debit_workspace_credits_for_turn_atomic(
+            workspace_id=clean_workspace_id,
+            tenant_id=clean_tenant_id,
+            request_id=clean_request_id,
+            credits_to_charge=int(credits_to_charge or 0),
+            floor_usd=resolved_floor_usd,
+            credits_per_usd=HOSTED_SAGE_AI_CREDITS_PER_USD,
+        )
+    ) or {
+        "ok": False,
+        "credits_debited": 0,
+        "debited_usd": 0.0,
+        "reason": "credit_debit_unavailable",
+    }
+
+
 def _stripe_api_request(path: str, form_fields: Dict[str, Any]) -> Dict[str, Any]:
     secret_key = _stripe_secret_key()
     if not secret_key:
@@ -990,8 +1030,15 @@ def _credit_history_transaction_entry(transaction: Dict[str, Any], index: int) -
     amount_usd = _coerce_float(transaction.get("amount_usd"))
     if amount_usd is None:
         amount_usd = round(credits / HOSTED_SAGE_AI_CREDITS_PER_USD, 6) if credits else 0.0
+    source = str(transaction.get("source") or "").strip().lower()
     label = "Bonus for new users" if kind == "bonus" else "Credit purchase" if kind == "purchase" else "Credit adjustment"
-    if kind == "usage_debit":
+    if kind == "bonus" and source == "safety_backfill_grant":
+        label = "Free credit top-up"
+    elif kind == "bonus" and source == "signup_grant":
+        label = "Welcome credit grant"
+    if kind == "usage_debit" and source == "hosted_sage_ai_turn":
+        label = "Sage AI chat"
+    elif kind == "usage_debit":
         label = "Hosted Sage overage"
     return {
         "id": str(transaction.get("id") or transaction.get("request_id") or f"transaction-{index}").strip(),

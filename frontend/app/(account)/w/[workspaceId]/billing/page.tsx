@@ -8,9 +8,12 @@ import { formatNumber, tintKeyForIndex, TINTS } from "@/lib/workspace/fleet/flee
 import { MultiSeriesChart, type ChartSeries } from "@/lib/workspace/fleet/fleet-sparkline";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
+import { CreditsPanel } from "@/lib/workspace/fleet/CreditsPanel";
 
 /**
- * Usage dashboard (U3-I) — a provider-console-style view (Anthropic/OpenAI
+ * Billing page: credit balance + top-up (2026-07-20 credit-system
+ * reconnect — see CreditsPanel.tsx) on top of the pre-existing usage
+ * dashboard (U3-I) below — a provider-console-style view (Anthropic/OpenAI
  * console as reference): daily-bucket charts for cost/tokens/calls, colored
  * one hue per agent, a period selector, and a per-agent legend table.
  *
@@ -176,6 +179,8 @@ export default function UsagePage() {
           ))}
         </div>
       </HeaderAction>
+
+      <CreditsPanel workspaceId={workspaceId} />
 
       {loading && <FleetListSkeleton rows={5} />}
       {!loading && error && <FleetSurfaceError title="Couldn’t load usage" message={error} />}

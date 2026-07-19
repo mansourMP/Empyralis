@@ -474,10 +474,17 @@ class SignupCreditGrantTests(unittest.TestCase):
             {"EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD": "1.00"},
             clear=False,
         ):
-            # Re-import to pick up env var
+            # Re-import to pick up env var. The constant now lives in
+            # billing_credit_config.py (single source of truth) and
+            # control_plane_repository re-exports it at import time, so
+            # both modules must be reloaded — billing_credit_config first
+            # (to recompute from the patched env), then
+            # control_plane_repository (to re-bind the fresh value).
             import importlib
+            import server_modules.billing_credit_config as bcc
             import server_modules.control_plane_repository as cpr
 
+            importlib.reload(bcc)
             importlib.reload(cpr)
 
             try:
@@ -486,9 +493,10 @@ class SignupCreditGrantTests(unittest.TestCase):
                 self.assertEqual(billing["credit_balance_usd"], 1.0)
                 transactions = billing.get("credit_transactions", [])
                 self.assertEqual(transactions[0]["amount_usd"], 1.0)
-                self.assertEqual(transactions[0]["credits"], 20000)
+                self.assertEqual(transactions[0]["credits"], 2000)
             finally:
                 # Restore original
+                importlib.reload(bcc)
                 importlib.reload(cpr)
 
     def test_zero_env_var_disables_grant(self):
@@ -499,8 +507,10 @@ class SignupCreditGrantTests(unittest.TestCase):
             clear=False,
         ):
             import importlib
+            import server_modules.billing_credit_config as bcc
             import server_modules.control_plane_repository as cpr
 
+            importlib.reload(bcc)
             importlib.reload(cpr)
 
             try:
@@ -511,6 +521,7 @@ class SignupCreditGrantTests(unittest.TestCase):
                 # When grant is 0, no transaction should be created
                 self.assertEqual(len(transactions), 0)
             finally:
+                importlib.reload(bcc)
                 importlib.reload(cpr)
 
     def test_workspace_shell_metadata_includes_billing_grant(self):
