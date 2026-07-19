@@ -1741,12 +1741,28 @@ async def create_connector_vault(body: ConnectorCreate):
         elif connector == "linear":
             test = validate_linear_connector(credentials)
             credentials = test.get("credentials") if isinstance(test.get("credentials"), dict) else credentials
+        elif connector == "higgsfield":
+            test = validate_higgsfield_connector(credentials)
+            credentials = test.get("credentials") if isinstance(test.get("credentials"), dict) else credentials
         elif connector == "instagram_business":
             test = validate_instagram_business_connector(credentials)
         elif connector == "irc":
             test = validate_irc_connector(credentials)
         else:
-            raise RuntimeError(f"Unsupported connector '{connector}'")
+            # Generic fallback: ANY connector wired into connection_oauth_
+            # service.OAUTH_PROVIDER_CONFIGS (the 40 net-new Tier-1 DCR
+            # connectors plus zapier/paypal/sentry/attio/cloudflare) works
+            # here with no per-provider elif branch -- validate_generic_
+            # oauth_connector decides MCP-scoped vs. classic-bearer
+            # validation the same data-driven way every named branch above
+            # does. Only a connector absent from OAUTH_PROVIDER_CONFIGS
+            # entirely still hits "Unsupported connector".
+            from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS
+            if connector in OAUTH_PROVIDER_CONFIGS:
+                test = validate_generic_oauth_connector(connector, credentials)
+                credentials = test.get("credentials") if isinstance(test.get("credentials"), dict) else credentials
+            else:
+                raise RuntimeError(f"Unsupported connector '{connector}'")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1908,6 +1924,7 @@ async def create_connector_vault(body: ConnectorCreate):
         "xero",
         "freshbooks",
         "vercel",
+        "higgsfield",
     } and isinstance(test, dict):
         profile = test.get("profile") if isinstance(test.get("profile"), dict) else {}
         auth_mode = str(test.get("auth_mode") or credentials.get("auth_mode") or "").strip().lower()
@@ -2329,6 +2346,21 @@ async def test_connector_vault(credential_id: str, workspace_id: Optional[str] =
         except Exception as exc:
             _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
             raise HTTPException(status_code=400, detail=str(exc))
+    elif connector == "higgsfield":
+        # Higgsfield has no classic profile/userinfo endpoint to probe —
+        # its MCP OAuth discovery document (mcp.higgsfield.ai/.well-known/
+        # oauth-authorization-server) only advertises authorization_
+        # endpoint, token_endpoint, and registration_endpoint (checked
+        # 2026-07-18). validate_higgsfield_connector proves the token the
+        # same way every other DCR/MCP-scoped connector above now does: a
+        # live MCP initialize + tools/list handshake against
+        # APP_MCP_SERVER_MAP["higgsfield"] — see validate_mcp_scoped_oauth_
+        # connector in connector_validators.py.
+        try:
+            test_result = validate_higgsfield_connector(credentials)
+        except Exception as exc:
+            _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
+            raise HTTPException(status_code=400, detail=str(exc))
     elif connector == "s3":
         try:
             test_result = validate_s3_connector(credentials)
@@ -2360,7 +2392,17 @@ async def test_connector_vault(credential_id: str, workspace_id: Optional[str] =
             _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
             raise HTTPException(status_code=400, detail=str(exc))
     else:
-        raise HTTPException(status_code=400, detail=f"Unsupported connector '{connector}'")
+        # Generic fallback -- same reasoning as create_connector_vault's
+        # final else branch above: any connector wired into OAUTH_PROVIDER_
+        # CONFIGS re-validates here with no per-provider elif branch needed.
+        from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS
+        if connector not in OAUTH_PROVIDER_CONFIGS:
+            raise HTTPException(status_code=400, detail=f"Unsupported connector '{connector}'")
+        try:
+            test_result = validate_generic_oauth_connector(connector, credentials)
+        except Exception as exc:
+            _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
+            raise HTTPException(status_code=400, detail=str(exc))
 
     _persist_capability_verification(test_result)
     return test_result

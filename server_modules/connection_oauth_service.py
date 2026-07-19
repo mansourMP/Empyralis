@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict
@@ -44,9 +45,56 @@ class OAuthProviderConfig:
     include_redirect_uri_in_token_body: bool = True
     token_grant_type: str | None = "authorization_code"
     token_request_format: str = "form"
+    # RFC 7591 Dynamic Client Registration endpoint. None for every provider
+    # below that has no live, confirmed self-register endpoint for its MCP
+    # OAuth app (confirmed via each provider's own /.well-known/oauth-
+    # authorization-server or oauth-protected-resource — see the comment
+    # above each entry below for the discovery evidence trail): those
+    # providers require the workspace owner to pre-register a static OAuth
+    # app in the provider's developer console and supply client_id/
+    # client_secret via env_vars. Every other provider below (as of the
+    # 2026-07-19 connector sweep: Higgsfield, Stripe, Linear, Notion, Asana,
+    # Canva, Airtable, ClickUp, Dropbox, Figma, Todoist, Calendly, Jira,
+    # Confluence, Webflow, monday.com, GitLab, Miro, Intercom, Square,
+    # Typeform, Vercel, Zapier, PayPal, Sentry, Attio, and Cloudflare) has no
+    # such console for its MCP OAuth app, so a client_id can only be obtained
+    # by self-registering here. See _resolve_oauth_client().
+    registration_endpoint: str | None = None
+    # Whether the dynamic-registration fallback additionally requires the
+    # owner to opt in with a {PROVIDER}_OAUTH_ENABLED / _MCP_ENABLED env flag
+    # before it will self-register (see _dynamic_registration_enabled()).
+    # True (default) preserves Higgsfield's original behavior: DCR exists but
+    # stays inert, and oauth_provider_configured() stays False, until the
+    # owner explicitly turns it on. False means DCR engages the moment a
+    # request needs a client and no static client_id/secret is set — no flag,
+    # no console, genuinely zero-config — and oauth_provider_configured()
+    # reports True out of the box. Every other DCR-capable provider listed
+    # above uses False: mainstream SaaS with a live, confirmed self-register
+    # endpoint and nothing an operator could "finish configuring" manually
+    # even if they wanted to, so gating them behind a flag would only ever
+    # produce a false "not configured" reading.
+    dynamic_registration_opt_in_required: bool = True
+    # RFC 7591 token_endpoint_auth_method requested when self-registering
+    # (see _register_dynamic_client). Must be a value the provider's own
+    # token_endpoint_auth_methods_supported actually advertises, since this
+    # also determines how _exchange_standard_oauth/_exchange_notion/
+    # _exchange_linear must authenticate at the token endpoint afterward
+    # (token_auth / include_client_secret_in_token_body below). Defaults to
+    # "client_secret_post", the shape already used by every provider that
+    # doesn't override it.
+    dynamic_registration_token_auth_method: str = "client_secret_post"
 
 
 OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
+    # Google Workspace: checked live 2026-07-19 for DCR as part of the wider
+    # connector sweep. All 3 MCP hosts (gmailmcp/calendarmcp/drivemcp.
+    # googleapis.com) declare authorization_servers=["https://accounts.google.
+    # com/"] via their own oauth-protected-resource discovery -- same
+    # classic issuer already configured below. GET https://accounts.google.
+    # com/.well-known/oauth-authorization-server has no registration_endpoint
+    # field at all -- Google has no public self-registration API; an OAuth
+    # client must be created in Google Cloud Console. Stays classic-only, no
+    # config changes.
     "google_workspace": OAuthProviderConfig(
         label="Google Workspace",
         env_vars={
@@ -68,6 +116,13 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         profile_probe="https://www.googleapis.com/oauth2/v3/userinfo",
         auth_params={"access_type": "offline", "prompt": "consent select_account"},
     ),
+    # GitHub: checked live 2026-07-19. api.githubcopilot.com/mcp/'s own
+    # oauth-protected-resource doc points authorization_servers at
+    # https://github.com/login/oauth, whose oauth-authorization-server
+    # discovery has no registration_endpoint field -- OAuth Apps/GitHub Apps
+    # still require manual registration in the GitHub UI. Stays classic-only,
+    # no config changes. (Also requires a Copilot/Copilot Enterprise seat,
+    # per the APP_MCP_SERVER_MAP comment below, independent of this finding.)
     "github": OAuthProviderConfig(
         label="GitHub",
         env_vars={
@@ -82,6 +137,17 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         profile_probe="https://api.github.com/user",
         include_response_type=False,
     ),
+    # Microsoft 365: checked live 2026-07-19. APP_MCP_SERVER_MAP's
+    # "microsoft-365" entry has endpoint=None -- Agent 365 MCP is still a
+    # tenant-specific Frontier preview with no single public URL, so there is
+    # nothing to run DCR discovery against on the MCP side at all. Checked
+    # the identity platform directly anyway: login.microsoftonline.com has no
+    # oauth-protected-resource or oauth-authorization-server document on any
+    # of the common/organizations/consumers tenants (all 404); the only live
+    # discovery doc is .../v2.0/.well-known/openid-configuration, which has
+    # no registration_endpoint field. Microsoft app registration requires the
+    # Azure Portal or an authenticated Graph API call, not RFC 7591 DCR.
+    # Stays classic-only, no config changes.
     "microsoft_365": OAuthProviderConfig(
         label="Microsoft 365",
         env_vars={
@@ -103,6 +169,15 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         profile_probe="https://graph.microsoft.com/v1.0/me",
         auth_params={"prompt": "select_account"},
     ),
+    # Slack: checked live 2026-07-19. mcp.slack.com's own oauth-authorization-
+    # server discovery has no registration_endpoint. Bonus finding, not acted
+    # on: the MCP server's authorize/token endpoints
+    # (slack.com/oauth/v2_user/authorize, slack.com/api/oauth.v2.user.access)
+    # are a different, user-token "v2_user" pair from the classic bot-token
+    # "v2" pair already configured below -- switching to it would change what
+    # the OAuth actually authorizes (user token vs. bot token), which is a
+    # product decision beyond a DCR sweep, so left untouched. Stays
+    # classic-only, no config changes.
     "slack": OAuthProviderConfig(
         label="Slack",
         env_vars={
@@ -118,6 +193,21 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         scope_separator=",",
         slack_authorize_helper=True,
     ),
+    # Notion: official remote MCP server (mcp.notion.com) — a different OAuth
+    # app from the classic api.notion.com integrations OAuth this config
+    # used to point at. Verified live 2026-07-19 via GET
+    # https://mcp.notion.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../authorize", token_endpoint=".../token",
+    # registration_endpoint=".../register"; code_challenge_methods_supported
+    # includes "S256" (auth_method switched to pkce to match);
+    # token_endpoint_auth_methods_supported includes "client_secret_basic"
+    # (matches this file's existing _exchange_notion, which already
+    # authenticates with a Basic header — kept as the DCR request shape too).
+    # Neither the authorization-server nor protected-resource discovery
+    # document advertises scopes_supported, matching Notion's classic
+    # all-or-nothing workspace grant, so scopes stays empty. auth_params
+    # owner=user was a classic api.notion.com-only query param with no
+    # meaning for mcp.notion.com's authorize endpoint — dropped.
     "notion": OAuthProviderConfig(
         label="Notion",
         env_vars={
@@ -125,13 +215,33 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("NOTION_OAUTH_CLIENT_SECRET", "NOTION_CLIENT_SECRET"),
         },
         scopes=(),
-        auth_url="https://api.notion.com/v1/oauth/authorize",
-        token_url="https://api.notion.com/v1/oauth/token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.notion.com/authorize",
+        token_url="https://mcp.notion.com/token",
+        auth_method="pkce",
         token_parser="custom",
         profile_probe="https://api.notion.com/v1/users/me",
-        auth_params={"owner": "user"},
+        registration_endpoint="https://mcp.notion.com/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
     ),
+    # Linear: official remote MCP server (mcp.linear.app) — a different OAuth
+    # app from the classic linear.app app-authorize OAuth this config used to
+    # point at. Verified live 2026-07-19 via GET
+    # https://mcp.linear.app/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../authorize", token_endpoint=".../token",
+    # registration_endpoint=".../register", code_challenge_methods_supported
+    # = ["S256"] (auth_method switched to pkce to match);
+    # token_endpoint_auth_methods_supported includes "client_secret_post"
+    # (matches this file's existing _exchange_linear, which already posts
+    # client_id+client_secret in the form body). scopes_supported at the
+    # protected-resource (mcp.linear.app/mcp) discovery is exactly
+    # ["read","write"] — matches the scopes already configured below.
+    # scope_separator switched from "," (a classic linear.app quirk) to the
+    # RFC 6749 default space separator to match mcp.linear.app's standard
+    # OAuth 2.1-shaped discovery document (same style as Notion/Asana/
+    # Canva's) — unverified beyond that pattern match, since a live
+    # authorize+consent round trip needs a browser and is outside what a
+    # registration-only smoke test can confirm.
     "linear": OAuthProviderConfig(
         label="Linear",
         env_vars={
@@ -139,13 +249,32 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("LINEAR_OAUTH_CLIENT_SECRET", "LINEAR_CLIENT_SECRET"),
         },
         scopes=("read", "write"),
-        auth_url="https://linear.app/oauth/authorize",
-        token_url="https://api.linear.app/oauth/token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.linear.app/authorize",
+        token_url="https://mcp.linear.app/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.linear.app/graphql",
-        scope_separator=",",
+        registration_endpoint="https://mcp.linear.app/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Dropbox: checked live 2026-07-19. GET https://www.dropbox.com/.well-
+    # known/oauth-authorization-server (the issuer named by mcp.dropbox.com's
+    # own oauth-protected-resource discovery) -> authorization_endpoint and
+    # token_endpoint are IDENTICAL to the classic auth_url/token_url already
+    # configured below (this is the SAME OAuth app gaining DCR, not a
+    # separate MCP-specific app like Notion/Linear/Stripe were) --
+    # registration_endpoint="https://www.dropbox.com/oauth2/register".
+    # scopes_supported is a 38-entry superset that includes all 5 scopes
+    # already configured -- no change needed. code_challenge_methods_
+    # supported includes "S256" (auth_method switched to pkce to match).
+    # token_endpoint_auth_methods_supported includes "client_secret_post"
+    # (this config's default token_auth, unchanged). Because auth_method is
+    # now pkce, _exchange_dropbox (the dedicated exchange function below,
+    # kept for its account_id capture) was updated to accept and forward
+    # code_verifier, and to resolve its client via _resolve_oauth_client
+    # instead of ensure_oauth_configured -- the same fix Notion/Linear
+    # needed (see the "Notion and Linear token exchange" comment block near
+    # complete_oauth_callback).
     "dropbox": OAuthProviderConfig(
         label="Dropbox",
         env_vars={
@@ -155,10 +284,12 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         scopes=("files.metadata.read", "files.content.read", "files.content.write", "sharing.read", "sharing.write"),
         auth_url="https://www.dropbox.com/oauth2/authorize",
         token_url="https://api.dropboxapi.com/oauth2/token",
-        auth_method="authorization_code",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.dropboxapi.com/2/users/get_current_account",
         auth_params={"token_access_type": "offline"},
+        registration_endpoint="https://www.dropbox.com/oauth2/register",
+        dynamic_registration_opt_in_required=False,
     ),
     "discord": OAuthProviderConfig(
         label="Discord",
@@ -174,22 +305,65 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         profile_probe="https://discord.com/api/users/@me",
         auth_params={"permissions": "274877908992"},
     ),
+    # Figma: official MCP OAuth app, checked live 2026-07-19. GET
+    # https://api.figma.com/.well-known/oauth-authorization-server (the
+    # issuer named by mcp.figma.com's own oauth-protected-resource
+    # discovery; byte-identical when fetched directly from mcp.figma.com
+    # too) -> authorization_endpoint="https://www.figma.com/oauth/mcp" (a
+    # dedicated MCP-specific path, NOT the classic
+    # "https://www.figma.com/oauth" this config used to point at),
+    # token_endpoint="https://api.figma.com/v1/oauth/token" (same as
+    # before), registration_endpoint="https://api.figma.com/v1/oauth/mcp/
+    # register". scopes_supported=["mcp:connect"] -- one coarse scope,
+    # replacing the classic granular scopes (current_user:read/file_metadata:
+    # read/file_content:read/file_comments:read), which don't exist in the
+    # new app's model. code_challenge_methods_supported=["S256"] (auth_method
+    # switched to pkce to match). token_endpoint_auth_methods_supported
+    # includes "client_secret_basic", matching this config's existing
+    # token_auth="basic" shape (Authorization: Basic header) -- DCR requests
+    # "client_secret_basic" to match what the exchange code actually sends,
+    # not merely because it's supported (client_secret_post is also
+    # supported, but token_auth="basic" here predates this pass and wasn't
+    # touched). profile_probe left pointing at the classic REST API
+    # (api.figma.com/v1/me) on the same assumption already used for Notion/
+    # Asana/Airtable: an MCP-app-issued token authorizes the same Figma
+    # account and should remain a valid bearer token against the classic
+    # REST API too -- unverified beyond that pattern match.
     "figma": OAuthProviderConfig(
         label="Figma",
         env_vars={
             "client_id": ("FIGMA_CLIENT_ID",),
             "client_secret": ("FIGMA_CLIENT_SECRET",),
         },
-        scopes=("current_user:read", "file_metadata:read", "file_content:read", "file_comments:read"),
-        auth_url="https://www.figma.com/oauth",
+        scopes=("mcp:connect",),
+        auth_url="https://www.figma.com/oauth/mcp",
         token_url="https://api.figma.com/v1/oauth/token",
-        auth_method="authorization_code",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.figma.com/v1/me",
         token_auth="basic",
         include_client_id_in_token_body=False,
         include_client_secret_in_token_body=False,
+        registration_endpoint="https://api.figma.com/v1/oauth/mcp/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
     ),
+    # Todoist: checked live 2026-07-19. ai.todoist.net's own oauth-protected-
+    # resource discovery names issuer "https://todoist.com" (the bare apex,
+    # NOT app.todoist.com -- that classic host has no discovery documents at
+    # all, it's a UI-only front end). GET https://todoist.com/.well-known/
+    # oauth-authorization-server -> authorization_endpoint="https://todoist.
+    # com/oauth/authorize" (auth_url corrected to this from
+    # app.todoist.com/oauth/authorize), token_endpoint="https://todoist.com/
+    # oauth/access_token" (already matched, no change),
+    # registration_endpoint="https://todoist.com/oauth/register" --
+    # confirmed live via an actual RFC 7591 POST that got back a correct
+    # invalid_client_metadata 400 (missing fields), proving the endpoint is
+    # real. scopes_supported is a 13-entry list that includes the existing
+    # "data:read_write" scope -- no change needed. code_challenge_methods_
+    # supported=["S256"] (auth_method switched to pkce to match).
+    # token_endpoint_auth_methods_supported includes "client_secret_post"
+    # (this config's default token_auth, unchanged).
     "todoist": OAuthProviderConfig(
         label="Todoist",
         env_vars={
@@ -197,12 +371,29 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("TODOIST_CLIENT_SECRET",),
         },
         scopes=("data:read_write",),
-        auth_url="https://app.todoist.com/oauth/authorize",
+        auth_url="https://todoist.com/oauth/authorize",
         token_url="https://todoist.com/oauth/access_token",
-        auth_method="authorization_code",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.todoist.com/api/v1/projects?limit=1",
+        registration_endpoint="https://todoist.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Airtable: official remote MCP server (mcp.airtable.com), but its OAuth
+    # app lives at the SAME host as before. Verified live 2026-07-19 via GET
+    # https://airtable.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint / token_endpoint / registration_endpoint exactly
+    # match this config's existing auth_url/token_url — no change needed
+    # there. Cross-checked against
+    # https://mcp.airtable.com/.well-known/oauth-protected-resource, which
+    # declares authorization_servers=["https://airtable.com/oauth2/v1"] (the
+    # SAME issuer) and the same data.records:*/schema.bases:*/etc scope
+    # namespace already configured below — confirms an Airtable OAuth token
+    # is a genuine general-purpose API token, not narrowly MCP-scoped, so the
+    # profile_probe below stays valid too. token_endpoint_auth_methods_
+    # supported is ["client_secret_basic","none"] (no "client_secret_post") —
+    # matches this config's existing token_auth="basic"; DCR requests
+    # "client_secret_basic" to match.
     "airtable": OAuthProviderConfig(
         label="Airtable",
         env_vars={
@@ -218,7 +409,23 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_auth="basic",
         include_client_id_in_token_body=True,
         include_client_secret_in_token_body=False,
+        registration_endpoint="https://airtable.com/oauth2/v1/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
     ),
+    # Canva: official remote MCP server (mcp.canva.com) — a different OAuth
+    # app from the classic www.canva.com Connect API OAuth this config used
+    # to point at. Verified live 2026-07-19 via GET
+    # https://mcp.canva.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../authorize", token_endpoint=".../token",
+    # registration_endpoint=".../register";
+    # token_endpoint_auth_methods_supported includes "client_secret_basic"
+    # (matches this config's existing token_auth="basic" — DCR requests the
+    # same). scopes_supported isn't declared at the authorization-server
+    # level, but the protected-resource discovery
+    # (mcp.canva.com/.well-known/oauth-protected-resource) lists a full scope
+    # catalog that the 5 scopes already configured below are all real,
+    # unchanged members of — no change needed there.
     "canva": OAuthProviderConfig(
         label="Canva",
         env_vars={
@@ -226,28 +433,52 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("CANVA_CLIENT_SECRET",),
         },
         scopes=("profile:read", "design:meta:read", "design:content:read", "folder:read", "asset:read"),
-        auth_url="https://www.canva.com/api/oauth/authorize",
-        token_url="https://api.canva.com/rest/v1/oauth/token",
+        auth_url="https://mcp.canva.com/authorize",
+        token_url="https://mcp.canva.com/token",
         auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.canva.com/rest/v1/users/me/profile",
         token_auth="basic",
         include_client_id_in_token_body=False,
         include_client_secret_in_token_body=False,
+        registration_endpoint="https://mcp.canva.com/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
     ),
+    # Asana: official remote MCP server (mcp.asana.com) — a different OAuth
+    # app from the classic app.asana.com OAuth this config used to point at.
+    # Verified live 2026-07-19 via GET
+    # https://mcp.asana.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../authorize", token_endpoint=".../token",
+    # registration_endpoint=".../register";
+    # token_endpoint_auth_methods_supported includes "client_secret_post"
+    # (this config's default token_auth, unchanged). scopes: the classic
+    # fine-grained tasks:read/tasks:write/etc scopes this config previously
+    # requested do NOT exist in the new server's model — GET
+    # https://mcp.asana.com/.well-known/oauth-protected-resource declares
+    # scopes_supported=["default"] only, so scopes is corrected to match.
     "asana": OAuthProviderConfig(
         label="Asana",
         env_vars={
             "client_id": ("ASANA_CLIENT_ID",),
             "client_secret": ("ASANA_CLIENT_SECRET",),
         },
-        scopes=("tasks:read", "tasks:write", "projects:read", "users:read", "workspaces:read"),
-        auth_url="https://app.asana.com/-/oauth_authorize",
-        token_url="https://app.asana.com/-/oauth_token",
+        scopes=("default",),
+        auth_url="https://mcp.asana.com/authorize",
+        token_url="https://mcp.asana.com/token",
         auth_method="pkce",
         token_parser="standard",
         profile_probe="https://app.asana.com/api/1.0/users/me",
+        registration_endpoint="https://mcp.asana.com/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # HubSpot: checked live 2026-07-19. mcp.hubspot.com publishes a complete,
+    # dedicated oauth-authorization-server document (authorize/token
+    # endpoints differ from the classic app below: mcp.hubspot.com/oauth/
+    # authorize/user + mcp.hubspot.com/oauth/v3/token vs. classic
+    # app.hubspot.com/oauth/authorize + api.hubapi.com/oauth/v1/token) but
+    # has no registration_endpoint field -- neither does the classic host.
+    # Stays classic-only, no config changes.
     "hubspot": OAuthProviderConfig(
         label="HubSpot",
         env_vars={
@@ -267,6 +498,18 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://api.hubapi.com/crm/v3/objects/contacts?limit=1",
     ),
+    # Zoom: the one provider in this DCR pass that stays static-only.
+    # Verified live 2026-07-19 via GET
+    # https://zoom.us/.well-known/oauth-authorization-server (also mirrored
+    # at mcp.zoom.us/.well-known/oauth-authorization-server) -> no
+    # registration_endpoint field at all, only authorization_endpoint,
+    # token_endpoint, and token_endpoint_auth_methods_supported=
+    # ["client_secret_basic"] — Zoom has no self-registration API for this
+    # app, so a workspace owner must still pre-register a static OAuth app
+    # in the Zoom developer console (marketplace.zoom.us) and supply
+    # ZOOM_CLIENT_ID/ZOOM_CLIENT_SECRET via env vars, same as every provider
+    # below this point. auth_url/token_url already match the verified
+    # discovery exactly — no change.
     "zoom": OAuthProviderConfig(
         label="Zoom",
         env_vars={
@@ -283,35 +526,105 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         include_client_id_in_token_body=False,
         include_client_secret_in_token_body=False,
     ),
+    # Calendly: checked live 2026-07-19. mcp.calendly.com's own oauth-
+    # protected-resource discovery names issuer "https://calendly.com/" (the
+    # bare apex, NOT auth.calendly.com -- that classic host has no discovery
+    # documents at all, all three well-known paths 404). GET https://
+    # calendly.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint="https://calendly.com/oauth/authorize",
+    # token_endpoint="https://calendly.com/oauth/token",
+    # registration_endpoint="https://calendly.com/oauth/register" --
+    # confirmed live via an actual RFC 7591 POST that got back a correct
+    # invalid_client_metadata 400 (missing fields). scopes_supported at the
+    # protected-resource level is exactly ["mcp:scheduling:read",
+    # "mcp:scheduling:write"] -- populated here since this config previously
+    # requested no scopes at all, and the MCP resource specifically gates its
+    # tools behind these two. token_endpoint_auth_methods_supported=["none"]
+    # only -- no client secret exists, so include_client_secret_in_token_body
+    # is turned off and the DCR request asks for "none" instead of the
+    # default "client_secret_post" (same shape as Stripe/ClickUp).
+    # code_challenge_methods_supported=["S256"] -- already auth_method=
+    # "pkce" here, no change needed.
     "calendly": OAuthProviderConfig(
         label="Calendly",
         env_vars={
             "client_id": ("CALENDLY_CLIENT_ID",),
             "client_secret": ("CALENDLY_CLIENT_SECRET",),
         },
-        scopes=(),
-        auth_url="https://auth.calendly.com/oauth/authorize",
-        token_url="https://auth.calendly.com/oauth/token",
+        scopes=("mcp:scheduling:read", "mcp:scheduling:write"),
+        auth_url="https://calendly.com/oauth/authorize",
+        token_url="https://calendly.com/oauth/token",
         auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.calendly.com/users/me",
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://calendly.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
     ),
+    # ClickUp: official remote MCP server (mcp.clickup.com) — a different
+    # OAuth app from the classic app.clickup.com "API" authorize page this
+    # config used to point at. Verified live 2026-07-19 via GET
+    # https://mcp.clickup.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint=".../oauth/authorize",
+    # token_endpoint=".../oauth/token",
+    # registration_endpoint=".../oauth/register",
+    # scopes_supported=["read","write"],
+    # code_challenge_methods_supported=["S256"] (auth_method switched to
+    # pkce to match), token_endpoint_auth_methods_supported=["none"] only —
+    # no client secret exists for this app, so include_client_secret_in_
+    # token_body is turned off and the DCR request asks for "none" instead
+    # of the default "client_secret_post". The classic config's
+    # include_response_type=False / include_redirect_uri_in_token_body=False
+    # / token_grant_type=None overrides were app.clickup.com-specific
+    # omissions; the new server's response_types_supported=["code"] and
+    # grant_types_supported=["authorization_code"] expect the standard
+    # parameters, so those overrides are dropped back to the field defaults.
     "clickup": OAuthProviderConfig(
         label="ClickUp",
         env_vars={
             "client_id": ("CLICKUP_CLIENT_ID",),
             "client_secret": ("CLICKUP_CLIENT_SECRET",),
         },
-        scopes=(),
-        auth_url="https://app.clickup.com/api",
-        token_url="https://api.clickup.com/api/v2/oauth/token",
-        auth_method="authorization_code",
+        scopes=("read", "write"),
+        auth_url="https://mcp.clickup.com/oauth/authorize",
+        token_url="https://mcp.clickup.com/oauth/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.clickup.com/api/v2/user",
-        include_response_type=False,
-        include_redirect_uri_in_token_body=False,
-        token_grant_type=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://mcp.clickup.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
     ),
+    # Jira: checked live 2026-07-19. GET https://mcp.atlassian.com/.well-
+    # known/oauth-authorization-server resolves directly to a complete,
+    # terminal AS document for a COMPLETELY SEPARATE OAuth app from the
+    # classic auth.atlassian.com Auth0 flow this config used to point at
+    # entirely: issuer/authorization_endpoint="https://mcp.atlassian.com/v1/
+    # authorize", token_endpoint="https://cf.mcp.atlassian.com/v1/token",
+    # registration_endpoint="https://cf.mcp.atlassian.com/v1/register" --
+    # confirmed live via an actual RFC 7591 POST that got back a correct
+    # invalid_client_metadata 400 ("At least one redirect URI is required").
+    # Because this new app is not Auth0-backed, the classic auth_params
+    # (audience/prompt, both Auth0-specific) and token_request_format="json"
+    # (a classic-auth.atlassian.com-specific body-encoding quirk) are dropped
+    # back to the field defaults, matching the ClickUp precedent of shedding
+    # classic-app-specific overrides when the MCP app turns out to expect
+    # standard OAuth 2.1 parameters. scopes_supported isn't declared at this
+    # AS -- existing scopes kept as best-effort, unverified against the new
+    # app. code_challenge_methods_supported includes "S256" (auth_method
+    # switched to pkce to match); token_endpoint_auth_methods_supported
+    # includes "client_secret_post" (default, unchanged).
+    # IMPORTANT CAVEAT (unverified, not just under-tested): a third-party
+    # Atlassian community-forum post (not Atlassian's own docs) claims
+    # Atlassian's Remote MCP Beta rejects non-preapproved client_ids at the
+    # authorize/consent step even though registration itself succeeds --
+    # i.e. DCR may complete and still dead-end before a token is ever
+    # issued. Registration was independently confirmed live and working;
+    # the authorize+consent step was NOT completable by an automated check
+    # (needs an interactive human login). Smoke-test a real end-to-end
+    # connect before relying on this in production.
     "jira": OAuthProviderConfig(
         label="Jira",
         env_vars={
@@ -319,29 +632,64 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("ATLASSIAN_CLIENT_SECRET", "JIRA_CLIENT_SECRET"),
         },
         scopes=("read:me", "read:jira-user", "read:jira-work", "write:jira-work", "offline_access"),
-        auth_url="https://auth.atlassian.com/authorize",
-        token_url="https://auth.atlassian.com/oauth/token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.atlassian.com/v1/authorize",
+        token_url="https://cf.mcp.atlassian.com/v1/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.atlassian.com/me",
-        auth_params={"audience": "api.atlassian.com", "prompt": "consent"},
-        token_request_format="json",
+        registration_endpoint="https://cf.mcp.atlassian.com/v1/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Stripe: official remote MCP server (mcp.stripe.com), authenticated via
+    # a SEPARATE OAuth app at access.stripe.com/mcp — not the classic Stripe
+    # Connect OAuth (connect.stripe.com) this config used to point at (Stripe
+    # Connect authorizes a *merchant's* Stripe account into a platform;
+    # this app authorizes our own agent to call Stripe's MCP tools — a
+    # different product with a different app). Verified live 2026-07-19 via
+    # GET https://access.stripe.com/.well-known/oauth-authorization-server/mcp
+    # (a path-suffixed RFC 8414 discovery URL — the domain-root well-known
+    # path 404s for Stripe; also mirrored verbatim at
+    # https://mcp.stripe.com/.well-known/oauth-authorization-server) ->
+    # authorization_endpoint="https://access.stripe.com/mcp/oauth2/authorize",
+    # token_endpoint=".../mcp/oauth2/token",
+    # registration_endpoint=".../mcp/oauth2/register",
+    # scopes_supported=["mcp"], code_challenge_methods_supported=["S256"]
+    # (auth_method switched to pkce to match),
+    # token_endpoint_auth_methods_supported=["none"] only — no client secret
+    # exists, so include_client_secret_in_token_body is turned off and the
+    # DCR request asks for "none" instead of the default "client_secret_
+    # post". The classic Connect-specific include_client_id_in_token_body=
+    # False / include_redirect_uri_in_token_body=False overrides are dropped
+    # back to the field defaults (RFC 6749 §3.2.1 requires client_id in the
+    # body for a "none"-auth public client; redirect_uri is standard once it
+    # was included in the authorize request, which it is here).
     "stripe": OAuthProviderConfig(
         label="Stripe",
         env_vars={
             "client_id": ("STRIPE_CLIENT_ID",),
             "client_secret": ("STRIPE_CLIENT_SECRET", "STRIPE_SECRET_KEY"),
         },
-        scopes=("read_write",),
-        auth_url="https://connect.stripe.com/oauth/authorize",
-        token_url="https://connect.stripe.com/oauth/token",
-        auth_method="authorization_code",
+        scopes=("mcp",),
+        auth_url="https://access.stripe.com/mcp/oauth2/authorize",
+        token_url="https://access.stripe.com/mcp/oauth2/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.stripe.com/v1/account",
-        include_client_id_in_token_body=False,
-        include_redirect_uri_in_token_body=False,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://access.stripe.com/mcp/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
     ),
+    # Salesforce: checked live 2026-07-19. The MCP-resource discovery chain
+    # (api.salesforce.com/.well-known/oauth-protected-resource/platform/mcp/
+    # v1/platform/ -> its named authorization-server document) resolves to
+    # issuer login.salesforce.com -- the SAME host already configured below
+    # -- with no registration_endpoint field. A registration_endpoint DOES
+    # exist at login.salesforce.com/services/oauth2/register (found only via
+    # the separate, OIDC-only discovery doc, not the MCP-relevant chain), but
+    # an unauthenticated POST to it returns 401 invalid_client -- it demands
+    # pre-existing client credentials just to respond, which is not open/
+    # anonymous RFC 7591 registration. Stays classic-only, no config changes.
     "salesforce": OAuthProviderConfig(
         label="Salesforce",
         env_vars={
@@ -355,6 +703,21 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://login.salesforce.com/services/oauth2/userinfo",
     ),
+    # Webflow: official MCP OAuth app, checked live 2026-07-19. GET https://
+    # mcp.webflow.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint="https://mcp.webflow.com/oauth/authorize",
+    # token_endpoint="https://mcp.webflow.com/oauth/token",
+    # registration_endpoint="https://mcp.webflow.com/oauth/register" --
+    # confirmed live (GET returns 405 Method Not Allowed, i.e. it exists and
+    # only accepts POST). A wholly separate app from the classic webflow.com/
+    # api.webflow.com pair (neither has any discovery document at all).
+    # scopes_supported isn't declared anywhere reachable -- existing scopes
+    # kept as best-effort, unverified against the new app. code_challenge_
+    # methods_supported includes "S256" (auth_method switched to pkce to
+    # match). token_endpoint_auth_methods_supported includes
+    # "client_secret_post" (default, unchanged). profile_probe left pointing
+    # at the classic REST API on the same unverified-but-consistent
+    # assumption used for Figma/Notion/Asana/Airtable.
     "webflow": OAuthProviderConfig(
         label="Webflow",
         env_vars={
@@ -362,12 +725,34 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("WEBFLOW_CLIENT_SECRET",),
         },
         scopes=("sites:read", "pages:read", "cms:read", "assets:read", "forms:read"),
-        auth_url="https://webflow.com/oauth/authorize",
-        token_url="https://api.webflow.com/oauth/access_token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.webflow.com/oauth/authorize",
+        token_url="https://mcp.webflow.com/oauth/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.webflow.com/v2/token/authorized_by",
+        registration_endpoint="https://mcp.webflow.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # monday.com: official MCP OAuth app, checked live 2026-07-19. GET
+    # https://mcp.monday.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint="https://mcp.monday.com/authorize",
+    # token_endpoint="https://mcp.monday.com/token",
+    # registration_endpoint="https://mcp.monday.com/register" -- confirmed
+    # live (GET returns 405 Method Not Allowed). A dedicated app, distinct
+    # from the classic auth.monday.com pair this config used to point at
+    # (which, as a bonus finding, ALSO independently supports DCR at
+    # auth.monday.com/oauth_ms/oauth/register with a larger 26-scope
+    # catalog -- not used here, in favor of the dedicated MCP app to match
+    # every other provider in this pass). scopes_supported isn't declared at
+    # mcp.monday.com -- existing scopes kept as best-effort, unverified
+    # against the new app. code_challenge_methods_supported includes "S256"
+    # (auth_method switched to pkce to match). token_endpoint_auth_methods_
+    # supported includes "client_secret_post" (default, unchanged). The
+    # classic config's token_grant_type=None override (omitting grant_type
+    # from the token body) was an auth.monday.com-specific quirk; the new
+    # app's response_types_supported=["code"] and standard grant_types
+    # expect the normal parameters, so it's dropped back to the field
+    # default, matching the ClickUp precedent.
     "monday": OAuthProviderConfig(
         label="monday.com",
         env_vars={
@@ -375,13 +760,23 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("MONDAY_CLIENT_SECRET",),
         },
         scopes=("me:read", "account:read", "boards:read", "boards:write", "updates:read", "updates:write", "workspaces:read"),
-        auth_url="https://auth.monday.com/oauth2/authorize",
-        token_url="https://auth.monday.com/oauth2/token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.monday.com/authorize",
+        token_url="https://mcp.monday.com/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.monday.com/v2",
-        token_grant_type=None,
+        registration_endpoint="https://mcp.monday.com/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Box: checked live 2026-07-19. mcp.box.com auth-gates every well-known
+    # path except its oauth-protected-resource document (401 on everything
+    # else, confirmed via response headers to be a blanket host-level auth
+    # gate, not evidence the docs don't exist), which names authorization_
+    # servers=["https://api.box.com/"] as the real issuer. That issuer's own
+    # discovery (also mirrored at account.box.com) has authorization_endpoint
+    # and token_endpoint identical to the classic config already below, and
+    # no registration_endpoint field at all. Stays classic-only, no config
+    # changes.
     "box": OAuthProviderConfig(
         label="Box",
         env_vars={
@@ -395,6 +790,22 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         token_parser="standard",
         profile_probe="https://api.box.com/2.0/users/me",
     ),
+    # GitLab: checked live 2026-07-19, confirming the pre-existing "OAuth
+    # 2.0 + DCR" comment on this provider's APP_MCP_SERVER_MAP entry.
+    # gitlab.com's own oauth-authorization-server discovery (present in 3
+    # independently-fetched documents: MCP-path-suffixed, root, and openid-
+    # configuration) -> registration_endpoint="https://gitlab.com/oauth/
+    # register". authorization_endpoint/token_endpoint are IDENTICAL to the
+    # classic config already below -- this is the SAME OAuth app gaining
+    # DCR, not a separate MCP-specific app (same situation as Dropbox). The
+    # MCP-path-suffixed discovery declares scopes_supported=["mcp"] only,
+    # but the root (whole-host) discovery confirms "read_api"/"api"/
+    # "read_user" (the 3 scopes already configured) remain valid members of
+    # gitlab.com's full scope catalog, and "api" already grants the broad
+    # access MCP tools need -- no scope change made. code_challenge_methods_
+    # supported includes "S256" (auth_method switched to pkce to match).
+    # token_endpoint_auth_methods_supported includes "client_secret_post"
+    # (default, unchanged).
     "gitlab": OAuthProviderConfig(
         label="GitLab",
         env_vars={
@@ -404,10 +815,45 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         scopes=("read_user", "read_api", "api"),
         auth_url="https://gitlab.com/oauth/authorize",
         token_url="https://gitlab.com/oauth/token",
-        auth_method="authorization_code",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://gitlab.com/api/v4/user",
+        registration_endpoint="https://gitlab.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Confluence: checked live 2026-07-19. mcp.atlassian.com/v1/mcp/authv2's
+    # own oauth-protected-resource discovery names a TENANT-SCOPED issuer --
+    # https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3 (a fixed
+    # resource identifier for the Confluence MCP resource itself, returned by
+    # an unauthenticated GET, not derived from any particular customer's
+    # login) -- whose own discovery document has authorization_endpoint/
+    # token_endpoint IDENTICAL to the classic auth.atlassian.com pair already
+    # configured below (unlike jira, whose MCP app lives on a wholly
+    # different, non-Auth0 host: this stays on auth.atlassian.com, so
+    # auth_params and token_request_format="json" are Auth0-specific and
+    # still apply -- left unchanged). New field:
+    # registration_endpoint="https://auth.atlassian.com/
+    # VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/dcr/register" -- confirmed live via an
+    # actual RFC 7591 POST that succeeded (see this task's report for the
+    # disclosure: an unintended real client registration resulted and could
+    # not be deleted afterward -- Atlassian's Remote MCP appears to register
+    # an ephemeral client per connecting client by design). scopes_supported
+    # IS declared at the protected-resource level and corrects 3 of the 6
+    # scopes previously configured, which are not real members of that list:
+    # read:confluence-content.summary -> read:page:confluence,
+    # read:confluence-space.summary -> read:space:confluence,
+    # write:confluence-content -> write:page:confluence (read:me,
+    # read:confluence-user, and offline_access were already valid and are
+    # unchanged). code_challenge_methods_supported includes "S256"
+    # (auth_method switched to pkce to match). token_endpoint_auth_methods_
+    # supported includes "client_secret_post" (default, unchanged).
+    # IMPORTANT CAVEAT (unverified, not just under-tested): the same
+    # third-party claim noted on the "jira" entry above -- that Atlassian's
+    # Remote MCP Beta may reject non-preapproved client_ids at the
+    # authorize/consent step even though registration succeeds -- applies
+    # here too, and does NOT transfer 1:1 from jira's result since this flow
+    # is Auth0-backed and jira's isn't. Smoke-test a real end-to-end connect
+    # before relying on this in production.
     "confluence": OAuthProviderConfig(
         label="Confluence",
         env_vars={
@@ -417,32 +863,69 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         scopes=(
             "read:me",
             "read:confluence-user",
-            "read:confluence-content.summary",
-            "read:confluence-space.summary",
-            "write:confluence-content",
+            "read:page:confluence",
+            "read:space:confluence",
+            "write:page:confluence",
             "offline_access",
         ),
         auth_url="https://auth.atlassian.com/authorize",
         token_url="https://auth.atlassian.com/oauth/token",
-        auth_method="authorization_code",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.atlassian.com/me",
         auth_params={"audience": "api.atlassian.com", "prompt": "consent"},
         token_request_format="json",
+        registration_endpoint="https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/dcr/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Miro: official MCP OAuth app, checked live 2026-07-19. GET https://
+    # mcp.miro.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint="https://mcp.miro.com/authorize",
+    # token_endpoint="https://mcp.miro.com/token",
+    # registration_endpoint="https://mcp.miro.com/register". A dedicated app,
+    # distinct from the classic miro.com/api.miro.com pair (neither has any
+    # discovery document -- miro.com returns a CloudFront AccessDenied, api.
+    # miro.com redirect-loops). scopes_supported=["boards:read","boards:
+    # write","openid","email"] -- corrects the classic scopes, which don't
+    # exist in the new app's model: drops "identity:read" (not offered) and
+    # adds "openid"+"email" (needed for the standard OIDC-shaped identity
+    # claims this app uses instead). code_challenge_methods_supported
+    # includes "S256" (auth_method switched to pkce to match).
+    # token_endpoint_auth_methods_supported=["client_secret_post",
+    # "client_secret_basic"] (no "none" -- dynamically-registered clients are
+    # treated as confidential, default token_auth unchanged). profile_probe
+    # left pointing at the classic REST API on the same unverified-but-
+    # consistent assumption used for Figma/Webflow/Notion/Asana/Airtable.
     "miro": OAuthProviderConfig(
         label="Miro",
         env_vars={
             "client_id": ("MIRO_CLIENT_ID",),
             "client_secret": ("MIRO_CLIENT_SECRET",),
         },
-        scopes=("identity:read", "boards:read", "boards:write"),
-        auth_url="https://miro.com/oauth/authorize",
-        token_url="https://api.miro.com/v1/oauth/token",
-        auth_method="authorization_code",
+        scopes=("boards:read", "boards:write", "openid", "email"),
+        auth_url="https://mcp.miro.com/authorize",
+        token_url="https://mcp.miro.com/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.miro.com/v2/users/me",
+        registration_endpoint="https://mcp.miro.com/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Intercom: official MCP OAuth app, checked live 2026-07-19. GET https://
+    # mcp.intercom.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint="https://mcp.intercom.com/authorize",
+    # token_endpoint="https://mcp.intercom.com/token",
+    # registration_endpoint="https://mcp.intercom.com/register". A dedicated,
+    # fully standards-compliant app (response_types_supported,
+    # response_modes_supported, PKCE, DCR all present) -- distinct from and
+    # NOT inheriting the classic app.intercom.com/api.intercom.io pair's
+    # nonstandard quirks (no redirect_uri in the authorize/token requests, no
+    # response_type, custom /auth/eagle/token path, all dropped back to field
+    # defaults here, matching the ClickUp precedent). scopes_supported isn't
+    # declared -- existing empty scopes kept unchanged. code_challenge_
+    # methods_supported includes "S256" (auth_method switched to pkce to
+    # match). token_endpoint_auth_methods_supported includes
+    # "client_secret_post" (default, unchanged).
     "intercom": OAuthProviderConfig(
         label="Intercom",
         env_vars={
@@ -450,16 +933,21 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("INTERCOM_CLIENT_SECRET",),
         },
         scopes=(),
-        auth_url="https://app.intercom.com/oauth",
-        token_url="https://api.intercom.io/auth/eagle/token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.intercom.com/authorize",
+        token_url="https://mcp.intercom.com/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.intercom.io/me",
-        include_response_type=False,
-        include_redirect_uri_in_authorization_url=False,
-        include_redirect_uri_in_token_body=False,
-        token_grant_type=None,
+        registration_endpoint="https://mcp.intercom.com/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Docusign: checked live 2026-07-19. mcp-d.docusign.com's own oauth-
+    # protected-resource discovery names issuer account-d.docusign.com (a
+    # sandbox host); its discovery document has no registration_endpoint.
+    # The classic production host (account.docusign.com, already configured
+    # below) also has full OIDC discovery with no registration_endpoint
+    # either. Neither reachable discovery document offers DCR. Stays
+    # classic-only, no config changes.
     "docusign": OAuthProviderConfig(
         label="Docusign",
         env_vars={
@@ -476,6 +964,30 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         include_client_id_in_token_body=False,
         include_client_secret_in_token_body=False,
     ),
+    # Square: official MCP OAuth app, checked live 2026-07-19. GET https://
+    # mcp.squareup.com/.well-known/oauth-authorization-server ->
+    # authorization_endpoint="https://mcp.squareup.com/authorize",
+    # token_endpoint="https://mcp.squareup.com/token",
+    # registration_endpoint="https://mcp.squareup.com/register". A dedicated
+    # app -- the classic connect.squareup.com host's own openid-configuration
+    # has no registration_endpoint at all, confirming only the MCP app
+    # supports DCR. scopes_supported isn't declared at the AS itself, but the
+    # companion oauth-protected-resource document lists a 40+ scope catalog
+    # that matches and extends the 5 scopes already configured -- no scope
+    # change made. scope_separator switched from "," (a classic
+    # connect.squareup.com quirk) to the RFC 6749 default space separator,
+    # matching the same reasoning already used for Linear's classic-vs-MCP-
+    # app switch. code_challenge_methods_supported includes "S256"
+    # (auth_method switched to pkce to match). token_endpoint_auth_methods_
+    # supported includes "client_secret_post" (default, unchanged).
+    # token_request_format="json" is a documented behavior of classic
+    # Square's OWN token endpoint (connect.squareup.com) -- kept as-is since
+    # there's no live evidence either way for the new mcp.squareup.com host
+    # (a POST test wasn't performed), so this is carried over unverified
+    # rather than guessed. profile_probe (connect.squareup.com/oauth2/token/
+    # status) is the classic app's OWN status-check endpoint and may not
+    # accept a token minted by the new app -- left unchanged for the same
+    # reason, flagged here rather than silently assumed correct.
     "square": OAuthProviderConfig(
         label="Square",
         env_vars={
@@ -483,27 +995,68 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "client_secret": ("SQUARE_APPLICATION_SECRET", "SQUARE_CLIENT_SECRET"),
         },
         scopes=("MERCHANT_PROFILE_READ", "CUSTOMERS_READ", "ORDERS_READ", "PAYMENTS_READ", "INVOICES_READ"),
-        auth_url="https://connect.squareup.com/oauth2/authorize",
-        token_url="https://connect.squareup.com/oauth2/token",
-        auth_method="authorization_code",
+        auth_url="https://mcp.squareup.com/authorize",
+        token_url="https://mcp.squareup.com/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://connect.squareup.com/oauth2/token/status",
-        scope_separator=",",
         token_request_format="json",
+        registration_endpoint="https://mcp.squareup.com/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Typeform: checked live 2026-07-19. GET https://api.typeform.com/.well-
+    # known/oauth-authorization-server (the MCP endpoint api.typeform.com/mcp
+    # shares this host with the classic OAuth app, so one discovery document
+    # covers both) -> authorization_endpoint="https://admin.typeform.com/
+    # oauth/authorize" -- corrected from api.typeform.com/oauth/authorize,
+    # which the discovery document does not name as the real authorize host.
+    # token_endpoint="https://api.typeform.com/oauth/token" (already
+    # matched). registration_endpoint="https://api.typeform.com/oauth/
+    # register". scopes_supported corrects "offline" to "offline_access" (the
+    # actual supported scope name -- "offline" is not a member of the
+    # declared list and would likely be rejected or silently dropped,
+    # breaking refresh-token issuance); forms:read/forms:write/
+    # responses:read/accounts:read were already valid and are unchanged.
+    # code_challenge_methods_supported=["S256"] (auth_method switched to pkce
+    # to match). token_endpoint_auth_methods_supported includes
+    # "client_secret_post" (default, unchanged).
     "typeform": OAuthProviderConfig(
         label="Typeform",
         env_vars={
             "client_id": ("TYPEFORM_CLIENT_ID",),
             "client_secret": ("TYPEFORM_CLIENT_SECRET",),
         },
-        scopes=("offline", "forms:read", "forms:write", "responses:read", "accounts:read"),
-        auth_url="https://api.typeform.com/oauth/authorize",
+        scopes=("offline_access", "forms:read", "forms:write", "responses:read", "accounts:read"),
+        auth_url="https://admin.typeform.com/oauth/authorize",
         token_url="https://api.typeform.com/oauth/token",
-        auth_method="authorization_code",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.typeform.com/me",
+        registration_endpoint="https://api.typeform.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
     ),
+    # Vercel: checked live 2026-07-19. GET https://mcp.vercel.com/.well-
+    # known/oauth-authorization-server -> issuer "https://vercel.com",
+    # authorization_endpoint="https://vercel.com/oauth/authorize" (already
+    # matched), token_endpoint="https://vercel.com/api/login/oauth/token"
+    # (corrected from api.vercel.com/login/oauth/token to the exact
+    # MCP-facing doc's value -- likely equivalent via Vercel's vercel.com/
+    # api/* <-> api.vercel.com/* routing, but reconciled to the literal
+    # discovered string rather than left as a probably-equivalent alias),
+    # registration_endpoint="https://vercel.com/api/login/oauth/register".
+    # Vercel exposes TWO capability views of the same issuer: this
+    # MCP-facing one, which is public-client-only
+    # (token_endpoint_auth_methods_supported=["none"] -- no client secret
+    # exists, so include_client_secret_in_token_body is turned off and the
+    # DCR request asks for "none" instead of the default "client_secret_
+    # post", same shape as Stripe/ClickUp/Calendly), vs. a fuller
+    # confidential-client view at the classic vercel.com root doc
+    # (client_secret_basic/post, no "none") -- the MCP-facing values are used
+    # here since that's what a spec-compliant MCP client resolves via the
+    # RFC 9728 -> RFC 8414 chain from mcp.vercel.com itself. scopes_supported
+    # (openid/email/offline_access/profile) confirms the 3 scopes already
+    # configured remain valid -- no change made. code_challenge_methods_
+    # supported includes "S256" (auth_method switched to pkce to match).
     "vercel": OAuthProviderConfig(
         label="Vercel",
         env_vars={
@@ -512,10 +1065,948 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
         },
         scopes=("openid", "profile", "email"),
         auth_url="https://vercel.com/oauth/authorize",
-        token_url="https://api.vercel.com/login/oauth/token",
-        auth_method="authorization_code",
+        token_url="https://vercel.com/api/login/oauth/token",
+        auth_method="pkce",
         token_parser="standard",
         profile_probe="https://api.vercel.com/login/oauth/userinfo",
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://vercel.com/api/login/oauth/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Higgsfield: official remote MCP server (mcp.higgsfield.ai/mcp) aggregating
+    # ~30 image/video generation models (Kling, Sora, Veo, Seedream, Seedance,
+    # FLUX, Soul, Nano Banana, and more) behind one connection. Auth: OAuth 2.1
+    # + PKCE (S256) — NOT a flat API key. Confirmed live 2026-07-18 via MCP
+    # OAuth discovery:
+    #   GET https://mcp.higgsfield.ai/.well-known/oauth-authorization-server
+    #     -> {"authorization_endpoint": ".../oauth2/authorize",
+    #         "token_endpoint": ".../oauth2/token",
+    #         "registration_endpoint": ".../oauth2/register",
+    #         "grant_types_supported": ["authorization_code","refresh_token"],
+    #         "code_challenge_methods_supported": ["S256"],
+    #         "scopes_supported": ["openid","email","offline_access"]}
+    #   GET https://mcp.higgsfield.ai/.well-known/oauth-protected-resource
+    #     -> confirms authorization_code+PKCE is the right flow for a client
+    #        that can receive a redirect (vs. the separate device_code flow
+    #        at fnf-device-auth.higgsfield.ai for redirect-less CLI clients).
+    # Unlike every provider above, Higgsfield has NO developer console to
+    # pre-register a static client_id: higgsfield.ai/mcp's own setup docs say
+    # only "sign in with your Higgsfield account" (no OAuth-app/client-ID
+    # screen), and every guessed developer-console path 404s. cloud.higgsfield.ai
+    # is a SEPARATE product (their REST "Cloud API") with its own flat API-key
+    # auth — not the MCP server, and not used here. The only way to obtain a
+    # client_id is RFC 7591 Dynamic Client Registration at
+    # registration_endpoint below — see _resolve_oauth_client(), which uses
+    # HIGGSFIELD_CLIENT_ID/SECRET if the owner set them, else self-registers
+    # once (gated by HIGGSFIELD_OAUTH_ENABLED) and caches the result.
+    "higgsfield": OAuthProviderConfig(
+        label="Higgsfield",
+        env_vars={
+            "client_id": ("HIGGSFIELD_CLIENT_ID",),
+            "client_secret": ("HIGGSFIELD_CLIENT_SECRET",),
+        },
+        scopes=("openid", "email", "offline_access"),
+        auth_url="https://mcp.higgsfield.ai/oauth2/authorize",
+        token_url="https://mcp.higgsfield.ai/oauth2/token",
+        auth_method="pkce",
+        token_parser="standard",
+        # No userinfo/introspection endpoint is advertised in the discovery
+        # document above (only authorization/token/registration endpoints) —
+        # left unset rather than guessing an unverified URL.
+        profile_probe=None,
+        registration_endpoint="https://mcp.higgsfield.ai/oauth2/register",
+    ),
+    # Zapier: official hosted MCP server (mcp.zapier.com) reaching ~8-9k
+    # connected apps through the CUSTOMER'S OWN Zapier account — this
+    # connection only exposes app connections/Zaps the customer has already
+    # wired inside Zapier; it does not create new app connections itself.
+    # Zapier's own docs (docs.zapier.com/mcp/authentication) foreground a
+    # manual "connection token" copy-paste flow as a fallback for MCP clients
+    # that can't do OAuth discovery, but live discovery confirmed 2026-07-19
+    # via GET https://mcp.zapier.com/.well-known/oauth-authorization-server
+    # -> {"issuer":"https://mcp.zapier.com","authorization_endpoint":".../
+    # oauth/authorize","token_endpoint":".../api/v1/oauth/token",
+    # "registration_endpoint":".../api/v1/oauth/register","userinfo_
+    # endpoint":".../api/v1/oauth/userinfo","scopes_supported":["openid",
+    # "profile","email"],"token_endpoint_auth_methods_supported":["none",
+    # "client_secret_post","client_secret_basic"],"code_challenge_methods_
+    # supported":["plain","S256"]} that Zapier's docs also describe as the
+    # default for "most clients" ("your AI handles authentication and tool
+    # discovery automatically") — used here instead of the manual-token
+    # fallback since it's what a spec-compliant MCP client resolves and
+    # matches this codebase's established DCR pattern exactly.
+    # oauth-protected-resource (path-suffixed) confirmed the MCP resource
+    # itself: resource="https://mcp.zapier.com/api/v1/connect".
+    "zapier": OAuthProviderConfig(
+        label="Zapier",
+        env_vars={
+            "client_id": ("ZAPIER_CLIENT_ID",),
+            "client_secret": ("ZAPIER_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email"),
+        auth_url="https://mcp.zapier.com/oauth/authorize",
+        token_url="https://mcp.zapier.com/api/v1/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://mcp.zapier.com/api/v1/oauth/userinfo",
+        registration_endpoint="https://mcp.zapier.com/api/v1/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # PayPal: official remote MCP server (mcp.paypal.com, production;
+    # mcp.sandbox.paypal.com, sandbox). Confirmed live 2026-07-19 via GET
+    # https://mcp.paypal.com/.well-known/oauth-authorization-server ->
+    # {"issuer":"https://mcp.paypal.com","authorization_endpoint":".../
+    # authorize","token_endpoint":".../token","registration_endpoint":".../
+    # register","token_endpoint_auth_methods_supported":["client_secret_
+    # basic","client_secret_post","none"],"code_challenge_methods_
+    # supported":["S256"]}. No scopes_supported field is declared in either
+    # the authorization-server or protected-resource discovery document —
+    # left empty rather than guessing scope names. No userinfo/introspection
+    # endpoint is advertised either — profile_probe left unset rather than
+    # guessing an unverified URL (same treatment as Higgsfield).
+    "paypal": OAuthProviderConfig(
+        label="PayPal",
+        env_vars={
+            "client_id": ("PAYPAL_CLIENT_ID",),
+            "client_secret": ("PAYPAL_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://mcp.paypal.com/authorize",
+        token_url="https://mcp.paypal.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.paypal.com/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Sentry: official remote MCP server (mcp.sentry.dev). Confirmed live
+    # 2026-07-19 via GET https://mcp.sentry.dev/.well-known/oauth-
+    # authorization-server -> {"issuer":"https://mcp.sentry.dev",
+    # "authorization_endpoint":".../oauth/authorize","token_endpoint":".../
+    # oauth/token","registration_endpoint":".../oauth/register","scopes_
+    # supported":["org:read","project:write","team:write","event:write"],
+    # "token_endpoint_auth_methods_supported":["client_secret_basic",
+    # "client_secret_post","none"],"code_challenge_methods_supported":
+    # ["plain","S256"]}. No userinfo/introspection endpoint advertised —
+    # profile_probe left unset rather than guessing an unverified URL.
+    "sentry": OAuthProviderConfig(
+        label="Sentry",
+        env_vars={
+            "client_id": ("SENTRY_CLIENT_ID",),
+            "client_secret": ("SENTRY_CLIENT_SECRET",),
+        },
+        scopes=("org:read", "project:write", "team:write", "event:write"),
+        auth_url="https://mcp.sentry.dev/oauth/authorize",
+        token_url="https://mcp.sentry.dev/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.sentry.dev/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Attio: official remote MCP server (mcp.attio.com), whose authorization
+    # server lives on a DIFFERENT host — Attio's main web app. Confirmed live
+    # 2026-07-19 via GET https://mcp.attio.com/.well-known/oauth-protected-
+    # resource -> authorization_servers=["https://app.attio.com"]; GET
+    # https://app.attio.com/.well-known/oauth-authorization-server ->
+    # {"issuer":"https://app.attio.com","authorization_endpoint":".../oidc/
+    # authorize","token_endpoint":".../oidc/token","registration_
+    # endpoint":".../oauth/register","scopes_supported":["mcp",
+    # "offline_access","openid"],"token_endpoint_auth_methods_supported":
+    # ["none","client_secret_post"],"code_challenge_methods_supported":
+    # ["S256"]}. No userinfo/introspection endpoint advertised — profile_probe
+    # left unset rather than guessing an unverified URL.
+    "attio": OAuthProviderConfig(
+        label="Attio",
+        env_vars={
+            "client_id": ("ATTIO_CLIENT_ID",),
+            "client_secret": ("ATTIO_CLIENT_SECRET",),
+        },
+        scopes=("mcp", "offline_access", "openid"),
+        auth_url="https://app.attio.com/oidc/authorize",
+        token_url="https://app.attio.com/oidc/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://app.attio.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Cloudflare: official remote MCP server (mcp.cloudflare.com) — a "Code
+    # Mode" server exposing ~2,500 Cloudflare API endpoints through two tools
+    # (search()/execute()) rather than one tool per endpoint. Cloudflare also
+    # runs 16 domain-specific sibling MCP servers (docs/bindings/builds/
+    # observability/radar/containers/browser/logs/ai-gateway/autorag/
+    # auditlogs/dns-analytics/dex/casb/graphql.mcp.cloudflare.com, and
+    # agents.cloudflare.com/mcp) on the same auth pattern, not individually
+    # wired here — only the primary server was live-discovery-verified.
+    # Confirmed live 2026-07-19 via GET https://mcp.cloudflare.com/.well-
+    # known/oauth-authorization-server -> {"issuer":"https://mcp.
+    # cloudflare.com","authorization_endpoint":".../authorize",
+    # "token_endpoint":".../token","registration_endpoint":".../register",
+    # "token_endpoint_auth_methods_supported":["client_secret_basic",
+    # "client_secret_post","none"],"code_challenge_methods_supported":
+    # ["plain","S256"]}. No scopes_supported or userinfo/introspection
+    # endpoint advertised — scopes left empty and profile_probe left unset
+    # rather than guessing.
+    "cloudflare": OAuthProviderConfig(
+        label="Cloudflare",
+        env_vars={
+            "client_id": ("CLOUDFLARE_CLIENT_ID",),
+            "client_secret": ("CLOUDFLARE_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://mcp.cloudflare.com/authorize",
+        token_url="https://mcp.cloudflare.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.cloudflare.com/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Gusto: official remote MCP server (https://mcp.api.gusto.com). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes curated to read-only HR/payroll
+    # data; payrolls:run/payrolls:write (executes payroll) and
+    # webhook_subscriptions:write deliberately excluded
+    "gusto": OAuthProviderConfig(
+        label="Gusto",
+        env_vars={
+            "client_id": ("GUSTO_CLIENT_ID",),
+            "client_secret": ("GUSTO_CLIENT_SECRET",),
+        },
+        scopes=("public", "companies:read", "employees:read", "employments:read", "jobs:read", "departments:read", "compensations:read", "contractors:read", "pay_schedules:read", "payrolls:read", "time_sheet:read"),
+        auth_url="https://mcp.api.gusto.com/oauth/authorize",
+        token_url="https://mcp.api.gusto.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.api.gusto.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Deel: official remote MCP server (https://api.letsdeel.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client. Scopes
+    # curated to core people/HR read+write; global-payroll/off-cycle-
+    # payments/invoice/treasury/withdrawals/equities/compensation-management write
+    # scopes (money movement) deliberately excluded
+    "deel": OAuthProviderConfig(
+        label="Deel",
+        env_vars={
+            "client_id": ("DEEL_CLIENT_ID",),
+            "client_secret": ("DEEL_CLIENT_SECRET",),
+        },
+        scopes=("people:read", "people:write", "worker:read", "worker:write", "profile:read", "time-off:read", "time-off:write", "timesheets:read", "timesheets:write", "contracts:read", "tasks:read", "tasks:write", "organizations:read"),
+        auth_url="https://api.letsdeel.com/oauth/authorize",
+        token_url="https://api.letsdeel.com/oauth/tokens",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://api.letsdeel.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Remote: official remote MCP server (https://mcp.remote.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported and
+    # token_endpoint_auth_methods_supported not declared in discovery -- left at
+    # field defaults rather than guessing. Auth server resolved via
+    # mcp.remote.com's oauth-protected-resource -> issuer chain to
+    # api.employ.remote.com
+    "remote_com": OAuthProviderConfig(
+        label="Remote",
+        env_vars={
+            "client_id": ("REMOTE_COM_CLIENT_ID",),
+            "client_secret": ("REMOTE_COM_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://api.employ.remote.com/oauth/authorize",
+        token_url="https://api.employ.remote.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.employ.remote.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Ashby: official remote MCP server (https://mcp.ashbyhq.com/mcp/v1). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). auth server on a DIFFERENT host (mcp-
+    # auth.ashbyhq.com/oidc) from the MCP endpoint (mcp.ashbyhq.com), resolved via
+    # oauth-protected-resource -> issuer chain, same pattern as Attio
+    "ashby": OAuthProviderConfig(
+        label="Ashby",
+        env_vars={
+            "client_id": ("ASHBY_CLIENT_ID",),
+            "client_secret": ("ASHBY_CLIENT_SECRET",),
+        },
+        scopes=("openid", "mcp", "offline_access"),
+        auth_url="https://mcp-auth.ashbyhq.com/oidc/auth",
+        token_url="https://mcp-auth.ashbyhq.com/oidc/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://mcp-auth.ashbyhq.com/oidc/me",
+        registration_endpoint="https://mcp-auth.ashbyhq.com/oidc/reg",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Klaviyo: official remote MCP server (https://mcp.klaviyo.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported not declared
+    "klaviyo": OAuthProviderConfig(
+        label="Klaviyo",
+        env_vars={
+            "client_id": ("KLAVIYO_CLIENT_ID",),
+            "client_secret": ("KLAVIYO_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://mcp.klaviyo.com/authorize",
+        token_url="https://mcp.klaviyo.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.klaviyo.com/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Customer.io: official remote MCP server (https://mcp.customer.io/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). scopes_supported not declared
+    "customer_io": OAuthProviderConfig(
+        label="Customer.io",
+        env_vars={
+            "client_id": ("CUSTOMER_IO_CLIENT_ID",),
+            "client_secret": ("CUSTOMER_IO_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://mcp.customer.io/oauth2/authorize",
+        token_url="https://mcp.customer.io/oauth2/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.customer.io/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Netlify: official remote MCP server (https://netlify-mcp.netlify.app/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "netlify": OAuthProviderConfig(
+        label="Netlify",
+        env_vars={
+            "client_id": ("NETLIFY_CLIENT_ID",),
+            "client_secret": ("NETLIFY_CLIENT_SECRET",),
+        },
+        scopes=("offline_access", "read", "write", "claudeai"),
+        auth_url="https://netlify-mcp.netlify.app/oauth-server/auth",
+        token_url="https://netlify-mcp.netlify.app/oauth-server/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://netlify-mcp.netlify.app/oauth-server/reg",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Supabase: official remote MCP server (https://mcp.supabase.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). auth server on a DIFFERENT host
+    # (api.supabase.com) from the MCP endpoint, resolved via oauth-protected-
+    # resource -> issuer chain
+    "supabase": OAuthProviderConfig(
+        label="Supabase",
+        env_vars={
+            "client_id": ("SUPABASE_CLIENT_ID",),
+            "client_secret": ("SUPABASE_CLIENT_SECRET",),
+        },
+        scopes=("organizations:read", "projects:read", "projects:write", "database:write", "database:read", "analytics:read", "secrets:read", "edge_functions:read", "edge_functions:write", "environment:read", "environment:write", "storage:read"),
+        auth_url="https://api.supabase.com/v1/oauth/authorize",
+        token_url="https://api.supabase.com/v1/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.supabase.com/platform/oauth/apps/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # PlanetScale: official remote MCP server
+    # (https://mcp.pscale.dev/mcp/planetscale). Confirmed live 2026-07-19 via GET
+    # .well-known/oauth-authorization-server (or oauth-protected-resource -> issuer
+    # chain). resolved via path-suffixed discovery (/.well-known/oauth-
+    # authorization-server/mcp/planetscale). Scopes curated to read-oriented +
+    # database creation; manage_passwords/manage_production_* (production
+    # credential management) deliberately excluded
+    "planetscale": OAuthProviderConfig(
+        label="PlanetScale",
+        env_vars={
+            "client_id": ("PLANETSCALE_CLIENT_ID",),
+            "client_secret": ("PLANETSCALE_CLIENT_SECRET",),
+        },
+        scopes=("email", "openid", "profile", "database:read_branches", "database:read_database", "database:read_deploy_requests", "organization:read_branches", "organization:read_databases", "organization:read_organization", "organization:create_databases", "user:read_organizations", "user:read_user"),
+        auth_url="https://app.planetscale.com/oauth/authorize",
+        token_url="https://auth.planetscale.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://auth.planetscale.com/oauth/userinfo",
+        registration_endpoint="https://auth.planetscale.com/oauth/registration",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Neon: official remote MCP server (https://mcp.neon.tech/mcp). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported also lists a "*"
+    # wildcard-all scope -- deliberately not requested, using the narrower
+    # read/write instead
+    "neon": OAuthProviderConfig(
+        label="Neon",
+        env_vars={
+            "client_id": ("NEON_CLIENT_ID",),
+            "client_secret": ("NEON_CLIENT_SECRET",),
+        },
+        scopes=("read", "write"),
+        auth_url="https://mcp.neon.tech/api/authorize",
+        token_url="https://mcp.neon.tech/api/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.neon.tech/api/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Railway: official remote MCP server (https://mcp.railway.com). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). live discovery's authorization_endpoint
+    # embeds ?resource=https://mcp.railway.com (RFC 8707 resource indicator) --
+    # moved into auth_params rather than auth_url since _build authorization_url
+    # always appends its own "?"+params (would double up)
+    "railway": OAuthProviderConfig(
+        label="Railway",
+        env_vars={
+            "client_id": ("RAILWAY_CLIENT_ID",),
+            "client_secret": ("RAILWAY_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "offline_access", "workspace:member"),
+        auth_url="https://backboard.railway.com/oauth/auth",
+        token_url="https://backboard.railway.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        auth_params={"resource": "https://mcp.railway.com"},
+        registration_endpoint="https://backboard.railway.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Heroku: official remote MCP server (https://mcp.heroku.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). token_endpoint_auth_methods_supported
+    # not declared -- left at field default (client_secret_post)
+    "heroku": OAuthProviderConfig(
+        label="Heroku",
+        env_vars={
+            "client_id": ("HEROKU_CLIENT_ID",),
+            "client_secret": ("HEROKU_CLIENT_SECRET",),
+        },
+        scopes=("openid", "offline_access"),
+        auth_url="https://mcp.heroku.com/auth",
+        token_url="https://mcp.heroku.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://mcp.heroku.com/me",
+        registration_endpoint="https://mcp.heroku.com/reg",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Sourcegraph: official remote MCP server (https://sourcegraph.com/.api/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). discovery also declares
+    # introspection_endpoint (not a bearer-GET userinfo endpoint) -- not used as
+    # profile_probe
+    "sourcegraph": OAuthProviderConfig(
+        label="Sourcegraph",
+        env_vars={
+            "client_id": ("SOURCEGRAPH_CLIENT_ID",),
+            "client_secret": ("SOURCEGRAPH_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "offline_access", "user:all", "mcp", "externalapi:read", "externalapi:write"),
+        auth_url="https://sourcegraph.com/.auth/idp/oauth/authorize",
+        token_url="https://sourcegraph.com/.auth/idp/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://sourcegraph.com/.auth/idp/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Replit: official remote MCP server (https://replit-mcp.com/server/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "replit": OAuthProviderConfig(
+        label="Replit",
+        env_vars={
+            "client_id": ("REPLIT_CLIENT_ID",),
+            "client_secret": ("REPLIT_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "offline_access", "apps:read", "apps:write"),
+        auth_url="https://replit.com/oidc/auth",
+        token_url="https://replit.com/oidc/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://replit.com/oidc/reg",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Postman: official remote MCP server (https://mcp.postman.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported not declared
+    "postman": OAuthProviderConfig(
+        label="Postman",
+        env_vars={
+            "client_id": ("POSTMAN_CLIENT_ID",),
+            "client_secret": ("POSTMAN_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://mcp.postman.com/authorize",
+        token_url="https://mcp.postman.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.postman.com/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Buildkite: official remote MCP server (https://mcp.buildkite.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "buildkite": OAuthProviderConfig(
+        label="Buildkite",
+        env_vars={
+            "client_id": ("BUILDKITE_CLIENT_ID",),
+            "client_secret": ("BUILDKITE_CLIENT_SECRET",),
+        },
+        scopes=("read", "write"),
+        auth_url="https://mcp.buildkite.com/oauth/authorize",
+        token_url="https://mcp.buildkite.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.buildkite.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Socket: official remote MCP server (https://mcp.socket.dev/). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none","client_secret_basic"] -- no
+    # client_secret_post, so token_auth switches to basic (same shape as
+    # Airtable/Mercury). scopes_supported has ~90 entries (full
+    # admin/webhook/token-management/policy-write surface) -- curated to a read-
+    # plus-core-scan subset; api-tokens:*/webhooks:*/integration:*/access-
+    # policy:*/security-policy:update (admin scopes) deliberately excluded
+    "socket": OAuthProviderConfig(
+        label="Socket",
+        env_vars={
+            "client_id": ("SOCKET_CLIENT_ID",),
+            "client_secret": ("SOCKET_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "alerts:list", "alerts:trend", "dependencies:list", "dependencies:trend", "full-scans:list", "full-scans:create", "packages:list", "repo:list", "report:list", "report:read", "security-policy:read", "socket-basics:read", "triage:alerts-list"),
+        auth_url="https://api.socket.dev/v1/oauth2/authorize",
+        token_url="https://api.socket.dev/v1/oauth2/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://api.socket.dev/v1/oauth2/userinfo",
+        token_auth="basic",
+        registration_endpoint="https://api.socket.dev/v1/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
+    ),
+    # Whimsical: official remote MCP server (https://mcp.whimsical.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). auth/token/register endpoints live
+    # on api.whimsical.com, a different host from the mcp.whimsical.com MCP
+    # endpoint
+    "whimsical": OAuthProviderConfig(
+        label="Whimsical",
+        env_vars={
+            "client_id": ("WHIMSICAL_CLIENT_ID",),
+            "client_secret": ("WHIMSICAL_CLIENT_SECRET",),
+        },
+        scopes=("mcp:read", "mcp:write", "profile"),
+        auth_url="https://api.whimsical.com/v1/oauth.authorize",
+        token_url="https://api.whimsical.com/v1/oauth.token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.whimsical.com/v1/oauth.register-mcp-client",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Ramp: official remote MCP server (https://mcp.ramp.com/mcp). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client.
+    # authorization_endpoint embeds ?auth_level=auto, moved into auth_params for
+    # the same double-"?" reason as Railway. Scopes curated to read-only
+    # reporting/bookkeeping; funds:write/x402:write/banking_drawdown_requests:write
+    # /bank_accounts:write/cards:write/approvals:write (money movement, card
+    # issuance, spend approval) deliberately excluded
+    "ramp": OAuthProviderConfig(
+        label="Ramp",
+        env_vars={
+            "client_id": ("RAMP_CLIENT_ID",),
+            "client_secret": ("RAMP_CLIENT_SECRET",),
+        },
+        scopes=("bills:read", "cards:read", "departments:read", "entities:read", "limits:read", "locations:read", "memos:read", "purchase_orders:read", "reimbursements:read", "spend_programs:read", "transactions:read", "users:read", "vendors:read", "accounting:read", "merchants:read", "spend_requests:read", "bank_accounts:read", "tasks:read", "trips:read"),
+        auth_url="https://mcp.ramp.com/oauth/authorize",
+        token_url="https://api.ramp.com/developer/v1/token/pkce",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        auth_params={"auth_level": "auto"},
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://mcp.ramp.com/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Brex: official remote MCP server (https://api.brex.com/mcp). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). registration_endpoint is a non-standard
+    # path (/v3/clients, not /register) -- confirmed live regardless. Scopes copied
+    # verbatim: already conservative (mostly *.readonly;
+    # expenses.card/expenses.bill are expense-record writes, not fund transfers)
+    "brex": OAuthProviderConfig(
+        label="Brex",
+        env_vars={
+            "client_id": ("BREX_CLIENT_ID",),
+            "client_secret": ("BREX_CLIENT_SECRET",),
+        },
+        scopes=("openid", "offline_access", "email", "users.readonly", "departments.readonly", "locations.readonly", "titles.readonly", "legal_entities.readonly", "cards.readonly", "companies.readonly", "budgets.readonly", "travel.trips.readonly", "expenses.card.readonly", "expenses.card", "expenses.bill", "accounts.cash.readonly", "vendors.readonly", "accounting.integration.read", "accounting.record.read"),
+        auth_url="https://accounts-api.brex.com/oauth2/default/v1/authorize",
+        token_url="https://accounts-api.brex.com/oauth2/default/v1/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.brex.com/v3/clients",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Mercury: official remote MCP server (https://mcp.mercury.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["client_secret_basic","none"] -- no
+    # client_secret_post, so token_auth switches to basic. No write scope even
+    # offered -- read-only by the provider's own design
+    "mercury": OAuthProviderConfig(
+        label="Mercury",
+        env_vars={
+            "client_id": ("MERCURY_CLIENT_ID",),
+            "client_secret": ("MERCURY_CLIENT_SECRET",),
+        },
+        scopes=("read", "offline_access"),
+        auth_url="https://mcp.mercury.com/authorize",
+        token_url="https://mcp.mercury.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        token_auth="basic",
+        registration_endpoint="https://mcp.mercury.com/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="client_secret_basic",
+    ),
+    # Robinhood: official remote MCP server
+    # (https://agent.robinhood.com/mcp/trading). Confirmed live 2026-07-19 via GET
+    # .well-known/oauth-authorization-server (or oauth-protected-resource -> issuer
+    # chain). token_endpoint_auth_methods_supported=["none"] only -- public client.
+    # scopes_supported is exactly one opaque scope ("internal") -- no finer-grained
+    # alternative exists
+    "robinhood": OAuthProviderConfig(
+        label="Robinhood",
+        env_vars={
+            "client_id": ("ROBINHOOD_CLIENT_ID",),
+            "client_secret": ("ROBINHOOD_CLIENT_SECRET",),
+        },
+        scopes=("internal",),
+        auth_url="https://robinhood.com/oauth",
+        token_url="https://api.robinhood.com/oauth2/token/",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://agent.robinhood.com/oauth/trading/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Amplitude: official remote MCP server (https://mcp.amplitude.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "amplitude": OAuthProviderConfig(
+        label="Amplitude",
+        env_vars={
+            "client_id": ("AMPLITUDE_CLIENT_ID",),
+            "client_secret": ("AMPLITUDE_CLIENT_SECRET",),
+        },
+        scopes=("mcp:read", "mcp:write", "offline_access"),
+        auth_url="https://mcp.amplitude.com/authorize",
+        token_url="https://mcp.amplitude.com/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.amplitude.com/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Mixpanel: official remote MCP server (https://mcp.mixpanel.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). scopes copied verbatim -- all
+    # analytics/reporting-read scopes, no admin/destructive scope offered
+    "mixpanel": OAuthProviderConfig(
+        label="Mixpanel",
+        env_vars={
+            "client_id": ("MIXPANEL_CLIENT_ID",),
+            "client_secret": ("MIXPANEL_CLIENT_SECRET",),
+        },
+        scopes=("projects", "analysis", "events", "insights", "segmentation", "retention", "data:read", "funnels", "flows", "data_definitions", "bookmarks", "business_context", "cohorts", "dashboard_reports", "experiments", "feature_flags", "metrics", "user_details"),
+        auth_url="https://mixpanel.com/oauth/authorize",
+        token_url="https://mixpanel.com/oauth/token/",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mixpanel.com/oauth/mcp/register/",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # PostHog: official remote MCP server (https://mcp.posthog.com/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). auth server on a dedicated
+    # oauth.posthog.com host. scopes_supported has ~200 entries (full product
+    # surface incl. organization/billing/member-management/access-control) --
+    # curated to a core analytics/feature-flag subset; organization:write,
+    # organization_member:*, access_control:*, and similar admin scopes
+    # deliberately excluded
+    "posthog": OAuthProviderConfig(
+        label="PostHog",
+        env_vars={
+            "client_id": ("POSTHOG_CLIENT_ID",),
+            "client_secret": ("POSTHOG_CLIENT_SECRET",),
+        },
+        scopes=("openid", "profile", "email", "insight:read", "insight:write", "dashboard:read", "dashboard:write", "event_definition:read", "feature_flag:read", "feature_flag:write", "action:read", "action:write", "annotation:read", "annotation:write", "cohort:read", "experiment:read", "person:read", "project:read", "query:read", "session_recording:read", "survey:read", "survey:write", "web_analytics:read"),
+        auth_url="https://oauth.posthog.com/oauth/authorize/",
+        token_url="https://oauth.posthog.com/oauth/token/",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe="https://oauth.posthog.com/oauth/userinfo/",
+        registration_endpoint="https://oauth.posthog.com/oauth/register/",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Meta Ads: official remote MCP server (https://mcp.facebook.com/ads).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client.
+    # Authorization happens via Facebook's classic Graph API OAuth dialog
+    # (www.facebook.com), resolved via mcp.facebook.com/ads's own oauth-protected-
+    # resource -> issuer chain; the MCP endpoint IS the resource this token is
+    # minted for, so MCP-scoped validation against it is correct
+    "meta_ads": OAuthProviderConfig(
+        label="Meta Ads",
+        env_vars={
+            "client_id": ("META_ADS_CLIENT_ID",),
+            "client_secret": ("META_ADS_CLIENT_SECRET",),
+        },
+        scopes=("ads_management", "ads_read", "catalog_management", "business_management", "pages_show_list", "instagram_basic", "ads_mcp_management"),
+        auth_url="https://www.facebook.com/v25.0/dialog/oauth",
+        token_url="https://graph.facebook.com/v25.0/oauth/access_token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://mcp.facebook.com/.well-known/register/ads",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Semrush: official remote MCP server (https://mcp.semrush.com/v1/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client
+    "semrush": OAuthProviderConfig(
+        label="Semrush",
+        env_vars={
+            "client_id": ("SEMRUSH_CLIENT_ID",),
+            "client_secret": ("SEMRUSH_CLIENT_SECRET",),
+        },
+        scopes=("mcp.access",),
+        auth_url="https://api.semrush.com/apis/v4/auth/v0/oauth2/auth",
+        token_url="https://api.semrush.com/apis/v4-raw/auth/v1/oauth2/access_token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://api.semrush.com/apis/v4-raw/auth/v1/oauth2/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Ahrefs: official remote MCP server (https://api.ahrefs.com/mcp/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). authorize/token/register span
+    # three different hosts (app.ahrefs.com / ahrefs.com / api.ahrefs.com) per live
+    # discovery. token_endpoint_auth_methods_supported not declared -- left at
+    # field default
+    "ahrefs": OAuthProviderConfig(
+        label="Ahrefs",
+        env_vars={
+            "client_id": ("AHREFS_CLIENT_ID",),
+            "client_secret": ("AHREFS_CLIENT_SECRET",),
+        },
+        scopes=("apiv3-mcp",),
+        auth_url="https://app.ahrefs.com/web/oauth/authorize",
+        token_url="https://ahrefs.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.ahrefs.com/mcp/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Close: official remote MCP server (https://mcp.close.com/mcp). Confirmed live
+    # 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported not declared
+    "close_crm": OAuthProviderConfig(
+        label="Close",
+        env_vars={
+            "client_id": ("CLOSE_CRM_CLIENT_ID",),
+            "client_secret": ("CLOSE_CRM_CLIENT_SECRET",),
+        },
+        scopes=(),
+        auth_url="https://app.close.com/oauth2/authorize/",
+        token_url="https://api.close.com/oauth2/token/",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.close.com/oauth2/register/",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Apollo.io: official remote MCP server (https://mcp.apollo.io/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain). scopes_supported has ~70 entries --
+    # curated to core contact/company/opportunity/task read+write;
+    # email_account_purchase_*/domain_purchase_* (literal purchases) and
+    # admin/usage-stats scopes deliberately excluded
+    "apollo_io": OAuthProviderConfig(
+        label="Apollo.io",
+        env_vars={
+            "client_id": ("APOLLO_IO_CLIENT_ID",),
+            "client_secret": ("APOLLO_IO_CLIENT_SECRET",),
+        },
+        scopes=("read_user_profile", "contacts_search", "contact_read", "contact_write", "contact_update", "account_write", "account_update", "people_match", "organizations_enrich", "organizations_bulk_enrich", "opportunities_list", "opportunity_read", "opportunity_write", "tasks_list", "tasks_create", "emailer_campaigns_search", "emailer_messages_search", "tags_list", "lists_create"),
+        auth_url="https://mcp.apollo.io/mcp/oauth_metadata/redirect_to_authorize",
+        token_url="https://mcp.apollo.io/api/v1/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.apollo.io/api/v1/oauth/applications/register_oauth_client",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Outreach: official remote MCP server (https://api.outreach.io/mcp/).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "outreach": OAuthProviderConfig(
+        label="Outreach",
+        env_vars={
+            "client_id": ("OUTREACH_CLIENT_ID",),
+            "client_secret": ("OUTREACH_CLIENT_SECRET",),
+        },
+        scopes=("prospects.all",),
+        auth_url="https://api.outreach.io/mcpOAuth/authorize",
+        token_url="https://api.outreach.io/mcpOAuth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.outreach.io/mcpOAuth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Salesloft: official remote MCP server (https://mcp.salesloft.com/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain). auth/token endpoints on
+    # accounts.salesloft.com, registration on mcp.salesloft.com -- different hosts
+    # per live discovery
+    "salesloft": OAuthProviderConfig(
+        label="Salesloft",
+        env_vars={
+            "client_id": ("SALESLOFT_CLIENT_ID",),
+            "client_secret": ("SALESLOFT_CLIENT_SECRET",),
+        },
+        scopes=("accounts:read", "conversations:read", "opportunities:read", "people:read", "team:read", "claudeai"),
+        auth_url="https://accounts.salesloft.com/oauth/authorize",
+        token_url="https://accounts.salesloft.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://mcp.salesloft.com/auth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Clay: official remote MCP server (https://api.clay.com/v3/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    "clay": OAuthProviderConfig(
+        label="Clay",
+        env_vars={
+            "client_id": ("CLAY_CLIENT_ID",),
+            "client_secret": ("CLAY_CLIENT_SECRET",),
+        },
+        scopes=("mcp",),
+        auth_url="https://app.clay.com/oauth/authorize",
+        token_url="https://api.clay.com/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.clay.com/oauth/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Fireflies.ai: official remote MCP server (https://api.fireflies.ai/mcp).
+    # Confirmed live 2026-07-19 via GET .well-known/oauth-authorization-server (or
+    # oauth-protected-resource -> issuer chain).
+    "fireflies": OAuthProviderConfig(
+        label="Fireflies.ai",
+        env_vars={
+            "client_id": ("FIREFLIES_CLIENT_ID",),
+            "client_secret": ("FIREFLIES_CLIENT_SECRET",),
+        },
+        scopes=("profile", "email"),
+        auth_url="https://api.fireflies.ai/authorize",
+        token_url="https://api.fireflies.ai/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://api.fireflies.ai/register",
+        dynamic_registration_opt_in_required=False,
+    ),
+    # Fathom: official remote MCP server (https://api.fathom.ai/mcp). Confirmed
+    # live 2026-07-19 via GET .well-known/oauth-authorization-server (or oauth-
+    # protected-resource -> issuer chain).
+    # token_endpoint_auth_methods_supported=["none"] only -- public client.
+    # authorize endpoint on fathom.video, token endpoint on api.fathom.ai --
+    # different hosts per live discovery. Simple Icons "fathom" slug is the WRONG
+    # brand (Fathom Analytics, an unrelated company) -- logo intentionally NOT
+    # wired, uses a placeholder (see fleet-icons.ts)
+    "fathom": OAuthProviderConfig(
+        label="Fathom",
+        env_vars={
+            "client_id": ("FATHOM_CLIENT_ID",),
+            "client_secret": ("FATHOM_CLIENT_SECRET",),
+        },
+        scopes=("mcp",),
+        auth_url="https://fathom.video/mcp/oauth/authorize",
+        token_url="https://api.fathom.ai/mcp/oauth/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        include_client_secret_in_token_body=False,
+        registration_endpoint="https://api.fathom.ai/mcp/oauth/register",
+        dynamic_registration_opt_in_required=False,
+        dynamic_registration_token_auth_method="none",
+    ),
+    # Superhuman Docs (formerly Coda): official remote MCP server
+    # (https://docs.superhuman.com/apis/mcp). Confirmed live 2026-07-19 via GET
+    # .well-known/oauth-authorization-server (or oauth-protected-resource -> issuer
+    # chain). issuer resolves to tokens.grammarly.com (Coda/Superhuman Docs is now
+    # issued through Grammarly's shared identity service, post-acquisition) --
+    # confirmed via live oauth-protected-resource -> issuer chain from
+    # docs.superhuman.com
+    "coda": OAuthProviderConfig(
+        label="Superhuman Docs (formerly Coda)",
+        env_vars={
+            "client_id": ("CODA_CLIENT_ID",),
+            "client_secret": ("CODA_CLIENT_SECRET",),
+        },
+        scopes=("mcp:all",),
+        auth_url="https://tokens.grammarly.com/v4/api/oauth2/authorize",
+        token_url="https://tokens.grammarly.com/v4/api/oauth2/token",
+        auth_method="pkce",
+        token_parser="standard",
+        profile_probe=None,
+        registration_endpoint="https://tokens.grammarly.com/v4/api/oauth2/register",
+        dynamic_registration_opt_in_required=False,
     ),
 }
 
@@ -562,6 +2053,48 @@ _CONNECTION_PROVIDER_ALIASES = {
     "square": "square",
     "typeform": "typeform",
     "vercel": "vercel",
+    "higgsfield": "higgsfield",
+    "zapier": "zapier",
+    "paypal": "paypal",
+    "sentry": "sentry",
+    "attio": "attio",
+    "cloudflare": "cloudflare",
+    "gusto": "gusto",
+    "deel": "deel",
+    "remote_com": "remote_com",
+    "ashby": "ashby",
+    "klaviyo": "klaviyo",
+    "customer_io": "customer_io",
+    "netlify": "netlify",
+    "supabase": "supabase",
+    "planetscale": "planetscale",
+    "neon": "neon",
+    "railway": "railway",
+    "heroku": "heroku",
+    "sourcegraph": "sourcegraph",
+    "replit": "replit",
+    "postman": "postman",
+    "buildkite": "buildkite",
+    "socket": "socket",
+    "whimsical": "whimsical",
+    "ramp": "ramp",
+    "brex": "brex",
+    "mercury": "mercury",
+    "robinhood": "robinhood",
+    "amplitude": "amplitude",
+    "mixpanel": "mixpanel",
+    "posthog": "posthog",
+    "meta_ads": "meta_ads",
+    "semrush": "semrush",
+    "ahrefs": "ahrefs",
+    "close_crm": "close_crm",
+    "apollo_io": "apollo_io",
+    "outreach": "outreach",
+    "salesloft": "salesloft",
+    "clay": "clay",
+    "fireflies": "fireflies",
+    "fathom": "fathom",
+    "coda": "coda",
 }
 
 
@@ -703,7 +2236,199 @@ def ensure_oauth_configured(provider: str) -> tuple[str, str]:
 
 def oauth_provider_configured(provider: str) -> bool:
     client_id, client_secret, _client_names, _secret_names = _provider_env(provider)
-    return bool(client_id and client_secret)
+    if client_id and client_secret:
+        return True
+    # Dynamic-client-registration providers: no static client_id is required
+    # up front. Providers with dynamic_registration_opt_in_required=True
+    # (Higgsfield) still need the owner to opt in with a feature flag before
+    # this reports True — see _dynamic_registration_enabled(). Providers with
+    # dynamic_registration_opt_in_required=False (Stripe, Linear, Notion,
+    # Asana, Canva, Airtable, ClickUp) report True unconditionally: there is
+    # no console for an operator to "finish configuring" even if they wanted
+    # to, so the OAuth client self-registers on first real connect (see
+    # _resolve_oauth_client) with no flag needed. Every provider with
+    # config.registration_endpoint is None falls through to False exactly as
+    # before this branch existed.
+    config = OAUTH_PROVIDER_CONFIGS.get(str(provider or "").strip().lower())
+    if config is not None and config.registration_endpoint:
+        return _dynamic_registration_enabled(provider)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Client Registration (RFC 7591) fallback for MCP providers that have
+# no developer console — see the registration_endpoint field on
+# OAuthProviderConfig and the "higgsfield"/"stripe"/"linear"/"notion"/
+# "asana"/"canva"/"airtable"/"clickup" entries in OAUTH_PROVIDER_CONFIGS for
+# the motivating cases. This machinery is inert for every other, statically
+# configured provider above, since config.registration_endpoint is None for
+# all of them; _resolve_oauth_client() falls through to the exact same
+# ensure_oauth_configured() call (and exception) they always used.
+# ---------------------------------------------------------------------------
+
+# Safety margin before a cached client_secret's real expiry at which it's
+# already treated as unusable and re-registered — refreshing a few minutes
+# early is cheap; a token exchange racing the actual expiry instant is not.
+_DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS = 300
+
+
+def _coerce_epoch_seconds(value: Any) -> int:
+    """Best-effort int coercion for RFC 7591 client_id_issued_at /
+    client_secret_expires_at fields — both are supposed to be JSON numbers,
+    but a provider returning a string, null, or garbage must degrade to "no
+    value" rather than raise out of registration bookkeeping."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+@dataclass(frozen=True)
+class _DynamicClientRegistration:
+    """A cached RFC 7591 client registration, plus the two timing fields the
+    registration response can carry (client_id_issued_at, client_secret_
+    expires_at). Per RFC 7591 §3.2.1, client_secret_expires_at of 0 (or the
+    field being absent, which _coerce_epoch_seconds also normalizes to 0)
+    means the secret does not expire — Higgsfield returns exactly that.
+    Linear, live-verified 2026-07-19, returns a real 24-hour
+    client_secret_expires_at, so a cache with no expiry awareness silently
+    outlives the secret and every subsequent token exchange/refresh 401s."""
+
+    client_id: str
+    client_secret: str
+    client_id_issued_at: int = 0
+    client_secret_expires_at: int = 0
+
+    def is_expired(self, *, safety_margin_seconds: int = _DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS) -> bool:
+        if self.client_secret_expires_at <= 0:
+            return False  # 0 / absent = never expires (RFC 7591 §3.2.1)
+        return time.time() >= (self.client_secret_expires_at - safety_margin_seconds)
+
+
+_DYNAMIC_CLIENT_CACHE: Dict[tuple[str, str], _DynamicClientRegistration] = {}
+_DYNAMIC_CLIENT_CACHE_LOCK = threading.Lock()
+
+
+def _dynamic_registration_enabled(provider: str) -> bool:
+    normalized = str(provider or "").strip().lower()
+    config = OAUTH_PROVIDER_CONFIGS.get(normalized)
+    if config is not None and config.registration_endpoint and not config.dynamic_registration_opt_in_required:
+        return True
+    return _env_flag_enabled(f"{normalized.upper()}_OAUTH_ENABLED", f"{normalized.upper()}_MCP_ENABLED")
+
+
+def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirect_uri: str) -> tuple[str, str]:
+    """Self-register an OAuth client via RFC 7591 and cache the result for
+    the life of the process, keyed by (provider, redirect_uri) — a client
+    registration is bound to the redirect_uris declared at registration time,
+    so a cached entry is only reusable for the exact redirect_uri it was
+    registered with (stable in practice: one production origin per deploy).
+
+    A cached entry whose client_secret_expires_at has passed (or is within
+    _DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS of passing) is treated as
+    absent and transparently re-registered — see _DynamicClientRegistration.
+    is_expired(). Entries with client_secret_expires_at == 0 (or missing
+    from the registration response) never expire, per RFC 7591."""
+    cache_key = (provider, redirect_uri)
+    cached = _DYNAMIC_CLIENT_CACHE.get(cache_key)
+    if cached is not None and not cached.is_expired():
+        return (cached.client_id, cached.client_secret)
+    with _DYNAMIC_CLIENT_CACHE_LOCK:
+        cached = _DYNAMIC_CLIENT_CACHE.get(cache_key)
+        if cached is not None and not cached.is_expired():
+            return (cached.client_id, cached.client_secret)
+        if not config.registration_endpoint:
+            raise HTTPException(status_code=409, detail=f"{_connector_label(provider)} has no dynamic registration endpoint configured.")
+        payload = {
+            "client_name": _env_first(f"{provider.upper()}_OAUTH_CLIENT_NAME") or "Empyralis",
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            # Request whichever token_endpoint_auth_method this provider's
+            # own discovery document actually advertises (see
+            # dynamic_registration_token_auth_method on OAuthProviderConfig)
+            # instead of assuming every provider supports "client_secret_
+            # post" — Stripe and ClickUp only advertise "none" (public
+            # client secured by PKCE, not a secret); Notion, Canva, and
+            # Airtable only advertise "client_secret_basic" among the
+            # secret-based options. Requesting an unsupported method risks
+            # the registration being rejected outright or silently coerced
+            # to a method the subsequent token exchange doesn't match.
+            "token_endpoint_auth_method": config.dynamic_registration_token_auth_method,
+        }
+        try:
+            registration = _post_json(config.registration_endpoint, payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{_connector_label(provider)} dynamic client registration failed: {exc}",
+            ) from exc
+        dynamic_client_id = str(registration.get("client_id") or "").strip()
+        if not dynamic_client_id:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{_connector_label(provider)} dynamic client registration did not return a client_id.",
+            )
+        dynamic_client_secret = str(registration.get("client_secret") or "").strip()
+        entry = _DynamicClientRegistration(
+            client_id=dynamic_client_id,
+            client_secret=dynamic_client_secret,
+            client_id_issued_at=_coerce_epoch_seconds(registration.get("client_id_issued_at")),
+            client_secret_expires_at=_coerce_epoch_seconds(registration.get("client_secret_expires_at")),
+        )
+        _DYNAMIC_CLIENT_CACHE[cache_key] = entry
+        if cached is not None:
+            _log.info(
+                "Re-registered OAuth client for %s (redirect_uri=%s) — previous client_secret was expired or expiring within %ds",
+                provider, redirect_uri, _DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS,
+            )
+        else:
+            _log.info("Dynamically registered OAuth client for %s (redirect_uri=%s)", provider, redirect_uri)
+        return (entry.client_id, entry.client_secret)
+
+
+def _resolve_oauth_client(provider: str, redirect_uri: str) -> tuple[str, str]:
+    """Resolve (client_id, client_secret) for a provider's OAuth application.
+
+    Static path (every provider except Higgsfield today): a client_id/secret
+    pre-registered by the workspace owner in the provider's developer
+    console, supplied via env vars — see ensure_oauth_configured().
+
+    Dynamic path (Higgsfield): when OAUTH_PROVIDER_CONFIGS[provider] declares
+    a registration_endpoint and no static env vars are set, self-register via
+    RFC 7591 once per (provider, redirect_uri) instead of failing closed.
+    """
+    try:
+        return ensure_oauth_configured(provider)
+    except HTTPException:
+        config = _provider_config(provider)
+        if config.registration_endpoint and _dynamic_registration_enabled(provider):
+            return _register_dynamic_client(provider, config, redirect_uri)
+        raise
+
+
+def _resolve_oauth_client_for_refresh(provider: str) -> tuple[str, str]:
+    """Same resolution as _resolve_oauth_client(), for background token
+    refresh where no live Request/redirect_uri is available. Reuses whichever
+    dynamically-registered client is already cached for this provider (it was
+    registered during the original start_oauth call that produced the
+    credential now being refreshed).
+
+    Unlike _register_dynamic_client, this path has no redirect_uri and so
+    can never re-register an expired entry (RFC 7591 registration requires
+    declaring redirect_uris) -- an expired cache entry is skipped rather
+    than handed back, so a refresh attempt fails fast locally (falling
+    through to `raise`) instead of spending a network round trip on a
+    client_secret the token endpoint is guaranteed to reject."""
+    try:
+        return ensure_oauth_configured(provider)
+    except HTTPException:
+        config = OAUTH_PROVIDER_CONFIGS.get(str(provider or "").strip().lower())
+        if config is not None and config.registration_endpoint:
+            for (cached_provider, _redirect_uri), entry in _DYNAMIC_CLIENT_CACHE.items():
+                if cached_provider == provider and not entry.is_expired():
+                    return (entry.client_id, entry.client_secret)
+        raise
 
 
 def provider_from_connection_id(connection_id: str) -> str:
@@ -779,8 +2504,14 @@ def start_oauth(
     extra_state: dict | None = None,
 ) -> Dict[str, Any]:
     config = _provider_config(provider)
-    client_id, _client_secret = ensure_oauth_configured(provider)
     redirect_uri = callback_url(request, provider)
+    # redirect_uri must be known before client resolution: dynamic-client-
+    # registration providers (Higgsfield) bind their client_id to the exact
+    # redirect_uris declared at registration time. Reordered from the plain
+    # ensure_oauth_configured(provider) call this replaces — callback_url()
+    # only needs `request` and `provider`, so this reorder is a no-op for
+    # every statically-configured provider.
+    client_id, _client_secret = _resolve_oauth_client(provider, redirect_uri)
     state_payload: Dict[str, Any] = {
         "provider": provider,
         "workspace_id": workspace_id,
@@ -918,7 +2649,12 @@ def _credentials_from_standard_token_response(provider: str, payload: Dict[str, 
 
 def _exchange_standard_oauth(provider: str, code: str, redirect_uri: str, *, code_verifier: str = "") -> Dict[str, Any]:
     config = _provider_config(provider)
-    client_id, client_secret = ensure_oauth_configured(provider)
+    # _resolve_oauth_client (not ensure_oauth_configured) so dynamic-client-
+    # registration providers (Higgsfield) exchange with the same client_id
+    # that was used for the authorize step in start_oauth — see that
+    # function's docstring. Identical to ensure_oauth_configured for every
+    # other provider (config.registration_endpoint is None for all of them).
+    client_id, client_secret = _resolve_oauth_client(provider, redirect_uri)
     body: Dict[str, Any] = {
         "code": code,
     }
@@ -1045,17 +2781,25 @@ def _exchange_slack(code: str, redirect_uri: str) -> Dict[str, Any]:
     return credentials
 
 
-def _exchange_notion(code: str, redirect_uri: str) -> Dict[str, Any]:
+def _exchange_notion(code: str, redirect_uri: str, *, code_verifier: str = "") -> Dict[str, Any]:
     config = _provider_config("notion")
-    client_id, client_secret = ensure_oauth_configured("notion")
+    # _resolve_oauth_client (not ensure_oauth_configured) so Notion's
+    # dynamic-client-registration path (registration_endpoint on the
+    # "notion" config) can complete the token exchange with the same
+    # client_id/secret that was used for the authorize step in start_oauth()
+    # — see _exchange_standard_oauth's identical reasoning.
+    client_id, client_secret = _resolve_oauth_client("notion", redirect_uri)
     auth = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+    body: Dict[str, Any] = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    if code_verifier:
+        body["code_verifier"] = code_verifier
     payload = _post_json(
         _provider_url("notion", config.token_url),
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-        },
+        body,
         headers={"Authorization": f"Basic {auth}"},
     )
     access_token = str(payload.get("access_token") or "").strip()
@@ -1071,19 +2815,24 @@ def _exchange_notion(code: str, redirect_uri: str) -> Dict[str, Any]:
     }
 
 
-def _exchange_linear(code: str, redirect_uri: str) -> Dict[str, Any]:
+def _exchange_linear(code: str, redirect_uri: str, *, code_verifier: str = "") -> Dict[str, Any]:
     config = _provider_config("linear")
-    client_id, client_secret = ensure_oauth_configured("linear")
-    payload = _post_form_json(
-        _provider_url("linear", config.token_url),
-        {
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        },
-    )
+    # _resolve_oauth_client (not ensure_oauth_configured) so Linear's
+    # dynamic-client-registration path (registration_endpoint on the
+    # "linear" config) can complete the token exchange with the same
+    # client_id/secret that was used for the authorize step in start_oauth()
+    # — see _exchange_standard_oauth's identical reasoning.
+    client_id, client_secret = _resolve_oauth_client("linear", redirect_uri)
+    body: Dict[str, Any] = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    if code_verifier:
+        body["code_verifier"] = code_verifier
+    payload = _post_form_json(_provider_url("linear", config.token_url), body)
     access_token = str(payload.get("access_token") or "").strip()
     if not access_token:
         raise RuntimeError(str(payload.get("error_description") or payload.get("error") or "Linear token exchange failed."))
@@ -1102,19 +2851,24 @@ def _exchange_linear(code: str, redirect_uri: str) -> Dict[str, Any]:
     return credentials
 
 
-def _exchange_dropbox(code: str, redirect_uri: str) -> Dict[str, Any]:
+def _exchange_dropbox(code: str, redirect_uri: str, *, code_verifier: str = "") -> Dict[str, Any]:
     config = _provider_config("dropbox")
-    client_id, client_secret = ensure_oauth_configured("dropbox")
-    payload = _post_form_json(
-        _provider_url("dropbox", config.token_url),
-        {
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        },
-    )
+    # _resolve_oauth_client (not ensure_oauth_configured) so Dropbox's
+    # dynamic-client-registration path (registration_endpoint on the
+    # "dropbox" config) can complete the token exchange with the same
+    # client_id/secret that was used for the authorize step in start_oauth()
+    # — identical reasoning to _exchange_notion/_exchange_linear.
+    client_id, client_secret = _resolve_oauth_client("dropbox", redirect_uri)
+    body: Dict[str, Any] = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    if code_verifier:
+        body["code_verifier"] = code_verifier
+    payload = _post_form_json(_provider_url("dropbox", config.token_url), body)
     access_token = str(payload.get("access_token") or "").strip()
     if not access_token:
         raise RuntimeError(str(payload.get("error_description") or payload.get("error") or "Dropbox token exchange failed."))
@@ -1362,6 +3116,232 @@ APP_MCP_SERVER_MAP: Dict[str, List[Dict[str, Optional[str]]]] = {
     "gitlab": [
         {"server_id": "gitlab", "label": "GitLab (MCP)", "endpoint": "https://gitlab.com/api/v4/mcp"},
     ],
+    # Higgsfield: official remote MCP server aggregating ~30 image/video
+    # generation models (Kling, Sora, Veo, Seedream, Seedance, FLUX, Soul,
+    # Nano Banana, Cinema Studio, and more) behind one connection. Auth:
+    # OAuth 2.1 + PKCE + Dynamic Client Registration (see the "higgsfield"
+    # entry in OAUTH_PROVIDER_CONFIGS above for discovery evidence).
+    # Streamable HTTP. Source: higgsfield.ai/mcp; confirmed live 2026-07-18
+    # via GET https://mcp.higgsfield.ai/.well-known/oauth-protected-resource.
+    "higgsfield": [
+        {"server_id": "higgsfield", "label": "Higgsfield (MCP)", "endpoint": "https://mcp.higgsfield.ai/mcp"},
+    ],
+    # Zapier: official hosted MCP server reaching ~8-9k apps through the
+    # customer's own Zapier account. Auth: OAuth 2.1 + PKCE + DCR (see the
+    # "zapier" entry in OAUTH_PROVIDER_CONFIGS above). Streamable HTTP.
+    # Source: docs.zapier.com/mcp; confirmed live 2026-07-19 via GET
+    # https://mcp.zapier.com/.well-known/oauth-protected-resource/api/v1/connect.
+    "zapier": [
+        {"server_id": "zapier", "label": "Zapier (MCP)", "endpoint": "https://mcp.zapier.com/api/v1/connect"},
+    ],
+    # PayPal: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Streamable HTTP. Source: docs.paypal.ai; confirmed live 2026-07-19 via
+    # GET https://mcp.paypal.com/.well-known/oauth-protected-resource.
+    "paypal": [
+        {"server_id": "paypal", "label": "PayPal (MCP)", "endpoint": "https://mcp.paypal.com"},
+    ],
+    # Sentry: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Streamable HTTP. Source: docs.sentry.io, github.com/getsentry/sentry-mcp;
+    # confirmed live 2026-07-19 via GET
+    # https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp.
+    "sentry": [
+        {"server_id": "sentry", "label": "Sentry (MCP)", "endpoint": "https://mcp.sentry.dev/mcp"},
+    ],
+    # Attio: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR (auth
+    # server on app.attio.com, a different host from the MCP endpoint).
+    # Streamable HTTP. Source: docs.attio.com; confirmed live 2026-07-19 via
+    # GET https://mcp.attio.com/.well-known/oauth-protected-resource.
+    "attio": [
+        {"server_id": "attio", "label": "Attio (MCP)", "endpoint": "https://mcp.attio.com/mcp"},
+    ],
+    # Cloudflare: official remote "Code Mode" MCP server exposing ~2,500
+    # Cloudflare API endpoints through two tools (search()/execute()). Auth:
+    # OAuth 2.0 + PKCE + DCR. Streamable HTTP. Source:
+    # developers.cloudflare.com; confirmed live 2026-07-19 via GET
+    # https://mcp.cloudflare.com/.well-known/oauth-protected-resource/mcp.
+    "cloudflare": [
+        {"server_id": "cloudflare", "label": "Cloudflare (MCP)", "endpoint": "https://mcp.cloudflare.com/mcp"},
+    ],
+    # Gusto: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "gusto": [
+        {"server_id": "gusto", "label": "Gusto (MCP)", "endpoint": "https://mcp.api.gusto.com"},
+    ],
+    # Deel: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "deel": [
+        {"server_id": "deel", "label": "Deel (MCP)", "endpoint": "https://api.letsdeel.com/mcp"},
+    ],
+    # Remote: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "remote_com": [
+        {"server_id": "remote_com", "label": "Remote (MCP)", "endpoint": "https://mcp.remote.com/mcp"},
+    ],
+    # Ashby: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "ashby": [
+        {"server_id": "ashby", "label": "Ashby (MCP)", "endpoint": "https://mcp.ashbyhq.com/mcp/v1"},
+    ],
+    # Klaviyo: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "klaviyo": [
+        {"server_id": "klaviyo", "label": "Klaviyo (MCP)", "endpoint": "https://mcp.klaviyo.com/mcp"},
+    ],
+    # Customer.io: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "customer_io": [
+        {"server_id": "customer_io", "label": "Customer.io (MCP)", "endpoint": "https://mcp.customer.io/mcp"},
+    ],
+    # Netlify: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "netlify": [
+        {"server_id": "netlify", "label": "Netlify (MCP)", "endpoint": "https://netlify-mcp.netlify.app/mcp"},
+    ],
+    # Supabase: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "supabase": [
+        {"server_id": "supabase", "label": "Supabase (MCP)", "endpoint": "https://mcp.supabase.com/mcp"},
+    ],
+    # PlanetScale: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "planetscale": [
+        {"server_id": "planetscale", "label": "PlanetScale (MCP)", "endpoint": "https://mcp.pscale.dev/mcp/planetscale"},
+    ],
+    # Neon: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "neon": [
+        {"server_id": "neon", "label": "Neon (MCP)", "endpoint": "https://mcp.neon.tech/mcp"},
+    ],
+    # Railway: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "railway": [
+        {"server_id": "railway", "label": "Railway (MCP)", "endpoint": "https://mcp.railway.com"},
+    ],
+    # Heroku: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "heroku": [
+        {"server_id": "heroku", "label": "Heroku (MCP)", "endpoint": "https://mcp.heroku.com/mcp"},
+    ],
+    # Sourcegraph: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "sourcegraph": [
+        {"server_id": "sourcegraph", "label": "Sourcegraph (MCP)", "endpoint": "https://sourcegraph.com/.api/mcp"},
+    ],
+    # Replit: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "replit": [
+        {"server_id": "replit", "label": "Replit (MCP)", "endpoint": "https://replit-mcp.com/server/mcp"},
+    ],
+    # Postman: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "postman": [
+        {"server_id": "postman", "label": "Postman (MCP)", "endpoint": "https://mcp.postman.com/mcp"},
+    ],
+    # Buildkite: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "buildkite": [
+        {"server_id": "buildkite", "label": "Buildkite (MCP)", "endpoint": "https://mcp.buildkite.com/mcp"},
+    ],
+    # Socket: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "socket": [
+        {"server_id": "socket", "label": "Socket (MCP)", "endpoint": "https://mcp.socket.dev/"},
+    ],
+    # Whimsical: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "whimsical": [
+        {"server_id": "whimsical", "label": "Whimsical (MCP)", "endpoint": "https://mcp.whimsical.com/mcp"},
+    ],
+    # Ramp: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "ramp": [
+        {"server_id": "ramp", "label": "Ramp (MCP)", "endpoint": "https://mcp.ramp.com/mcp"},
+    ],
+    # Brex: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "brex": [
+        {"server_id": "brex", "label": "Brex (MCP)", "endpoint": "https://api.brex.com/mcp"},
+    ],
+    # Mercury: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "mercury": [
+        {"server_id": "mercury", "label": "Mercury (MCP)", "endpoint": "https://mcp.mercury.com/mcp"},
+    ],
+    # Robinhood: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "robinhood": [
+        {"server_id": "robinhood", "label": "Robinhood (MCP)", "endpoint": "https://agent.robinhood.com/mcp/trading"},
+    ],
+    # Amplitude: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "amplitude": [
+        {"server_id": "amplitude", "label": "Amplitude (MCP)", "endpoint": "https://mcp.amplitude.com/mcp"},
+    ],
+    # Mixpanel: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "mixpanel": [
+        {"server_id": "mixpanel", "label": "Mixpanel (MCP)", "endpoint": "https://mcp.mixpanel.com/mcp"},
+    ],
+    # PostHog: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "posthog": [
+        {"server_id": "posthog", "label": "PostHog (MCP)", "endpoint": "https://mcp.posthog.com/mcp"},
+    ],
+    # Meta Ads: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "meta_ads": [
+        {"server_id": "meta_ads", "label": "Meta Ads (MCP)", "endpoint": "https://mcp.facebook.com/ads"},
+    ],
+    # Semrush: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "semrush": [
+        {"server_id": "semrush", "label": "Semrush (MCP)", "endpoint": "https://mcp.semrush.com/v1/mcp"},
+    ],
+    # Ahrefs: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "ahrefs": [
+        {"server_id": "ahrefs", "label": "Ahrefs (MCP)", "endpoint": "https://api.ahrefs.com/mcp/mcp"},
+    ],
+    # Close: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "close_crm": [
+        {"server_id": "close_crm", "label": "Close (MCP)", "endpoint": "https://mcp.close.com/mcp"},
+    ],
+    # Apollo.io: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "apollo_io": [
+        {"server_id": "apollo_io", "label": "Apollo.io (MCP)", "endpoint": "https://mcp.apollo.io/mcp"},
+    ],
+    # Outreach: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "outreach": [
+        {"server_id": "outreach", "label": "Outreach (MCP)", "endpoint": "https://api.outreach.io/mcp/"},
+    ],
+    # Salesloft: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "salesloft": [
+        {"server_id": "salesloft", "label": "Salesloft (MCP)", "endpoint": "https://mcp.salesloft.com/mcp"},
+    ],
+    # Clay: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "clay": [
+        {"server_id": "clay", "label": "Clay (MCP)", "endpoint": "https://api.clay.com/v3/mcp"},
+    ],
+    # Fireflies.ai: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR.
+    # Confirmed live 2026-07-19.
+    "fireflies": [
+        {"server_id": "fireflies", "label": "Fireflies.ai (MCP)", "endpoint": "https://api.fireflies.ai/mcp"},
+    ],
+    # Fathom: official remote MCP server. Auth: OAuth 2.0 + PKCE + DCR. Confirmed
+    # live 2026-07-19.
+    "fathom": [
+        {"server_id": "fathom", "label": "Fathom (MCP)", "endpoint": "https://api.fathom.ai/mcp"},
+    ],
+    # Superhuman Docs (formerly Coda): official remote MCP server. Auth: OAuth 2.0
+    # + PKCE + DCR. Confirmed live 2026-07-19.
+    "coda": [
+        {"server_id": "coda", "label": "Superhuman Docs (formerly Coda) (MCP)", "endpoint": "https://docs.superhuman.com/apis/mcp"},
+    ],
 }
 
 
@@ -1395,6 +3375,14 @@ async def connect_app_via_oauth_to_mcp(
         raise HTTPException(status_code=400, detail="workspace_id is required.")
 
     # Step 1: Exchange OAuth code for tokens (reuse existing provider-specific logic)
+    # NOTE: this bridge takes a bare (oauth_code, redirect_uri) with no PKCE
+    # code_verifier param and no `state` round-trip to recover one from — so
+    # it cannot complete a token exchange for any auth_method="pkce"
+    # provider (Airtable, Canva, Asana, Higgsfield, and — as of this pass —
+    # Stripe, Linear, Notion, ClickUp all use PKCE now). That gap predates
+    # this change and isn't introduced by it; the primary redirect-based
+    # flow (complete_oauth_callback, driven by start_oauth()'s own `state`)
+    # is the one that's fully PKCE-wired.
     provider_config = _provider_config(normalized_provider)
 
     try:
@@ -1591,7 +3579,11 @@ def refresh_oauth_token_if_needed(credential_id: str) -> Dict[str, Any]:
     # Step 4: Call the provider's token refresh endpoint
     client_id, client_secret = "", ""
     try:
-        client_id, client_secret = ensure_oauth_configured(provider)
+        # _resolve_oauth_client_for_refresh (not ensure_oauth_configured) so a
+        # credential obtained through Higgsfield's dynamic-client-registration
+        # path can still be refreshed — see that function's docstring.
+        # Identical to ensure_oauth_configured for every other provider.
+        client_id, client_secret = _resolve_oauth_client_for_refresh(provider)
     except Exception:
         _log.warning("refresh_oauth_token_if_needed: provider %s OAuth not configured", provider)
         return credential
@@ -1678,11 +3670,11 @@ async def complete_oauth_callback(
         elif normalized_provider == "slack":
             credentials = _exchange_slack(normalized_code, redirect_uri)
         elif normalized_provider == "notion":
-            credentials = _exchange_notion(normalized_code, redirect_uri)
+            credentials = _exchange_notion(normalized_code, redirect_uri, code_verifier=code_verifier)
         elif normalized_provider == "linear":
-            credentials = _exchange_linear(normalized_code, redirect_uri)
+            credentials = _exchange_linear(normalized_code, redirect_uri, code_verifier=code_verifier)
         elif normalized_provider == "dropbox":
-            credentials = _exchange_dropbox(normalized_code, redirect_uri)
+            credentials = _exchange_dropbox(normalized_code, redirect_uri, code_verifier=code_verifier)
         elif normalized_provider == "discord":
             credentials = _exchange_discord(normalized_code, redirect_uri)
         elif provider_config.token_parser == "standard":
