@@ -4,8 +4,6 @@ import base64
 from typing import Any, Callable, Dict, List
 from urllib.parse import quote_plus
 from server_modules.connectors.github_connector import validate_github_credentials
-from server_modules.connectors.linear_connector import validate_linear_credentials
-from server_modules.connectors.notion_connector import validate_notion_credentials
 from server_modules.connectors.dropbox_connector import validate_dropbox_credentials
 from server_modules.connectors.discord_connector import validate_discord_bot_credentials
 from server_modules.connectors.s3_connector import validate_s3_credentials
@@ -31,12 +29,131 @@ def validate_github_connector(credentials: Dict[str, Any], http_json_request: Ht
     return validate_github_credentials(credentials, http_json_request=http_json_request)
 
 
+# ---------------------------------------------------------------------------
+# DCR / MCP-scoped-token connectors (Stripe, Linear, Notion, Asana, Canva,
+# ClickUp, Higgsfield). These self-register their OAuth client via RFC 7591
+# (see connection_oauth_service.OAUTH_PROVIDER_CONFIGS's registration_
+# endpoint field) against the provider's MCP authorization server -- a
+# DIFFERENT OAuth app, with a DIFFERENT scope model, from the provider's
+# classic REST API (e.g. Stripe: access.stripe.com/mcp, scopes=("mcp",) vs.
+# the classic Stripe API and a full-access API key; Notion/Linear: an
+# mcp.notion.com / mcp.linear.app OAuth app vs. the classic api.notion.com /
+# api.linear.app app this file's validators used to call). A token minted
+# this way is REJECTED by the classic-API endpoints every other
+# validate_*_connector function in this module probes (validate_oauth_
+# bearer_connector's profile_probe, or the classic /users/me and /graphql
+# calls notion_connector.py / linear_connector.py used to be reached through
+# here) -- confirmed for Stripe/Asana (whose MCP resource declares a scope
+# model with zero overlap with the classic API's), architecturally certain
+# for Notion/Linear (a wholly different OAuth app/audience), suspected for
+# Canva/ClickUp. Airtable is the one DCR-enabled exception: its MCP resource
+# shares the SAME auth server as its classic API (airtable.com/oauth2/v1),
+# so an Airtable token is a genuine general-purpose API token and
+# validate_airtable_connector keeps using validate_oauth_bearer_connector's
+# classic profile_probe unchanged.
+#
+# validate_mcp_scoped_oauth_connector proves the token instead by using it
+# the same way the platform's own agent runtime will: a live MCP
+# `initialize` + `tools/list` handshake against the provider's registered
+# MCP endpoint (APP_MCP_SERVER_MAP), via the same mcp_registry_service
+# machinery connection_oauth_service._register_mcp_servers_for_provider
+# uses right after this validator runs during the real OAuth callback.
+#
+# Known trade-off: the classic-API calls this replaces for Notion/Linear
+# also happened to return workspace/organization identity (workspace_name,
+# organization_name, ...) that create_connector_vault folds into connector
+# metadata. An MCP tools/list response carries no such identity. That
+# enrichment is not a regression, though -- for an MCP-scoped token it was
+# already unreachable (the classic call raised before returning anything),
+# so today it silently never populates for a DCR-registered Notion/Linear
+# connection either. This fix trades a metadata field that was already
+# dead for a connection that actually completes.
+# ---------------------------------------------------------------------------
+
+
+def validate_mcp_scoped_oauth_connector(
+    credentials: Dict[str, Any],
+    http_json_request: HttpJsonRequest | None = None,
+    *,
+    provider: str,
+    label: str,
+) -> Dict[str, Any]:
+    access_token = str(credentials.get("access_token") or credentials.get("oauth_access_token") or credentials.get("token") or "").strip()
+    if not access_token:
+        raise RuntimeError(f"{label} access_token is required.")
+
+    auth_mode = str(credentials.get("auth_mode") or "oauth").strip().lower() or "oauth"
+    normalized_credentials = {
+        **credentials,
+        "access_token": access_token,
+        "auth_mode": auth_mode,
+    }
+
+    # Deferred imports: connection_oauth_service imports connectors_actions
+    # (which loads this module transitively, via runtime_config ->
+    # runtime_common) at module scope, so this module must not import
+    # connection_oauth_service at module scope -- the same deferred-import
+    # pattern already used throughout connectors_actions.py (e.g.
+    # _register_mcp_servers_for_provider's own `from server_modules import
+    # mcp_registry_service`).
+    from server_modules.connection_oauth_service import APP_MCP_SERVER_MAP
+    from server_modules import mcp_registry_service
+
+    endpoint: str | None = None
+    for entry in APP_MCP_SERVER_MAP.get(provider) or ():
+        candidate = entry.get("endpoint")
+        if candidate:
+            endpoint = str(candidate)
+            break
+
+    if not endpoint:
+        # No MCP endpoint on file for this provider yet -- nothing to probe.
+        # Trust the token exchange itself, the same fallback
+        # create_connector_vault uses for connectors with no dedicated
+        # validator at all.
+        return {
+            "ok": True,
+            "status": 200,
+            "message": f"{label} connector is valid.",
+            "profile": {},
+            "provider": provider,
+            "auth_mode": auth_mode,
+            "credentials": normalized_credentials,
+        }
+
+    try:
+        tools = mcp_registry_service.discover_mcp_server_tools(
+            transport="streamable_http",
+            endpoint=endpoint,
+            server_id=provider,
+            credential={"access_token": access_token},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"{label} MCP token is invalid: {exc}") from exc
+
+    tool_count = len(tools)
+    return {
+        "ok": True,
+        "status": 200,
+        "message": f"{label} connector is valid ({tool_count} MCP tool{'s' if tool_count != 1 else ''} available).",
+        "profile": {},
+        "provider": provider,
+        "auth_mode": auth_mode,
+        "mcp_tool_count": tool_count,
+        "credentials": normalized_credentials,
+    }
+
+
 def validate_notion_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest | None = None) -> Dict[str, Any]:
-    return validate_notion_credentials(credentials, http_json_request=http_json_request)
+    return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="notion", label="Notion")
 
 
 def validate_linear_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest | None = None) -> Dict[str, Any]:
-    return validate_linear_credentials(credentials, http_json_request=http_json_request)
+    return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="linear", label="Linear")
+
+
+def validate_higgsfield_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest | None = None) -> Dict[str, Any]:
+    return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="higgsfield", label="Higgsfield")
 
 
 def validate_dropbox_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest | None = None) -> Dict[str, Any]:
@@ -105,23 +222,11 @@ def validate_airtable_connector(credentials: Dict[str, Any], http_json_request: 
 
 
 def validate_canva_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
-    return validate_oauth_bearer_connector(
-        credentials,
-        http_json_request,
-        provider="canva",
-        label="Canva",
-        profile_probe="https://api.canva.com/rest/v1/users/me/profile",
-    )
+    return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="canva", label="Canva")
 
 
 def validate_asana_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
-    return validate_oauth_bearer_connector(
-        credentials,
-        http_json_request,
-        provider="asana",
-        label="Asana",
-        profile_probe="https://app.asana.com/api/1.0/users/me",
-    )
+    return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="asana", label="Asana")
 
 
 def validate_hubspot_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
@@ -155,13 +260,7 @@ def validate_calendly_connector(credentials: Dict[str, Any], http_json_request: 
 
 
 def validate_clickup_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
-    return validate_oauth_bearer_connector(
-        credentials,
-        http_json_request,
-        provider="clickup",
-        label="ClickUp",
-        profile_probe="https://api.clickup.com/api/v2/user",
-    )
+    return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="clickup", label="ClickUp")
 
 
 def validate_jira_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
@@ -175,13 +274,7 @@ def validate_jira_connector(credentials: Dict[str, Any], http_json_request: Http
 
 
 def validate_stripe_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
-    return validate_oauth_bearer_connector(
-        credentials,
-        http_json_request,
-        provider="stripe",
-        label="Stripe",
-        profile_probe="https://api.stripe.com/v1/account",
-    )
+    return validate_mcp_scoped_oauth_connector(credentials, http_json_request, provider="stripe", label="Stripe")
 
 
 def validate_salesforce_connector(credentials: Dict[str, Any], http_json_request: HttpJsonRequest) -> Dict[str, Any]:
