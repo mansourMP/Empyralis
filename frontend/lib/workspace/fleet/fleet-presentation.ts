@@ -60,10 +60,19 @@ export type TintKey = "blue" | "purple" | "amber" | "teal" | "coral" | "rose" | 
 /* Muted per-agent/per-project identity tints (~16% opacity fill + colored
    glyph). These are identity colors, NOT the brand accent — 8 total so a
    project's deterministic-hash assignment (projects_repository.py) has a
-   real spread to draw from. */
+   real spread to draw from.
+
+   The "purple" key's rendered color is green, not purple — the accent
+   directive banned purple everywhere, including chips. The string "purple"
+   is kept as the object key only because it's a data contract with
+   server_modules/projects_repository.py's PROJECT_TINTS list (the backend
+   hashes a project id to one of these literal strings and the frontend
+   looks it up here); renaming the key would desync already-assigned
+   projects from their tint without a migration, which is out of scope for
+   an accent-color change. No pixel it produces is purple. */
 export const TINTS: Record<TintKey, { bg: string; fg: string }> = {
   blue: { bg: "rgba(12, 68, 124, 0.16)", fg: "#85B7EB" },
-  purple: { bg: "rgba(60, 52, 137, 0.16)", fg: "#AFA9EC" },
+  purple: { bg: "rgba(21, 128, 61, 0.16)", fg: "#4ADE80" },
   amber: { bg: "rgba(133, 79, 11, 0.16)", fg: "#EF9F27" },
   teal: { bg: "rgba(15, 110, 86, 0.16)", fg: "#5DCAA5" },
   coral: { bg: "rgba(153, 60, 29, 0.16)", fg: "#F0997B" },
