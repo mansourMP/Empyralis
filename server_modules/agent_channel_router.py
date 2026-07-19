@@ -124,6 +124,7 @@ _SAGE_CHANNEL_ORIGIN_MAP: dict[str, str] = {
     "discord": "discord_guild",
     "github": "github",
     "telegram": "telegram_hosted",
+    "sms": "sms",
 }
 
 

@@ -11,6 +11,7 @@ import type {
   PersonalChannelHealthSnapshot,
   PersonalChannelRuntime,
 } from "./personal-runtime";
+import { TypingKeepalive } from "./foundation/typing-keepalive";
 
 type BridgeSetupKind = "local_bridge" | "mac_bridge";
 
@@ -81,6 +82,14 @@ function readPositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
 }
 
+// Same values as WhatsApp's/Telegram's own typing keepalive (see
+// whatsapp/outbound.ts's WHATSAPP_TYPING_KEEPALIVE_MS/MAX_TTL_MS and
+// telegram/outbound.ts's identical constants) — refresh every 3s, hard-stop
+// after 60s even if handleChannelOutbound's claim never arrives (e.g. the
+// backend reply never comes back).
+const LOCAL_BRIDGE_TYPING_KEEPALIVE_MS = 3_000;
+const LOCAL_BRIDGE_TYPING_MAX_TTL_MS = 60_000;
+
 function buildLocalBridgeManifest(config: LocalBridgeRuntimeConfig): PersonalChannelCapabilityManifest {
   return {
     channelKey: config.channelKey,
@@ -148,6 +157,19 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
   private lastError?: string;
   private readonly seenInboundEventIds: string[] = [];
   private readonly seenInboundEventSet = new Set<string>();
+  // Typing sessions started the instant an inbound message is admitted (see
+  // startTypingForChat), keyed by remote_jid, so handleChannelOutbound can
+  // claim and stop the SAME session once the real reply is ready to send —
+  // same start-on-admit/stop-on-send shape as WhatsApp's/Telegram's own
+  // activeTyping map (see whatsapp/runtime.ts's startTypingForChat), just
+  // without their draft-streaming coordination since local-bridge replies
+  // are generated backend-side, not gateway-side. Best-effort throughout:
+  // a bridge that doesn't implement /typing (BlueBubbles, WeChat today)
+  // simply never gets a successful call — see sendTypingAction — and
+  // TypingKeepalive's own maxTtlMs self-expires a session even if stop()
+  // is never claimed (e.g. the reply never arrives), so this can never
+  // leak an interval past that ceiling.
+  private readonly activeTyping = new Map<string, TypingKeepalive>();
 
   constructor(private readonly config: LocalBridgeRuntimeConfig) {
     this.manifest = buildLocalBridgeManifest(config);
@@ -179,6 +201,12 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
       throw new Error(`${this.config.label} bridge is not configured. Set ${this.config.envPrefix}_URL on Agent Computer.`);
     }
     const payload = frame.payload || {};
+    // Claim (and stop) whatever typing session startTypingForChat began for
+    // this same remote_jid when the triggering inbound message was admitted
+    // — the real reply is about to be sent, so the "thinking" indicator's
+    // job is done. Fire-and-forget: never let a cosmetic typing-stop call
+    // delay or fail the actual send below.
+    void this.claimTypingForChat(String(payload.remote_jid || ""))?.stop();
     const response = await this.fetchJson(`${bridge.baseUrl}/messages`, {
       method: "POST",
       token: bridge.token,
@@ -235,6 +263,10 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    for (const typing of this.activeTyping.values()) {
+      void typing.stop();
+    }
+    this.activeTyping.clear();
   }
 
   setPublisher(publisher: PersonalChannelGatewayPublisher): void {
@@ -360,6 +392,13 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
           if (event.message.is_group && !event.message.is_mentioned && !event.message.is_reply_to_sage) {
             continue;
           }
+          // Start the "thinking" typing indicator the instant a message
+          // clears the group gate — before waiting on the backend
+          // round-trip that actually produces a reply. Claimed and stopped
+          // in handleChannelOutbound once that reply is ready to send. See
+          // startTypingForChat's doc comment for why this only ever
+          // best-effort no-ops on bridges that don't support it.
+          this.startTypingForChat(event.message.remote_jid, bridge);
           await this.publisher.publishEvent("channel.inbound", event);
           this.lastEventAt = event.message.received_at;
         }
@@ -391,11 +430,76 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
         // Optional — absent/false unless the bridge behind this HTTP
         // contract actually computes them (see the two first-party bridges
         // in ../bridges/ for the reference implementation of each field).
+        // is_self_chat lets a from_me message still reach the backend as an
+        // owner command (see personal_channels_service.py's
+        // _handle_local_bridge_gateway_channel_inbound) — only
+        // signal-cli-bridge.ts computes it today.
+        is_self_chat: item.is_self_chat === true,
         is_group: item.is_group === true,
         is_mentioned: item.is_mentioned === true,
         is_reply_to_sage: item.is_reply_to_sage === true,
       },
     };
+  }
+
+  /** Starts a typing keepalive the instant an inbound message clears the
+   *  group gate — mirrors WhatsApp's/Telegram's own startTypingForChat (see
+   *  whatsapp/runtime.ts) but triggered by bridge-poll admission instead of
+   *  a live socket event, since polling is this family's own inbound path.
+   *  A second inbound message for the same remoteJid while one is already
+   *  active reuses it rather than starting a duplicate. */
+  private startTypingForChat(remoteJid: string, bridge: LocalBridgeResolvedConfig): void {
+    const jid = String(remoteJid || "").trim();
+    if (!jid || this.activeTyping.has(jid)) {
+      return;
+    }
+    const typing = new TypingKeepalive(
+      (action) => this.sendTypingAction(bridge, jid, action),
+      {
+        startAction: "start",
+        stopAction: "stop",
+        keepaliveMs: LOCAL_BRIDGE_TYPING_KEEPALIVE_MS,
+        maxTtlMs: LOCAL_BRIDGE_TYPING_MAX_TTL_MS,
+      },
+    );
+    this.activeTyping.set(jid, typing);
+    void typing.start();
+  }
+
+  /** Hands the caller the typing session startTypingForChat started for
+   *  this remoteJid (if one is still active) and stops tracking it here —
+   *  same claim-and-release contract as WhatsApp's claimTypingForChat. */
+  private claimTypingForChat(remoteJid: string): TypingKeepalive | undefined {
+    const jid = String(remoteJid || "").trim();
+    if (!jid) {
+      return undefined;
+    }
+    const typing = this.activeTyping.get(jid);
+    if (typing) {
+      this.activeTyping.delete(jid);
+    }
+    return typing;
+  }
+
+  /** POSTs a start/stop typing action to the bridge's /typing endpoint.
+   *  Best-effort by design: typing indicators are cosmetic, and a bridge
+   *  that doesn't implement /typing at all (BlueBubbles, WeChat today —
+   *  only signal-cli-bridge.ts does) must never turn a missing feature
+   *  into a logged error or a failed send. */
+  private async sendTypingAction(bridge: LocalBridgeResolvedConfig, remoteJid: string, action: string): Promise<void> {
+    try {
+      await this.fetchJson(`${bridge.baseUrl}/typing`, {
+        method: "POST",
+        token: bridge.token,
+        body: {
+          channel_key: this.config.channelKey,
+          remote_jid: remoteJid,
+          action,
+        },
+      });
+    } catch {
+      // Swallowed — see doc comment above.
+    }
   }
 
   private inboundEventKey(event: GatewayChannelInboundPayload): string {

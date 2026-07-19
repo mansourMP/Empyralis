@@ -909,13 +909,15 @@ def _is_owner_message(
     existing_state: Optional[Dict[str, Any]],
 ) -> bool:
     """True when this inbound message is from the OWNER's own identity:
-    WhatsApp/Telegram self-chat (message.is_self_chat — computed gateway-side
-    from the live connection's own account id, see
-    empyralis-gateway/src/channels/whatsapp/message-mapper.ts), or a sender
-    that matches this channel's previously-established linked owner
-    identity (also correctly identifies the owner posting inside a WhatsApp
-    group they're a member of, since a person's JID is the same in every
-    context).
+    WhatsApp/Telegram/Signal self-chat (message.is_self_chat — computed
+    gateway-side from the live connection's own account id, see
+    empyralis-gateway/src/channels/whatsapp/message-mapper.ts for WhatsApp
+    and empyralis-gateway/src/bridges/signal-cli-bridge.ts's
+    mapSignalCliReceiveNotification for Signal's "Note to Self" equivalent),
+    or a sender that matches this channel's previously-established linked
+    owner identity (also correctly identifies the owner posting inside a
+    WhatsApp group they're a member of, since a person's JID is the same in
+    every context).
 
     Reuses triage_service.resolve_sender_identity for the actual identity
     resolution rather than re-implementing it — see that function's
@@ -2699,7 +2701,22 @@ async def _handle_local_bridge_gateway_channel_inbound(
     media_items = [item for item in (message.get("media") or []) if isinstance(item, dict)]
     if not external_message_id or not remote_jid or (not text and not media_items):
         raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
-    if bool(message.get("from_me")):
+    # A self-chat message (the owner messaging their own Signal "Note to
+    # Self" conversation — the local-bridge analog of WhatsApp's/Telegram's
+    # is_self_chat command channel) is always from_me too, since only the
+    # linked account can post into its own self-conversation. Let it through
+    # here exactly like the WhatsApp/Telegram handlers (`from_me and not
+    # is_self_chat`) instead of ignoring every from_me message
+    # unconditionally — _is_owner_message's is_self_chat shortcut (above)
+    # already treats this as the owner regardless of channel, so no other
+    # plumbing is needed once a bridge sets it. An ordinary outgoing message
+    # to someone else (or to a group) still has is_self_chat=False and is
+    # still ignored here. Whether is_self_chat is ever true depends on the
+    # specific bridge actually computing it — see signal-cli-bridge.ts's
+    # mapSignalCliReceiveNotification for the reference implementation
+    # (BlueBubbles/WeChat bridges don't compute it yet, so iMessage/WeChat
+    # keep the previous from_me-always-ignored behavior until they do).
+    if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
         return {"ignored": True, "reason": "from_me", "channel_key": channel_key}
     # Group gate: skip group messages unless mentioned or replying to Sage.
     # The Gateway-side filter (local-bridge-runtime.ts's pollInboundEvents)

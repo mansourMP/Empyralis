@@ -16,6 +16,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
 
         webhook_paths = {
             "/channels/whatsapp/twilio/webhook",
+            "/channels/sms/twilio/webhook",
             "/channels/telegram/webhook/{connector_id}",
             "/channels/slack/events",
             "/channels/github/webhook",
@@ -60,10 +61,15 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["stage"] for entry in personal_catalog],
-            # iMessage and WeChat are first-class, owner-connectable gateway
-            # channels like Telegram/WhatsApp — not "coming soon". Only Signal
-            # remains planned until its bridge runtime is certified.
-            ["live", "live", "planned", "live", "live", "live"],
+            # Signal, iMessage, and WeChat are all first-class,
+            # owner-connectable local-bridge gateway channels like
+            # Telegram/WhatsApp — none are "coming soon". Signal's catalog
+            # entry previously said "planned"/live_capable=false here while
+            # its handler, gateway runtime, and signal-cli bridge were
+            # already fully wired — that mismatch (not any real capability
+            # gap) is what made Signal read as disabled everywhere this
+            # roadmap feeds; see get_gateway_personal_channel_surfaces.
+            ["live", "live", "live", "live", "live", "live"],
         )
         self.assertTrue(
             all(
@@ -77,18 +83,23 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["live_capable"] for entry in personal_catalog],
-            ["true", "true", "false", "true", "true", "true"],
+            ["true", "true", "true", "true", "true", "true"],
         )
 
         self.assertEqual(
             [entry["channel_key"] for entry in studio_catalog],
-            ["web_chat", "email", "telegram_bot", "whatsapp_twilio", "apple_messages_business", "slack", "discord_bot"],
+            ["web_chat", "email", "telegram_bot", "whatsapp_twilio", "sms_twilio", "apple_messages_business", "slack", "discord_bot"],
         )
         by_key = {entry["channel_key"]: entry for entry in studio_catalog}
         self.assertEqual(by_key["web_chat"]["status"], "roadmap")
         self.assertEqual(by_key["email"]["status"], "partial")
         self.assertEqual(by_key["telegram_bot"]["status"], "working_when_configured")
         self.assertEqual(by_key["whatsapp_twilio"]["status"], "out_of_scope")
+        # SMS (Twilio) is a live, launchable cloud channel — each agent gets
+        # its own phone number, reusing the WhatsApp-Twilio Messages plumbing.
+        self.assertEqual(by_key["sms_twilio"]["status"], "working_when_configured")
+        self.assertEqual(by_key["sms_twilio"]["provider"], "twilio_sms")
+        self.assertEqual(by_key["sms_twilio"]["launch_allowed"], "true")
         self.assertEqual(by_key["apple_messages_business"]["status"], "roadmap")
         self.assertEqual(by_key["slack"]["status"], "working_when_configured")
         self.assertEqual(by_key["discord_bot"]["status"], "working_when_configured")
@@ -97,7 +108,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
             all(
                 entry["launch_allowed"] == "false"
                 for entry in studio_catalog
-                if entry["channel_key"] not in {"telegram_bot", "slack", "discord_bot"}
+                if entry["channel_key"] not in {"telegram_bot", "sms_twilio", "slack", "discord_bot"}
             )
         )
         self.assertTrue(
@@ -114,7 +125,16 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         catalog = service.platform_channel_catalog()
         by_key = {entry["channel_key"]: entry for entry in catalog}
 
-        self.assertEqual(len(catalog), 25)
+        self.assertEqual(len(catalog), 26)
+        # SMS via Twilio — a live business channel on the Studio connector lane
+        # (the "each agent gets its own phone number" feature).
+        self.assertEqual(by_key["sms_twilio"]["provider"], "twilio_sms")
+        self.assertEqual(by_key["sms_twilio"]["binding_channel_key"], "sms")
+        self.assertEqual(by_key["sms_twilio"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
+        self.assertTrue(by_key["sms_twilio"]["live_capable"])
+        self.assertTrue(by_key["sms_twilio"]["launch_allowed"])
+        self.assertFalse(by_key["sms_twilio"]["requires_agent_computer"])
+        self.assertEqual(by_key["sms_twilio"]["product_surface"], "business_channel")
         self.assertEqual(by_key["telegram_bot"]["binding_channel_key"], "telegram")
         self.assertEqual(by_key["telegram_bot"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
         self.assertEqual(by_key["telegram_personal"]["runtime_lane"], service.PERSONAL_GATEWAY_RUNTIME_LANE)
@@ -125,13 +145,18 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         self.assertEqual(by_key["telegram_personal"]["ownership_boundary"], "agent_computer")
         self.assertEqual(by_key["whatsapp_personal"]["surface_support"], ["sage"])
         self.assertEqual(by_key["signal_personal"]["status"], "agent_computer_bridge")
-        self.assertFalse(by_key["signal_personal"]["live_capable"])
-        # iMessage and WeChat are shipped, owner-connectable gateway channels
-        # (like Telegram/WhatsApp) — live_capable/launch_allowed are true. The
-        # "agent_computer_bridge" status (not "agent_computer_only") is the
-        # honest bit that survives: both require a real bridge process on the
-        # agent's own gateway (BlueBubbles on a Mac for iMessage; a best-effort
-        # local WeChat session bridge for WeChat) rather than a cloud path.
+        self.assertTrue(by_key["signal_personal"]["live_capable"])
+        self.assertTrue(by_key["signal_personal"]["launch_allowed"])
+        # Signal, iMessage, and WeChat are all shipped, owner-connectable
+        # gateway channels (like Telegram/WhatsApp) — live_capable/
+        # launch_allowed are true for all three. The "agent_computer_bridge"
+        # status (not "agent_computer_only") is the honest bit that
+        # survives: each requires a real bridge process on the agent's own
+        # gateway (signal-cli for Signal; BlueBubbles on a Mac for iMessage;
+        # a best-effort local WeChat session bridge for WeChat) rather than
+        # a cloud path — a deployment that hasn't configured that bridge's
+        # env vars still reads "not configured" via the bridge's own health
+        # check, not this catalog flag.
         self.assertEqual(by_key["imessage_personal"]["provider"], "bluebubbles_local_bridge")
         self.assertEqual(by_key["imessage_personal"]["status"], "agent_computer_bridge")
         self.assertTrue(by_key["imessage_personal"]["live_capable"])

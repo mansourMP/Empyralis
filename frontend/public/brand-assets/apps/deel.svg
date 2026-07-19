@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 24 24">
+  <title>Deel</title>
+  <!-- Placeholder mark: no verified official brand SVG available for this
+       connector (see docs/PLATFORM-MAP.md connector wiring notes), a
+       neutral monogram badge, not an attempt at the real Deel wordmark or
+       logo, matching this directory's one-file-per-connector convention. -->
+  <rect width="24" height="24" rx="6" fill="#9E502E"/>
+  <text x="12" y="16.7" font-family="-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF" text-anchor="middle">D</text>
+</svg>

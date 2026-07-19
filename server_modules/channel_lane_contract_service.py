@@ -82,8 +82,20 @@ PERSONAL_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
         "label": "Signal",
         "provider": "signal_local_bridge",
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "stage": "planned",
-        "live_capable": "false",
+        # Live local-bridge channel, same family as iMessage/WeChat below —
+        # matches PERSONAL_CHANNEL_SPECS's signal_personal entry above and
+        # CHANNEL_PLATFORM_CATALOG's signal_personal entry further down.
+        # Previously "planned"/false here (while iMessage/WeChat were
+        # "live"/true) made get_gateway_personal_channel_surfaces compute
+        # live_capable=False for Signal even though the backend handler
+        # (_handle_local_bridge_gateway_channel_inbound), the gateway
+        # runtime (LocalBridgePersonalChannelRuntime), and the signal-cli
+        # bridge were all already fully wired — the same as iMessage/WeChat.
+        # A deployment that hasn't configured EMPYRALIS_SIGNAL_BRIDGE_URL
+        # still honestly reads "not configured" via the bridge health check,
+        # not this catalog flag.
+        "stage": "live",
+        "live_capable": "true",
         "family": "personal",
         "session_owner": "paired_gateway",
     },
@@ -175,6 +187,21 @@ STUDIO_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
         "status": "out_of_scope",
         "live_capable": "false",
         "launch_allowed": "false",
+        "family": "studio_business",
+        "session_owner": "cloud_connector",
+    },
+    {
+        # Plain SMS via a dedicated Twilio number per agent — reuses the same
+        # Twilio Messages API plumbing as whatsapp_twilio, minus the
+        # `whatsapp:` address prefix (see WhatsAppTransportService.send_sms).
+        "channel_key": "sms_twilio",
+        "label": "SMS (Twilio)",
+        "provider": "twilio_sms",
+        "runtime_lane": STUDIO_CONNECTOR_RUNTIME_LANE,
+        "stage": "live",
+        "status": "working_when_configured",
+        "live_capable": "true",
+        "launch_allowed": "true",
         "family": "studio_business",
         "session_owner": "cloud_connector",
     },
@@ -335,6 +362,44 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "connector_id": "whatsapp_twilio",
         "surface_support": ["studio"],
         "capabilities": ["inbound", "outbound", "business_messaging"],
+    },
+    {
+        # "Each agent gets its own phone number to text with." Cloud webhook
+        # channel (no gateway/hardware pairing) on the same Studio connector
+        # lane as Slack/Discord bot. The platform holds ONE master Twilio
+        # account (no customer keys) — provisioning searches + buys a number
+        # under it and points the number's SmsUrl at
+        # /channels/sms/twilio/webhook. Gated on TWILIO_ACCOUNT_SID /
+        # TWILIO_AUTH_TOKEN; unset ⇒ "not configured on this deployment".
+        "channel_key": "sms_twilio",
+        "binding_channel_key": "sms",
+        "label": "SMS via Twilio",
+        "provider": "twilio_sms",
+        "runtime_lane": STUDIO_CONNECTOR_RUNTIME_LANE,
+        "category": "customer_chat",
+        "stage": "live",
+        "status": "working_when_configured",
+        "live_capable": True,
+        "launch_allowed": True,
+        "requires_agent_computer": False,
+        "account_provider": "sms_twilio",
+        "connector_id": "sms_twilio",
+        "surface_support": ["studio"],
+        "capabilities": ["inbound", "outbound", "sms", "dedicated_number"],
+        # Per-message + monthly-number cost is a Twilio pass-through. These
+        # are indicative Twilio US list prices (subject to change by Twilio;
+        # carrier A2P fees extra) surfaced so the cost is never hidden — they
+        # are NOT yet metered against workspace credits. The exact billing
+        # hook point is documented in sms_twilio_provisioning_service.py.
+        "pricing": {
+            "model": "usage_metered_passthrough",
+            "currency": "USD",
+            "number_rental_per_month": 1.15,
+            "outbound_per_segment": 0.0079,
+            "inbound_per_segment": 0.0079,
+            "metered": False,
+            "provider": "twilio",
+        },
     },
     {
         "channel_key": "apple_messages_business",
@@ -608,9 +673,19 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
         "category": "personal_runtime",
         "stage": "live",
+        # "agent_computer_bridge" (not "agent_computer_only") — the same
+        # honest distinction from Telegram/WhatsApp that iMessage/WeChat
+        # below already use: this needs a real signal-cli bridge running on
+        # hardware the user controls, not a cloud path.
         "status": "agent_computer_bridge",
-        "live_capable": False,
-        "launch_allowed": False,
+        # live_capable/launch_allowed were False here (iMessage/WeChat below
+        # are both True) — that mismatch, not any real capability gap, is
+        # what made Signal disappear from get_gateway_personal_channel_surfaces
+        # and any other reader of this catalog. The signal-cli bridge
+        # (empyralis-gateway/src/bridges/signal-cli-bridge.ts) and its
+        # gateway runtime wiring are as real as BlueBubbles's/WeChat's.
+        "live_capable": True,
+        "launch_allowed": True,
         "requires_agent_computer": True,
         "account_provider": "signal_personal",
         "connector_id": None,
@@ -668,6 +743,10 @@ RESERVED_PRIVATE_RUNTIME_CHANNELS: tuple[Dict[str, str], ...] = (
 PUBLIC_STUDIO_WEBHOOK_ROUTES: Dict[str, Dict[str, str]] = {
     "/channels/whatsapp/twilio/webhook": {
         "provider": "twilio_whatsapp",
+        "runtime_lane": STUDIO_CONNECTOR_RUNTIME_LANE,
+    },
+    "/channels/sms/twilio/webhook": {
+        "provider": "twilio_sms",
         "runtime_lane": STUDIO_CONNECTOR_RUNTIME_LANE,
     },
     "/channels/telegram/webhook": {

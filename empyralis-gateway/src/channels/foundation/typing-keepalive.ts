@@ -31,14 +31,28 @@ export class TypingKeepalive {
 
     await Promise.resolve(this.sender(startAction)).catch(() => {});
 
+    // A concurrent stop() can complete while the await above is still in
+    // flight (e.g. an inbound message admits a typing session and the
+    // runtime is stopped again immediately after, as real callers and
+    // tests both do). stop() only clears intervalId/ttlId if they're
+    // already set, so without this check the two timers created below
+    // would be armed AFTER stop() already ran, and nothing would ever
+    // clear them -- a permanently leaked, self-perpetuating interval.
+    if (this.stopped) return;
+
     this.intervalId = setInterval(() => {
       if (this.stopped || !this.sender) return;
       Promise.resolve(this.sender(startAction)).catch(() => {});
     }, keepaliveMs);
+    // Best-effort/cosmetic by design (see class doc) -- must never be the
+    // reason a process/test can't exit, so this timer is never allowed to
+    // keep the event loop alive on its own.
+    this.intervalId.unref?.();
 
     this.ttlId = setTimeout(() => {
       void this.stop();
     }, maxTtlMs);
+    this.ttlId.unref?.();
   }
 
   async stop(): Promise<void> {

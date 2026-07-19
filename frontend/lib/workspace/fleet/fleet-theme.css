@@ -1082,6 +1082,8 @@ a.fleet-breadcrumb:hover {
   overflow-y: auto;
   background: transparent; /* lives inside the floating panel */
   padding: 28px 32px;
+  max-width: var(--content-max);
+  margin-inline: auto;
 }
 
 .fleet-header {
@@ -1241,6 +1243,13 @@ a.fleet-breadcrumb:hover {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  /* Lean layout: .fleet-content's reading-column max-width is for plain
+     content pages only. This modifier's own child (.fleet-content-main)
+     carries the wider --content-max-wide cap instead — if this outer box
+     stayed capped at 820px too, .fleet-content-main's 1140px would have no
+     room to bind against and the list pages would silently render narrow. */
+  max-width: none;
+  margin-inline: 0;
 }
 
 /* Same full-height reset as --with-panel, honestly named for a page with NO
@@ -1253,6 +1262,10 @@ a.fleet-breadcrumb:hover {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  /* Lean layout: full-bleed chat, not a capped reading column — see
+     --with-panel's comment above for why this reset is needed. */
+  max-width: none;
+  margin-inline: 0;
 }
 
 /* Master-detail split (U3-F: Inbox) — a full-height flex ROW of exactly two
@@ -1264,6 +1277,10 @@ a.fleet-breadcrumb:hover {
   padding: 0;
   overflow: hidden;
   display: flex;
+  /* Lean layout: full-bleed master-detail, not a capped reading column —
+     see --with-panel's comment above for why this reset is needed. */
+  max-width: none;
+  margin-inline: 0;
 }
 
 /* ~30%, floored at 320px per the Linear reference — a hairline-divided list,
@@ -1404,6 +1421,11 @@ a.fleet-breadcrumb:hover {
      properties drawer's scrim (.fleet-content-with-panel's box) so it dims
      correctly whenever the drawer is open. */
   padding: 28px 32px;
+  /* Lean layout: wider cap than --content-max — this wraps the agents/
+     projects LIST pages, whose grid "tables" need more room than a reading
+     column (intrinsic min ~940px; --content-max-wide must stay >= that). */
+  max-width: var(--content-max-wide);
+  margin-inline: auto;
 }
 
 /* ── Properties drawer (overlay, not a permanent flex sibling) ───────────── */
@@ -2230,9 +2252,19 @@ a.fleet-breadcrumb:hover {
 /* ── Connector picker: project-scoped reuse-or-separate (UI Phase 1) ─────── */
 
 .fleet-connector-picker {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+/* Lean layout: the picker's 2-col grid assumes the ~820px detail-body
+   reading column (~400px per item — plenty for an account row + "also
+   used by" text). Inside the create-agent wizard the same component sits
+   in a 640px modal (592px after .fleet-wizard-body's padding), which
+   would squeeze columns to ~289px and wrap account emails / shared-use
+   warnings badly — so back to single-column there only. */
+.fleet-wizard .fleet-connector-picker {
+  grid-template-columns: 1fr;
 }
 
 .fleet-connector-picker-item {
@@ -3068,7 +3100,8 @@ a.fleet-breadcrumb:hover {
    "- 340px" overlay-compensation math needed, just a flat reading-measure
    cap. */
 .fleet-detail-body > * {
-  max-width: 840px;
+  max-width: var(--content-max);
+  margin-inline: auto;
 }
 
 /* U3-I: the permanent properties column on DETAIL pages — a real flex

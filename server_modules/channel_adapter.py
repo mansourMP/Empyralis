@@ -25,6 +25,7 @@ class ChannelOrigin(str, Enum):
     SLACK_GUILD = "slack_guild"
     DISCORD_GUILD = "discord_guild"
     GITHUB = "github"
+    SMS = "sms"
     ACP = "acp"
     UNKNOWN = "unknown"
 

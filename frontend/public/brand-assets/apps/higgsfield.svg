@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 24 24" fill="#FF5A36">
+  <title>Higgsfield</title>
+  <!-- Not the real Higgsfield wordmark/logo (no verified source asset was
+       available): an original abstract aperture/shutter mark used as a
+       placeholder, matching this directory's one file per connector icon
+       convention. Six identical blades rotated 60deg apart around the
+       center, evoking camera/generation control. -->
+  <g>
+    <polygon points="12,12 12,2.5 19.5,6" />
+    <polygon points="12,12 12,2.5 19.5,6" transform="rotate(60 12 12)" />
+    <polygon points="12,12 12,2.5 19.5,6" transform="rotate(120 12 12)" />
+    <polygon points="12,12 12,2.5 19.5,6" transform="rotate(180 12 12)" />
+    <polygon points="12,12 12,2.5 19.5,6" transform="rotate(240 12 12)" />
+    <polygon points="12,12 12,2.5 19.5,6" transform="rotate(300 12 12)" />
+  </g>
+  <circle cx="12" cy="12" r="2.1" fill="#14110f" />
+</svg>

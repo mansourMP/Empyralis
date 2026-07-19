@@ -1,6 +1,6 @@
 import os
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from server_modules import runtime_config as config
 from server_modules import secrets_broker, tool_broker
@@ -1250,6 +1250,169 @@ async def slack_events_webhook(request: Request):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _parse_twilio_form(raw_body: bytes) -> Dict[str, str]:
+    """Parse Twilio's application/x-www-form-urlencoded webhook body into a
+    flat {key: last_value} dict — the exact shape validate_webhook_signature
+    expects (it sorts + concatenates key/value pairs)."""
+    decoded = raw_body.decode("utf-8", errors="ignore") if raw_body else ""
+    parsed = parse_qs(decoded, keep_blank_values=True)
+    out: Dict[str, str] = {}
+    for key, values in parsed.items():
+        out[str(key)] = str(values[-1]) if isinstance(values, list) and values else ""
+    return out
+
+
+def _sms_public_request_url(request: Request) -> str:
+    """Reconstruct the public URL Twilio POSTed to, for signature validation.
+
+    Must match the SmsUrl registered on the number
+    (sms_twilio_provisioning_service.sms_webhook_url = base + WEBHOOK_PATH),
+    so it uses the SAME public base URL env and appends request.url.path
+    (+ query, if any). Falls back to the raw request URL when no public base
+    is set (dev/local)."""
+    from server_modules import sms_twilio_provisioning_service as sms_provisioning
+
+    base = sms_provisioning.webhook_base_url()
+    path = str(getattr(request.url, "path", "") or "").strip()
+    query = str(getattr(request.url, "query", "") or "").strip()
+    if base and path:
+        url = f"{base}{path}"
+        return f"{url}?{query}" if query else url
+    return str(request.url)
+
+
+async def sms_twilio_webhook(request: Request):
+    """Inbound plain-SMS webhook (Twilio). Sibling of the WhatsApp-Twilio
+    webhook: validates the Twilio signature against the PLATFORM master
+    account's auth token, parses From/To/Body, resolves which agent owns the
+    ``To`` number, feeds the text into the SAME agent-turn pipeline Slack/
+    WhatsApp inbound use (route_inbound_channel_message), and replies via
+    twiml_response(). ``From`` → sender identity, ``To`` → the agent's
+    number (endpoint_key)."""
+    from server_modules import agent_channel_router
+    from server_modules import sms_twilio_provisioning_service as sms_provisioning
+    from server_modules.connectors.whatsapp_transport_service import WhatsAppTransportService
+
+    transport = WhatsAppTransportService()
+    creds = sms_provisioning.platform_twilio_credentials()
+    if creds is None:
+        # "not configured on this deployment" — no numbers can exist without
+        # the master account, so any inbound here is unexpected. Fail loudly
+        # (503) rather than crash; never 500.
+        raise HTTPException(status_code=503, detail=sms_provisioning.NOT_CONFIGURED_MESSAGE)
+
+    raw_body = await request.body()
+    try:
+        form = _parse_twilio_form(raw_body)
+        provided_signature = str(
+            request.headers.get("x-twilio-signature")
+            or request.headers.get("X-Twilio-Signature")
+            or ""
+        ).strip()
+        if not provided_signature:
+            raise HTTPException(status_code=401, detail="X-Twilio-Signature header is required.")
+        if not transport.validate_webhook_signature(
+            request_url=_sms_public_request_url(request),
+            form=form,
+            signature=provided_signature,
+            auth_token=creds["auth_token"],
+        ):
+            raise HTTPException(status_code=403, detail="Twilio signature is invalid.")
+
+        from_number = str(form.get("From") or "").strip()
+        to_number = str(form.get("To") or "").strip()
+        body_text = str(form.get("Body") or "").strip()
+        message_id = str(form.get("MessageSid") or form.get("SmsMessageSid") or form.get("SmsSid") or "").strip()
+
+        # Resolve which agent owns the destination number. Mirrors Slack: scan
+        # vault rows for provider "sms_twilio" and match the stored number
+        # against Twilio's `To`. workspace/tenant come from the matched row;
+        # the specific agent is resolved inside route_inbound_channel_message
+        # via its persisted "sms" channel binding (endpoint_key == To).
+        target_number = transport.normalize_sms_number(to_number)
+        vault = load_vault()
+        items = vault.get("credentials", [])
+        if not isinstance(items, list):
+            items = []
+        sms_rows = [
+            item
+            for item in items
+            if isinstance(item, dict) and str(item.get("provider") or "").strip().lower() == sms_provisioning.SMS_VAULT_PROVIDER
+        ]
+        matched = None
+        for item in sms_rows:
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            row_number = transport.normalize_sms_number(metadata.get("phone_number") or metadata.get("sms_endpoint_key"))
+            if row_number and target_number and row_number == target_number:
+                matched = item
+                break
+        if matched is None:
+            # No agent owns this number — reply with empty TwiML (200), never
+            # crash and never leak.
+            return transport.twiml_response("")
+
+        workspace_id = _normalize_workspace_id(matched.get("workspace_id"))
+        row_id = str(matched.get("id") or "").strip()
+        session_key = f"sms:{target_number}:{transport.normalize_sms_number(from_number) or 'sender'}"
+
+        append_fn = globals().get("_append_channel_event")
+        if callable(append_fn):
+            append_fn(
+                channel="sms",
+                direction="inbound",
+                event_type="message",
+                text=body_text or None,
+                workspace_id=workspace_id,
+                session_key=session_key,
+                message_id=message_id or None,
+                trace_id=f"sms:{message_id or uuid.uuid4().hex}",
+                metadata={"from": from_number, "to": to_number},
+            )
+
+        if not body_text:
+            return transport.twiml_response("")
+
+        # TODO(billing): meter this inbound message + the reply below against
+        # workspace credits — check balance via entitlements_service before
+        # running the turn, then record via
+        # usage_events_repository.record_usage_event(provider="twilio_sms",
+        # model="sms", ...). Not metered today (see
+        # sms_twilio_provisioning_service module docstring).
+        route_result = await agent_channel_router.route_inbound_channel_message(
+            tenant_id=await _resolve_connector_tenant_id(matched, workspace_id),
+            workspace_id=workspace_id,
+            channel_key=sms_provisioning.CHANNEL_KEY_SMS,
+            endpoint_key=_resolve_channel_endpoint_key(
+                entry=matched,
+                channel_key=sms_provisioning.CHANNEL_KEY_SMS,
+                connector_id=row_id,
+                fallback=target_number,
+            ),
+            customer_message=body_text,
+            session_key=session_key,
+            message_id=message_id or None,
+            actor_id=from_number or None,
+            actor_display_name=from_number or None,
+            metadata={
+                "connector_id": row_id,
+                "delivery_source": "webhook",
+                "sms_from": from_number,
+                "sms_to": to_number,
+                "source_event_id": message_id or None,
+            },
+            allow_master_fallback=False,
+        )
+        route_payload = route_result if isinstance(route_result, dict) else {}
+        # ABSOLUTE RULE: no hardcoded platform status/error message may EVER be
+        # sent into a channel — the TwiML <Message> IS a message to the sender.
+        reply_text = filter_channel_outbound_reply(route_payload.get("reply"))
+        return transport.twiml_response(reply_text or "")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 def _discord_candidate_public_keys(rows: List[Dict[str, Any]]) -> List[str]:
     candidates: List[str] = []
     env_public_key = str(os.getenv("DISCORD_APP_PUBLIC_KEY") or "").strip()
@@ -1763,12 +1926,28 @@ async def create_connector_vault(body: ConnectorCreate):
         elif connector == "linear":
             test = validate_linear_connector(credentials)
             credentials = test.get("credentials") if isinstance(test.get("credentials"), dict) else credentials
+        elif connector == "higgsfield":
+            test = validate_higgsfield_connector(credentials)
+            credentials = test.get("credentials") if isinstance(test.get("credentials"), dict) else credentials
         elif connector == "instagram_business":
             test = validate_instagram_business_connector(credentials)
         elif connector == "irc":
             test = validate_irc_connector(credentials)
         else:
-            raise RuntimeError(f"Unsupported connector '{connector}'")
+            # Generic fallback: ANY connector wired into connection_oauth_
+            # service.OAUTH_PROVIDER_CONFIGS (the 40 net-new Tier-1 DCR
+            # connectors plus zapier/paypal/sentry/attio/cloudflare) works
+            # here with no per-provider elif branch -- validate_generic_
+            # oauth_connector decides MCP-scoped vs. classic-bearer
+            # validation the same data-driven way every named branch above
+            # does. Only a connector absent from OAUTH_PROVIDER_CONFIGS
+            # entirely still hits "Unsupported connector".
+            from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS
+            if connector in OAUTH_PROVIDER_CONFIGS:
+                test = validate_generic_oauth_connector(connector, credentials)
+                credentials = test.get("credentials") if isinstance(test.get("credentials"), dict) else credentials
+            else:
+                raise RuntimeError(f"Unsupported connector '{connector}'")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1930,6 +2109,7 @@ async def create_connector_vault(body: ConnectorCreate):
         "xero",
         "freshbooks",
         "vercel",
+        "higgsfield",
     } and isinstance(test, dict):
         profile = test.get("profile") if isinstance(test.get("profile"), dict) else {}
         auth_mode = str(test.get("auth_mode") or credentials.get("auth_mode") or "").strip().lower()
@@ -2351,6 +2531,21 @@ async def test_connector_vault(credential_id: str, workspace_id: Optional[str] =
         except Exception as exc:
             _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
             raise HTTPException(status_code=400, detail=str(exc))
+    elif connector == "higgsfield":
+        # Higgsfield has no classic profile/userinfo endpoint to probe —
+        # its MCP OAuth discovery document (mcp.higgsfield.ai/.well-known/
+        # oauth-authorization-server) only advertises authorization_
+        # endpoint, token_endpoint, and registration_endpoint (checked
+        # 2026-07-18). validate_higgsfield_connector proves the token the
+        # same way every other DCR/MCP-scoped connector above now does: a
+        # live MCP initialize + tools/list handshake against
+        # APP_MCP_SERVER_MAP["higgsfield"] — see validate_mcp_scoped_oauth_
+        # connector in connector_validators.py.
+        try:
+            test_result = validate_higgsfield_connector(credentials)
+        except Exception as exc:
+            _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
+            raise HTTPException(status_code=400, detail=str(exc))
     elif connector == "s3":
         try:
             test_result = validate_s3_connector(credentials)
@@ -2382,7 +2577,17 @@ async def test_connector_vault(credential_id: str, workspace_id: Optional[str] =
             _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
             raise HTTPException(status_code=400, detail=str(exc))
     else:
-        raise HTTPException(status_code=400, detail=f"Unsupported connector '{connector}'")
+        # Generic fallback -- same reasoning as create_connector_vault's
+        # final else branch above: any connector wired into OAUTH_PROVIDER_
+        # CONFIGS re-validates here with no per-provider elif branch needed.
+        from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS
+        if connector not in OAUTH_PROVIDER_CONFIGS:
+            raise HTTPException(status_code=400, detail=f"Unsupported connector '{connector}'")
+        try:
+            test_result = validate_generic_oauth_connector(connector, credentials)
+        except Exception as exc:
+            _persist_capability_verification({"ok": False, "status": 400, "message": str(exc)})
+            raise HTTPException(status_code=400, detail=str(exc))
 
     _persist_capability_verification(test_result)
     return test_result

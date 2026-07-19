@@ -531,7 +531,7 @@ This IS the production backend. Everything below lives at `server_modules/`.
 | File | Purpose |
 |------|---------|
 | `mcp_registry_service.py` | MCP server registry, tool discovery, approval, invocation |
-| `connection_oauth_service.py` | OAuth provider configs + `APP_MCP_SERVER_MAP` (30 providers) + `_register_mcp_servers_for_provider()` |
+| `connection_oauth_service.py` | OAuth provider configs (32) + `APP_MCP_SERVER_MAP` (31 providers) + `_register_mcp_servers_for_provider()` |
 | `connection_catalog_service.py` | Connection catalog |
 | `connection_readiness_service.py` | Connection readiness checks |
 | `connection_verify_service.py` | Connection verification |
@@ -1205,7 +1205,7 @@ These providers have OAuth → credential vault → MCP server auto-registration
 | Figma | figma | yes | streamable_http | **WIRED** |
 | Dropbox | dropbox | yes | streamable_http | **WIRED** |
 
-### 6.2 Frontend + Backend Bridge Live (12)
+### 6.2 Frontend + Backend Bridge Live (13)
 
 Endpoints in `APP_MCP_SERVER_MAP`, bridge wired (Phase U), frontend reads from single-source catalog API:
 
@@ -1223,6 +1223,7 @@ Endpoints in `APP_MCP_SERVER_MAP`, bridge wired (Phase U), frontend reads from s
 | Square | square | **WIRED** |
 | Typeform | typeform | **WIRED** |
 | Vercel | vercel | **WIRED** |
+| Higgsfield | higgsfield | **WIRED** — official MCP aggregator (`mcp.higgsfield.ai/mcp`) for ~30 image/video models (Kling, Sora, Veo, Seedream, Seedance, FLUX, etc.) behind one connection. **New auth shape (2026-07-19):** the only provider here with no developer console to pre-register a static `client_id` — confirmed live via `mcp.higgsfield.ai/.well-known/oauth-authorization-server` (`registration_endpoint` present, no userinfo/introspection endpoint). Added `OAuthProviderConfig.registration_endpoint` (`connection_oauth_service.py:55`) + `_resolve_oauth_client()` (`:839`): tries static `HIGGSFIELD_CLIENT_ID`/`SECRET` first, else self-registers via RFC 7591 (gated by `HIGGSFIELD_OAUTH_ENABLED`) and caches the result for the process lifetime. Inert for all 31 other providers (`registration_endpoint` stays `None`). |
 
 ### 6.3 OAuth-Only, No MCP Tools (3)
 
@@ -1242,7 +1243,7 @@ Endpoints in `APP_MCP_SERVER_MAP`, bridge wired (Phase U), frontend reads from s
 
 canva, asana, zoom, airtable, stripe, salesforce, webhook, gitlab, and others — use `standard` token_parser.
 
-**Total:** 30 providers in catalog. Honest status per provider (live/partial/preview). Single source: `GET /api/connections/mcp-catalog`.
+**Total:** 31 providers in catalog (30 with a live MCP endpoint; `microsoft_365` remains endpoint=null per §6.4). Honest status per provider (live/partial/preview). Single source: `GET /api/connections/mcp-catalog`. (Verified 2026-07-19 via `len(connection_oauth_service.OAUTH_PROVIDER_CONFIGS)` == 32 — the 31 above plus `discord`, which has an OAuth config but intentionally no `APP_MCP_SERVER_MAP` entry; its OAuth flow feeds the bot-token `discord_bot` connector instead, not an MCP server.)
 
 ### 6.6 Empyralis IS an MCP Server (Phase U2)
 
@@ -1364,7 +1365,7 @@ To reach feature parity with `server_modules/`, the `server/` directory would ne
 - `agent/` — Sage loop, specialist service, triage, turn runtime, context building, prompt assembly
 - `channels/` — Telegram, Discord, Slack, WhatsApp, Signal, iMessage adapters + router
 - `tools/` — Tool broker, fleet tools, skill registry, MCP client, schedule_task
-- `oauth/` — Provider configs, token exchange, refresh, APP_MCP_SERVER_MAP (30 providers)
+- `oauth/` — Provider configs, token exchange, refresh, APP_MCP_SERVER_MAP (31 providers)
 - `memory/` — Memory service, unified memory, agent memory tools, embeddings
 - `mcp/` — MCP registry, server auth, MCP server (Empyralis as MCP)
 - `vault/` — Encrypted credential storage

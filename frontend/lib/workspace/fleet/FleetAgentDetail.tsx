@@ -212,7 +212,21 @@ export function FleetAgentDetail({
    *  can refresh whatever list/breadcrumb sources agent.label. */
   onRenamed?: () => void;
 }) {
-  const [activeTab, setActiveTab] = useState<TabId>(initialTab || "overview");
+  // The URL's {tab} segment is the single source of truth for which tab
+  // renders — read directly from `initialTab` (resolved by the routed
+  // [tab]/page.tsx from its own route params) on every render, instead of
+  // copying it into a one-shot useState seed. That copy was the actual
+  // bug: a re-render mid-navigation (rapid tab clicks, or clicking a
+  // second tab while the first was still loading) could see `initialTab`
+  // transiently unresolved, and a sync effect here plus the parent's own
+  // unresolved-defaults-to-"overview" coercion combined to silently stomp
+  // whatever tab the user had just clicked back to Overview. Deriving
+  // instead of storing means there is no local copy to desync — whatever
+  // the URL says is what renders. [tab]/page.tsx now passes `undefined`
+  // (never a manufactured "overview") while a navigation is still
+  // resolving, so the "overview" fallback below only ever fires for a
+  // genuine first paint before routing has resolved at all.
+  const activeTab: TabId = initialTab || "overview";
   // Chat tab's mobile-only properties drawer (see propertiesContent below) —
   // every other tab keeps the permanent column, so this stays false and unused there.
   const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
@@ -264,14 +278,11 @@ export function FleetAgentDetail({
     return !connectorMissing;
   }).length;
 
-  // Page mode: keep the active tab in sync with the URL {tab} segment.
-  useEffect(() => {
-    if (initialTab) setActiveTab(initialTab);
-  }, [initialTab]);
-
+  // Tab clicks just navigate — activeTab above already tracks initialTab
+  // directly, so there's no local state to update here; the URL round-trips
+  // back through [tab]/page.tsx's params and the new tab renders from that.
   const selectTab = useCallback(
     (tab: TabId) => {
-      setActiveTab(tab);
       onTabChange?.(tab);
     },
     [onTabChange],
@@ -298,7 +309,7 @@ export function FleetAgentDetail({
   // Land keyboard/SR focus somewhere deliberate on mount rather than leaving
   // it on <body> — the active tab pill, since it's already the natural next
   // stop for arrow/tab navigation. Only on first mount, not on every tab
-  // switch (selectTab already moves visible state; native click/router
+  // switch (activeTab already tracks the URL; native click/router
   // navigation already handles focus for those).
   const activeTabRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
@@ -1124,6 +1135,7 @@ const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
   { label: "Slack", id: "slack" },
   { label: "Discord", id: "discord_bot" },
   { label: "WhatsApp", id: "whatsapp_personal" },
+  { label: "Signal", id: "signal_personal" },
   { label: "iMessage", id: "imessage_personal" },
   { label: "WeChat", id: "wechat_personal" },
 ];
@@ -1152,6 +1164,9 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   whatsapp_personal: [
     { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number — scan a QR code or use a pairing code — running on this agent's own gateway. There is no chatbot/business-API mode.", real: true },
   ],
+  signal_personal: [
+    { key: "full_account", label: "Full account", body: "This agent's own Signal, via a signal-cli bridge running on hardware you control as this agent's gateway. Requires a real signal-cli install — there is no cloud path for Signal.", real: true },
+  ],
   imessage_personal: [
     { key: "full_account", label: "Full account", body: "This agent's own iMessage, via a Mac running BlueBubbles Server as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage.", real: true },
   ],
@@ -1160,19 +1175,24 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   ],
 };
 
-// Local-bridge channels (iMessage today; WeChat has no bridge to check at
-// all) have no in-app pairing step — the bridge runs on hardware the user
-// configures themselves. This shows the REAL health snapshot for one
-// channel_key on one gateway; there is no client-invented "connected" state,
-// and no button that claims to "connect" anything.
+// Local-bridge channels (Signal and iMessage today; WeChat has no bridge to
+// check at all) have no in-app pairing step — the bridge runs on hardware
+// the user configures themselves. This shows the REAL health snapshot for
+// one channel_key on one gateway; there is no client-invented "connected"
+// state, and no button that claims to "connect" anything.
+const LOCAL_BRIDGE_NO_GATEWAY_HINT: Record<string, string> = {
+  signal_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a signal-cli bridge.",
+  imessage_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a BlueBubbles Server on that Mac.",
+  wechat_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a WeChat bridge.",
+};
+
 function LocalBridgeChannelStatus({ channelKey, gatewayId }: { channelKey: string; gatewayId: string | null }) {
   const { items, loading } = useGatewayPersonalChannelSurfaces(gatewayId);
 
   if (!gatewayId) {
     return (
       <p className="fleet-channel-expand-hint">
-        This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a
-        BlueBubbles Server on that Mac.
+        {LOCAL_BRIDGE_NO_GATEWAY_HINT[channelKey] || "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at this channel's local bridge."}
       </p>
     );
   }
@@ -1731,6 +1751,17 @@ export function ChannelsTab({
                     agentId={agentId}
                     onConnected={handleChannelsChanged}
                   />
+                </div>
+              )}
+
+              {/* Signal: same local-bridge shape as iMessage — no phone/code/QR
+                   step of its own, the bridge (signal-cli) lives on hardware the
+                   user runs themselves, configured via env vars on this agent's
+                   gateway. The only honest thing to show is real bridge health,
+                   not a fake "connect" button. */}
+              {activePlatform.id === "signal_personal" && activeDoor?.key === "full_account" && (
+                <div style={{ marginTop: 12 }}>
+                  <LocalBridgeChannelStatus channelKey="signal_personal" gatewayId={agentGatewayId} />
                 </div>
               )}
 
