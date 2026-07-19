@@ -36,6 +36,20 @@ class WhatsAppTransportService:
             return f"whatsapp:{value}"
         return value.lower()
 
+    def normalize_sms_number(self, raw_value: Any) -> str:
+        """Plain-SMS counterpart to normalize_number(): same whitespace/'*'
+        handling, but never adds (and strips, if present) the `whatsapp:`
+        channel prefix — Twilio routes a bare E.164 number (e.g.
+        "+15551234567") as SMS rather than WhatsApp."""
+        value = str(raw_value or "").strip().replace(" ", "")
+        if not value:
+            return ""
+        if value.lower() in {"*", "whatsapp:*"}:
+            return "*"
+        if value.lower().startswith("whatsapp:"):
+            return value.split(":", 1)[1]
+        return value
+
     def twiml_response(self, message: Optional[str] = None) -> Response:
         if message and str(message).strip():
             safe = html.escape(str(message), quote=False)
@@ -66,19 +80,20 @@ class WhatsAppTransportService:
         expected_signature = base64.b64encode(digest).decode("ascii")
         return hmac.compare_digest(expected_signature, provided_signature)
 
-    def send_message(
+    def _send_via_messages_api(
         self,
         *,
         account_sid: str,
         auth_token: str,
-        from_number: str,
-        to_number: str,
+        sender: str,
+        receiver: str,
         body: str,
     ) -> Dict[str, Any]:
+        """Shared Twilio Messages API POST — WhatsApp and plain SMS differ
+        only in how From/To were normalized before reaching here (see
+        send_message() vs send_sms())."""
         sid = str(account_sid or "").strip()
         token = str(auth_token or "").strip()
-        sender = self.normalize_number(from_number)
-        receiver = self.normalize_number(to_number)
         if not sid or not token:
             raise RuntimeError("Twilio account_sid/auth_token are required.")
         if not sender or not receiver:
@@ -105,3 +120,43 @@ class WhatsAppTransportService:
             raise RuntimeError(f"Twilio send failed: HTTP {exc.code}: {detail}") from exc
         except Exception as exc:
             raise RuntimeError(str(exc)) from exc
+
+    def send_message(
+        self,
+        *,
+        account_sid: str,
+        auth_token: str,
+        from_number: str,
+        to_number: str,
+        body: str,
+    ) -> Dict[str, Any]:
+        return self._send_via_messages_api(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            sender=self.normalize_number(from_number),
+            receiver=self.normalize_number(to_number),
+            body=body,
+        )
+
+    def send_sms(
+        self,
+        *,
+        account_sid: str,
+        auth_token: str,
+        from_number: str,
+        to_number: str,
+        body: str,
+    ) -> Dict[str, Any]:
+        """Plain-SMS sibling of send_message(): the exact same Twilio
+        Messages API call, but From/To are normalized WITHOUT the
+        `whatsapp:` channel prefix so Twilio delivers over SMS instead of
+        WhatsApp. This is the entire behavioral delta — everything else
+        (auth, endpoint, error handling) is shared via
+        _send_via_messages_api()."""
+        return self._send_via_messages_api(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            sender=self.normalize_sms_number(from_number),
+            receiver=self.normalize_sms_number(to_number),
+            body=body,
+        )
