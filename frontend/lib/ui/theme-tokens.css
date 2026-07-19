@@ -60,6 +60,10 @@
   --h-control-sm: 2rem;     /* 32px */
   --h-control-md: 2.25rem;  /* 36px */
 
+  /* Content widths — centered-column layout (Claude-app-lean), not full-bleed */
+  --content-max: 820px;       /* reading/forms column, Claude-lean */
+  --content-max-wide: 1140px; /* data-table pages need more room */
+
   /* Motion — appear instant, dismiss brief (Linear's asymmetric timing) */
   --motion-fast: 100ms;
   --motion-base: 150ms;
