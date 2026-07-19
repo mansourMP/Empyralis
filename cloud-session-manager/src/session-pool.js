@@ -263,7 +263,11 @@ export class SessionPool {
     if (result.ok) {
       await session.outbox.acknowledge(requestId);
       this.logger?.info?.({ sessionId, messageId: result.messageId, tokensLeft: rateResult.tokensLeft }, "outbound message sent + acked");
-      session.inboundHandler?.addSentMessageId(result.messageId);
+      // addSentMessageId is now scoped per remoteJid (see inbound-handler.js's
+      // sentMessageIds field comment) — payload.remoteJid is the same
+      // normalized target (falls back to "me" for self-chat) sendMessage
+      // actually sent to.
+      session.inboundHandler?.addSentMessageId(payload.remoteJid, result.messageId);
       return { ok: true, messageId: result.messageId, tokensLeft: rateResult.tokensLeft };
     }
 

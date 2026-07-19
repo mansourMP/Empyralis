@@ -13,24 +13,45 @@ export class InboundHandler {
     this.linkedUsername = linkedUsername || "";
     this.logger = logger;
     this.messageCount = 0;
-    /** @type {Set<string>} Telegram message IDs sent by Sage (for reply-to detection) */
-    this.sentMessageIds = new Set();
+    // Telegram message ids are small integers scoped to EACH chat's own
+    // independent sequence, not globally unique across chats. A single
+    // flat set of "every id Sage has ever sent, anywhere" (the previous
+    // shape here) inevitably collides with unrelated ids in a completely
+    // different, unrelated chat's own numbering — e.g. self-chat's send #42
+    // and some busy group's real message #42 are different messages that
+    // happen to share a number. That collision let a reply to an ORDINARY
+    // message in one chat incorrectly resolve isReplyToSage=true purely
+    // because the reply's target id happened to numerically match
+    // something Sage had sent elsewhere. Scoped per remoteJid instead,
+    // mirroring empyralis-gateway/src/channels/telegram/runtime.ts's
+    // sentMessageIds (fixed there in afdf884e4) and WhatsApp's own
+    // per-chat reply tracking.
+    /** @type {Map<string, Set<string>>} remoteJid -> Telegram message ids sent by Sage into that chat */
+    this.sentMessageIds = new Map();
   }
 
   /**
-   * Track a message ID that Sage sent (called by session-pool after sendMessage).
+   * Track a message ID that Sage sent into `remoteJid` (called by
+   * session-pool after sendMessage), capping that chat's own set at 500
+   * entries — see the sentMessageIds field comment for why this is
+   * per-chat, not a single shared cap.
+   * @param {string} remoteJid - the chat the message was sent into
    * @param {string} messageId - Telegram message ID
    */
-  addSentMessageId(messageId) {
-    if (messageId) {
-      this.sentMessageIds.add(String(messageId));
-      // Keep set bounded (last 500 sent messages)
-      if (this.sentMessageIds.size > 500) {
-        const iterator = this.sentMessageIds.values();
-        for (let i = 0; i < 100; i++) iterator.next();
-        // Can't easily trim oldest from Set — just clear and start over if too large
-        this.sentMessageIds.clear();
-      }
+  addSentMessageId(remoteJid, messageId) {
+    const jid = String(remoteJid || "").trim();
+    const id = String(messageId || "").trim();
+    if (!jid || !id) {
+      return;
+    }
+    let ids = this.sentMessageIds.get(jid);
+    if (!ids) {
+      ids = new Set();
+      this.sentMessageIds.set(jid, ids);
+    }
+    ids.add(id);
+    if (ids.size > 500) {
+      ids.clear();
     }
   }
 
@@ -76,14 +97,21 @@ export class InboundHandler {
         return { skipped: true, reason: "hosted_bot_message" };
       }
 
+      // remoteJid scopes both the reply-to-Sage lookup below and the
+      // is_group/is_mentioned/is_reply_to_sage signal now forwarded to the
+      // backend (see buildSignedInbound's doc) — must be resolved before
+      // either.
+      const remoteJid = String(msg.remote_jid || msg.remoteJid || "").trim();
+
       // Group gate: skip group messages unless Sage is mentioned or replied to.
       // Prevents credit drain and Telegram ban risk from replying to every message.
       const isGroup = Boolean(msg.is_group ?? normalized?.message?.is_group ?? false);
+      let isMentioned = false;
+      let isReplyToSage = false;
       if (isGroup) {
         const entities = msg.entities || normalized?.message?.entities || [];
 
         // Check if linked account is mentioned (via @username or user ID)
-        let isMentioned = false;
         const linkedUser = String(this.linkedUsername || "").toLowerCase().trim();
         const linkedId = String(this.linkedUserId || "").trim();
         if (linkedUser || linkedId) {
@@ -110,8 +138,12 @@ export class InboundHandler {
         }
 
         // Check if this message is a reply to one of Sage's prior messages
+        // INTO THIS SAME CHAT — scoped per remoteJid (see the
+        // sentMessageIds field comment for why a flat, cross-chat set was
+        // wrong: Telegram message ids are small integers scoped to each
+        // chat's own sequence, not globally unique).
         const replyToMsgId = String(msg.reply_to_msg_id ?? normalized?.message?.reply_to_msg_id ?? "").trim();
-        const isReplyToSage = replyToMsgId && this.sentMessageIds.has(replyToMsgId);
+        isReplyToSage = Boolean(replyToMsgId && this.sentMessageIds.get(remoteJid)?.has(replyToMsgId));
 
         if (!isMentioned && !isReplyToSage) {
           this.logger?.info?.(
@@ -139,6 +171,9 @@ export class InboundHandler {
         linkedUsername: this.linkedUsername,
         text,
         timestamp: receivedAt,
+        isGroup,
+        isMentioned,
+        isReplyToSage,
       });
 
       const backendUrl = `${CONFIG.backendUrl}/api/personal-channels/cloud/inbound`;
