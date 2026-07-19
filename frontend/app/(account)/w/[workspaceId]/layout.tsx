@@ -40,7 +40,7 @@ export default async function WorkspaceRouteLayout({
             <div className="app-page-message__content">
               <h1 className="app-page-message__title">Workspace is warming up</h1>
               <p className="app-page-message__body">
-                Sage could not load this workspace yet. This usually clears after a deploy or service restart.
+                We could not load this workspace yet. This usually clears after a deploy or service restart.
               </p>
               <p className="app-page-message__meta">
                 Reload the workspace, or sign in again if it keeps happening.

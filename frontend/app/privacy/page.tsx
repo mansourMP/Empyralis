@@ -24,7 +24,7 @@ export default function PrivacyPage() {
             Empyralis uses Google user data only after you give consent through Google OAuth. Google data is used only to provide user-requested assistant actions, account connection, and product features you authorize.
           </p>
           <p className="app-static-page__body">
-            If you connect Gmail, Empyralis may use authorized Gmail data to read, organize, draft, send, archive, or label email when you ask Sage to do so. If you connect Google Calendar, Empyralis may use authorized Calendar data to view availability, read events, create events, or update events when you ask Sage to do so. If you enable Google Drive access, Empyralis may use authorized Drive data only for the file actions you request.
+            If you connect Gmail, Empyralis may use authorized Gmail data to read, organize, draft, send, archive, or label email when you ask the assistant to do so. If you connect Google Calendar, Empyralis may use authorized Calendar data to view availability, read events, create events, or update events when you ask the assistant to do so. If you enable Google Drive access, Empyralis may use authorized Drive data only for the file actions you request.
           </p>
           <p className="app-static-page__body">
             Empyralis does not sell Google user data, does not use Google user data for advertising, and does not use Google user data to train third-party AI models.

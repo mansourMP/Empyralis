@@ -318,7 +318,7 @@ export const ChatMessage = memo(({
       || lowerText.includes('selected provider')
       || lowerText.includes('selected for chat')
       || lowerText.includes('local-only')
-      ? 'Choose the default Sage route, connect a model account, or connect Agent Computer.'
+      ? 'Choose the default AI route, connect a model account, or connect Agent Computer.'
       : text;
     return (
       <article
@@ -329,7 +329,7 @@ export const ChatMessage = memo(({
           <CircleAlert size={14} strokeWidth={1.9} />
         </span>
         <div className="app-chat-transcript-error__copy">
-          <strong>Sage route needs attention</strong>
+          <strong>AI route needs attention</strong>
           <span>{providerNoticeText}</span>
         </div>
         {actionHref && actionLabel ? (

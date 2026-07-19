@@ -1240,7 +1240,7 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
     { key: "full_account", label: "Full account", body: "This agent's own Telegram number — phone, code, and 2FA if enabled — running on this agent's own gateway.", real: true },
   ],
   slack: [
-    { key: "oauth", label: "App", body: "Connect a Slack workspace — signed mentions and DMs route to Sage.", real: true },
+    { key: "oauth", label: "App", body: "Connect a Slack workspace — signed mentions and DMs route to your AI.", real: true },
   ],
   discord_bot: [
     { key: "byo_bot", label: "Bot", body: "Give this agent its own Discord bot — paste the token from Discord's developer portal. Discord's Terms forbid automating a real user account, so this is the only path.", real: true },
@@ -2058,7 +2058,7 @@ function ToolsTab({
       <EmptyState
         icon={Wrench}
         title="No tools available"
-        body="Chat with Sage to configure tools for this agent."
+        body="Ask AI to configure tools for this agent."
         action="Chat to configure"
         onAction={onChat}
       />

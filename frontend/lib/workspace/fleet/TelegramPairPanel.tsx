@@ -91,7 +91,7 @@ export function TelegramPairPanel({ workspaceId }: { workspaceId: string }) {
         <div className="fleet-pair-title">Talk to your agent on Telegram</div>
         <div className="fleet-pair-desc">
           Pair the hosted bot — no BotFather, no token. Send your first
-          message and Sage replies from your workspace.
+          message and your AI replies from your workspace.
         </div>
         {pair && (
           <div className="fleet-pair-details">

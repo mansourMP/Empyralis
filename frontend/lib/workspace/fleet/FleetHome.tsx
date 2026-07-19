@@ -82,11 +82,6 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
         {/* Pair Telegram — first-run CTA. Self-hides when already paired. */}
         <TelegramPairPanel workspaceId={workspaceId} />
 
-        {/* Sage operator row */}
-        {sageAgent && (
-          <SageRow onChat={openSageConsole} onSelect={openSageConsole} />
-        )}
-
         {/* Grid or empty */}
         {mapped.length === 0 ? (
           <EmptyFleet onChat={openSageConsole} />
@@ -124,56 +119,6 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
         />
       )}
     </>
-  );
-}
-
-// ── Sage operator row (the single accent fill on the page) ─────────────────
-
-function SageRow({
-  onChat,
-  onSelect,
-}: {
-  onChat: () => void;
-  onSelect: () => void;
-}) {
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      className="fleet-sage"
-      onClick={() => onSelect()}
-      onKeyDown={(e) => {
-        // Enter/Space bubbles up from the nested "Chat with Sage" button
-        // below — without this guard, keyboard-activating it ALSO fired
-        // onSelect here, hijacking the button's own onChat activation.
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
-    >
-      <div className="fleet-sage-tile">✦</div>
-      <div className="fleet-sage-body">
-        <div className="fleet-sage-name-row">
-          <span className="fleet-sage-name">Sage</span>
-          <span className="fleet-sage-badge">Operator</span>
-        </div>
-        <div className="fleet-sage-desc">
-          Ask me to create or configure any agent for you.
-        </div>
-      </div>
-      <button
-        type="button"
-        className="fleet-btn"
-        onClick={(e) => {
-          e.stopPropagation();
-          onChat();
-        }}
-      >
-        Chat with Sage
-      </button>
-    </div>
   );
 }
 
@@ -260,11 +205,11 @@ function EmptyFleet({ onChat }: { onChat: () => void }) {
       </div>
       <div className="fleet-empty-title">Start your first agent</div>
       <div className="fleet-empty-desc">
-        Tell Sage what you need and it&apos;ll set one up for you.
+        Ask AI what you need and it&apos;ll set one up for you.
       </div>
       <div className="fleet-empty-actions">
         <button type="button" className="fleet-btn fleet-btn--accent" onClick={onChat}>
-          Chat with Sage
+          Ask AI
         </button>
       </div>
     </div>

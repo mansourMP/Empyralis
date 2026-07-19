@@ -27,8 +27,8 @@ type ConsoleTab = "chat" | "connect";
  * answer as Sage regardless of which agent page you configured them from.
  */
 const PERSONAL_CHANNELS: { id: string; label: string; platform: string; description: string }[] = [
-  { id: "telegram", label: "Telegram", platform: "macos", description: "Your personal Telegram account. Messages are routed to Sage." },
-  { id: "whatsapp", label: "WhatsApp", platform: "macos", description: "Your personal WhatsApp account. Messages are routed to Sage." },
+  { id: "telegram", label: "Telegram", platform: "macos", description: "Your personal Telegram account. Messages are routed to your AI." },
+  { id: "whatsapp", label: "WhatsApp", platform: "macos", description: "Your personal WhatsApp account. Messages are routed to your AI." },
   { id: "signal", label: "Signal", platform: "macos", description: "Your personal Signal account via the Gateway." },
   { id: "imessage", label: "iMessage", platform: "macos", description: "Personal iMessage via a Mac running the Gateway." },
   { id: "wechat", label: "WeChat", platform: "macos", description: "Your personal WeChat account via the Gateway." },
@@ -116,7 +116,7 @@ export function SageLauncher({
   return (
     <div ref={ref} className={`fleet-sage-launcher${open ? " is-open" : ""}`}>
       {open && (
-        <div className="fleet-sage-console" role="dialog" aria-label="Sage console">
+        <div className="fleet-sage-console" role="dialog" aria-label="Ask AI">
           <div className="fleet-sage-console-header">
             <div className="fleet-sage-console-tabs">
               <button
@@ -140,7 +140,7 @@ export function SageLauncher({
               type="button"
               className="fleet-sage-console-close"
               onClick={onClose}
-              aria-label="Close Sage"
+              aria-label="Close Ask AI"
             >
               <X size={16} strokeWidth={1.75} />
             </button>
@@ -152,10 +152,10 @@ export function SageLauncher({
                 workspaceId={workspaceId}
                 threadId={PRIMARY_THREAD_ID}
                 emptyIcon={Sparkles}
-                emptyTitle="Ask Sage anything"
-                emptyBody="Ask Sage to create an agent, configure your fleet, search the web, or check your paired hardware."
+                emptyTitle="Ask AI anything"
+                emptyBody="Ask AI to create an agent, configure your fleet, search the web, or check your paired hardware."
                 starterPrompts={STARTER_PROMPTS}
-                placeholder="Message Sage…"
+                placeholder="Message…"
                 sourceTag="fleet_sage_chat"
                 liveSyncUrl={`/api/workstation/${encodeURIComponent(workspaceId)}/sage/turns/stream`}
               />
@@ -165,7 +165,7 @@ export function SageLauncher({
               <div className="fleet-sage-connect">
                 <div className="fleet-sage-connect-heading">Connect your accounts</div>
                 <p className="fleet-sage-connect-desc">
-                  Personal channels route through the Gateway and always answer as Sage.
+                  Personal channels route through the Gateway and always answer as your AI.
                   Pair your accounts below.
                 </p>
 
