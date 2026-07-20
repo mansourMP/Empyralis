@@ -138,8 +138,18 @@ prepare_directories() {
   # PATH via the env file below, so cli.install lands binaries where the
   # gateway can find and exec them without further wiring.
   mkdir -p "${INSTALL_ROOT}/cli/bin" "${INSTALL_ROOT}/cli/lib"
+  # npm's cache (~/.npm) and the installed CLIs' own config (~/.claude,
+  # ~/.codex) resolve off $HOME. Under systemd's User= the service $HOME is
+  # /var/lib/empyralis (from the passwd entry) — NOT in ReadWritePaths (only
+  # its STATE_ROOT subdir is), so ProtectSystem=strict makes it read-only and
+  # `npm install -g` dies with EACCES creating ~/.npm/_cacache, even though
+  # NPM_CONFIG_PREFIX was already writable. Verified: read-only $HOME -> npm
+  # EACCES; writable $HOME + NPM_CONFIG_CACHE -> install succeeds. Give the
+  # service its own writable HOME + npm cache under INSTALL_ROOT (already in
+  # ReadWritePaths) instead of widening the sandbox to the real home dir.
+  mkdir -p "${INSTALL_ROOT}/cli/home" "${INSTALL_ROOT}/cli/npm-cache"
   chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_ROOT}" "${LOG_DIR}" "${RUN_DIR}" "${INSTALL_ROOT}/cli"
-  chmod 0750 "${STATE_ROOT}" "${LOG_DIR}" "${RUN_DIR}"
+  chmod 0750 "${STATE_ROOT}" "${LOG_DIR}" "${RUN_DIR}" "${INSTALL_ROOT}/cli/home" "${INSTALL_ROOT}/cli/npm-cache"
   chmod 0755 "${INSTALL_ROOT}" "${BIN_DIR}" "${CONFIG_DIR}" "${INSTALL_ROOT}/cli" "${INSTALL_ROOT}/cli/bin"
 }
 
@@ -200,6 +210,11 @@ write_env_file() {
     # after cli.install lands it. See cli-installer.ts for the paired
     # gateway-side --prefix defense-in-depth.
     printf 'NPM_CONFIG_PREFIX=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli")"
+    # Writable HOME + npm cache so `npm install -g` (and the CLIs' own
+    # ~/.claude / ~/.codex writes at login) don't EACCES against the
+    # read-only real home under ProtectSystem=strict. See prepare_directories.
+    printf 'HOME=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/home")"
+    printf 'NPM_CONFIG_CACHE=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/npm-cache")"
     printf 'PATH=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
     if [[ -n "${existing_gateway_token}" ]]; then
       printf 'EMPYRALIS_GATEWAY_TOKEN=%s\n' "$(shell_quote_env "${existing_gateway_token}")"
