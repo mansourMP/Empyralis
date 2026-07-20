@@ -923,7 +923,7 @@ export default function GatewayDetailPage() {
   const byId = new Map(serviceInventory.map((item) => [String(item.id || ""), item]));
 
   return (
-    <main className="fleet-content">
+    <main className="fleet-content fleet-content--wide">
       {backLink}
 
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16 }}>
