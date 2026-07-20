@@ -1127,6 +1127,31 @@ a.fleet-breadcrumb:hover {
   margin-inline: auto;
 }
 
+/* Hardware page regression fix: its provider-card grid + device list is a
+   data/cards page like Projects/Agents (which get the wide --with-panel +
+   .fleet-content-main cap, 1140px), not a reading/forms page like Settings/
+   Billing (which keep .fleet-content's plain 820px cap).
+   Just widening max-width here isn't enough — .fleet-content is a flex
+   item of .fleet-shell-scroll (display:flex; flex-direction:column), so
+   its OWN "width" is the flexbox CROSS axis, and .fleet-content's
+   margin-inline:auto is a pair of cross-axis auto margins. Per the flexbox
+   spec, cross-axis auto margins disable stretch and instead absorb the
+   leftover space themselves — confirmed live: with only max-width bumped,
+   getComputedStyle still reported ~291px auto margins on each side and an
+   unchanged ~467px content box, because the box was sizing to its
+   grid's shrink-to-fit content width rather than filling the container
+   (`repeat(auto-fill, …)` can't compute real column counts against an
+   indefinite/shrink-to-fit inline size either, compounding the narrowing).
+   Zeroing the inline margins removes the auto-margin/no-stretch trap, so
+   the item stretches to fill .fleet-shell-scroll's real width — max-width
+   then acts as a genuine cap on very wide viewports instead of a target
+   that's never reached, and there's no auto margin left to re-center it,
+   which also satisfies "left-aligned, not centered" per the bug report. */
+.fleet-content--wide {
+  max-width: var(--content-max-wide);
+  margin-inline: 0;
+}
+
 .fleet-header {
   display: flex;
   align-items: flex-start;

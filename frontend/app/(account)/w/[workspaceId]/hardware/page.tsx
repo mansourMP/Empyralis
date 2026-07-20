@@ -198,7 +198,7 @@ export default function HardwarePage() {
   };
 
   return (
-    <main className="fleet-content">
+    <main className="fleet-content fleet-content--wide">
       {/* Each box row opens its own machine-detail ROUTE (hardware/[gatewayId]),
           matching the Projects list -> project-detail pattern — a deliberate
           departure from this list's earlier "a box row already says
