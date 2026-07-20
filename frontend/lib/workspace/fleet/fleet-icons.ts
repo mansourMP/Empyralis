@@ -3,7 +3,20 @@
 // icons are a client-side lookup by id, matching the same static assets the
 // workspace-wide Channels/Connectors pages use.
 
-export const CHANNEL_ICONS: Record<string, string> = {
+// Bump when a brand asset is added or changed. Appended as ?v= to every icon
+// URL below so a browser that once cached a 404 for a not-yet-deployed asset
+// (Safari renders that as a "?" broken-image box, and negatively caches it)
+// is forced to fetch the new URL fresh instead of reusing the poisoned entry.
+// This is why a channel logo could stay broken for a user across normal
+// refreshes even after the file went live — the fix is a new URL, not a reload.
+const ASSET_VERSION = "20260721";
+
+const withVersion = (map: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(map).map(([key, path]) => [key, `${path}?v=${ASSET_VERSION}`]),
+  );
+
+const RAW_CHANNEL_ICONS: Record<string, string> = {
   sage_telegram_hosted: "/brand-assets/channels/telegram.svg",
   telegram_personal: "/brand-assets/channels/telegram.svg",
   telegram_bot: "/brand-assets/channels/telegram.svg",
@@ -18,7 +31,7 @@ export const CHANNEL_ICONS: Record<string, string> = {
   email: "/brand-assets/generic/email.svg",
 };
 
-export const CONNECTOR_ICONS: Record<string, string> = {
+const RAW_CONNECTOR_ICONS: Record<string, string> = {
   // google_workspace grants Gmail + Calendar + Drive in one connection (see
   // connection_catalog_service.py connector_ids=[...]) so it gets the Google
   // "G" mark, not the Gmail-only glyph gmail.svg still used for the literal
@@ -104,3 +117,10 @@ export const CONNECTOR_ICONS: Record<string, string> = {
   fireflies: "/brand-assets/apps/fireflies.svg",
   fathom: "/brand-assets/apps/fathom.svg",
 };
+
+// Versioned public exports — see ASSET_VERSION above. Every render site
+// (channel grid tiles, the expanded-channel door header, the connector
+// picker) reads from these, so all icon URLs carry the cache-bust with no
+// per-call-site changes.
+export const CHANNEL_ICONS: Record<string, string> = withVersion(RAW_CHANNEL_ICONS);
+export const CONNECTOR_ICONS: Record<string, string> = withVersion(RAW_CONNECTOR_ICONS);
