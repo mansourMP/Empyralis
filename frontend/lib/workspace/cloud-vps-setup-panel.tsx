@@ -148,7 +148,40 @@ type VpsProvisionResponse = {
 
 type VpsProvisionStatusPayload = {
   status?: 'provisioning' | 'registering' | 'connected' | 'failed' | 'deleted' | string;
+  // Both pass through from GET /hardware/vps/{vps_id}/status (see
+  // get_hardware_vps_status / _public_record in vps_provisioning_service.py).
+  // provider_resource_id is empty until the provider actually creates the
+  // resource — with provisioning running as a background task (see
+  // run_vps_provisioning_lifecycle), the initial POST response NEVER carries
+  // a real one (it's a placeholder record), so this field must be re-read
+  // from every status poll, not just the create response. error carries the
+  // real failure reason recorded by mark_vps_provision_failed.
+  provider_resource_id?: string;
+  error?: string;
 };
+
+// Builds the message shown when a background provision lands in status
+// 'failed'. Two things the old hardcoded string got wrong: (1) it always
+// claimed "the server was created" even when provider_resource_id was empty
+// — i.e. the provider create call itself failed (e.g. DigitalOcean's
+// "missing the required permission tag:create") and nothing was ever created
+// or billed; (2) it never showed the actual backend error, just a generic
+// "could not connect". hasProviderResource comes from the SAME status poll
+// that reported 'failed', not stale state from the initial create response.
+function friendlyProvisionFailureMessage(rawError: string, hasProviderResource: boolean): string {
+  const detail = rawError.trim();
+  if (/tag:create|tag:read|tag:delete/i.test(detail)) {
+    return 'Setup failed — the connected DigitalOcean account is missing a permission (tagging). Disconnect and reconnect DigitalOcean, then try again.';
+  }
+  if (!detail) {
+    return hasProviderResource
+      ? 'Setup failed — the server was created but could not connect.'
+      : 'Setup failed before the server could be created.';
+  }
+  return hasProviderResource
+    ? `Setup failed — the server was created but could not connect: ${detail}`
+    : `Setup failed before the server could be created: ${detail}`;
+}
 
 // Resumes the wizard after the DigitalOcean/Google OAuth round-trip: both
 // providers now navigate this same tab straight to the provider's authorize
@@ -1141,6 +1174,11 @@ export function CloudVpsSetupPanel({
 
   async function pollProvisionStatus(nextVpsId: string) {
     const deadline = Date.now() + 300_000;
+    // Tracks the most recently seen provider_resource_id across polls (NOT
+    // React state — a state update from inside this loop wouldn't be visible
+    // to this same closure until the next render) so the deadline fallback
+    // below can also know whether a resource actually got created.
+    let lastKnownResourceId = '';
     while (Date.now() < deadline) {
       await wait(5_000);
       try {
@@ -1148,6 +1186,8 @@ export function CloudVpsSetupPanel({
           `/api/hardware/vps/${encodeURIComponent(nextVpsId)}/status`,
         );
         const status = String(payload?.status || '').toLowerCase();
+        lastKnownResourceId = String(payload?.provider_resource_id || '').trim();
+        setProviderResourceId(lastKnownResourceId || null);
         if (status === 'connected') {
           setProgressStage('connected');
           window.setTimeout(() => {
@@ -1157,7 +1197,7 @@ export function CloudVpsSetupPanel({
         }
         if (status === 'failed') {
           setProgressStage('failed');
-          setError('Setup failed — server was created but could not connect.');
+          setError(friendlyProvisionFailureMessage(String(payload?.error || ''), Boolean(lastKnownResourceId)));
           return;
         }
         setProgressStage(status === 'registering' ? 'connecting' : 'installing');
@@ -1166,7 +1206,7 @@ export function CloudVpsSetupPanel({
       }
     }
     setProgressStage('failed');
-    setError('Setup failed — server was created but could not connect.');
+    setError(friendlyProvisionFailureMessage('', Boolean(lastKnownResourceId)));
   }
 
   async function deleteFailedServer() {

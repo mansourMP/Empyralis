@@ -263,9 +263,14 @@ def test_digitalocean_oauth_start_stores_state_and_uses_registered_redirect(tmp_
     # Granular scopes matching exactly what this service calls (droplet
     # create/delete + region/size reads) — not the old "read write" alias,
     # which (per DO's current scopes reference) maps to full-account
-    # read/write, far more than this app needs.
+    # read/write, far more than this app needs. tag:create/read/delete are
+    # additive-only (see _tag_digitalocean_droplet_best_effort) — droplet
+    # creation itself never depends on a token actually having them (see
+    # test_digitalocean_provisioning_succeeds_without_tag_scope below).
     query = parse_qs(urlsplit(result["oauth_redirect"]).query)
-    assert query["scope"] == ["droplet:create droplet:delete regions:read sizes:read"]
+    assert query["scope"] == [
+        "droplet:create droplet:delete regions:read sizes:read tag:create tag:read tag:delete"
+    ]
     assert "state=" in result["oauth_redirect"]
 
 
@@ -801,6 +806,91 @@ def test_digitalocean_provisioning_payload_uses_curated_region(monkeypatch):
     assert calls[0]["payload"]["region"] == "lon1"
     assert calls[0]["payload"]["image"] == "ubuntu-24-04-x64"
     assert calls[0]["payload"]["user_data"].startswith("#cloud-config")
+    # The regression this guards: `tags` must NEVER be sent on the
+    # create-droplet call itself. DigitalOcean auto-creates a tag object the
+    # first time it's referenced by name, and that implicit creation needs
+    # the `tag:create` OAuth scope — separate from `droplet:create` — so
+    # sending `tags` here 403s the ENTIRE create call ("You are missing the
+    # required permission tag:create") for any token connected before
+    # tag:create was added to the OAuth request. See
+    # test_digitalocean_provisioning_succeeds_when_tag_scope_is_missing for
+    # the end-to-end proof.
+    assert "tags" not in calls[0]["payload"]
+
+
+def test_digitalocean_provisioning_succeeds_when_tag_scope_is_missing(monkeypatch):
+    """The actual bug this fix closes: a DigitalOcean personal access token
+    connected under the old scope request (droplet:create/delete +
+    regions:read/sizes:read, no tag:* scopes) must still be able to create a
+    droplet. Tagging is applied AFTER creation, as a separate best-effort
+    step (see _tag_digitalocean_droplet_best_effort) — every tag call here
+    403s exactly like DO would for a token missing tag:create, and that must
+    be swallowed rather than failing (or rolling back) the already-created
+    droplet."""
+    calls = []
+
+    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
+        calls.append({"method": method, "url": url, "payload": payload})
+        if url == "https://api.digitalocean.com/v2/droplets":
+            return {
+                "droplet": {
+                    "id": 12345,
+                    "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.10"}]},
+                }
+            }
+        # Every tag-related call (create-tag and attach-to-resource) fails
+        # exactly like DO's real 403 for a token that lacks tag:create.
+        raise vps.VPSProvisioningError(
+            f"{provider} provisioning failed: HTTP 403 "
+            '{"id":"forbidden","message":"You are missing the required permission tag:create."}'
+        )
+
+    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+
+    result = vps.provision_vps(
+        "digitalocean",
+        {"api_token": "do_secret"},
+        "lon1",
+        None,
+        "pair_do",
+    )
+
+    # The droplet was created successfully despite every tag call 403ing.
+    assert result.provider == "digitalocean"
+    assert result.provider_resource_id == "12345"
+    assert result.public_ip == "203.0.113.10"
+    # First call is the create-droplet request; every subsequent call is a
+    # best-effort tag attempt (create + attach, per DIGITALOCEAN_TAG_NAMES),
+    # all of which 403 and are swallowed rather than raised.
+    assert calls[0]["url"] == "https://api.digitalocean.com/v2/droplets"
+    tag_call_urls = [c["url"] for c in calls[1:]]
+    assert len(tag_call_urls) == len(vps.DIGITALOCEAN_TAG_NAMES) * 2
+    assert all(vps.DIGITALOCEAN_TAGS_URL in url for url in tag_call_urls)
+
+
+def test_digitalocean_provisioning_tags_droplet_when_tag_scope_is_present(monkeypatch):
+    """The future-proofing half of the same fix: once a workspace reconnects
+    DigitalOcean under the new scope (tag:create/read/delete — see
+    create_digitalocean_oauth_start), the very same code path actually
+    tags the droplet instead of silently no-op'ing forever."""
+    calls = []
+
+    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
+        calls.append({"method": method, "url": url, "payload": payload})
+        if url == "https://api.digitalocean.com/v2/droplets":
+            return {"droplet": {"id": 12345, "networks": {"v4": []}}}
+        return {}
+
+    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+
+    result = vps.provision_vps("digitalocean", {"api_token": "do_secret"}, "lon1", None, "pair_do")
+
+    assert result.provider_resource_id == "12345"
+    create_tag_calls = [c for c in calls if c["url"] == vps.DIGITALOCEAN_TAGS_URL]
+    attach_calls = [c for c in calls if c["url"] == f"{vps.DIGITALOCEAN_TAGS_URL}/{vps.DIGITALOCEAN_TAG_NAMES[0]}/resources"]
+    assert {c["payload"]["name"] for c in create_tag_calls} == set(vps.DIGITALOCEAN_TAG_NAMES)
+    assert len(attach_calls) == 1
+    assert attach_calls[0]["payload"]["resources"] == [{"resource_id": "12345", "resource_type": "droplet"}]
 
 
 def test_vultr_provisioning_uses_current_ubuntu_2404_id_and_base64_user_data(monkeypatch):
@@ -879,8 +969,12 @@ def test_provision_vps_accepts_live_only_digitalocean_region(monkeypatch):
         calls.append(url)
         if url == "https://api.digitalocean.com/v2/regions":
             return {"regions": [{"slug": "sfo2", "name": "San Francisco 2", "available": True}]}
-        assert url == "https://api.digitalocean.com/v2/droplets"
-        return {"droplet": {"id": 777, "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.50"}]}}}
+        if url == "https://api.digitalocean.com/v2/droplets":
+            return {"droplet": {"id": 777, "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.50"}]}}}
+        # Best-effort post-create tagging calls (see
+        # _tag_digitalocean_droplet_best_effort) — asserted on below.
+        assert vps.DIGITALOCEAN_TAGS_URL in url
+        return {}
 
     monkeypatch.setattr(vps, "_http_json", fake_http_json)
 
@@ -894,7 +988,8 @@ def test_provision_vps_accepts_live_only_digitalocean_region(monkeypatch):
     )
 
     assert result.provider_resource_id == "777"
-    assert calls == ["https://api.digitalocean.com/v2/regions", "https://api.digitalocean.com/v2/droplets"]
+    assert calls[:2] == ["https://api.digitalocean.com/v2/regions", "https://api.digitalocean.com/v2/droplets"]
+    assert all(vps.DIGITALOCEAN_TAGS_URL in url for url in calls[2:])
 
 
 def test_provision_vps_still_rejects_region_absent_from_static_and_live(monkeypatch):
@@ -923,8 +1018,12 @@ def test_provision_vps_still_accepts_static_digitalocean_region_when_live_fetch_
     def fake_http_json(method, url, *, token, payload, provider, on_unauthorized=None):
         if url == "https://api.digitalocean.com/v2/regions":
             raise vps.VPSProvisioningError("digitalocean unreachable")
-        assert url == "https://api.digitalocean.com/v2/droplets"
-        return {"droplet": {"id": 42, "networks": {"v4": []}}}
+        if url == "https://api.digitalocean.com/v2/droplets":
+            return {"droplet": {"id": 42, "networks": {"v4": []}}}
+        # Best-effort post-create tagging calls (see
+        # _tag_digitalocean_droplet_best_effort) — not the subject of this test.
+        assert vps.DIGITALOCEAN_TAGS_URL in url
+        return {}
 
     monkeypatch.setattr(vps, "_http_json", fake_http_json)
 

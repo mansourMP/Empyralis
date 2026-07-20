@@ -53,6 +53,10 @@ DEFAULT_AGENT_INSTALLER_URL = (
 )
 DIGITALOCEAN_OAUTH_AUTHORIZE_URL = "https://cloud.digitalocean.com/v1/oauth/authorize"
 DIGITALOCEAN_OAUTH_TOKEN_URL = "https://cloud.digitalocean.com/v1/oauth/token"
+DIGITALOCEAN_TAGS_URL = "https://api.digitalocean.com/v2/tags"
+# Applied to every created droplet on a best-effort basis only — see
+# _tag_digitalocean_droplet_best_effort. Never load-bearing for creation.
+DIGITALOCEAN_TAG_NAMES = ("empyralis", "agent-computer")
 DIGITALOCEAN_OAUTH_REDIRECT_URI_ENV = "EMPYRALIS_DIGITALOCEAN_OAUTH_REDIRECT_URI"
 DIGITALOCEAN_CLIENT_ID_ENV = "DIGITALOCEAN_CLIENT_ID"
 DIGITALOCEAN_CLIENT_SECRET_ENV = "DIGITALOCEAN_CLIENT_SECRET"
@@ -429,7 +433,18 @@ def create_digitalocean_oauth_start(
             # exactly that instead of api:read/api:write's full-account
             # access. Each scope is documented at
             # docs.digitalocean.com/reference/api/scopes/<resource>/.
-            "scope": "droplet:create droplet:delete regions:read sizes:read",
+            #
+            # tag:create/read/delete are additive, best-effort scopes: droplet
+            # creation itself never depends on them (see
+            # _provision_digitalocean/_tag_digitalocean_droplet_best_effort —
+            # a token connected WITHOUT these still creates droplets fine,
+            # just without tags). They're requested here so a fresh/re-auth'd
+            # connection also gets tracking/cleanup tags applied instead of
+            # silently 403ing on every attempt forever.
+            "scope": (
+                "droplet:create droplet:delete regions:read sizes:read "
+                "tag:create tag:read tag:delete"
+            ),
             "state": state_token,
         }
     )
@@ -1603,6 +1618,17 @@ def _provision_digitalocean(
     *,
     on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
 ) -> VPSResult:
+    # `tags` is intentionally NOT sent in the create-droplet body. DigitalOcean
+    # auto-creates a tag object the first time it's referenced by name, and
+    # that implicit creation requires the `tag:create` OAuth scope — separate
+    # from `droplet:create` — so a create request that includes `tags` 403s
+    # ("You are missing the required permission tag:create") for any token
+    # connected before tag:create was added to the OAuth request (see
+    # create_digitalocean_oauth_start), and it 403s BEFORE the droplet is
+    # created — the whole create call is one request. Droplet creation must
+    # never depend on a scope this app doesn't unconditionally have, so
+    # tagging is applied as a separate, best-effort, non-fatal step AFTER the
+    # droplet already exists (see _tag_digitalocean_droplet_best_effort).
     payload = {
         "name": name,
         "region": region,
@@ -1612,7 +1638,6 @@ def _provision_digitalocean(
         "backups": False,
         "ipv6": True,
         "monitoring": True,
-        "tags": ["empyralis", "agent-computer"],
     }
     response = _http_json(
         "POST",
@@ -1626,6 +1651,7 @@ def _provision_digitalocean(
     resource_id = str(droplet.get("id") or "").strip()
     if not resource_id:
         raise VPSProvisioningError("DigitalOcean did not return a droplet id.")
+    _tag_digitalocean_droplet_best_effort(token, resource_id, on_unauthorized=on_unauthorized)
     return VPSResult(
         provider_resource_id=resource_id,
         public_ip=_digitalocean_public_ip(droplet),
@@ -1634,6 +1660,65 @@ def _provision_digitalocean(
         status="provisioning",
         provider=config.provider,
     )
+
+
+def _tag_digitalocean_droplet_best_effort(
+    token: str,
+    droplet_id: str,
+    *,
+    on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
+) -> None:
+    """Applies DIGITALOCEAN_TAG_NAMES to an already-created droplet, purely
+    for tracking/cleanup in the DO console. Called ONLY after the droplet
+    already exists (see _provision_digitalocean) — every call here is wrapped
+    so a tagging failure (most commonly a 403 from a token connected before
+    tag:create/tag:read/tag:delete were added to the OAuth scope request, see
+    create_digitalocean_oauth_start) is logged and swallowed, never raised:
+    an already-created, already-billing droplet must never be treated as a
+    failed provision just because it isn't tagged.
+
+    Both the create-tag and attach-tag calls are attempted independently per
+    tag name: create-tag returning 409 (tag already exists from a prior
+    droplet) is expected and harmless, so attach is still tried even when
+    create fails — including if create failed with 403 (a token WITH
+    tag:read/tag:delete but somehow not tag:create could still attach to a
+    tag another token already created). Once a workspace reconnects
+    DigitalOcean under the new scope, these same calls start succeeding with
+    no code change required here.
+    """
+    for tag_name in DIGITALOCEAN_TAG_NAMES:
+        try:
+            _http_json(
+                "POST",
+                DIGITALOCEAN_TAGS_URL,
+                token=token,
+                payload={"name": tag_name},
+                provider="digitalocean",
+                on_unauthorized=on_unauthorized,
+            )
+        except VPSProvisioningError as exc:
+            _LOGGER.warning(
+                "digitalocean tag create '%s' failed non-fatally (droplet %s already created): %s",
+                tag_name,
+                droplet_id,
+                exc,
+            )
+        try:
+            _http_json(
+                "POST",
+                f"{DIGITALOCEAN_TAGS_URL}/{tag_name}/resources",
+                token=token,
+                payload={"resources": [{"resource_id": str(droplet_id), "resource_type": "droplet"}]},
+                provider="digitalocean",
+                on_unauthorized=on_unauthorized,
+            )
+        except VPSProvisioningError as exc:
+            _LOGGER.warning(
+                "digitalocean tag attach '%s' failed non-fatally (droplet %s already created): %s",
+                tag_name,
+                droplet_id,
+                exc,
+            )
 
 
 def _provision_hetzner(
