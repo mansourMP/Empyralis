@@ -2102,9 +2102,45 @@ def _personal_channel_state(connection_id: str, gateway_id: str, agent_id: str =
     reads THAT agent's own paired session specifically — see
     personal_channels_repository's agent-scoped schema."""
     if connection_id == "telegram_personal":
-        return personal_channels_repository.get_telegram_state(gateway_id, channel_key="telegram_personal", agent_id=agent_id)
+        state = personal_channels_repository.get_telegram_state(gateway_id, channel_key="telegram_personal", agent_id=agent_id)
+        # Telegram runs ONE session per box (a singleton); agent_id is just a
+        # label on whichever UI configured it. If THIS agent has no live
+        # session but the box's session is connected under a DIFFERENT agent
+        # (e.g. paired from Sage's workspace-wide console), reflect that — the
+        # session is shared, so the per-agent Channels tile should read
+        # "Connected", not the false "Set up" that contradicts the connect
+        # card. (Revisit when the Gateway pools true per-agent sessions —
+        # see PLATFORM-MAP's multi-agent-per-box plan.)
+        if agent_id and _token((state or {}).get("status")) != "connected":
+            try:
+                owner = personal_channels_repository.find_agent_id_for_telegram_session(
+                    gateway_id, channel_key="telegram_personal",
+                )
+            except Exception:
+                owner = ""
+            if owner and owner != agent_id:
+                box_state = personal_channels_repository.get_telegram_state(
+                    gateway_id, channel_key="telegram_personal", agent_id=owner,
+                )
+                if _token((box_state or {}).get("status")) == "connected":
+                    return box_state
+        return state
     if connection_id == "whatsapp_personal":
-        return personal_channels_repository.get_whatsapp_state(gateway_id, channel_key="whatsapp_personal", agent_id=agent_id)
+        state = personal_channels_repository.get_whatsapp_state(gateway_id, channel_key="whatsapp_personal", agent_id=agent_id)
+        if agent_id and _token((state or {}).get("status")) != "connected":
+            try:
+                owner = personal_channels_repository.find_agent_id_for_whatsapp_session(
+                    gateway_id, channel_key="whatsapp_personal",
+                )
+            except Exception:
+                owner = ""
+            if owner and owner != agent_id:
+                box_state = personal_channels_repository.get_whatsapp_state(
+                    gateway_id, channel_key="whatsapp_personal", agent_id=owner,
+                )
+                if _token((box_state or {}).get("status")) == "connected":
+                    return box_state
+        return state
     return None
 
 

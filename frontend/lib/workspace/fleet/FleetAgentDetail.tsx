@@ -1822,6 +1822,7 @@ export function ChannelsTab({
                     agentGatewayId={agentGatewayId}
                     agentId={agentId}
                     onConnected={handleChannelsChanged}
+                    onDone={() => setExpanded(null)}
                   />
                 </div>
               )}
@@ -1834,6 +1835,7 @@ export function ChannelsTab({
                     agentGatewayId={agentGatewayId}
                     agentId={agentId}
                     onConnected={handleChannelsChanged}
+                    onDone={() => setExpanded(null)}
                   />
                 </div>
               )}
