@@ -1320,12 +1320,39 @@ async def test_provision_hardware_vps_route_creates_pairing_then_records_vps():
         ) as pairing_mock,
         patch.object(routes_gateway.vps_provisioning_service, "provision_vps", return_value=result) as provision_mock,
         patch.object(routes_gateway.vps_provisioning_service, "record_vps_provision") as record_mock,
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "get_vps_provision_status",
+            return_value={"status": "connected"},
+        ),
+        patch.object(vps, "VPS_CONNECT_POLL_INTERVAL_SECONDS", 0),
     ):
         response = await routes_gateway.provision_hardware_vps(body, current_user=current_user)
 
+        # provision_hardware_vps must return BEFORE the droplet lifecycle
+        # (provision_vps / record_vps_provision's second, real-result call)
+        # has run at all — that's the whole point of the async contract.
+        # Only the synchronous pre-flight (pairing intent + placeholder
+        # record) may have happened by the time this awaits.
+        assert provision_mock.call_count == 0
+        assert record_mock.call_count == 1
+
+        # Drain the background task this request scheduled (still inside
+        # the patch context, so the mocks it calls are still active) to
+        # exercise the rest of the lifecycle deterministically instead of
+        # racing the event loop.
+        background_tasks = [
+            task for task in routes_gateway._VPS_PROVISION_BACKGROUND_TASKS if not task.done()
+        ]
+        assert len(background_tasks) == 1
+        await background_tasks[0]
+
     assert response["pairing_token"] == "pair_do"
     assert response["vps_id"].startswith("vps_")
-    assert response["provider_resource_id"] == "droplet-1"
+    # The initial response can never carry the real provider_resource_id —
+    # provision_vps (the call that creates it) hasn't run yet at this point.
+    assert response["provider_resource_id"] == ""
+    assert response["status"] == "provisioning"
     access_mock.assert_called_once_with(current_user, "ws-1", minimum_role="owner")
     assert pairing_mock.call_args.kwargs["metadata"]["setup_source"] == "vps"
     assert pairing_mock.call_args.kwargs["metadata"]["vps_id"] == response["vps_id"]
@@ -1339,8 +1366,16 @@ async def test_provision_hardware_vps_route_creates_pairing_then_records_vps():
         "s-1vcpu-2gb",
         "pair_do",
     )
-    assert record_mock.call_args.kwargs["credentials"] == {"api_token": "do_secret"}
-    assert record_mock.call_args.kwargs["vps_id"] == response["vps_id"]
+    # record_vps_provision is called twice: once synchronously (the
+    # 'provisioning' placeholder, empty provider_resource_id, so status
+    # polling works before the droplet exists) and once from the background
+    # task with the real result.
+    assert record_mock.call_count == 2
+    assert record_mock.call_args_list[0].kwargs["provider_resource_id"] == ""
+    assert record_mock.call_args_list[0].kwargs["vps_id"] == response["vps_id"]
+    assert record_mock.call_args_list[1].kwargs["credentials"] == {"api_token": "do_secret"}
+    assert record_mock.call_args_list[1].kwargs["vps_id"] == response["vps_id"]
+    assert record_mock.call_args_list[1].kwargs["provider_resource_id"] == "droplet-1"
 
 
 @pytest.mark.asyncio
@@ -1379,8 +1414,20 @@ async def test_provision_hardware_vps_route_uses_stored_provider_token():
         ) as load_credentials_mock,
         patch.object(routes_gateway.vps_provisioning_service, "provision_vps", return_value=result) as provision_mock,
         patch.object(routes_gateway.vps_provisioning_service, "record_vps_provision") as record_mock,
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "get_vps_provision_status",
+            return_value={"status": "connected"},
+        ),
+        patch.object(vps, "VPS_CONNECT_POLL_INTERVAL_SECONDS", 0),
     ):
         await routes_gateway.provision_hardware_vps(body, current_user=current_user)
+
+        background_tasks = [
+            task for task in routes_gateway._VPS_PROVISION_BACKGROUND_TASKS if not task.done()
+        ]
+        assert len(background_tasks) == 1
+        await background_tasks[0]
 
     load_credentials_mock.assert_called_once_with(
         "vps_token_1",
@@ -1396,6 +1443,410 @@ async def test_provision_hardware_vps_route_uses_stored_provider_token():
         "pair_do",
     )
     assert record_mock.call_args.kwargs["credentials"] == {"access_token": "do_secret"}
+    assert record_mock.call_args.kwargs["provider_resource_id"] == "droplet-1"
+
+
+@pytest.mark.asyncio
+async def test_provision_hardware_vps_route_returns_before_provision_vps_runs():
+    # The core async-provisioning contract: the POST handler must return
+    # fast (never wait on the create call, let alone boot/install/connect),
+    # with status 'provisioning' and no provider_resource_id yet. Unlike the
+    # two tests above, this one deliberately does NOT drain the scheduled
+    # background task before asserting — it's checking what the caller sees
+    # the instant the await on provision_hardware_vps itself returns, which
+    # is exactly what an HTTP client waiting on this request would see.
+    provision_started = False
+
+    def _slow_provision_vps(*_args, **_kwargs):
+        nonlocal provision_started
+        provision_started = True
+        return vps.VPSResult(
+            provider_resource_id="droplet-9",
+            public_ip="203.0.113.9",
+            region="nyc3",
+            size="s-1vcpu-2gb",
+            status="provisioning",
+            provider="digitalocean",
+        )
+
+    body = routes_gateway.HardwareVPSProvisionRequest(
+        workspace_id="ws-1",
+        provider="digitalocean",
+        credentials={"api_token": "do_secret"},
+        region="nyc3",
+        runtime_access_mode="full_access",
+        autonomous_agent_setup_warning_acknowledged=True,
+    )
+    current_user = {"user_id": "user-1"}
+
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(
+            routes_gateway.gateway_pairing_service,
+            "create_gateway_pairing_intent",
+            return_value={"pairing_token": "pair_do", "pairing_id": "pairing-1"},
+        ),
+        patch.object(routes_gateway.vps_provisioning_service, "provision_vps", side_effect=_slow_provision_vps),
+        patch.object(routes_gateway.vps_provisioning_service, "record_vps_provision") as record_mock,
+    ):
+        response = await routes_gateway.provision_hardware_vps(body, current_user=current_user)
+
+        # The response landed without provision_vps ever having been
+        # invoked — asyncio.create_task only *schedules* the background
+        # coroutine, it doesn't run any of it until the event loop is next
+        # given a chance to (which hasn't happened yet at this point).
+        assert provision_started is False
+        assert record_mock.call_count == 1  # only the synchronous placeholder write
+
+        # Clean up the still-pending task so it doesn't outlive the mocked
+        # context (and so pytest-asyncio doesn't warn about a dangling
+        # task); what it does isn't this test's concern.
+        for task in list(routes_gateway._VPS_PROVISION_BACKGROUND_TASKS):
+            task.cancel()
+
+    assert response["status"] == "provisioning"
+    assert response["provider_resource_id"] == ""
+    assert response["public_ip"] is None
+    assert response["vps_id"].startswith("vps_")
+
+
+@pytest.mark.asyncio
+async def test_run_vps_provisioning_lifecycle_persists_result_then_waits_for_connected(tmp_path, monkeypatch):
+    # Full lifecycle, success path: the background task should (1) call
+    # provision_vps, (2) persist the REAL result over the placeholder
+    # record, then (3) keep polling get_vps_provision_status until it
+    # reports 'connected', at which point it should stop -- no cleanup, no
+    # failure marking.
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps, "VPS_CONNECT_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    vps.record_vps_provision(
+        vps_id="vps_lifecycle_1",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        pairing_token="pair_do",
+        credentials={"api_token": "do_secret"},
+        pairing_id="pairing-1",
+    )
+
+    result = vps.VPSResult(
+        provider_resource_id="droplet-42",
+        public_ip="203.0.113.42",
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        provider="digitalocean",
+    )
+    status_sequence = iter(
+        [
+            {"status": "provisioning"},
+            {"status": "registering"},
+            {"status": "connected"},
+        ]
+    )
+    delete_calls = []
+
+    with (
+        patch.object(vps, "provision_vps", return_value=result) as provision_mock,
+        patch.object(vps, "get_vps_provision_status", side_effect=lambda _vps_id: next(status_sequence)),
+        patch.object(vps, "_destroy_vps_provider_resource", side_effect=lambda *a: delete_calls.append(a)),
+    ):
+        await vps.run_vps_provisioning_lifecycle(
+            vps_id="vps_lifecycle_1",
+            provider="digitalocean",
+            credentials={"api_token": "do_secret"},
+            region="nyc3",
+            size="s-1vcpu-2gb",
+            pairing_token="pair_do",
+            token_id=None,
+            workspace_id="ws-1",
+            tenant_id="tenant-1",
+            user_id="user-1",
+            pairing_id="pairing-1",
+        )
+
+    provision_mock.assert_called_once()
+    assert delete_calls == []  # success path never touches cleanup
+    record = vps.load_vps_record("vps_lifecycle_1")
+    assert record["provider_resource_id"] == "droplet-42"
+    assert record["public_ip"] == "203.0.113.42"
+
+
+@pytest.mark.asyncio
+async def test_run_vps_provisioning_lifecycle_deletes_droplet_when_connect_fails(tmp_path, monkeypatch):
+    # The critical cleanup-on-failure fence: once a droplet is created
+    # (provision_vps succeeds) but the agent never finishes connecting
+    # (get_vps_provision_status eventually reports 'failed' -- e.g. the
+    # gateway pairing intent expired), the background task must call the
+    # provider's delete API for the resource it created, and persist status
+    # 'failed'. A failed provision must never leave a running box.
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps, "VPS_CONNECT_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    vps.record_vps_provision(
+        vps_id="vps_lifecycle_2",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        pairing_token="pair_do",
+        credentials={"api_token": "do_secret"},
+        pairing_id="pairing-1",
+    )
+
+    result = vps.VPSResult(
+        provider_resource_id="droplet-99",
+        public_ip="203.0.113.99",
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        provider="digitalocean",
+    )
+    status_sequence = iter(
+        [
+            {"status": "provisioning"},
+            {"status": "registering"},
+            # cloud-init never finished / the pairing intent expired first:
+            {"status": "failed"},
+        ]
+    )
+    deleted = []
+
+    with (
+        patch.object(vps, "provision_vps", return_value=result),
+        patch.object(vps, "get_vps_provision_status", side_effect=lambda _vps_id: next(status_sequence)),
+        patch.object(
+            vps,
+            "_http_empty",
+            lambda method, url, *, token, provider, **_kwargs: deleted.append((method, url, token, provider)),
+        ),
+    ):
+        await vps.run_vps_provisioning_lifecycle(
+            vps_id="vps_lifecycle_2",
+            provider="digitalocean",
+            credentials={"api_token": "do_secret"},
+            region="nyc3",
+            size="s-1vcpu-2gb",
+            pairing_token="pair_do",
+            token_id=None,
+            workspace_id="ws-1",
+            tenant_id="tenant-1",
+            user_id="user-1",
+            pairing_id="pairing-1",
+        )
+
+    # The provider's delete-droplet API was actually called for the
+    # resource that was created.
+    assert deleted == [("DELETE", "https://api.digitalocean.com/v2/droplets/droplet-99", "do_secret", "digitalocean")]
+    record = vps.load_vps_record("vps_lifecycle_2")
+    assert record["status"] == "failed"
+    assert record["provider_resource_id"] == "droplet-99"
+
+
+@pytest.mark.asyncio
+async def test_run_vps_provisioning_lifecycle_marks_failed_without_cleanup_when_create_fails(tmp_path, monkeypatch):
+    # If provision_vps itself raises, no provider resource was ever
+    # created (every provider's create call in provision_vps is a single
+    # all-or-nothing operation) -- so there's nothing to delete, and the
+    # background task must not attempt a delete call against an id that
+    # doesn't exist. It still must mark the record 'failed' so the UI's
+    # poll loop doesn't hang forever.
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    vps.record_vps_provision(
+        vps_id="vps_lifecycle_3",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        pairing_token="pair_do",
+        credentials={"api_token": "do_secret"},
+        pairing_id="pairing-1",
+    )
+
+    delete_calls = []
+
+    with (
+        patch.object(vps, "provision_vps", side_effect=vps.VPSProvisioningError("digitalocean provisioning failed: HTTP 422")),
+        patch.object(vps, "_destroy_vps_provider_resource", side_effect=lambda *a: delete_calls.append(a)),
+    ):
+        await vps.run_vps_provisioning_lifecycle(
+            vps_id="vps_lifecycle_3",
+            provider="digitalocean",
+            credentials={"api_token": "do_secret"},
+            region="nyc3",
+            size="s-1vcpu-2gb",
+            pairing_token="pair_do",
+            token_id=None,
+            workspace_id="ws-1",
+            tenant_id="tenant-1",
+            user_id="user-1",
+            pairing_id="pairing-1",
+        )
+
+    assert delete_calls == []  # nothing was ever created -- nothing to delete
+    record = vps.load_vps_record("vps_lifecycle_3")
+    assert record["status"] == "failed"
+    assert record["provider_resource_id"] == ""
+    assert "422" in (record.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_run_vps_provisioning_lifecycle_marks_failed_on_connect_timeout(tmp_path, monkeypatch):
+    # Defensive timeout: even if the record's live-resolved status never
+    # naturally flips to 'failed' (e.g. a future caller threads through a
+    # longer-than-default pairing ttl_seconds), the background task's own
+    # deadline must still fire, delete the droplet, and mark the record
+    # failed -- it must never poll forever while a box keeps billing.
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps, "VPS_CONNECT_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(vps, "VPS_CONNECT_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    vps.record_vps_provision(
+        vps_id="vps_lifecycle_4",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        pairing_token="pair_do",
+        credentials={"api_token": "do_secret"},
+        pairing_id="pairing-1",
+    )
+    result = vps.VPSResult(
+        provider_resource_id="droplet-77",
+        public_ip="203.0.113.77",
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        provider="digitalocean",
+    )
+    deleted = []
+
+    with (
+        patch.object(vps, "provision_vps", return_value=result),
+        patch.object(
+            vps,
+            "_http_empty",
+            lambda method, url, *, token, provider, **_kwargs: deleted.append((method, url, token, provider)),
+        ),
+    ):
+        await vps.run_vps_provisioning_lifecycle(
+            vps_id="vps_lifecycle_4",
+            provider="digitalocean",
+            credentials={"api_token": "do_secret"},
+            region="nyc3",
+            size="s-1vcpu-2gb",
+            pairing_token="pair_do",
+            token_id=None,
+            workspace_id="ws-1",
+            tenant_id="tenant-1",
+            user_id="user-1",
+            pairing_id="pairing-1",
+        )
+
+    assert deleted == [("DELETE", "https://api.digitalocean.com/v2/droplets/droplet-77", "do_secret", "digitalocean")]
+    record = vps.load_vps_record("vps_lifecycle_4")
+    assert record["status"] == "failed"
+
+
+def test_mark_vps_provision_failed_deletes_resource_and_records_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+    deleted = []
+    monkeypatch.setattr(
+        vps,
+        "_http_empty",
+        lambda method, url, *, token, provider, **_kwargs: deleted.append((method, url, token, provider)),
+    )
+
+    vps.record_vps_provision(
+        vps_id="vps_mark_failed_1",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="12345",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        pairing_token="pair_do",
+        credentials={"api_token": "do_secret"},
+    )
+
+    result = vps.mark_vps_provision_failed("vps_mark_failed_1", reason="boot never completed")
+
+    assert result["status"] == "failed"
+    assert result["error"] == "boot never completed"
+    assert deleted == [("DELETE", "https://api.digitalocean.com/v2/droplets/12345", "do_secret", "digitalocean")]
+
+    # Calling it again (e.g. a second failure signal racing in) must not
+    # attempt a second delete against a resource that's already gone.
+    vps.mark_vps_provision_failed("vps_mark_failed_1", reason="second failure signal")
+    assert len(deleted) == 1
+
+
+def test_mark_vps_provision_failed_skips_cleanup_when_no_resource_was_created(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("no provider resource exists yet -- delete must not be attempted")
+
+    monkeypatch.setattr(vps, "_http_empty", _fail_if_called)
+
+    vps.record_vps_provision(
+        vps_id="vps_mark_failed_2",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        pairing_token="pair_do",
+        credentials={"api_token": "do_secret"},
+    )
+
+    result = vps.mark_vps_provision_failed("vps_mark_failed_2", reason="create call rejected", attempt_cleanup=False)
+
+    assert result["status"] == "failed"
+    assert result["provider_resource_id"] == ""
 
 
 @pytest.mark.asyncio

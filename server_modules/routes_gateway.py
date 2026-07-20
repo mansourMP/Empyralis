@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -1980,11 +1981,42 @@ async def get_hardware_vps_plans(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+# Holds strong references to the fire-and-forget asyncio.Task objects
+# provision_hardware_vps schedules for the actual (multi-minute) droplet
+# lifecycle — asyncio only weakly tracks a Task via the event loop while
+# something else holds a reference to it; without this set, a Task can be
+# garbage-collected mid-run and silently stop (a well-known asyncio
+# footgun). Mirrors the exact same pattern gateway_protocol_service.py uses
+# for its own per-connection background tasks (_track_background_task
+# there), just module-scoped here since these aren't tied to one
+# connection's lifetime. Entries remove themselves via add_done_callback the
+# moment each task finishes, so this never grows unbounded.
+_VPS_PROVISION_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _track_vps_provision_task(task: "asyncio.Task") -> None:
+    _VPS_PROVISION_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_VPS_PROVISION_BACKGROUND_TASKS.discard)
+
+
 @router.post("/hardware/vps/provision")
 async def provision_hardware_vps(
     body: HardwareVPSProvisionRequest,
     current_user=Depends(require_api_key),
 ):
+    """Kicks off droplet/instance provisioning and returns immediately with
+    status 'provisioning' — it does NOT wait for the create call, let alone
+    boot/install/connect, to finish. Those run in a background asyncio task
+    (vps_provisioning_service.run_vps_provisioning_lifecycle, scheduled
+    below) so a slow provider call can never block this request past
+    Cloudflare's edge timeout and 502 it — which used to happen with
+    provision_vps() called synchronously right here, and worse, could leave
+    an already-created droplet with no vps_id ever reaching the client to
+    track or delete it by. The frontend (cloud-vps-setup-panel.tsx) polls
+    GET /hardware/vps/{vps_id}/status for progress; see that route and
+    get_vps_provision_status/_resolved_record_status for how 'provisioning'
+    -> 'registering' -> 'connected'/'failed' gets resolved.
+    """
     workspace_id = enforce_workspace_access(
         current_user,
         body.workspace_id or "default",
@@ -2029,6 +2061,7 @@ async def provision_hardware_vps(
     pairing_token = str(pairing.get("pairing_token") or "").strip()
     if not pairing_token:
         raise HTTPException(status_code=500, detail="Gateway pairing token was not created.")
+    pairing_id = str(pairing.get("pairing_id") or "").strip() or None
     resolved_token_id = str(body.token_id or "").strip() or None
     try:
         credentials = (
@@ -2041,42 +2074,57 @@ async def provision_hardware_vps(
             if resolved_token_id
             else body.credentials
         )
-        result = vps_provisioning_service.provision_vps(
-            resolved["provider"],
-            credentials,
-            resolved["region"],
-            resolved["size"],
-            pairing_token,
-            token_id=resolved_token_id,
-        )
-        vps_provisioning_service.record_vps_provision(
-            vps_id=vps_id,
-            workspace_id=workspace_id,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            provider=result.provider,
-            provider_resource_id=result.provider_resource_id,
-            public_ip=result.public_ip,
-            region=result.region,
-            size=result.size,
-            status=result.status,
-            pairing_token=pairing_token,
-            credentials=credentials,
-            pairing_id=str(pairing.get("pairing_id") or "").strip() or None,
-        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="VPS provider credential was not found.") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except vps_provisioning_service.VPSProvisioningError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Persist a 'provisioning' placeholder BEFORE returning — with no
+    # provider_resource_id yet, since the provider hasn't been asked to
+    # create anything at this point — so GET /hardware/vps/{vps_id}/status
+    # is pollable from the instant this response lands. The background
+    # lifecycle below (run_vps_provisioning_lifecycle) replaces this same
+    # record with the real provider_resource_id/public_ip once the droplet
+    # actually exists, and is the only thing that ever gets to fail it.
+    vps_provisioning_service.record_vps_provision(
+        vps_id=vps_id,
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        provider=resolved["provider"],
+        provider_resource_id="",
+        public_ip=None,
+        region=resolved["region"],
+        size=resolved["size"],
+        status="provisioning",
+        pairing_token=pairing_token,
+        credentials=credentials,
+        pairing_id=pairing_id,
+    )
+
+    _track_vps_provision_task(
+        asyncio.create_task(
+            vps_provisioning_service.run_vps_provisioning_lifecycle(
+                vps_id=vps_id,
+                provider=resolved["provider"],
+                credentials=credentials,
+                region=resolved["region"],
+                size=resolved["size"],
+                pairing_token=pairing_token,
+                token_id=resolved_token_id,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                pairing_id=pairing_id,
+            )
+        )
+    )
+
     return {
         "pairing_token": pairing_token,
         "vps_id": vps_id,
-        "provider_resource_id": result.provider_resource_id,
-        "public_ip": result.public_ip,
+        "provider_resource_id": "",
+        "public_ip": None,
         "status": "provisioning",
     }
 
@@ -2153,6 +2201,7 @@ async def get_hardware_vps_status(
         "region": status_record["region"],
         "size": status_record["size"],
         "status": status_record["status"],
+        "error": status_record.get("error"),
     }
 
 

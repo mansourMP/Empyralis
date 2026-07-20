@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
 import os
 import secrets
 import threading
@@ -182,6 +184,19 @@ VPS_STATE_FILE = Path(
         str(EMPYRALIS_STATE_HOME / "gateway" / "vps-provisioning.json"),
     )
 ).expanduser()
+
+_LOGGER = logging.getLogger(__name__)
+
+# How often (and how long) run_vps_provisioning_lifecycle's background wait
+# loop polls get_vps_provision_status for the agent computer to finish
+# booting/installing/connecting after its droplet/instance was created.
+# VPS_CONNECT_TIMEOUT_SECONDS is a safety net above and beyond the gateway
+# pairing intent's own TTL (DEFAULT_GATEWAY_PAIRING_TTL_SECONDS, 15 minutes —
+# see gateway_pairing_service) which normally resolves the record to
+# 'failed' first via _resolved_record_status; this only fires if that somehow
+# doesn't happen (e.g. a custom/longer ttl_seconds is ever threaded through).
+VPS_CONNECT_POLL_INTERVAL_SECONDS = 15
+VPS_CONNECT_TIMEOUT_SECONDS = 20 * 60
 
 
 @dataclass(frozen=True)
@@ -1224,6 +1239,165 @@ def provision_vps(
     raise VPSProvisioningError(f"Unsupported VPS provider: {provider_id}")
 
 
+async def run_vps_provisioning_lifecycle(
+    *,
+    vps_id: str,
+    provider: str,
+    credentials: Mapping[str, Any],
+    region: Optional[str],
+    size: Optional[str],
+    pairing_token: str,
+    token_id: Optional[str],
+    workspace_id: str,
+    tenant_id: str,
+    user_id: str,
+    pairing_id: Optional[str],
+) -> None:
+    """The full droplet lifecycle (create -> persist -> wait for the agent to
+    connect), run off the HTTP request path as a background asyncio task —
+    see routes_gateway.provision_hardware_vps, which schedules this via
+    asyncio.create_task() immediately after writing a 'provisioning'
+    placeholder record (record_vps_provision with an empty
+    provider_resource_id) and returning 200 with vps_id + status
+    'provisioning'. That placeholder is what makes GET
+    /hardware/vps/{vps_id}/status pollable from the instant the POST
+    response lands, well before provision_vps() below has even started —
+    this function only ever *replaces* it with real data or flips it to
+    'failed', it never has to create it.
+
+    provision_vps (a blocking function: plain urllib/boto3 calls, no
+    asyncio) is offloaded to a worker thread via asyncio.to_thread so it
+    never blocks the event loop — see provision_hardware_vps's docstring
+    reference for why that mattered: every previous call ran this
+    synchronously inline in the request handler, so a slow provider call
+    (AWS's create path alone makes 5 sequential API calls) could tie up the
+    whole process and blow past Cloudflare's ~100s edge timeout, 502ing the
+    request AFTER the droplet was already created provider-side — orphaning
+    it with no vps_id ever reaching the client to poll or delete it by.
+
+    Cleanup contract: the moment provision_vps() returns successfully, its
+    provider_resource_id is persisted (record_vps_provision) before
+    anything else in this function can fail — so every failure branch after
+    that point has a real resource id on record for
+    mark_vps_provision_failed to delete. A create-step failure
+    (provision_vps itself raising) never reaches that point, so there is
+    nothing to delete: every provider's create call in provision_vps is a
+    single all-or-nothing operation, never a partial multi-resource create
+    left dangling (AWS's prerequisite security-group/key-pair calls create
+    shared, free, reusable resources — not the billed instance itself).
+    """
+    try:
+        try:
+            result = await asyncio.to_thread(
+                provision_vps,
+                provider,
+                credentials,
+                region,
+                size,
+                pairing_token,
+                token_id=token_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced via the failed-status record, not a caller
+            _LOGGER.warning(
+                "vps provisioning create step failed vps_id=%s provider=%s error=%s",
+                vps_id,
+                provider,
+                exc,
+            )
+            await asyncio.to_thread(
+                mark_vps_provision_failed,
+                vps_id,
+                reason=str(exc) or "Provisioning failed.",
+                attempt_cleanup=False,
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                record_vps_provision,
+                vps_id=vps_id,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                provider=result.provider,
+                provider_resource_id=result.provider_resource_id,
+                public_ip=result.public_ip,
+                region=result.region,
+                size=result.size,
+                status=result.status,
+                pairing_token=pairing_token,
+                credentials=credentials,
+                pairing_id=pairing_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - a real resource now exists; must not be left untracked
+            _LOGGER.error(
+                "vps provisioning created %s resource_id=%s for vps_id=%s but could not persist the "
+                "record: %s -- attempting best-effort cleanup so the resource does not orphan",
+                provider,
+                result.provider_resource_id,
+                vps_id,
+                exc,
+            )
+            try:
+                await asyncio.to_thread(
+                    _destroy_vps_provider_resource,
+                    vps_id,
+                    {
+                        "provider": result.provider,
+                        "provider_resource_id": result.provider_resource_id,
+                        "region": result.region,
+                        "credentials_ciphertext": _encrypt_secret(dict(credentials or {})),
+                    },
+                )
+            except Exception as cleanup_exc:  # noqa: BLE001 - last resort: log loudly for manual intervention
+                _LOGGER.error(
+                    "vps provisioning cleanup ALSO failed for orphaned resource_id=%s provider=%s "
+                    "vps_id=%s: %s -- manual deletion in the provider console is required",
+                    result.provider_resource_id,
+                    provider,
+                    vps_id,
+                    cleanup_exc,
+                )
+            return
+
+        deadline = time.monotonic() + VPS_CONNECT_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            await asyncio.sleep(VPS_CONNECT_POLL_INTERVAL_SECONDS)
+            try:
+                status_record = await asyncio.to_thread(get_vps_provision_status, vps_id)
+            except KeyError:
+                # Record vanished — e.g. the user deleted it out from under
+                # this task via DELETE /hardware/vps/{vps_id} while it was
+                # still installing. Nothing left to watch or clean up.
+                return
+            except Exception as exc:  # noqa: BLE001 - transient state-file hiccup; keep polling
+                _LOGGER.warning("vps provisioning status poll failed vps_id=%s error=%s", vps_id, exc)
+                continue
+            status = str(status_record.get("status") or "")
+            if status == "connected":
+                return
+            if status == "deleted":
+                return
+            if status == "failed":
+                await asyncio.to_thread(
+                    mark_vps_provision_failed,
+                    vps_id,
+                    reason="The agent computer did not connect before the setup window expired.",
+                )
+                return
+
+        await asyncio.to_thread(
+            mark_vps_provision_failed,
+            vps_id,
+            reason=(
+                f"Timed out after {VPS_CONNECT_TIMEOUT_SECONDS // 60} minutes waiting for the "
+                "agent computer to connect."
+            ),
+        )
+    except Exception:  # noqa: BLE001 - a background task has no caller to propagate to; never die silently
+        _LOGGER.exception("vps provisioning background lifecycle crashed unexpectedly vps_id=%s", vps_id)
+
+
 def record_vps_provision(
     *,
     vps_id: str,
@@ -1283,13 +1457,21 @@ def get_vps_provision_status(vps_id: str) -> Dict[str, Any]:
     return _public_record(record)
 
 
-def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
-    clean_vps_id = _clean_identifier(vps_id, field_name="vps_id")
-    with _STATE_LOCK:
-        state = _load_state()
-        record = dict((state.get("vps") or {}).get(clean_vps_id) or {})
-        if not record:
-            raise KeyError(clean_vps_id)
+def _destroy_vps_provider_resource(clean_vps_id: str, record: Mapping[str, Any]) -> None:
+    """Shared provider-delete dispatch: calls whichever provider's
+    delete-droplet/instance API matches record['provider'], addressing
+    record['provider_resource_id'] exactly the way provision_vps's own
+    per-provider branches created it (see provision_vps). Used by both a
+    user-initiated delete (delete_recorded_vps) and the background
+    auto-cleanup a failed/timed-out provision runs (mark_vps_provision_failed)
+    — one lifecycle, one delete path, so a droplet created either through
+    the normal flow or left over from a failed background provision is
+    always torn down the same way. Raises VPSProvisioningError (or a
+    provider SDK error for AWS) on failure; callers decide whether that's
+    fatal (delete_recorded_vps) or best-effort/logged (
+    mark_vps_provision_failed — a background task has no caller to surface
+    the error to).
+    """
     credentials = _decrypt_secret(str(record.get("credentials_ciphertext") or ""))
     provider_id = _normalize_provider(str(record.get("provider") or ""))
     resource_id = str(record.get("provider_resource_id") or "").strip()
@@ -1331,10 +1513,71 @@ def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
 
             on_unauthorized = _reauth
         _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
+
+
+def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
+    clean_vps_id = _clean_identifier(vps_id, field_name="vps_id")
+    with _STATE_LOCK:
+        state = _load_state()
+        record = dict((state.get("vps") or {}).get(clean_vps_id) or {})
+        if not record:
+            raise KeyError(clean_vps_id)
+    _destroy_vps_provider_resource(clean_vps_id, record)
     with _STATE_LOCK:
         state = _load_state()
         latest = dict((state.get("vps") or {}).get(clean_vps_id) or record)
         latest["status"] = "deleted"
+        latest["updated_at"] = _utc_now_iso()
+        state.setdefault("vps", {})[clean_vps_id] = latest
+        _write_state(state)
+    return _public_record(latest)
+
+
+def mark_vps_provision_failed(vps_id: str, *, reason: str, attempt_cleanup: bool = True) -> Dict[str, Any]:
+    """Terminal failure path for a background provision (see
+    run_vps_provisioning_lifecycle): best-effort destroys the provider
+    resource if one was ever recorded, then persists status 'failed'
+    either way — this is the "cleanup-on-failure" fence the async
+    provisioning contract depends on: from the moment a droplet/instance is
+    created and its provider_resource_id lands on the record (via
+    record_vps_provision), every failure path funnels through here, so a
+    failed provision can never silently leave a running, billing box behind.
+
+    Never raises: a background asyncio task has no request/caller to
+    propagate an exception to, so a cleanup failure (e.g. the provider API
+    is down) is logged and swallowed rather than left to crash the task
+    unnoticed — the record still gets marked 'failed' either way, with a
+    cleanup_error note, so a human has something to act on via the provider
+    console and the existing DELETE /hardware/vps/{vps_id} route (which
+    will simply try the same delete again).
+    """
+    clean_vps_id = _clean_identifier(vps_id, field_name="vps_id")
+    with _STATE_LOCK:
+        state = _load_state()
+        record = dict((state.get("vps") or {}).get(clean_vps_id) or {})
+        if not record:
+            raise KeyError(clean_vps_id)
+    resource_id = str(record.get("provider_resource_id") or "").strip()
+    cleanup_error: Optional[str] = None
+    if attempt_cleanup and resource_id and str(record.get("status") or "") not in {"deleted", "failed"}:
+        try:
+            _destroy_vps_provider_resource(clean_vps_id, record)
+        except Exception as exc:  # noqa: BLE001 - best-effort cleanup, never fatal here
+            cleanup_error = str(exc)[:500]
+            _LOGGER.error(
+                "vps provisioning failure cleanup could not delete resource_id=%s provider=%s vps_id=%s: %s",
+                resource_id,
+                record.get("provider"),
+                clean_vps_id,
+                exc,
+            )
+    with _STATE_LOCK:
+        state = _load_state()
+        latest = dict((state.get("vps") or {}).get(clean_vps_id) or record)
+        latest["status"] = "failed"
+        latest["error"] = str(reason or "Provisioning failed.")[:500]
+        if cleanup_error:
+            latest["cleanup_error"] = cleanup_error
         latest["updated_at"] = _utc_now_iso()
         state.setdefault("vps", {})[clean_vps_id] = latest
         _write_state(state)
@@ -1763,6 +2006,7 @@ def _public_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "size": str(record.get("size") or "").strip(),
         "status": _normalize_status(str(record.get("status") or "provisioning")),
         "pairing_id": str(record.get("pairing_id") or "").strip() or None,
+        "error": str(record.get("error") or "").strip() or None,
         "created_at": str(record.get("created_at") or "").strip(),
         "updated_at": str(record.get("updated_at") or "").strip(),
     }
