@@ -2205,12 +2205,21 @@ async def test_google_vps_oauth_start_route_returns_authorize_url(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_google_vps_oauth_callback_route_returns_setup_session_payload():
-    with patch.object(
-        routes_gateway.vps_provisioning_service,
-        "complete_google_oauth_callback",
-        return_value={"provider": "google", "setup_id": "gsetup_abc", "workspace_id": "ws-1"},
+    with (
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "complete_google_oauth_callback",
+            return_value={"provider": "google", "setup_id": "gsetup_abc", "workspace_id": "ws-1"},
+        ),
+        # request=None is fine here — _vps_oauth_hardware_redirect_url only
+        # touches `request` via _oauth_request_origin, which is patched out
+        # below (same pattern as
+        # test_routes_connections_oauth_callback.py's OAuth tests).
+        patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"),
     ):
-        response = await routes_gateway.complete_google_vps_oauth(code="auth_code", state="state_token")
+        response = await routes_gateway.complete_google_vps_oauth(
+            request=None, code="auth_code", state="state_token"
+        )
 
     assert response.status_code == 200
     assert b"gsetup_abc" in response.body
@@ -2219,7 +2228,8 @@ async def test_google_vps_oauth_callback_route_returns_setup_session_payload():
 
 @pytest.mark.asyncio
 async def test_google_vps_oauth_callback_route_surfaces_cancellation():
-    response = await routes_gateway.complete_google_vps_oauth(error="access_denied")
+    with patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"):
+        response = await routes_gateway.complete_google_vps_oauth(request=None, error="access_denied")
 
     assert response.status_code == 400
     assert b"access_denied" in response.body or b"cancelled" in response.body

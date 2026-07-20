@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib import parse as urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from server_modules.auth import enforce_workspace_access, validate_csrf, workspace_tenant_id
+from server_modules.connection_oauth_service import request_origin as _oauth_request_origin
 from server_modules.kill_switch_gate import assert_not_killed, KillSwitchBlockedError
 from server_modules.gateway_quota_enforcement import (
     evaluate_gateway_quota,
@@ -703,11 +705,50 @@ def _remote_agent_computer_setup_command(
 _VPS_OAUTH_PROVIDER_LABELS = {"digitalocean": "DigitalOcean", "google": "Google"}
 
 
+def _vps_oauth_hardware_redirect_url(
+    request: Request,
+    *,
+    workspace_id: str,
+    provider: str,
+    result: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> Optional[str]:
+    """Build the "come back to the Hardware page" URL for the no-opener
+    fallback in _vps_oauth_popup_html below. Mirrors
+    routes_connections.py's _oauth_completion_url (the pattern proven to
+    work for every other OAuth connector) — same idea, but this flow's
+    normal path is a popup + postMessage, so this URL is only needed for the
+    minority case where that popup got blocked/lost its opener and the
+    browser fell back to navigating the original tab through the OAuth
+    provider directly. Returns None when we don't know which workspace to
+    send the user back to (state was invalid/expired before we ever learned
+    it) — the caller falls back to a plain message in that case.
+    """
+    clean_workspace_id = str(workspace_id or "").strip()
+    if not clean_workspace_id:
+        return None
+    query: Dict[str, str] = {"vps_oauth_provider": provider}
+    if error:
+        query["vps_oauth_error"] = str(error)
+    else:
+        query["vps_oauth"] = provider
+        for key in ("token_id", "setup_id"):
+            value = str((result or {}).get(key) or "").strip()
+            if value:
+                query[key] = value
+    return (
+        f"{_oauth_request_origin(request)}"
+        f"/w/{urlparse.quote(clean_workspace_id)}/hardware?"
+        f"{urlparse.urlencode(query)}"
+    )
+
+
 def _vps_oauth_popup_html(
     *,
     provider: str = "digitalocean",
     result: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
+    fallback_redirect_url: Optional[str] = None,
 ) -> str:
     provider_label = _VPS_OAUTH_PROVIDER_LABELS.get(provider, provider.title() or "Provider")
     payload: Dict[str, Any] = {
@@ -719,17 +760,30 @@ def _vps_oauth_popup_html(
     else:
         payload.update(result or {})
     serialized = json.dumps(payload, separators=(",", ":"))
+    fallback_text = payload.get("error") or f"{provider_label} connected. You can close this window."
+    redirect_js = json.dumps(fallback_redirect_url) if fallback_redirect_url else "null"
     return f"""<!doctype html>
 <html>
   <head><meta charset="utf-8"><title>{provider_label} connected</title></head>
   <body>
     <script>
       const payload = {serialized};
+      const fallbackRedirect = {redirect_js};
       if (window.opener) {{
+        // Normal path: this IS the popup. Hand the result to the parent tab
+        // and close ourselves.
         window.opener.postMessage(payload, '*');
         window.close();
+      }} else if (fallbackRedirect) {{
+        // No opener — either the popup got blocked and we're really the
+        // original tab (window.open() lost the user-gesture flag and fell
+        // back to a same-tab navigation), or the opener reference was lost
+        // some other way. Either way this tab IS the app: send it back into
+        // the Hardware page instead of dead-ending here. The page picks the
+        // OAuth result back up from the query string and resumes the wizard.
+        window.location.replace(fallbackRedirect);
       }} else {{
-        document.body.textContent = payload.error || '{provider_label} connected. You can close this window.';
+        document.body.textContent = {json.dumps(fallback_text)};
       }}
     </script>
   </body>
@@ -1638,6 +1692,7 @@ async def start_digitalocean_vps_oauth(
 
 @router.get("/hardware/vps/oauth/digitalocean/callback", response_class=HTMLResponse)
 async def complete_digitalocean_vps_oauth(
+    request: Request,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -1645,15 +1700,43 @@ async def complete_digitalocean_vps_oauth(
 ):
     if error:
         message = str(error_description or error or "DigitalOcean authorization was cancelled.")
-        return HTMLResponse(_vps_oauth_popup_html(error=message), status_code=400)
+        # State is still in the file at this point (only popped on the
+        # success path below) — peek it for workspace_id so the no-opener
+        # fallback below can still send the user back to the right
+        # workspace's Hardware page instead of dead-ending on an error page.
+        workspace_id = vps_provisioning_service.peek_oauth_state_workspace_id(str(state or ""))
+        fallback_redirect_url = _vps_oauth_hardware_redirect_url(
+            request, workspace_id=workspace_id, provider="digitalocean", error=message,
+        )
+        return HTMLResponse(
+            _vps_oauth_popup_html(error=message, fallback_redirect_url=fallback_redirect_url),
+            status_code=400,
+        )
     try:
         result = vps_provisioning_service.complete_digitalocean_oauth_callback(
             code=str(code or ""),
             state=str(state or ""),
         )
     except vps_provisioning_service.VPSProvisioningError as exc:
-        return HTMLResponse(_vps_oauth_popup_html(error=str(exc)), status_code=400)
-    return HTMLResponse(_vps_oauth_popup_html(result=result))
+        # exc.workspace_id is populated when the failure happened after the
+        # state record was popped (e.g. a bad client secret during token
+        # exchange — see complete_digitalocean_oauth_callback); the state
+        # peek is the fallback for failures raised before that (missing/
+        # invalid/expired state, where there's nothing to peek anyway).
+        workspace_id = getattr(exc, "workspace_id", "") or vps_provisioning_service.peek_oauth_state_workspace_id(
+            str(state or "")
+        )
+        fallback_redirect_url = _vps_oauth_hardware_redirect_url(
+            request, workspace_id=workspace_id, provider="digitalocean", error=str(exc),
+        )
+        return HTMLResponse(
+            _vps_oauth_popup_html(error=str(exc), fallback_redirect_url=fallback_redirect_url),
+            status_code=400,
+        )
+    fallback_redirect_url = _vps_oauth_hardware_redirect_url(
+        request, workspace_id=str(result.get("workspace_id") or ""), provider="digitalocean", result=result,
+    )
+    return HTMLResponse(_vps_oauth_popup_html(result=result, fallback_redirect_url=fallback_redirect_url))
 
 
 @router.get("/hardware/vps/oauth/google/start")
@@ -1680,6 +1763,7 @@ async def start_google_vps_oauth(
 
 @router.get("/hardware/vps/oauth/google/callback", response_class=HTMLResponse)
 async def complete_google_vps_oauth(
+    request: Request,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -1687,15 +1771,36 @@ async def complete_google_vps_oauth(
 ):
     if error:
         message = str(error_description or error or "Google authorization was cancelled.")
-        return HTMLResponse(_vps_oauth_popup_html(provider="google", error=message), status_code=400)
+        workspace_id = vps_provisioning_service.peek_oauth_state_workspace_id(str(state or ""))
+        fallback_redirect_url = _vps_oauth_hardware_redirect_url(
+            request, workspace_id=workspace_id, provider="google", error=message,
+        )
+        return HTMLResponse(
+            _vps_oauth_popup_html(provider="google", error=message, fallback_redirect_url=fallback_redirect_url),
+            status_code=400,
+        )
     try:
         result = vps_provisioning_service.complete_google_oauth_callback(
             code=str(code or ""),
             state=str(state or ""),
         )
     except vps_provisioning_service.VPSProvisioningError as exc:
-        return HTMLResponse(_vps_oauth_popup_html(provider="google", error=str(exc)), status_code=400)
-    return HTMLResponse(_vps_oauth_popup_html(provider="google", result=result))
+        workspace_id = getattr(exc, "workspace_id", "") or vps_provisioning_service.peek_oauth_state_workspace_id(
+            str(state or "")
+        )
+        fallback_redirect_url = _vps_oauth_hardware_redirect_url(
+            request, workspace_id=workspace_id, provider="google", error=str(exc),
+        )
+        return HTMLResponse(
+            _vps_oauth_popup_html(provider="google", error=str(exc), fallback_redirect_url=fallback_redirect_url),
+            status_code=400,
+        )
+    fallback_redirect_url = _vps_oauth_hardware_redirect_url(
+        request, workspace_id=str(result.get("workspace_id") or ""), provider="google", result=result,
+    )
+    return HTMLResponse(
+        _vps_oauth_popup_html(provider="google", result=result, fallback_redirect_url=fallback_redirect_url)
+    )
 
 
 @router.get("/hardware/vps/google/projects")
