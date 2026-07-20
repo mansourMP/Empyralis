@@ -107,7 +107,17 @@ def _persona_from_bundle(bundle: Mapping[str, Any], label: str) -> str:
     here — the "who are you and who am I" bug)."""
     meta = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
     persona = _text(meta.get("instructions")) or _text(meta.get("persona")) or _text(meta.get("system_prompt"))
-    return persona or _default_specialist_persona(label)
+    if persona:
+        # Ground the agent's real NAME first. A configured persona (e.g. "You
+        # help the team internally...") never states the agent's own name, and
+        # the prompt still tells it to "introduce yourself by name" — so with no
+        # name given, the model invents one (the "Ethan" bug: an agent named
+        # Nova introduced itself as a fabricated "Ethan"). The empty-persona
+        # fallback below already grounds the name; do the same when a custom
+        # persona is set.
+        name = label or "this specialist"
+        return f"Your name is {name}. {persona}"
+    return _default_specialist_persona(label)
 
 
 def _model_provider_from(bundle: Mapping[str, Any], metadata: Optional[Mapping[str, Any]]) -> tuple[str, str]:

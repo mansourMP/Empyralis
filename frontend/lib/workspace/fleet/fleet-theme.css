@@ -3915,6 +3915,13 @@ a.fleet-breadcrumb:hover {
   font-size: 13px;
 }
 
+/* Primary action (Send code / Verify) sits bottom-right of the step as a real
+   CTA, not stretched full-width flush-left like a form row. */
+.pc-connect-step__footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .pc-connect-connected {
   display: flex;
   flex-direction: column;

@@ -2819,6 +2819,32 @@ async def _run_sage_action_loop_v3(
             "paired from the Hardware page.\n"
         )
 
+    # Capability honesty for specialists: Sage's own prompt gets an explicit
+    # "## Callable Tools — do not invent unavailable tools" manifest, but the
+    # specialist branch never did. With a vague persona and no connectors, the
+    # model had zero grounding for "what you help with" and defaulted to the
+    # generic corporate-assistant trope ("I help with calendar, Gmail, Drive")
+    # instead of its real (empty) toolset. State the real bound-connector list
+    # — or its absence — explicitly. Reuses the same agent_connector_bindings
+    # data that gates the actual tool list, so claim and availability can't drift.
+    if _acting_install_id:
+        _bound_connectors = sorted((_specialist_toolset or {}).get("connectors") or ())
+        if _bound_connectors:
+            system_prompt = (system_prompt or "") + (
+                "\n[SYSTEM CONTEXT] You are connected to these tools/connectors "
+                f"right now: {', '.join(_bound_connectors)}. Only describe yourself "
+                "as helping with these — never claim Gmail, Calendar, Drive, Slack, "
+                "or any other app/service unless it appears in this list.\n"
+            )
+        else:
+            system_prompt = (system_prompt or "") + (
+                "\n[SYSTEM CONTEXT] No connectors are bound to you yet — no Gmail, "
+                "Calendar, Drive, Slack, or any other external app access. Never "
+                "claim such a capability. If asked what you help with, describe only "
+                "your configured persona/purpose and say connectors can be added by "
+                "the workspace owner.\n"
+            )
+
     route_decision = _build_sage_route_decision(
         message=message,
         tools=tools,

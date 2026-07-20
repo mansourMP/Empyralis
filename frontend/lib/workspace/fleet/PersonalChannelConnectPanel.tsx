@@ -309,10 +309,12 @@ function TelegramConnectBody({
           <span>Code</span>
           <input type="text" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(e) => { setCode(e.currentTarget.value); setError(null); }} />
         </label>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitCode} disabled={busy}>
-          {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-          {busy ? "Verifying…" : "Verify code"}
-        </button>
+        <div className="pc-connect-step__footer">
+          <button type="button" className="fleet-btn fleet-btn--mono" onClick={submitCode} disabled={busy}>
+            {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+            {busy ? "Verifying…" : "Verify code"}
+          </button>
+        </div>
         {error && <p className="fleet-channel-expand-error">{error}</p>}
         <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
       </div>
@@ -322,15 +324,19 @@ function TelegramConnectBody({
   if (status === "password_required") {
     return (
       <div className="pc-connect-step">
-        <p className="fleet-channel-expand-hint">This account has two-factor authentication enabled.</p>
+        <p className="fleet-channel-expand-hint">
+          This account has two-factor authentication enabled. Enter your Telegram two-step verification password to finish connecting.
+        </p>
         <label className="gw-pair-panel-field">
-          <span>Password</span>
+          <span>Two-step verification password</span>
           <input type="password" autoComplete="off" value={password} onChange={(e) => { setPassword(e.currentTarget.value); setError(null); }} />
         </label>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitPassword} disabled={busy}>
-          {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-          {busy ? "Verifying…" : "Verify password"}
-        </button>
+        <div className="pc-connect-step__footer">
+          <button type="button" className="fleet-btn fleet-btn--mono" onClick={submitPassword} disabled={busy}>
+            {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+            {busy ? "Verifying…" : "Verify password"}
+          </button>
+        </div>
         {error && <p className="fleet-channel-expand-error">{error}</p>}
         <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
       </div>
@@ -354,10 +360,12 @@ function TelegramConnectBody({
         <span>Phone number</span>
         <input type="tel" autoComplete="tel" placeholder="+1 555 0100" value={phoneNumber} onChange={(e) => { setPhoneNumber(e.currentTarget.value); setError(null); }} />
       </label>
-      <button type="button" className="fleet-btn fleet-btn--accent" onClick={submitPhone} disabled={busy}>
-        {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-        {busy ? "Sending…" : "Send code"}
-      </button>
+      <div className="pc-connect-step__footer">
+        <button type="button" className="fleet-btn fleet-btn--mono" onClick={submitPhone} disabled={busy}>
+          {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+          {busy ? "Sending…" : "Send code"}
+        </button>
+      </div>
       {error && <p className="fleet-channel-expand-error">{error}</p>}
     </div>
   );
