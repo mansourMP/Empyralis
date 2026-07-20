@@ -269,6 +269,114 @@ def test_digitalocean_oauth_start_stores_state_and_uses_registered_redirect(tmp_
     assert "state=" in result["oauth_redirect"]
 
 
+def _digitalocean_env(monkeypatch):
+    monkeypatch.setenv("DIGITALOCEAN_CLIENT_ID", "do_client")
+    monkeypatch.setenv("DIGITALOCEAN_CLIENT_SECRET", "do_client_secret")
+
+
+def test_complete_digitalocean_oauth_callback_stores_token(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _digitalocean_env(monkeypatch)
+    start = vps.create_digitalocean_oauth_start(workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1")
+    monkeypatch.setattr(vps, "_http_form_json", lambda *a, **kw: {
+        "access_token": "do_access_token", "refresh_token": "do_refresh_token", "expires_in": 2592000,
+    })
+
+    result = vps.complete_digitalocean_oauth_callback(code="auth_code_123", state=start["state"])
+
+    assert result["provider"] == "digitalocean"
+    assert result["token_id"].startswith("vps_token_")
+    assert result["workspace_id"] == "ws-1"
+
+
+def test_complete_digitalocean_oauth_callback_rejects_unknown_state(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _digitalocean_env(monkeypatch)
+
+    with pytest.raises(vps.VPSProvisioningError):
+        vps.complete_digitalocean_oauth_callback(code="auth_code_123", state="not-a-real-state-token")
+
+
+# --- OAuth callback idempotency (defect: popup + same-tab-fallback double
+# fire) ----------------------------------------------------------------------
+#
+# The DigitalOcean/Google cloud-VPS OAuth "connect" flow used to open a
+# popup and ALSO fall back to a same-tab navigation when the popup got
+# blocked or lost its opener — in practice both paths could fire and hit
+# /callback for the same authorization more than once. The state token (and
+# the OAuth provider's `code`) are single-use, so only the first hit ever
+# succeeds; the fix here (see cloud-vps-setup-panel.tsx's
+# startDigitalOceanOAuth/startGoogleOAuth) removes the popup entirely, but
+# duplicate hits can still happen (browser retry, link prefetch) — these
+# tests cover the idempotency layer (_record_oauth_result /
+# _cached_oauth_result) that makes a duplicate hit replay the original
+# outcome instead of 400ing on "state is invalid or expired".
+
+
+def test_complete_digitalocean_oauth_callback_replays_result_for_duplicate_state(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _digitalocean_env(monkeypatch)
+    start = vps.create_digitalocean_oauth_start(workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1")
+
+    exchange_calls = []
+
+    def fake_http_form_json(method, url, *, payload, provider):
+        exchange_calls.append(payload)
+        return {"access_token": "do_access_token", "refresh_token": "do_refresh_token", "expires_in": 2592000}
+
+    monkeypatch.setattr(vps, "_http_form_json", fake_http_form_json)
+
+    first = vps.complete_digitalocean_oauth_callback(code="auth_code_123", state=start["state"])
+    second = vps.complete_digitalocean_oauth_callback(code="auth_code_123", state=start["state"])
+
+    assert first == second
+    assert first["provider"] == "digitalocean"
+    assert first["token_id"].startswith("vps_token_")
+    assert first["workspace_id"] == "ws-1"
+    # The DO code exchange only ever happened once — the duplicate hit was
+    # answered from the cached result, not replayed against DO's API (whose
+    # authorization code is single-use and would reject a second exchange).
+    assert len(exchange_calls) == 1
+
+
+def test_complete_digitalocean_oauth_callback_replays_error_for_duplicate_state(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _digitalocean_env(monkeypatch)
+    start = vps.create_digitalocean_oauth_start(workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1")
+    monkeypatch.setattr(
+        vps, "_http_form_json", lambda *a, **kw: {"access_token": "", "expires_in": 2592000}
+    )  # no access_token -> _exchange_digitalocean_oauth_code raises
+
+    with pytest.raises(vps.VPSProvisioningError) as first_exc:
+        vps.complete_digitalocean_oauth_callback(code="auth_code_123", state=start["state"])
+    with pytest.raises(vps.VPSProvisioningError) as second_exc:
+        vps.complete_digitalocean_oauth_callback(code="auth_code_123", state=start["state"])
+
+    assert str(first_exc.value) == str(second_exc.value)
+    # Both the original failure and the replayed duplicate know which
+    # workspace to send the user back to, even though the state record
+    # itself was popped (single-use) on the very first hit.
+    assert first_exc.value.workspace_id == "ws-1"
+    assert second_exc.value.workspace_id == "ws-1"
+
+
+def test_complete_google_oauth_callback_replays_result_for_duplicate_state(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _google_env(monkeypatch)
+    start = vps.create_google_oauth_start(workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1")
+    monkeypatch.setattr(vps, "_http_form_json", lambda *a, **kw: {
+        "access_token": "user_access_token", "refresh_token": "user_refresh_token", "expires_in": 3600,
+    })
+
+    first = vps.complete_google_oauth_callback(code="auth_code_123", state=start["state"])
+    second = vps.complete_google_oauth_callback(code="auth_code_123", state=start["state"])
+
+    assert first == second
+    assert first["provider"] == "google"
+    assert first["setup_id"].startswith("gsetup_")
+    assert first["workspace_id"] == "ws-1"
+
+
 def test_provider_token_store_encrypts_and_loads_by_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
@@ -2204,7 +2312,11 @@ async def test_google_vps_oauth_start_route_returns_authorize_url(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_google_vps_oauth_callback_route_returns_setup_session_payload():
+async def test_google_vps_oauth_callback_route_redirects_to_hardware_on_success():
+    # No popup, no window.opener/postMessage — this route now ALWAYS 303s
+    # back to the Hardware page (see _vps_oauth_hardware_redirect_url), the
+    # same same-tab redirect pattern every other OAuth connector already
+    # uses (routes_connections.py's complete_connection_oauth_callback).
     with (
         patch.object(
             routes_gateway.vps_provisioning_service,
@@ -2221,18 +2333,97 @@ async def test_google_vps_oauth_callback_route_returns_setup_session_payload():
             request=None, code="auth_code", state="state_token"
         )
 
-    assert response.status_code == 200
-    assert b"gsetup_abc" in response.body
-    assert b"window.opener.postMessage" in response.body
+    assert response.status_code == 303
+    location = response.headers["location"]
+    parsed = urlsplit(location)
+    assert parsed.path == "/w/ws-1/hardware"
+    query = parse_qs(parsed.query)
+    assert query["vps_oauth_provider"] == ["google"]
+    assert query["vps_oauth"] == ["google"]
+    assert query["setup_id"] == ["gsetup_abc"]
 
 
 @pytest.mark.asyncio
-async def test_google_vps_oauth_callback_route_surfaces_cancellation():
+async def test_google_vps_oauth_callback_route_surfaces_cancellation_as_redirect():
+    # Used to 400 with a blank/plain-text popup page — now redirects back to
+    # Hardware with the error in the query string so the panel can show it,
+    # never stranding the user on a dead-end response.
     with patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"):
         response = await routes_gateway.complete_google_vps_oauth(request=None, error="access_denied")
 
-    assert response.status_code == 400
-    assert b"access_denied" in response.body or b"cancelled" in response.body
+    assert response.status_code == 303
+    query = parse_qs(urlsplit(response.headers["location"]).query)
+    assert query["vps_oauth_provider"] == ["google"]
+    assert "access_denied" in query["vps_oauth_error"][0] or "cancelled" in query["vps_oauth_error"][0]
+
+
+@pytest.mark.asyncio
+async def test_digitalocean_vps_oauth_callback_route_redirects_to_hardware_on_success():
+    with (
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "complete_digitalocean_oauth_callback",
+            return_value={"provider": "digitalocean", "token_id": "vps_token_abc", "workspace_id": "ws-1"},
+        ),
+        patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"),
+    ):
+        response = await routes_gateway.complete_digitalocean_vps_oauth(
+            request=None, code="auth_code", state="state_token"
+        )
+
+    assert response.status_code == 303
+    parsed = urlsplit(response.headers["location"])
+    assert parsed.path == "/w/ws-1/hardware"
+    query = parse_qs(parsed.query)
+    assert query["vps_oauth_provider"] == ["digitalocean"]
+    assert query["vps_oauth"] == ["digitalocean"]
+    assert query["token_id"] == ["vps_token_abc"]
+
+
+@pytest.mark.asyncio
+async def test_digitalocean_vps_oauth_callback_route_surfaces_cancellation_as_redirect():
+    with patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"):
+        response = await routes_gateway.complete_digitalocean_vps_oauth(request=None, error="access_denied")
+
+    assert response.status_code == 303
+    query = parse_qs(urlsplit(response.headers["location"]).query)
+    assert query["vps_oauth_provider"] == ["digitalocean"]
+    assert "access_denied" in query["vps_oauth_error"][0] or "cancelled" in query["vps_oauth_error"][0]
+
+
+@pytest.mark.asyncio
+async def test_digitalocean_vps_oauth_callback_route_duplicate_hit_redirects_not_400(tmp_path, monkeypatch):
+    # End-to-end regression test for the reported bug: the popup +
+    # same-tab-fallback both hitting /callback for one click used to produce
+    # one 200 (token stored) followed by 400s on the duplicate hits, and the
+    # 400 rendered a blank popup-only page with nowhere for a same-tab
+    # browser to go. Drives the REAL service function (not mocked) through
+    # the route twice with the same code/state to prove the second hit now
+    # redirects to the same success destination instead of erroring.
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _digitalocean_env(monkeypatch)
+    start = vps.create_digitalocean_oauth_start(workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1")
+    monkeypatch.setattr(vps, "_http_form_json", lambda *a, **kw: {
+        "access_token": "do_access_token", "refresh_token": "do_refresh_token", "expires_in": 2592000,
+    })
+
+    with patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"):
+        first_response = await routes_gateway.complete_digitalocean_vps_oauth(
+            request=None, code="auth_code_123", state=start["state"]
+        )
+        second_response = await routes_gateway.complete_digitalocean_vps_oauth(
+            request=None, code="auth_code_123", state=start["state"]
+        )
+
+    for response in (first_response, second_response):
+        assert response.status_code == 303
+        query = parse_qs(urlsplit(response.headers["location"]).query)
+        assert query["vps_oauth_provider"] == ["digitalocean"]
+        assert "vps_oauth_error" not in query
+        assert query["vps_oauth"] == ["digitalocean"]
+    first_query = parse_qs(urlsplit(first_response.headers["location"]).query)
+    second_query = parse_qs(urlsplit(second_response.headers["location"]).query)
+    assert first_query["token_id"] == second_query["token_id"]
 
 
 @pytest.mark.asyncio

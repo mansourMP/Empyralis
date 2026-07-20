@@ -445,6 +445,65 @@ def peek_oauth_state_workspace_id(state: str) -> str:
     return str(state_record.get("workspace_id") or "").strip()
 
 
+# How long a completed OAuth callback's outcome stays available for a
+# duplicate hit on the same (already-consumed) state token to replay — see
+# _record_oauth_result / _cached_oauth_result. Only needs to outlive the
+# handful of seconds a retry/prefetch/leftover-popup duplicate might lag
+# behind the original request, not the OAuth state's own TTL.
+_OAUTH_RESULT_CACHE_TTL_SECONDS = 600
+
+
+def _record_oauth_result(
+    state_token: str,
+    provider: str,
+    *,
+    result: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+    workspace_id: str = "",
+) -> None:
+    """Cache the outcome of a just-consumed OAuth state token (success or
+    failure) so complete_digitalocean_oauth_callback / _google equivalent can
+    answer a duplicate callback hit for the same token idempotently instead
+    of raising "state is invalid or expired" once the one-time state record
+    itself has already been popped. See the oauth_results bucket comment in
+    _load_state.
+    """
+    clean_state = str(state_token or "").strip()
+    if not clean_state:
+        return
+    now = int(time.time())
+    with _STATE_LOCK:
+        payload = _load_state()
+        results = payload.setdefault("oauth_results", {})
+        results[clean_state] = {
+            "provider": provider,
+            "ok": error is None,
+            "result": dict(result or {}),
+            "error": str(error or ""),
+            "workspace_id": str(workspace_id or "").strip(),
+            "expires_at": now + _OAUTH_RESULT_CACHE_TTL_SECONDS,
+        }
+        # Opportunistic pruning — there's no background sweep for
+        # VPS_STATE_FILE, so without this the bucket would grow unbounded.
+        for key in [k for k, v in results.items() if _to_int((v or {}).get("expires_at")) <= now]:
+            results.pop(key, None)
+        _write_state(payload)
+
+
+def _cached_oauth_result(state_token: str, provider: str) -> Optional[Dict[str, Any]]:
+    clean_state = str(state_token or "").strip()
+    if not clean_state:
+        return None
+    with _STATE_LOCK:
+        payload = _load_state()
+        entry = dict((payload.get("oauth_results") or {}).get(clean_state) or {})
+    if not entry or str(entry.get("provider") or "") != provider:
+        return None
+    if _to_int(entry.get("expires_at")) <= int(time.time()):
+        return None
+    return entry
+
+
 def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
     clean_code = str(code or "").strip()
     clean_state = str(state or "").strip()
@@ -457,6 +516,20 @@ def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, 
         state_record = dict((payload.get("oauth_states") or {}).pop(clean_state, {}) or {})
         _write_state(payload)
     if not state_record or str(state_record.get("provider") or "") != "digitalocean":
+        # Not a live state record — either it was never valid, or this is a
+        # duplicate hit of a callback we already completed for this exact
+        # state token (the OAuth `code` DO issued is single-use, so a second
+        # exchange attempt would 400 at DO's end anyway). Replay the cached
+        # outcome instead of erroring so a retry/prefetch/duplicate request
+        # lands the user on the same result as the original, not a dead end.
+        cached = _cached_oauth_result(clean_state, "digitalocean")
+        if cached is not None:
+            if cached.get("ok"):
+                return dict(cached.get("result") or {})
+            raise VPSProvisioningError(
+                str(cached.get("error") or "DigitalOcean OAuth state is invalid or expired."),
+                workspace_id=str(cached.get("workspace_id") or ""),
+            )
         raise VPSProvisioningError("DigitalOcean OAuth state is invalid or expired.")
     state_workspace_id = str(state_record.get("workspace_id") or "default")
     try:
@@ -471,16 +544,20 @@ def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, 
         )
     except VPSProvisioningError as exc:
         # The state record (and the workspace_id in it) was already popped
-        # above — reattach it here so the route layer can still send a
-        # blocked-popup fallback tab back to the right workspace instead of
-        # losing that context on a mid-exchange failure (e.g. a bad
-        # DIGITALOCEAN_CLIENT_SECRET).
+        # above — reattach it here so the route layer can still send the
+        # user back to the right workspace's Hardware page, and cache the
+        # failure so a duplicate hit for this state token gets the same
+        # answer instead of a generic "invalid or expired" (see
+        # _record_oauth_result).
+        _record_oauth_result(clean_state, "digitalocean", error=str(exc), workspace_id=state_workspace_id)
         raise VPSProvisioningError(str(exc), workspace_id=state_workspace_id) from exc
-    return {
+    result = {
         "provider": "digitalocean",
         "token_id": token_id,
         "workspace_id": state_workspace_id,
     }
+    _record_oauth_result(clean_state, "digitalocean", result=result, workspace_id=state_workspace_id)
+    return result
 
 
 def google_oauth_redirect_uri() -> str:
@@ -550,6 +627,17 @@ def complete_google_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
         state_record = dict((payload.get("oauth_states") or {}).pop(clean_state, {}) or {})
         _write_state(payload)
     if not state_record or str(state_record.get("provider") or "") != "google":
+        # See the matching comment in complete_digitalocean_oauth_callback —
+        # replay a cached outcome for a duplicate hit on an already-consumed
+        # state token instead of erroring.
+        cached = _cached_oauth_result(clean_state, "google")
+        if cached is not None:
+            if cached.get("ok"):
+                return dict(cached.get("result") or {})
+            raise VPSProvisioningError(
+                str(cached.get("error") or "Google OAuth state is invalid or expired."),
+                workspace_id=str(cached.get("workspace_id") or ""),
+            )
         raise VPSProvisioningError("Google OAuth state is invalid or expired.")
     state_workspace_id = str(state_record.get("workspace_id") or "default")
     try:
@@ -569,15 +657,17 @@ def complete_google_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
         )
     except VPSProvisioningError as exc:
         # See the matching comment in complete_digitalocean_oauth_callback —
-        # reattach the workspace_id the popped state record carried so the
-        # route layer's no-opener fallback still knows where to send the
-        # user back to.
+        # reattach the workspace_id the popped state record carried, and
+        # cache the failure so a duplicate hit replays the same answer.
+        _record_oauth_result(clean_state, "google", error=str(exc), workspace_id=state_workspace_id)
         raise VPSProvisioningError(str(exc), workspace_id=state_workspace_id) from exc
-    return {
+    result = {
         "provider": "google",
         "setup_id": setup_id,
         "workspace_id": state_workspace_id,
     }
+    _record_oauth_result(clean_state, "google", result=result, workspace_id=state_workspace_id)
+    return result
 
 
 def store_vps_provider_token(
@@ -1592,7 +1682,15 @@ def _resolved_record_status(record: Mapping[str, Any]) -> str:
 
 def _load_state() -> Dict[str, Any]:
     if not VPS_STATE_FILE.exists():
-        return {"v": 1, "vps": {}, "tokens": {}, "oauth_states": {}, "google_setup_sessions": {}, "aws_pending": {}}
+        return {
+            "v": 1,
+            "vps": {},
+            "tokens": {},
+            "oauth_states": {},
+            "oauth_results": {},
+            "google_setup_sessions": {},
+            "aws_pending": {},
+        }
     try:
         parsed = json.loads(VPS_STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -1605,6 +1703,17 @@ def _load_state() -> Dict[str, Any]:
         parsed["tokens"] = {}
     if not isinstance(parsed.get("oauth_states"), dict):
         parsed["oauth_states"] = {}
+    if not isinstance(parsed.get("oauth_results"), dict):
+        # Short-lived cache of *completed* OAuth callback outcomes, keyed by
+        # the same one-time state token as oauth_states — see
+        # _record_oauth_result / _cached_oauth_result below. oauth_states
+        # entries are popped (single-use) the moment a callback starts
+        # processing them; this bucket lets a duplicate hit for the same
+        # state token (browser retry, prefetch, or — before the same-tab-only
+        # OAuth fix — a leftover popup racing the same-tab fallback) be
+        # answered idempotently instead of erroring on "state is invalid or
+        # expired".
+        parsed["oauth_results"] = {}
     if not isinstance(parsed.get("google_setup_sessions"), dict):
         parsed["google_setup_sessions"] = {}
     if not isinstance(parsed.get("aws_pending"), dict):

@@ -90,10 +90,11 @@ export default function HardwarePage() {
   }, [loadRegistrations]);
 
   // Resumes the DigitalOcean/Google cloud-VPS OAuth wizard when the browser
-  // lands back here via the backend's no-opener fallback redirect (popup
-  // got blocked by the browser, or the OAuth round-trip fell back to
-  // navigating this same tab) instead of the popup's normal
-  // window.postMessage handoff — see _vps_oauth_popup_html /
+  // lands back here after the OAuth round-trip: CloudVpsSetupPanel now
+  // navigates this same tab straight to the provider's authorize page (no
+  // popup, no window.postMessage — see startDigitalOceanOAuth /
+  // startGoogleOAuth in cloud-vps-setup-panel.tsx), and the backend's
+  // callback redirects back here with the result in the query string — see
   // _vps_oauth_hardware_redirect_url in routes_gateway.py. Runs once on
   // mount; strips the query string afterward so a refresh or back
   // navigation doesn't replay the same OAuth result into the panel again.
