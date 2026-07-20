@@ -66,10 +66,29 @@ export interface PersonalChannelView {
 // Gateway" surfaces feel consistent.
 const POLL_MS = 2_000;
 
+// Slower cadence used only for the resting "connected" state (see the
+// shouldPoll effect below) — frequent enough to notice the Gateway's own
+// honesty health-check (runs every few minutes — see
+// TELEGRAM_HEALTH_CHECK_INTERVAL_MS in empyralis-gateway/src/channels/
+// telegram/runtime.ts) downgrading a session that silently died, without
+// hammering the status endpoint the way the 2s active-pairing cadence would.
+const CONNECTED_POLL_MS = 15_000;
+
 // Statuses where nothing is going to change without the poll loop watching for
-// it (a code/QR was issued, or the connect attempt is mid-flight). Anything
-// else (idle, connected, logged_out, disconnected) is a resting state — no
-// point burning a request every 2s once we're there.
+// it (a code/QR was issued, or the connect attempt is mid-flight). idle/
+// logged_out/disconnected are resting states too — no point burning a
+// request every 2s once there, since they only ever change via an explicit
+// action (submitting a phone/code/password) that already calls onRefresh()
+// itself. "connected" is deliberately NOT resting in that same sense: unlike
+// those, it can flip to something else with NO local action at all — the
+// Gateway's own session can die silently (a revoked auth key, a dropped
+// connection) with nothing in this tab having done anything. Without
+// continuing to poll (see the shouldPoll effect below, at CONNECTED_POLL_MS),
+// a modal left open on the green "Connected as X" badge would keep showing
+// that stale badge forever even after the Gateway honestly downgrades the
+// underlying status — this was half of the connect-modal-vs-Channels-tile
+// contradiction bug: the modal fetched once, latched onto "connected", and
+// never looked again.
 const ACTIVE_STATUSES = new Set([
   "connecting",
   "code_required",
@@ -172,13 +191,18 @@ export function usePersonalChannelStatus(
 
   useEffect(() => {
     const status = view?.state?.status;
-    const shouldPoll = !!gatewayId && (alwaysPoll || !status || ACTIVE_STATUSES.has(status));
+    const isConnected = status === "connected";
+    // "connected" keeps polling too (see ACTIVE_STATUSES's doc for why it's
+    // not a truly resting state) — at the slower CONNECTED_POLL_MS cadence
+    // rather than the active-pairing POLL_MS, since it only needs to notice
+    // an eventual honest downgrade, not drive a live multi-step form.
+    const shouldPoll = !!gatewayId && (alwaysPoll || !status || ACTIVE_STATUSES.has(status) || isConnected);
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
     if (shouldPoll) {
-      pollRef.current = setInterval(refresh, POLL_MS);
+      pollRef.current = setInterval(refresh, isConnected && !alwaysPoll ? CONNECTED_POLL_MS : POLL_MS);
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);

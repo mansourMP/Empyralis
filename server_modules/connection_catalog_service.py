@@ -2111,6 +2111,23 @@ def _personal_channel_state(connection_id: str, gateway_id: str, agent_id: str =
         # "Connected", not the false "Set up" that contradicts the connect
         # card. (Revisit when the Gateway pools true per-agent sessions —
         # see PLATFORM-MAP's multi-agent-per-box plan.)
+        #
+        # Deliberately reads box_state.status literally rather than adding
+        # yet another layer of distrust here — this fallback can only ever
+        # propagate a status of exactly "connected", never invent one, so it
+        # is only as honest as that field already is. The actual honesty fix
+        # lives at the source: empyralis-gateway/src/channels/telegram/
+        # runtime.ts's TelegramPersonalRuntime now runs an active health
+        # check (client.checkAuthorized, on TELEGRAM_HEALTH_CHECK_INTERVAL_MS)
+        # against the live GramJS client and downgrades the persisted status
+        # (logged_out/disconnected/etc) the moment a revoked auth key or
+        # dropped connection is detected — GramJS's own passive recv loop
+        # silently swallows exactly that failure for the main session, so
+        # nothing else would ever catch it. Before that fix, "connected"
+        # could stay persisted forever after the live client actually died,
+        # which this fallback (and the direct, unscoped read above it) would
+        # have faithfully propagated as a lie. Fixing the reader instead of
+        # the writer would only have hidden the same lie one layer deeper.
         if agent_id and _token((state or {}).get("status")) != "connected":
             try:
                 owner = personal_channels_repository.find_agent_id_for_telegram_session(

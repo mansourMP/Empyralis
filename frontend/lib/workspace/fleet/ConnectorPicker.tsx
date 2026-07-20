@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, ChevronRight, Loader2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { CONNECTOR_ICONS } from "./fleet-icons";
@@ -15,6 +15,25 @@ import {
 function fieldLabel(field: string): string {
   return field.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
+
+// The owner's own priority stack — Google Workspace (Gmail/Calendar/Drive)
+// plus his 8 (Notion, Linear, Stripe, ClickUp, Airtable, Canva, Asana,
+// Zoom) — always rendered first and never collapsed. Everything else in
+// the catalog (the ~65-connector directory: dev tools, finance, sales
+// outreach, etc.) is real and stays reachable, just tucked behind a
+// closed-by-default "More connectors" disclosure so it can grow without
+// burying what the owner actually uses. Order here IS display order.
+const PRIORITY_CONNECTOR_IDS = [
+  "google_workspace",
+  "notion",
+  "linear",
+  "stripe",
+  "clickup",
+  "airtable",
+  "canva",
+  "asana",
+  "zoom",
+];
 
 /**
  * The reuse-or-separate connector picker (UI Phase 1). For each connector the
@@ -50,6 +69,25 @@ export function ConnectorPicker({
   const [error, setError] = useState<string | null>(null);
   const [manualFieldsFor, setManualFieldsFor] = useState<FleetConnector | null>(null);
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  // Split the catalog into the owner's priority stack (always shown, in
+  // PRIORITY_CONNECTOR_IDS order) and everything else (the wider directory —
+  // dev tools, finance, sales-outreach, etc. — real connectors, just not
+  // what he reaches for daily). A connector already connected always counts
+  // as priority regardless of id, so a live integration never gets hidden
+  // behind the disclosure the moment it falls outside the curated 9.
+  const { priorityConnectors, moreConnectors } = useMemo(() => {
+    const rank = new Map(PRIORITY_CONNECTOR_IDS.map((id, i) => [id, i]));
+    const priority: FleetConnector[] = [];
+    const more: FleetConnector[] = [];
+    for (const c of connectors) {
+      if (rank.has(c.id) || c.connected) priority.push(c);
+      else more.push(c);
+    }
+    priority.sort((a, b) => (rank.get(a.id) ?? PRIORITY_CONNECTOR_IDS.length) - (rank.get(b.id) ?? PRIORITY_CONNECTOR_IDS.length));
+    return { priorityConnectors: priority, moreConnectors: more };
+  }, [connectors]);
 
   const refreshAll = useCallback(async () => {
     await Promise.all([refreshAgent(), refreshProject()]);
@@ -178,11 +216,8 @@ export function ConnectorPicker({
     );
   }
 
-  return (
-    <div className="fleet-connector-picker">
-      {error && <p className="fleet-channel-expand-error">{error}</p>}
-      {connectors.map((c) => {
-        const projectCreds = projectConnectors.filter((pc) => pc.provider === c.id);
+  const renderConnector = (c: FleetConnector) => {
+    const projectCreds = projectConnectors.filter((pc) => pc.provider === c.id);
         const icon = CONNECTOR_ICONS[c.id];
         const connectBusy = busyKey === `${c.id}:new`;
         const notConfigured = c.configured === false;
@@ -355,7 +390,34 @@ export function ConnectorPicker({
             )}
           </div>
         );
-      })}
+  };
+
+  return (
+    <div>
+      {error && <p className="fleet-channel-expand-error">{error}</p>}
+      <div className="fleet-connector-picker">
+        {priorityConnectors.map(renderConnector)}
+      </div>
+      {moreConnectors.length > 0 && (
+        <div className={`fleet-disclosure${moreOpen ? " is-open" : ""}`} style={{ marginTop: 14 }}>
+          <button
+            type="button"
+            className="fleet-disclosure-trigger"
+            onClick={() => setMoreOpen((o) => !o)}
+            aria-expanded={moreOpen}
+          >
+            <ChevronRight size={13} strokeWidth={2} className="fleet-disclosure-chevron" />
+            More connectors ({moreConnectors.length})
+          </button>
+          {moreOpen && (
+            <div className="fleet-disclosure-body">
+              <div className="fleet-connector-picker">
+                {moreConnectors.map(renderConnector)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {connectors.length === 0 && <p className="fleet-wizard-hint">No connectors are available yet.</p>}
     </div>
   );
