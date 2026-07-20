@@ -4229,6 +4229,20 @@ a.fleet-breadcrumb:hover {
   gap: 8px;
 }
 
+/* Door-choice screen (e.g. Telegram's Chatbot vs. Full account): marks
+   whichever door is already connected, so the founder doesn't have to click
+   into each one to find out. Same dot + text-color language as the channel
+   grid's own "● Connected" pill (.fleet-channel-card-pill--connected /
+   .fleet-channel-card-dot) so the two screens read as one system. */
+.fleet-wizard-option-connected {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--online-text);
+}
+
 .fleet-wizard-option-tag {
   font-size: 10px;
   font-weight: 500;

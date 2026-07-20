@@ -1475,22 +1475,28 @@ export function ChannelsTab({
   // click on a specific (real) door decides which one is active.
   const activeDoor = doors.length === 1 && doors[0].real ? doors[0] : doors.find((d) => d.key === selectedDoor) || null;
 
-  // Live pairing status for whichever full-account door is on screen right
-  // now. PersonalChannelConnectPanel (rendered below when activeDoor is
-  // full_account) polls this exact same endpoint internally to drive its own
-  // phone/code/QR/password steps — this is a second, parallel read of it,
-  // used only to gate the doors picker just below. Must be called
-  // unconditionally on every render (rules of hooks), so every branch that
-  // isn't "a full_account door is currently active" passes a null gatewayId,
-  // which short-circuits usePersonalChannelStatus into a no-op — no fetch,
-  // no poll, view stays null. alwaysPoll: true because this instance has no
-  // onRefresh() of its own to ride in on (unlike PersonalChannelConnectPanel,
-  // which re-fetches right after every phone/code/password submit) — without
-  // it, this poll would fetch "idle" once, stop (idle isn't an
-  // ACTIVE_STATUSES status), and never notice the user going on to actually
-  // pair from inside the panel below.
+  // Live pairing status for this channel's full-account door — read as soon
+  // as the channel has one and its banner is open, NOT gated on that door
+  // being the currently-selected one. Two things read this: (1) the
+  // door-choice picker just below, which needs to know "is full_account
+  // already connected" to badge the card BEFORE the founder has clicked into
+  // it (the founder-reported bug: Telegram's picker gave no hint that
+  // "Full account" was already connected as him, so he had to click in to
+  // find out), and (2) pairingActive right below, which narrows this down to
+  // "is the door on screen right now full_account AND mid-pairing." Must be
+  // called unconditionally on every render (rules of hooks), so every branch
+  // that isn't "this channel has a real full_account door, and its banner is
+  // open" passes a null gatewayId, which short-circuits
+  // usePersonalChannelStatus into a no-op — no fetch, no poll, view stays
+  // null. alwaysPoll: true because this instance has no onRefresh() of its
+  // own to ride in on (unlike PersonalChannelConnectPanel, which re-fetches
+  // right after every phone/code/password submit) — without it, this poll
+  // would fetch "idle" once, stop (idle isn't an ACTIVE_STATUSES status), and
+  // never notice the user going on to actually pair from inside the panel
+  // below.
+  const hasFullAccountDoor = doors.some((d) => d.key === "full_account" && d.real);
   const pairingChannelKey: PersonalChannelKey | null =
-    activeDoor?.key !== "full_account" ? null
+    !hasFullAccountDoor ? null
       : expanded === "sage_telegram_hosted" ? "telegram_personal"
       : expanded === "whatsapp_personal" ? "whatsapp_personal"
       : null;
@@ -1501,6 +1507,10 @@ export function ChannelsTab({
     agentId,
     { alwaysPoll: true },
   );
+  // Full-account door badge for the picker below — true once this channel's
+  // personal-channel session is actually connected, independent of which
+  // door is currently selected.
+  const fullAccountDoorConnected = !!pairingChannelKey && pairingView?.state?.status === "connected";
   // True only while the door on screen right now is full_account AND its
   // pairing is actively mid-flight (a code/QR/password step with real typed
   // input at stake — the ACTIVE_STATUSES a fresh poll loop is worth running
@@ -1509,7 +1519,7 @@ export function ChannelsTab({
   // PersonalChannelConnectPanel and silently discard whatever's been typed
   // so far — the founder-reported bug this gates. Once pairing settles
   // (connected, or back to idle/disconnected) the picker returns to normal.
-  const pairingActive = !!pairingChannelKey && isPersonalChannelStatusActive(pairingView?.state?.status);
+  const pairingActive = activeDoor?.key === "full_account" && !!pairingChannelKey && isPersonalChannelStatusActive(pairingView?.state?.status);
   // The doors picker's actual render list: collapsed to just the in-flight
   // door while pairingActive, otherwise the full set (unchanged behavior).
   const displayDoors = pairingActive && activeDoor ? [activeDoor] : doors;
@@ -1649,6 +1659,25 @@ export function ChannelsTab({
                 <div className="fleet-wizard-options">
                   {displayDoors.map((door) => {
                     const isOnlyRealDoor = displayDoors.length === 1 && door.real;
+                    // Which door is ALREADY connected, so the picker itself
+                    // says so instead of making the founder click into a door
+                    // just to discover it's the one he already paired (the
+                    // reported bug: Telegram's "Full account" showed
+                    // "Connected as Mansur阿龙" only once you opened it).
+                    // Chatbot's connected state rides in on telegramBotConnected
+                    // (see isChannelConnected's doc above — same "separate
+                    // catalog item from the grid pill" shape); full_account's
+                    // comes from the live pairing status polled just above,
+                    // already scoped to whichever channel is on screen.
+                    const doorConnected =
+                      activePlatform.id === "sage_telegram_hosted" && door.key === "byo_bot" ? telegramBotConnected
+                        : door.key === "full_account" ? fullAccountDoorConnected
+                        : false;
+                    const connectedBadge = doorConnected ? (
+                      <span className="fleet-wizard-option-connected">
+                        <span className="fleet-channel-card-dot" /> Connected
+                      </span>
+                    ) : null;
                     if (!door.real) {
                       return (
                         <button key={door.key} type="button" disabled className="fleet-wizard-option fleet-wizard-option--soon">
@@ -1661,7 +1690,7 @@ export function ChannelsTab({
                     if (isOnlyRealDoor) {
                       return (
                         <div key={door.key} className="fleet-wizard-option is-selected" style={{ cursor: "default" }}>
-                          <span className="fleet-wizard-option-label">{door.label}</span>
+                          <span className="fleet-wizard-option-label">{door.label}{connectedBadge}</span>
                           <span className="fleet-wizard-option-body">{door.body}</span>
                         </div>
                       );
@@ -1673,7 +1702,7 @@ export function ChannelsTab({
                         className={`fleet-wizard-option${selectedDoor === door.key ? " is-selected" : ""}`}
                         onClick={() => setSelectedDoor(selectedDoor === door.key ? null : door.key)}
                       >
-                        <span className="fleet-wizard-option-label">{door.label}</span>
+                        <span className="fleet-wizard-option-label">{door.label}{connectedBadge}</span>
                         <span className="fleet-wizard-option-body">{door.body}</span>
                       </button>
                     );
