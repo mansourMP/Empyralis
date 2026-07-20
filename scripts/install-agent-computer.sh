@@ -376,7 +376,13 @@ ProtectProc=invisible
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-MemoryDenyWriteExecute=true
+# NOTE: MemoryDenyWriteExecute is intentionally NOT set. The gateway is a
+# Node.js process, and V8's JIT allocates writable+executable memory on
+# startup; with MemoryDenyWriteExecute=true, Node aborts immediately with a
+# V8 fatal error ("SetPermissionsOnExecutableMemoryChunk" / W^X), so the
+# gateway never starts and the box hangs at "provisioning" forever. Verified
+# on ubuntu 24.04 / node v20. Every other hardening directive here is
+# Node-compatible and stays; this one is fundamentally incompatible.
 RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
