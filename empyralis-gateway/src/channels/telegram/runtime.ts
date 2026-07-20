@@ -2048,7 +2048,17 @@ export class TelegramPersonalRuntime {
     const storedConfig = await this.configStore.patchTelegramConfig(patch);
     let reconnectRequested = false;
     const currentState = await this.sessionStore.load();
-    if (this.started && currentState.status !== "connected") {
+    // Submitting a phone number, login code, or 2FA password is an explicit
+    // (re)authentication attempt — always tear down and reconnect so the new
+    // material is actually applied. The old gate only reconnected when the
+    // persisted status was NOT "connected"; if the live client had died but the
+    // status was still a STALE "connected" (revoked auth key, silent network
+    // drop), re-pairing was a no-op — the session stayed dead: no messages, no
+    // typing indicator, while every UI kept showing the green "connected"
+    // check. Config-only tweaks (api_id/api_hash with no login material) still
+    // just flush without a disruptive reconnect.
+    const hasLoginMaterial = Boolean(patch.phoneNumber || patch.loginCode || patch.password);
+    if (this.started && (hasLoginMaterial || currentState.status !== "connected")) {
       reconnectRequested = true;
       await this.reconnectForConfigUpdate();
     } else {
