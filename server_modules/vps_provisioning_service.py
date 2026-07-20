@@ -280,41 +280,12 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
             ProviderRegion("blr1", "Bangalore 1"),
         ),
     ),
-    "hetzner": ProviderConfig(
-        provider="hetzner",
-        label="Hetzner",
-        auth_label="Hetzner Cloud API token",
-        create_url="https://api.hetzner.cloud/v1/servers",
-        default_region="nbg1",
-        default_size="cx22",
-        default_image="ubuntu-24.04",
-        token_keys=("api_token", "token"),
-        regions=(
-            ProviderRegion("nbg1", "Nuremberg, Germany"),
-            ProviderRegion("fsn1", "Falkenstein, Germany"),
-            ProviderRegion("hel1", "Helsinki, Finland"),
-            ProviderRegion("ash", "Ashburn, USA"),
-            ProviderRegion("hil", "Hillsboro, USA"),
-            ProviderRegion("sin", "Singapore"),
-        ),
-    ),
-    "vultr": ProviderConfig(
-        provider="vultr",
-        label="Vultr",
-        auth_label="Vultr API key",
-        create_url="https://api.vultr.com/v2/instances",
-        default_region="ewr",
-        default_size="vc2-1c-2gb",
-        default_image="2284",
-        token_keys=("api_key", "api_token", "token"),
-        regions=(
-            ProviderRegion("ewr", "New York / New Jersey"),
-            ProviderRegion("lhr", "London"),
-            ProviderRegion("fra", "Frankfurt"),
-            ProviderRegion("sgp", "Singapore"),
-            ProviderRegion("syd", "Sydney"),
-        ),
-    ),
+    # Hetzner + Vultr removed 2026-07-21 (Mansur): they only authenticate by
+    # pasting a raw API token/key — the product rule is authorize-an-account
+    # (OAuth) or connect-your-own-box (SSH), never token-paste. DigitalOcean
+    # (OAuth), Google (sign-in), and AWS (CloudFormation role) remain, plus the
+    # direct SSH connect path. The hetzner/vultr helper functions elsewhere in
+    # this module are now dead code (unreachable without a config entry).
     "google": ProviderConfig(
         provider="google",
         label="Google Cloud",

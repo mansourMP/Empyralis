@@ -34,7 +34,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   return (await response.json()) as T;
 }
 
-export type VpsProviderId = 'digitalocean' | 'hetzner' | 'vultr' | 'google' | 'aws';
+export type VpsProviderId = 'digitalocean' | 'google' | 'aws';
 // google-project / google-billing are Google-only steps between 'access'
 // (Sign in with Google) and 'plans' — Google needs a project chosen and its
 // billing verified before anything is provisionable, neither of which any
@@ -219,24 +219,6 @@ export const CLOUD_VPS_PROVIDERS: Record<VpsProviderId, VpsProviderCard> = {
     logoSrc: '/brand-assets/infrastructure/digitalocean.svg',
     features: ['OAuth', 'Ubuntu 24.04', 'Global'],
   },
-  hetzner: {
-    id: 'hetzner',
-    label: 'Hetzner',
-    tagline: 'Best value',
-    accountMethod: 'API token',
-    tokenUrl: 'https://console.hetzner.cloud/projects',
-    logoSrc: '/brand-assets/infrastructure/hetzner.svg',
-    features: ['API token', 'Ubuntu 24.04', 'EU'],
-  },
-  vultr: {
-    id: 'vultr',
-    label: 'Vultr',
-    tagline: 'Global regions',
-    accountMethod: 'API token',
-    tokenUrl: 'https://my.vultr.com/settings/#settingsapi',
-    logoSrc: '/brand-assets/infrastructure/vultr.svg',
-    features: ['API token', 'Ubuntu 24.04', '25 regions'],
-  },
   google: {
     id: 'google',
     label: 'Google Cloud',
@@ -262,7 +244,7 @@ export const CLOUD_VPS_PROVIDERS: Record<VpsProviderId, VpsProviderCard> = {
   },
 };
 
-export const CLOUD_VPS_PROVIDER_IDS: VpsProviderId[] = ['digitalocean', 'hetzner', 'vultr', 'google', 'aws'];
+export const CLOUD_VPS_PROVIDER_IDS: VpsProviderId[] = ['digitalocean', 'google', 'aws'];
 
 const PROVIDERS = CLOUD_VPS_PROVIDERS;
 const PROVIDER_IDS = CLOUD_VPS_PROVIDER_IDS;
@@ -343,10 +325,9 @@ function saveStoredConnections(workspaceId: string, connections: Partial<Record<
   window.localStorage.setItem(connectionStorageKey(workspaceId), JSON.stringify(connections));
 }
 
-function tokenPayload(providerId: VpsProviderId, token: string): Record<string, string> {
-  if (providerId === 'vultr') {
-    return { api_key: token };
-  }
+function tokenPayload(_providerId: VpsProviderId, token: string): Record<string, string> {
+  // Only DigitalOcean still accepts a token (as an OAuth fallback); it uses
+  // api_token. Google/AWS never token-paste. Vultr's api_key shape is gone.
   return { api_token: token };
 }
 
@@ -402,6 +383,15 @@ export function CloudVpsSetupPanel({
   const [vpsId, setVpsId] = useState<string | null>(null);
   const [providerResourceId, setProviderResourceId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
+  // Live "motion" for the progress screen: a 1s ticker so the UI is never
+  // visibly frozen during the multi-minute install (the backend record sits
+  // on 'provisioning' the whole time, so there is no per-step signal to show).
+  const [elapsedSec, setElapsedSec] = useState(0);
+  // The install genuinely can outrun the poll window on a fresh box. When it
+  // does, we do NOT lie with a red "Setup failed" — the backend keeps going
+  // for 20 min; we show a calm "still finishing in the background" instead.
+  const [timedOut, setTimedOut] = useState(false);
+  const provisionStartRef = useRef<number | null>(null);
   // Set when "Create server" is clicked while browsing pre-connect (Vultr) —
   // routes the connect step's success handler straight into creating the
   // server the user already picked, instead of landing back on the plan
@@ -447,6 +437,23 @@ export function CloudVpsSetupPanel({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleRegions]);
+
+  // Drive the live elapsed counter on the progress screen. Runs only while a
+  // build is actually in flight (progress step, not yet connected/failed) so
+  // there is always visible motion even though status polls are 5s apart.
+  useEffect(() => {
+    if (step !== 'progress') return;
+    if (progressStage === 'connected' || progressStage === 'failed' || progressStage === 'idle') return;
+    const tick = () => {
+      const started = provisionStartRef.current;
+      if (started != null) {
+        setElapsedSec(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [step, progressStage]);
 
   useEffect(() => {
     if (!open) {
@@ -658,14 +665,6 @@ export function CloudVpsSetupPanel({
   // endpoints are what make skipping straight to real prices possible.
   // DigitalOcean/Hetzner have no public price data (see loadPlans/
   // loadRegions above), so they keep the connect-first flow below.
-  async function browseProviderPreConnect(providerId: VpsProviderId) {
-    setStep('plans');
-    const [nextPlans] = await Promise.all([loadPlans(providerId, ''), loadRegions(providerId, '')]);
-    if (!nextPlans.length) {
-      setStep('access');
-    }
-  }
-
   async function selectProvider(providerId: VpsProviderId) {
     setSelectedProvider(providerId);
     setApiToken('');
@@ -695,10 +694,6 @@ export function CloudVpsSetupPanel({
       return;
     }
     setTokenId('');
-    if (providerId === 'vultr') {
-      await browseProviderPreConnect(providerId);
-      return;
-    }
     setStep('access');
   }
 
@@ -1134,6 +1129,9 @@ export function CloudVpsSetupPanel({
     }
     setBusy(true);
     setError(null);
+    setElapsedSec(0);
+    setTimedOut(false);
+    provisionStartRef.current = Date.now();
     setProgressStage('creating');
     setStep('progress');
     try {
@@ -1173,7 +1171,12 @@ export function CloudVpsSetupPanel({
   }
 
   async function pollProvisionStatus(nextVpsId: string) {
-    const deadline = Date.now() + 300_000;
+    // 12 min of client-side polling. A fresh box does apt + Node + gateway
+    // download + pair, which is a real ~2-4 min (longer on slow mirrors);
+    // 5 min used to expire mid-install and paint a false "failed" while the
+    // backend (20-min window) was still working. If we still outrun it, we
+    // fall through to the calm timedOut branch below, never a red failure.
+    const deadline = Date.now() + 720_000;
     // Tracks the most recently seen provider_resource_id across polls (NOT
     // React state — a state update from inside this loop wouldn't be visible
     // to this same closure until the next render) so the deadline fallback
@@ -1205,8 +1208,12 @@ export function CloudVpsSetupPanel({
         setError(pollError instanceof Error ? pollError.message : 'Could not check VPS setup status.');
       }
     }
-    setProgressStage('failed');
-    setError(friendlyProvisionFailureMessage('', Boolean(lastKnownResourceId)));
+    // Ran out the client window but the backend never reported 'failed' — the
+    // box is very likely still installing (backend keeps trying for 20 min).
+    // Do NOT show a red failure; keep the last step spinning and let the copy
+    // tell the truth. The Hardware page reflects the real state when it lands.
+    setTimedOut(true);
+    setError(null);
   }
 
   async function deleteFailedServer() {
@@ -1623,32 +1630,54 @@ export function CloudVpsSetupPanel({
           <section className="cloud-vps-flow-modal__content">
             <div className="cloud-vps-panel__heading">
               <h2>Creating Agent Computer</h2>
-              <p>Leave this open while Empyralis installs and connects the server.</p>
+              <p>
+                {progressStage === 'connected'
+                  ? 'Your Agent Computer is connected.'
+                  : 'This takes a few minutes on a new box — you can leave this open.'}
+              </p>
             </div>
             <div className="cloud-vps-progress" aria-live="polite">
-              {PROGRESS_STEPS.map((item) => (
-                <div
-                  key={item.id}
-                  className={joinClassNames(
-                    'cloud-vps-progress__item',
-                    progressStepActive(item.id, progressStage) && 'is-active',
-                    progressStepDone(item.id, progressStage) && 'is-done',
-                    progressStage === 'failed' && 'is-failed',
-                  )}
-                >
-                  <span className="cloud-vps-progress__dot">
-                    {progressStepDone(item.id, progressStage) || item.id === 'connected' && progressStage === 'connected' ? (
-                      <Check size={12} strokeWidth={2.4} aria-hidden="true" />
-                    ) : null}
-                  </span>
-                  <span>{item.label}</span>
-                </div>
-              ))}
+              {PROGRESS_STEPS.map((item) => {
+                const isDone = progressStepDone(item.id, progressStage) || (item.id === 'connected' && progressStage === 'connected');
+                const isActive = progressStepActive(item.id, progressStage) && progressStage !== 'failed' && progressStage !== 'connected';
+                return (
+                  <div
+                    key={item.id}
+                    className={joinClassNames(
+                      'cloud-vps-progress__item',
+                      progressStepActive(item.id, progressStage) && 'is-active',
+                      progressStepDone(item.id, progressStage) && 'is-done',
+                      progressStage === 'failed' && 'is-failed',
+                    )}
+                  >
+                    <span className="cloud-vps-progress__dot">
+                      {isDone ? (
+                        <Check size={12} strokeWidth={2.4} aria-hidden="true" />
+                      ) : isActive ? (
+                        <span className="cloud-vps-progress__spin" aria-hidden="true" />
+                      ) : null}
+                    </span>
+                    <span>{item.label}</span>
+                  </div>
+                );
+              })}
             </div>
+            {progressStage !== 'connected' && progressStage !== 'failed' ? (
+              <p className="cloud-vps-progress__meta" aria-live="polite">
+                {timedOut
+                  ? 'Still finishing in the background — a fresh box can take a few minutes on a slow network. You can close this; it’ll appear on the Hardware page once it connects.'
+                  : `Setting up your server… ${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')} elapsed. Usually 2–4 minutes.`}
+              </p>
+            ) : null}
             {providerResourceId ? <p className="cloud-vps-panel__note">{`Provider server: ${providerResourceId}`}</p> : null}
             {error ? <p className="cloud-vps-panel__error">{error}</p> : null}
-            {progressStage === 'failed' ? (
+            {progressStage === 'failed' || timedOut ? (
               <div className="cloud-vps-panel__footer">
+                {timedOut ? (
+                  <AppButton tone="secondary" type="button" onClick={() => onClose()}>
+                    Close and check later
+                  </AppButton>
+                ) : null}
                 <AppButton tone="secondary" type="button" onClick={() => void deleteFailedServer()} disabled={!vpsId || cleanupBusy}>
                   {cleanupBusy ? 'Deleting server' : 'Delete server'}
                 </AppButton>

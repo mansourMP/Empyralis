@@ -25857,12 +25857,57 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
 
 .cloud-vps-progress__item.is-active .cloud-vps-progress__dot {
   border-color: var(--app-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 14%, transparent);
+  animation: cloud-vps-dot-pulse 1.7s ease-in-out infinite;
 }
 
 .cloud-vps-progress__item.is-done .cloud-vps-progress__dot {
   border-color: var(--app-success);
   background: color-mix(in srgb, var(--app-success) 14%, transparent);
+}
+
+/* Rotating ring inside the active step's dot — the primary "it's moving"
+   signal during the multi-minute install. */
+.cloud-vps-progress__spin {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  border: 2px solid color-mix(in srgb, var(--app-accent) 28%, transparent);
+  border-top-color: var(--app-accent);
+  animation: cloud-vps-spin 0.8s linear infinite;
+}
+
+.cloud-vps-progress__meta {
+  margin: 12px 0 0;
+  font-size: var(--app-font-13, 13px);
+  color: var(--app-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+@keyframes cloud-vps-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes cloud-vps-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 16%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--app-accent) 5%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cloud-vps-progress__spin {
+    animation-duration: 2.4s;
+  }
+  .cloud-vps-progress__item.is-active .cloud-vps-progress__dot {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 16%, transparent);
+  }
 }
 
 
