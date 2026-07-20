@@ -369,6 +369,22 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         media_support=_media(text=True),
         approval_policy="channel_policy",
         health_check="first_party_bot_health",
+        # "telegram_personal" (NOT just this item's own id) is included here
+        # deliberately: this is the ONLY catalog item the Fleet ChannelsTab
+        # grid renders for Telegram (CHANNEL_GRID_PLATFORMS has no separate
+        # "telegram_personal" tile — the full_account door lives INSIDE this
+        # card, see FleetAgentDetail.tsx's CHANNEL_DOORS.sage_telegram_hosted).
+        # Pairing that full_account door writes its enabling row under
+        # channel_key="telegram_personal" (personal_channels_service.py's
+        # _ensure_agent_channel_binding_enabled, TELEGRAM_PERSONAL_CHANNEL_KEY)
+        # — a DIFFERENT key than this item's own id/provider aliases. Without
+        # "telegram_personal" here, agent_status_items()'s has_binding gate
+        # (aliases & enabled_channel_keys) never matches that row, so a real
+        # connected full-account session still forces this item's `connected`
+        # back to False — the exact connect-modal-vs-Channels-tile
+        # contradiction (modal reads the session directly with no binding
+        # gate; this tile went through the gate and lost).
+        connector_ids=["sage_telegram_hosted", "telegram_personal"],
         provider="sage_telegram_hosted_bot",
         runtime_provider="sage_telegram_hosted_bot",
         connector_id="sage_telegram_hosted",
