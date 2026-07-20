@@ -79,6 +79,22 @@ export interface TelegramAdapterClient {
   sendChatAction?: (remoteJid: string, action: TelegramChatAction) => Promise<void> | void;
   disconnect?: () => Promise<void> | void;
   exportSessionString?: () => Promise<string> | string;
+  /**
+   * Actively probes whether the live session is still authorized against
+   * Telegram's servers (GramJS's own `getMe()`) — throws a real error
+   * (AUTH_KEY_UNREGISTERED/SESSION_REVOKED, or a network failure) when the
+   * session is dead. This is the ONLY reliable way to detect a revoked auth
+   * key: GramJS's main-sender recv loop deliberately swallows exactly that
+   * failure instead of surfacing it through any event/callback — see
+   * node_modules/telegram/network/MTProtoSender.js's
+   * `_handleBadAuthKey(shouldSkipForMain)`, which returns immediately
+   * without touching `_updateCallback`/`_errorHandler` when the dead sender
+   * is the main one. See TelegramPersonalRuntime.runHealthCheck's doc for
+   * the full story (this is the fix for the connection-state honesty bug —
+   * a stale "connected" status shown forever after a silent auth-key
+   * revocation).
+   */
+  checkAuthorized?: () => Promise<void>;
 }
 
 export interface TelegramRuntimeAdapter {
@@ -436,6 +452,21 @@ export function ensureGramLoggerShape(client: { _log?: unknown }, buildGramLogge
 // 90s comfortably covers real reply turns while capping the worst case.
 const TELEGRAM_INBOUND_TYPING_MAX_TTL_MS = 90_000;
 
+/**
+ * How often a LIVE connection is actively re-probed (client.checkAuthorized,
+ * i.e. GramJS's getMe()) to catch a silently-dead session — a revoked auth
+ * key or a dropped connection that GramJS's own passive event plumbing never
+ * surfaces for the main sender (see TelegramAdapterClient.checkAuthorized's
+ * doc). Without this, the persisted session status stays "connected" —and
+ * every UI reading it (the connect modal's badge, the Channels tile) keeps
+ * showing a false green checkmark — forever after the live client actually
+ * died, since nothing else ever re-evaluates it once the initial connect
+ * succeeded. Frequent enough that a dead session doesn't sit lying for long;
+ * infrequent enough not to add meaningful load against Telegram's rate
+ * limits for an otherwise-idle account.
+ */
+const TELEGRAM_HEALTH_CHECK_INTERVAL_MS = 3 * 60 * 1000;
+
 // ── Self-chat loop-guard tuning (see TelegramPersonalRuntime's
 // pendingSelfChatSends/selfChatTurnTimestamps fields and
 // isOwnSelfChatEcho/admitSelfChatTurnOrTrip for the mechanisms these tune).
@@ -693,6 +724,11 @@ export class TelegramPersonalRuntime {
   private client: TelegramAdapterClient | null = null;
   private started = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  /** See runHealthCheck's doc — only ever running while a live connection
+   *  is up; torn down alongside `client` in every teardown path (stop,
+   *  handleDisconnect, reconnectForConfigUpdate, and a failed health check
+   *  itself). */
+  private healthCheckTimer: NodeJS.Timeout | null = null;
   private connectPromise: Promise<void> | null = null;
   private reconnectAttempts = 0;
   private readonly draftManager = new DraftManager();
@@ -853,6 +889,7 @@ export class TelegramPersonalRuntime {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.stopHealthCheck();
     this.reconnectAttempts = 0;
     if (this.client) {
       try {
@@ -947,6 +984,7 @@ export class TelegramPersonalRuntime {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.stopHealthCheck();
     // Drop any buffered inbound burst (don't publish after teardown).
     this.inboundDebouncer.dispose();
     await Promise.resolve(this.client?.disconnect?.());
@@ -1330,33 +1368,143 @@ export class TelegramPersonalRuntime {
       await this.configStore.clearTelegramSecrets();
       await this.sessionStore.save(buildTelegramConnectedState(account || {}));
       await this.flushState();
+      // Start actively re-probing this now-live connection — see
+      // runHealthCheck's doc for why this is the only reliable way to
+      // notice a later silent death (revoked auth key, dropped network)
+      // instead of leaving the persisted "connected" status a stale lie
+      // forever.
+      this.scheduleHealthCheck();
     } catch (error) {
-      const reconnectState = resolveTelegramReconnectState(error);
-      if (!reconnectState.shouldReconnect) {
-        await this.sessionStore.clearSessionString();
+      await this.handleConnectionFailure(error);
+    }
+  }
+
+  /**
+   * Classifies `error` (via resolveTelegramReconnectState) and persists the
+   * resulting HONEST status — the single place that downgrades the
+   * persisted Telegram session status away from a lie. Used both when
+   * adapter.connect() itself fails (connectClientInternal's catch, the
+   * pre-existing call site) and when runHealthCheck finds a previously
+   * successful connection has silently died since (the fix for the
+   * connection-state honesty bug: before this, ONLY a failure during the
+   * initial connect attempt ever touched the persisted status — a client
+   * that connected fine and then died later left "connected" persisted
+   * forever, since nothing else ever re-evaluated it, and every UI reading
+   * that status — the connect modal's "Connected as X" badge AND the
+   * Channels tile — kept showing a false green checkmark).
+   *
+   * `fromLiveConnection: true` (set by runHealthCheck) additionally tears
+   * down the now-dead `client`/`selfIdentity` and stops the health-check
+   * timer first — mirroring what connectClientInternal's catch never had to
+   * do itself, since in that path `this.client` was never successfully
+   * assigned in the first place.
+   */
+  private async handleConnectionFailure(
+    error: unknown,
+    options: { fromLiveConnection?: boolean } = {},
+  ): Promise<void> {
+    if (options.fromLiveConnection) {
+      this.stopHealthCheck();
+      if (this.client) {
+        try {
+          await Promise.resolve(this.client.disconnect?.());
+        } catch {
+          // Best-effort — the client is already known-dead.
+        }
       }
-      const isRejectedCode = reconnectState.loginHint === "phone_code_invalid" || reconnectState.loginHint === "phone_code_expired";
-      if (isRejectedCode) {
-        // The code (and the phoneCodeHash it was checked against) is done —
-        // clear both so the NEXT connectClientInternal() pass falls through
-        // to "no code on file" and requests a fresh one, instead of
-        // resolvedConfig picking the same rejected loginCode back up from
-        // configStore and failing identically forever (the original bug).
-        await this.sessionStore.clearPendingLogin();
-        await this.configStore.clearTelegramSecrets();
-      }
-      await this.sessionStore.save({
-        status: reconnectState.status,
-        loginHint: reconnectState.loginHint,
-        codeRequestedAt: reconnectState.status === "code_required" ? new Date().toISOString() : undefined,
-        retryable: reconnectState.shouldReconnect,
-        lastDisconnectReason: reconnectState.reason,
-        lastDisconnectCode: reconnectState.statusCode,
-      });
-      await this.flushState();
-      if (reconnectState.shouldReconnect && this.started) {
-        this.scheduleReconnect();
-      }
+      this.client = null;
+      this.selfIdentity = null;
+    }
+    const reconnectState = resolveTelegramReconnectState(error);
+    if (!reconnectState.shouldReconnect) {
+      await this.sessionStore.clearSessionString();
+    }
+    const isRejectedCode = reconnectState.loginHint === "phone_code_invalid" || reconnectState.loginHint === "phone_code_expired";
+    if (isRejectedCode) {
+      // The code (and the phoneCodeHash it was checked against) is done —
+      // clear both so the NEXT connectClientInternal() pass falls through
+      // to "no code on file" and requests a fresh one, instead of
+      // resolvedConfig picking the same rejected loginCode back up from
+      // configStore and failing identically forever (the original bug).
+      await this.sessionStore.clearPendingLogin();
+      await this.configStore.clearTelegramSecrets();
+    }
+    await this.sessionStore.save({
+      status: reconnectState.status,
+      loginHint: reconnectState.loginHint,
+      codeRequestedAt: reconnectState.status === "code_required" ? new Date().toISOString() : undefined,
+      retryable: reconnectState.shouldReconnect,
+      lastDisconnectReason: reconnectState.reason,
+      lastDisconnectCode: reconnectState.statusCode,
+    });
+    await this.flushState();
+    if (reconnectState.shouldReconnect && this.started) {
+      this.scheduleReconnect();
+    }
+  }
+
+  /** Schedules the next active health-probe (see TELEGRAM_HEALTH_CHECK_INTERVAL_MS's
+   *  doc). Idempotent — always clears any existing timer first, so it's safe
+   *  to call from runHealthCheck's own re-schedule as well as right after a
+   *  fresh connect. */
+  private scheduleHealthCheck(): void {
+    this.stopHealthCheck();
+    this.healthCheckTimer = setTimeout(() => {
+      this.healthCheckTimer = null;
+      void this.runHealthCheck();
+    }, TELEGRAM_HEALTH_CHECK_INTERVAL_MS);
+    // Never let this background probe keep the process alive on its own —
+    // it's housekeeping, not real work; a real pending inbound/outbound
+    // call, or the reconnect timer while genuinely mid-reconnect, should be
+    // what decides whether the process has anything left to do. Also keeps
+    // this timer from silently stalling test/tool shutdown for up to
+    // TELEGRAM_HEALTH_CHECK_INTERVAL_MS after a runtime is done with but
+    // never explicitly stopped.
+    this.healthCheckTimer.unref?.();
+  }
+
+  private stopHealthCheck(): void {
+    if (this.healthCheckTimer) {
+      clearTimeout(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+  }
+
+  /**
+   * Actively probes the live client (client.checkAuthorized — GramJS's
+   * getMe()) and re-schedules itself on success. THE fix for the
+   * connection-state honesty bug: see TelegramAdapterClient.checkAuthorized's
+   * doc and TELEGRAM_HEALTH_CHECK_INTERVAL_MS's doc for why an ACTIVE probe
+   * is required — GramJS's main sender deliberately swallows
+   * AUTH_KEY_UNREGISTERED/SESSION_REVOKED from its passive recv loop
+   * instead of surfacing it through any event/callback, so a revoked
+   * session sits completely silent (no error, no disconnect event) while
+   * the persisted status stays stuck on "connected" — until something
+   * actively asks Telegram "am I still authorized?" and gets told no.
+   *
+   * A single failure is enough to hand off to handleConnectionFailure — no
+   * debounce/retry-count needed here: that method already schedules its own
+   * reconnect for a transient/network error (resolveTelegramReconnectState's
+   * shouldReconnect:true default) and only stops retrying for an
+   * authoritative auth failure (shouldReconnect:false), so a one-off network
+   * blip still self-heals via the normal reconnect path instead of being
+   * treated as fatal.
+   */
+  private async runHealthCheck(): Promise<void> {
+    const client = this.client;
+    if (!client || typeof client.checkAuthorized !== "function") {
+      // No live client, or a client build too old to support the probe —
+      // nothing to check right now; try again next interval rather than
+      // spinning down the loop entirely (a reconnect that lands later would
+      // otherwise never get probed).
+      this.scheduleHealthCheck();
+      return;
+    }
+    try {
+      await client.checkAuthorized();
+      this.scheduleHealthCheck();
+    } catch (error) {
+      await this.handleConnectionFailure(error, { fromLiveConnection: true });
     }
   }
 
@@ -1987,6 +2135,13 @@ export class TelegramPersonalRuntime {
             },
             disconnect: () => client.disconnect(),
             exportSessionString: () => client.session?.save?.(),
+            // See TelegramAdapterClient.checkAuthorized's doc — an
+            // authenticated RPC call is the only way to surface a revoked
+            // auth key for the main session; GramJS's own passive recv loop
+            // deliberately swallows that exact failure instead.
+            checkAuthorized: async () => {
+              await client.getMe();
+            },
           },
         };
       },
@@ -2086,6 +2241,7 @@ export class TelegramPersonalRuntime {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.stopHealthCheck();
     this.reconnectAttempts = 0;
     await Promise.resolve(this.client?.disconnect?.());
     this.client = null;
