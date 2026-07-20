@@ -232,7 +232,14 @@ class VPSPlan:
 
 
 class VPSProvisioningError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, workspace_id: str = ""):
+        super().__init__(message)
+        # Best-effort context for callers that need to redirect the user
+        # somewhere on failure (e.g. the OAuth callback routes in
+        # routes_gateway.py sending a blocked-popup fallback tab back to the
+        # right workspace's Hardware page) — empty when unknown, callers
+        # must treat that as "nowhere known to redirect to."
+        self.workspace_id = str(workspace_id or "").strip()
 
 
 PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
@@ -419,6 +426,25 @@ def create_digitalocean_oauth_start(
     }
 
 
+def peek_oauth_state_workspace_id(state: str) -> str:
+    """Best-effort, non-destructive lookup of the workspace_id an OAuth
+    state token was minted for — used only to build the "come back to the
+    Hardware page" redirect URL for the *error* branch of the DigitalOcean/
+    Google callbacks, where the state record is never popped/consumed (the
+    success path already returns workspace_id straight from its own popped
+    record — see complete_digitalocean_oauth_callback / _google_oauth_callback
+    below). Returns "" if the state is missing/unknown/expired; callers must
+    treat that as "no workspace to redirect to", not an error.
+    """
+    clean_state = str(state or "").strip()
+    if not clean_state:
+        return ""
+    with _STATE_LOCK:
+        payload = _load_state()
+        state_record = dict((payload.get("oauth_states") or {}).get(clean_state, {}) or {})
+    return str(state_record.get("workspace_id") or "").strip()
+
+
 def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
     clean_code = str(code or "").strip()
     clean_state = str(state or "").strip()
@@ -432,19 +458,28 @@ def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, 
         _write_state(payload)
     if not state_record or str(state_record.get("provider") or "") != "digitalocean":
         raise VPSProvisioningError("DigitalOcean OAuth state is invalid or expired.")
-    token_payload = _exchange_digitalocean_oauth_code(clean_code)
-    token_id = store_vps_provider_token(
-        provider="digitalocean",
-        workspace_id=str(state_record.get("workspace_id") or "default"),
-        tenant_id=str(state_record.get("tenant_id") or "default"),
-        user_id=str(state_record.get("user_id") or "unknown-user"),
-        credentials=token_payload,
-        source="oauth",
-    )
+    state_workspace_id = str(state_record.get("workspace_id") or "default")
+    try:
+        token_payload = _exchange_digitalocean_oauth_code(clean_code)
+        token_id = store_vps_provider_token(
+            provider="digitalocean",
+            workspace_id=state_workspace_id,
+            tenant_id=str(state_record.get("tenant_id") or "default"),
+            user_id=str(state_record.get("user_id") or "unknown-user"),
+            credentials=token_payload,
+            source="oauth",
+        )
+    except VPSProvisioningError as exc:
+        # The state record (and the workspace_id in it) was already popped
+        # above — reattach it here so the route layer can still send a
+        # blocked-popup fallback tab back to the right workspace instead of
+        # losing that context on a mid-exchange failure (e.g. a bad
+        # DIGITALOCEAN_CLIENT_SECRET).
+        raise VPSProvisioningError(str(exc), workspace_id=state_workspace_id) from exc
     return {
         "provider": "digitalocean",
         "token_id": token_id,
-        "workspace_id": str(state_record.get("workspace_id") or "default"),
+        "workspace_id": state_workspace_id,
     }
 
 
@@ -516,23 +551,32 @@ def complete_google_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
         _write_state(payload)
     if not state_record or str(state_record.get("provider") or "") != "google":
         raise VPSProvisioningError("Google OAuth state is invalid or expired.")
-    token_payload = _exchange_google_oauth_code(clean_code)
-    # Deliberately NOT store_vps_provider_token: Google isn't provisionable
-    # yet at this point (no project chosen, bootstrap not run) — this is a
-    # short-lived SETUP session the rest of the bootstrap flow (
-    # list_google_projects / create_google_project / check_google_project_billing
-    # / finish_google_bootstrap) consumes and then discards, never a
-    # long-lived provider connection the way a DO token_id is.
-    setup_id = _store_google_setup_session(
-        workspace_id=str(state_record.get("workspace_id") or "default"),
-        tenant_id=str(state_record.get("tenant_id") or "default"),
-        user_id=str(state_record.get("user_id") or "unknown-user"),
-        credentials=token_payload,
-    )
+    state_workspace_id = str(state_record.get("workspace_id") or "default")
+    try:
+        token_payload = _exchange_google_oauth_code(clean_code)
+        # Deliberately NOT store_vps_provider_token: Google isn't
+        # provisionable yet at this point (no project chosen, bootstrap not
+        # run) — this is a short-lived SETUP session the rest of the
+        # bootstrap flow (list_google_projects / create_google_project /
+        # check_google_project_billing / finish_google_bootstrap) consumes
+        # and then discards, never a long-lived provider connection the way
+        # a DO token_id is.
+        setup_id = _store_google_setup_session(
+            workspace_id=state_workspace_id,
+            tenant_id=str(state_record.get("tenant_id") or "default"),
+            user_id=str(state_record.get("user_id") or "unknown-user"),
+            credentials=token_payload,
+        )
+    except VPSProvisioningError as exc:
+        # See the matching comment in complete_digitalocean_oauth_callback —
+        # reattach the workspace_id the popped state record carried so the
+        # route layer's no-opener fallback still knows where to send the
+        # user back to.
+        raise VPSProvisioningError(str(exc), workspace_id=state_workspace_id) from exc
     return {
         "provider": "google",
         "setup_id": setup_id,
-        "workspace_id": str(state_record.get("workspace_id") or "default"),
+        "workspace_id": state_workspace_id,
     }
 
 

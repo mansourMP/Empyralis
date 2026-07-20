@@ -16,6 +16,7 @@ import {
   CLOUD_VPS_PROVIDERS,
   CLOUD_VPS_PROVIDER_IDS,
   CloudVpsSetupPanel,
+  type VpsOAuthResumePayload,
   type VpsProviderId,
 } from "@/lib/workspace/cloud-vps-setup-panel";
 import { SshServerConnectPanel } from "@/lib/workspace/ssh-server-connect-panel";
@@ -41,6 +42,7 @@ export default function HardwarePage() {
   const [error, setError] = useState<string | null>(null);
   const [vpsPanelOpen, setVpsPanelOpen] = useState(false);
   const [vpsInitialProvider, setVpsInitialProvider] = useState<VpsProviderId | null>(null);
+  const [vpsOAuthResumePayload, setVpsOAuthResumePayload] = useState<VpsOAuthResumePayload | null>(null);
   const [sshPanelOpen, setSshPanelOpen] = useState(false);
   const [showManualPairing, setShowManualPairing] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -86,6 +88,37 @@ export default function HardwarePage() {
       cancelled = true;
     };
   }, [loadRegistrations]);
+
+  // Resumes the DigitalOcean/Google cloud-VPS OAuth wizard when the browser
+  // lands back here via the backend's no-opener fallback redirect (popup
+  // got blocked by the browser, or the OAuth round-trip fell back to
+  // navigating this same tab) instead of the popup's normal
+  // window.postMessage handoff — see _vps_oauth_popup_html /
+  // _vps_oauth_hardware_redirect_url in routes_gateway.py. Runs once on
+  // mount; strips the query string afterward so a refresh or back
+  // navigation doesn't replay the same OAuth result into the panel again.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const providerParam = params.get("vps_oauth_provider");
+    const matchedProvider = CLOUD_VPS_PROVIDER_IDS.find((id) => id === providerParam);
+    if (!matchedProvider) return;
+    const errorMessage = params.get("vps_oauth_error");
+    const connectedProvider = params.get("vps_oauth");
+    if (!errorMessage && !connectedProvider) return;
+    setVpsInitialProvider(matchedProvider);
+    setVpsOAuthResumePayload({
+      provider: matchedProvider,
+      error: errorMessage || undefined,
+      tokenId: params.get("token_id") || undefined,
+      setupId: params.get("setup_id") || undefined,
+    });
+    setVpsPanelOpen(true);
+    router.replace(`/w/${encodeURIComponent(workspaceId)}/hardware`, { scroll: false });
+    // Mount-only: reads window.location.search once, deliberately not
+    // re-run when workspaceId/router identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const openProviderPanel = (providerId: VpsProviderId) => {
     setVpsInitialProvider(providerId);
@@ -281,6 +314,8 @@ export default function HardwarePage() {
         open={vpsPanelOpen}
         workspaceId={workspaceId}
         initialProviderId={vpsInitialProvider}
+        initialOAuthResult={vpsOAuthResumePayload}
+        onOAuthResultConsumed={() => setVpsOAuthResumePayload(null)}
         onClose={() => setVpsPanelOpen(false)}
         onConnected={async () => {
           setVpsPanelOpen(false);

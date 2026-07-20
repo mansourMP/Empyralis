@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Check, ExternalLink, X } from 'lucide-react';
 
 import { AppButton, joinClassNames } from '@/lib/ui/primitives';
@@ -150,10 +150,25 @@ type VpsProvisionStatusPayload = {
   status?: 'provisioning' | 'registering' | 'connected' | 'failed' | 'deleted' | string;
 };
 
+// Resumes the wizard from the DigitalOcean/Google OAuth "no opener" fallback
+// redirect (see _vps_oauth_hardware_redirect_url / _vps_oauth_popup_html in
+// routes_gateway.py) — the same shape as the `empyralis:vps-oauth`
+// postMessage payload handleVpsOAuthMessage below normally consumes, just
+// arriving via the Hardware page's query string instead of window.postMessage
+// because there was no opener window to post it to.
+export type VpsOAuthResumePayload = {
+  provider: VpsProviderId;
+  tokenId?: string;
+  setupId?: string;
+  error?: string;
+};
+
 type CloudVpsSetupPanelProps = {
   open: boolean;
   workspaceId: string;
   initialProviderId?: VpsProviderId | null;
+  initialOAuthResult?: VpsOAuthResumePayload | null;
+  onOAuthResultConsumed?: () => void;
   onClose: () => void;
   onConnected: () => Promise<void> | void;
 };
@@ -317,7 +332,15 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null, onClose, onConnected }: CloudVpsSetupPanelProps) {
+export function CloudVpsSetupPanel({
+  open,
+  workspaceId,
+  initialProviderId = null,
+  initialOAuthResult = null,
+  onOAuthResultConsumed,
+  onClose,
+  onConnected,
+}: CloudVpsSetupPanelProps) {
   const [step, setStep] = useState<VpsStep>('provider');
   const [connections, setConnections] = useState<Partial<Record<VpsProviderId, VpsConnection>>>({});
   const [selectedProvider, setSelectedProvider] = useState<VpsProviderId | null>(null);
@@ -437,6 +460,62 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
     }
   }, [initialProviderId, open, workspaceId]);
 
+  // Shared by both ways an OAuth result can reach this panel: the normal
+  // popup + window.postMessage handoff (handleVpsOAuthMessage below), and
+  // the no-opener fallback where the backend redirects the top-level tab
+  // back to the Hardware page with the same fields in the query string
+  // (initialOAuthResult, consumed by the effect right after this one) — see
+  // _vps_oauth_popup_html / _vps_oauth_hardware_redirect_url in
+  // routes_gateway.py.
+  function applyOAuthResult(result: VpsOAuthResumePayload) {
+    if (result.provider === 'google') {
+      if (result.error) {
+        setError(result.error);
+        return;
+      }
+      // Google's callback returns a short-lived setup_id, never a
+      // token_id — the account isn't provisionable yet (no project chosen,
+      // billing unverified). See loadGoogleProjectsStep / finishGoogleBootstrap.
+      if (!result.setupId) {
+        setError('Google did not return a sign-in session.');
+        return;
+      }
+      setGoogleSetupId(result.setupId);
+      void loadGoogleProjectsStep(result.setupId);
+      return;
+    }
+    if (result.provider !== 'digitalocean') {
+      return;
+    }
+    if (result.error) {
+      setError(result.error);
+      return;
+    }
+    if (!result.tokenId) {
+      setError('DigitalOcean did not return a stored credential.');
+      return;
+    }
+    saveConnection('digitalocean', result.tokenId, 'DigitalOcean account');
+    void finishConnecting('digitalocean', result.tokenId);
+  }
+
+  // Resumes the wizard when the browser landed back on this page via the
+  // no-opener fallback redirect instead of the popup's postMessage — see
+  // applyOAuthResult above. Runs at most once per distinct payload the
+  // parent hands down; the parent is expected to clear its own state (and
+  // strip the query string) via onOAuthResultConsumed so this doesn't
+  // reprocess the same result on every re-render.
+  const consumedOAuthResultRef = useRef<VpsOAuthResumePayload | null>(null);
+  useEffect(() => {
+    if (!open || !initialOAuthResult || consumedOAuthResultRef.current === initialOAuthResult) {
+      return;
+    }
+    consumedOAuthResultRef.current = initialOAuthResult;
+    applyOAuthResult(initialOAuthResult);
+    onOAuthResultConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialOAuthResult]);
+
   useEffect(() => {
     function handleVpsOAuthMessage(event: MessageEvent) {
       const payload = readRecord(event.data);
@@ -444,42 +523,23 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
         return;
       }
       const messageProvider = readString(payload, 'provider');
-      const callbackError = readString(payload, 'error');
-      if (messageProvider === 'google') {
-        if (callbackError) {
-          setError(callbackError);
-          return;
-        }
-        // Google's callback returns a short-lived setup_id, never a
-        // token_id — the account isn't provisionable yet (no project chosen,
-        // billing unverified). See loadGoogleProjectsStep / finishGoogleBootstrap.
-        const setupId = readString(payload, 'setup_id');
-        if (!setupId) {
-          setError('Google did not return a sign-in session.');
-          return;
-        }
-        setGoogleSetupId(setupId);
-        void loadGoogleProjectsStep(setupId);
-        return;
+      // `=== ` (not `!==`) so TS can actually narrow the plain `string`
+      // return type of readString() down to the literal union below —
+      // window.postMessage payloads are untyped at the source, so this is
+      // the only way to get a properly-typed `provider` into
+      // applyOAuthResult without an unchecked cast.
+      if (messageProvider === 'google' || messageProvider === 'digitalocean') {
+        applyOAuthResult({
+          provider: messageProvider,
+          error: readString(payload, 'error') || undefined,
+          setupId: readString(payload, 'setup_id') || undefined,
+          tokenId: readString(payload, 'token_id') || undefined,
+        });
       }
-      if (messageProvider !== 'digitalocean') {
-        return;
-      }
-      if (callbackError) {
-        setError(callbackError);
-        return;
-      }
-      const nextTokenId = readString(payload, 'token_id');
-      if (!nextTokenId) {
-        setError('DigitalOcean did not return a stored credential.');
-        return;
-      }
-      const accountLabel = readString(payload, 'account_email', 'email', 'account_name') || 'DigitalOcean account';
-      saveConnection('digitalocean', nextTokenId, accountLabel);
-      void finishConnecting('digitalocean', nextTokenId);
     }
     window.addEventListener('message', handleVpsOAuthMessage);
     return () => window.removeEventListener('message', handleVpsOAuthMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
   function saveConnection(providerId: VpsProviderId, nextTokenId: string, accountLabel: string) {
@@ -640,6 +700,13 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
   async function startDigitalOceanOAuth() {
     setError(null);
     setBusy(true);
+    // Open the popup synchronously, as a direct continuation of the click
+    // handler — before any `await`. Safari (and other browsers) only honor
+    // window.open() as "user-gesture-triggered" while it's still on the
+    // call stack of the click event; opening it after an await loses that
+    // flag and gets it silently blocked. We navigate this blank popup to
+    // the real OAuth URL once we have it, instead of opening it fresh.
+    const popup = window.open('', 'empyralis-digitalocean-oauth', 'width=720,height=780');
     try {
       const payload = await requestJson<VpsOAuthStartResponse>(
         `/api/hardware/vps/oauth/digitalocean/start?workspace_id=${encodeURIComponent(workspaceId)}`,
@@ -648,13 +715,20 @@ export function CloudVpsSetupPanel({ open, workspaceId, initialProviderId = null
       if (!redirect) {
         throw new Error('DigitalOcean OAuth URL was not returned.');
       }
-      const popup = window.open(redirect, 'empyralis-digitalocean-oauth', 'width=720,height=780');
-      if (!popup) {
-        window.location.assign(redirect);
-      } else {
+      if (popup && !popup.closed) {
+        popup.location.href = redirect;
         popup.focus();
+      } else {
+        // Popup was blocked despite the synchronous open (or the user closed
+        // it already) — fall back to a same-tab navigation. The callback
+        // page now redirects back into the app in this case (see
+        // _vps_oauth_popup_html in routes_gateway.py).
+        window.location.assign(redirect);
       }
     } catch (oauthError) {
+      if (popup && !popup.closed) {
+        popup.close();
+      }
       setError(oauthError instanceof Error ? oauthError.message : 'Could not start DigitalOcean login.');
     } finally {
       setBusy(false);
