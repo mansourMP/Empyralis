@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, Cpu, Loader2, Server } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { deriveStatus, formatDateTime, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
@@ -876,6 +877,11 @@ export default function GatewayDetailPage() {
   const targetGatewayId = String(params?.gatewayId || "");
   const { gateways, loading, refresh } = useWorkspaceGateways(workspaceId);
   const { agents, loading: agentsLoading } = useFleetAgents(workspaceId);
+  const router = useRouter();
+
+  const [destroyOpen, setDestroyOpen] = useState(false);
+  const [destroying, setDestroying] = useState(false);
+  const [destroyError, setDestroyError] = useState<string | null>(null);
 
   const gateway = useMemo(() => gateways.find((g) => idOf(g) === targetGatewayId), [gateways, targetGatewayId]);
   useBreadcrumbLabel(targetGatewayId, gateway ? gatewayLabel(gateway) : null);
@@ -917,6 +923,30 @@ export default function GatewayDetailPage() {
   }
 
   const isCloud = gateway.hardware_kind === "cloud_vps";
+  const vpsId = String((gateway.metadata as Record<string, unknown> | undefined)?.vps_id || "").trim();
+  const canDestroy = isCloud && vpsId.length > 0;
+
+  const destroyServer = async () => {
+    if (!vpsId) return;
+    setDestroying(true);
+    setDestroyError(null);
+    try {
+      const res = await fetch(`/api/hardware/vps/${encodeURIComponent(vpsId)}`, {
+        method: "DELETE",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("DELETE", {}),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        const detail = typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
+      router.push(backHref);
+    } catch (e) {
+      setDestroyError(e instanceof Error ? e.message : "Could not destroy this server.");
+      setDestroying(false);
+    }
+  };
   const connPresentation = connectionPresentation(gateway);
   const heartbeatAge = gateway.heartbeat_age_seconds;
   const serviceInventory: ServiceInventoryItem[] = gateway.metadata?.service_inventory || [];
@@ -1061,6 +1091,43 @@ export default function GatewayDetailPage() {
           })}
         </div>
       )}
+
+      {canDestroy && (
+        <>
+          <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Danger zone</div>
+          <div className="fleet-hw-card">
+            <div className="fleet-hw-row">
+              <span className="fleet-hw-label">Destroy server</span>
+              <span className="fleet-hw-value">
+                <button type="button" className="fleet-btn fleet-btn--danger" onClick={() => setDestroyOpen(true)}>
+                  Destroy server
+                </button>
+              </span>
+            </div>
+            <div className="fleet-hw-note" style={{ paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+              Permanently deletes the DigitalOcean droplet backing this computer and stops billing for it.
+              Agents pinned here lose hardware access immediately. This can&apos;t be undone.
+            </div>
+            {destroyError && (
+              <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{destroyError}</span>
+            )}
+          </div>
+        </>
+      )}
+
+      <ConfirmDialog
+        open={destroyOpen}
+        title="Destroy this server?"
+        body={`This deletes the underlying DigitalOcean droplet for "${gatewayLabel(gateway)}" and stops billing for it. Agents pinned to this computer lose hardware access immediately — this can't be undone.`}
+        confirmLabel="Destroy server"
+        confirmTone="danger"
+        busy={destroying}
+        onConfirm={() => void destroyServer()}
+        onCancel={() => {
+          setDestroyOpen(false);
+          setDestroyError(null);
+        }}
+      />
     </main>
   );
 }
