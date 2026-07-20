@@ -686,19 +686,43 @@ def _remote_agent_computer_setup_command(
     display_name: str,
     remote_root: str,
 ) -> str:
-    root = (remote_root or "~/Multi_Agent_Orchestrator_Project").strip() or "~/Multi_Agent_Orchestrator_Project"
-    api_url = _gateway_api_url_for_remote_setup()
+    root = (remote_root or "").strip()
+    if root:
+        # Power-user path: the box already has an Empyralis checkout with the
+        # gateway built. Kept for a collaborator connecting a dev machine.
+        api_url = _gateway_api_url_for_remote_setup()
+        return "\n".join(
+            [
+                "set -e",
+                f"cd {shlex.quote(root)}",
+                f"export EMPYRALIS_GATEWAY_API_URL={shlex.quote(api_url)}",
+                f"export EMPYRALIS_GATEWAY_PAIRING_TOKEN={shlex.quote(pairing_token)}",
+                f"export EMPYRALIS_GATEWAY_EXPECTED_WORKSPACE_ID={shlex.quote(workspace_id)}",
+                f"export EMPYRALIS_GATEWAY_DISPLAY_NAME={shlex.quote(display_name)}",
+                "scripts/agent_computer.sh stop || true",
+                "scripts/agent_computer.sh service-install --system",
+                "scripts/agent_computer.sh start",
+            ]
+        )
+    # Default: a fresh Ubuntu box, nothing pre-installed. Download and run the
+    # exact same prebuilt-gateway installer the cloud-provisioning path uses
+    # (curl | ... sudo -E bash — see vps_provisioning_service.cloud_init_script)
+    # so "connect your own server" works on any bare box, no checkout/build.
+    installer_url = vps_provisioning_service.agent_installer_url()
+    api_url = (
+        vps_provisioning_service._ensure_api_path_suffix(vps_provisioning_service.PUBLIC_API_URL)
+        or _gateway_api_url_for_remote_setup()
+    )
+    repo_token = vps_provisioning_service._installer_repo_token()
+    repo_token_env = f" EMPYRALIS_REPO_TOKEN={shlex.quote(repo_token)}" if repo_token else ""
     return "\n".join(
         [
             "set -e",
-            f"cd {shlex.quote(root)}",
-            f"export EMPYRALIS_GATEWAY_API_URL={shlex.quote(api_url)}",
-            f"export EMPYRALIS_GATEWAY_PAIRING_TOKEN={shlex.quote(pairing_token)}",
-            f"export EMPYRALIS_GATEWAY_EXPECTED_WORKSPACE_ID={shlex.quote(workspace_id)}",
-            f"export EMPYRALIS_GATEWAY_DISPLAY_NAME={shlex.quote(display_name)}",
-            "scripts/agent_computer.sh stop || true",
-            "scripts/agent_computer.sh service-install --system",
-            "scripts/agent_computer.sh start",
+            f"curl -fsSL {shlex.quote(installer_url)} | "
+            f"EMPYRALIS_PAIRING_TOKEN={shlex.quote(pairing_token)} "
+            f"EMPYRALIS_API_URL={shlex.quote(api_url)} "
+            f"EMPYRALIS_GATEWAY_DISPLAY_NAME={shlex.quote(display_name)}"
+            f"{repo_token_env} sudo -E bash",
         ]
     )
 
@@ -1571,7 +1595,9 @@ async def create_gateway_ssh_pairing(
         workspace_id=workspace_id,
         pairing_token=pairing_token,
         display_name=f"{body.username}@{body.host}",
-        remote_root=body.remote_root or "~/Multi_Agent_Orchestrator_Project",
+        # Empty by default -> fresh-box installer path. Only a user who typed a
+        # checkout path gets the legacy "cd + agent_computer.sh" behavior.
+        remote_root=(body.remote_root or "").strip(),
     )
     try:
         result = _run_remote_agent_computer_setup_via_ssh(

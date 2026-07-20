@@ -130,7 +130,7 @@ export function SshServerConnectPanel({
             <>
               <div className="cloud-vps-panel__heading">
                 <h2>Connect your own server</h2>
-                <p>Empyralis will SSH in once to start the agent runtime. This server needs an existing Empyralis checkout with the gateway already built (<code>scripts/agent_computer.sh install</code>) — this doesn't provision a fresh box for you. It runs with full access to that machine — only connect a server you trust your agents to run on.</p>
+                <p>Empyralis will SSH in once and install the agent runtime for you — point it at a fresh Ubuntu 22.04/24.04 server (connect as root or a sudo user) and it comes back connected. It runs with full access to that machine — only connect a server you trust your agents to run on.</p>
               </div>
               <div className="cloud-vps-panel__footer">
                 <AppButton tone="primary" type="button" onClick={() => setWarningAck(true)}>
@@ -185,8 +185,8 @@ export function SshServerConnectPanel({
                 </label>
               )}
               <label className="app-form-field">
-                <span className="app-form-field__label">Path to existing Empyralis checkout (optional)</span>
-                <input className="app-field" value={remoteRoot} onChange={(e) => setRemoteRoot(e.currentTarget.value)} placeholder="~/Multi_Agent_Orchestrator_Project" />
+                <span className="app-form-field__label">Advanced: path to an existing Empyralis checkout (leave empty for a fresh box)</span>
+                <input className="app-field" value={remoteRoot} onChange={(e) => setRemoteRoot(e.currentTarget.value)} placeholder="Leave empty — Empyralis installs everything" />
               </label>
               <div className="cloud-vps-panel__footer">
                 <AppButton tone="primary" type="button" onClick={() => void connect()} disabled={busy || !canSubmit}>
