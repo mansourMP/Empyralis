@@ -1118,9 +1118,15 @@ a.fleet-breadcrumb:hover {
 /* ── Content area ────────────────────────────────────────────────────────── */
 
 .fleet-content {
-  flex: 1;
+  /* flex:0 1 auto (not flex:1) so a plain content page sizes to its own
+     content and the ONE scroller is .fleet-shell-scroll (full content-area
+     width). With flex:1 + overflow-y:auto this box became a SECOND scroller,
+     and because it's max-width capped + centered, its scrollbar floated at
+     the column's right edge in the middle of the screen — a second, mis-
+     placed scrollbar. .fleet-content--chat/--with-panel still set their own
+     flex:1 + overflow, so full-height chat/panel layouts are unaffected. */
+  flex: 0 1 auto;
   min-width: 0;
-  overflow-y: auto;
   background: transparent; /* lives inside the floating panel */
   padding: 28px 32px;
   max-width: var(--content-max);
