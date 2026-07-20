@@ -20,7 +20,10 @@ import { PersonalChannelRuntimeRegistry } from "./channels/personal-runtime";
 import {
   LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS,
   LocalBridgePersonalChannelRuntime,
+  type LocalBridgeRuntimeConfig,
 } from "./channels/local-bridge-runtime";
+import { ImsgIMessagePersonalChannelRuntime } from "./channels/imsg-imessage-runtime";
+import type { PersonalChannelRuntime } from "./channels/personal-runtime";
 import { GatewayBrowserWorker } from "./browser/worker";
 import { GatewayBrowserRuntime } from "./browser/runtime";
 import { GatewayShellRuntime } from "./shell/runtime";
@@ -106,6 +109,27 @@ export function shouldAttemptPairing(
   return Boolean(pairingToken) && !storedGatewayToken;
 }
 
+/** Selects the iMessage transport for the "imessage_personal" local-bridge
+ *  config: the in-process imsg RPC runtime by default (no separate process
+ *  to run — see channels/imsg-imessage-runtime.ts), or the legacy
+ *  BlueBubbles-over-HTTP runtime when a deployment already has
+ *  EMPYRALIS_IMESSAGE_BRIDGE_URL configured, so an existing BlueBubbles
+ *  Agent Computer bridge setup keeps working unchanged after this upgrade.
+ *  Every other local-bridge channel (Signal, WeChat) is untouched. */
+function buildLocalBridgeChannelRuntime(
+  bridgeConfig: LocalBridgeRuntimeConfig,
+  db: GatewayStateDb,
+): PersonalChannelRuntime {
+  if (bridgeConfig.channelKey === "imessage_personal") {
+    const legacyBlueBubblesUrl = String(process.env.EMPYRALIS_IMESSAGE_BRIDGE_URL || "").trim();
+    if (legacyBlueBubblesUrl) {
+      return new LocalBridgePersonalChannelRuntime(bridgeConfig);
+    }
+    return new ImsgIMessagePersonalChannelRuntime(bridgeConfig, { db });
+  }
+  return new LocalBridgePersonalChannelRuntime(bridgeConfig);
+}
+
 async function main(): Promise<void> {
   const config = loadGatewayConfig();
   const releaseLock = await acquireGatewayProcessLock(config.stateDir);
@@ -127,7 +151,7 @@ async function main(): Promise<void> {
       ? [
           new WhatsAppPersonalRuntime(db),
           new TelegramPersonalRuntime(db),
-          ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((config) => new LocalBridgePersonalChannelRuntime(config)),
+          ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((bridgeConfig) => buildLocalBridgeChannelRuntime(bridgeConfig, db)),
         ]
       : [],
   );

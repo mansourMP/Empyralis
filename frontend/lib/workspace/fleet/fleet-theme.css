@@ -2349,6 +2349,99 @@ a.fleet-breadcrumb:hover {
   margin-top: 8px;
 }
 
+/* ── iMessage (imsg) in-app setup panel — IMessageSetupPanel.tsx. Mirrors
+   OpenClaw's `channels status --probe` staged output as four rows (binary /
+   rpc / Full Disk Access / private API), each with its own pass/fail/blocked
+   state and inline fix. Reuses .fleet-channel-expand-*, .fleet-btn, and
+   .gw-pair-panel-command rather than inventing a parallel set of primitives —
+   only the stage-row layout below is new. ─────────────────────────────── */
+.imsg-setup-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.imsg-stage-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+
+.imsg-stage-row {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.imsg-stage-row:last-child {
+  border-bottom: none;
+}
+
+.imsg-stage-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.imsg-stage-row-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.imsg-stage-row-body {
+  margin-top: 8px;
+  margin-left: 22px;
+}
+
+.imsg-stage-row-blocked {
+  margin: 4px 0 0 22px !important;
+  color: var(--text-tertiary) !important;
+}
+
+.imsg-stage-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.imsg-install-outcome {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.imsg-install-log {
+  margin-top: 6px;
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.imsg-stage-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.imsg-stage-footer-checked {
+  margin: 0 !important;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
 /* ── Channel connection banner (UI Phase 11): the "two-door" design. Clicking
    a channel card opens a focused card over the same dimmed/blurred backdrop
    the agent-detail modal and wizard use (.fleet-detail-backdrop), rather than
