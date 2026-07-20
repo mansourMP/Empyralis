@@ -16,12 +16,19 @@ DEFAULT_API_URL="https://empyralis.ai/api"
 API_URL="${EMPYRALIS_API_URL:-${EMPYRALIS_GATEWAY_API_URL:-${DEFAULT_API_URL}}}"
 PAIRING_TOKEN="${EMPYRALIS_PAIRING_TOKEN:-${EMPYRALIS_GATEWAY_PAIRING_TOKEN:-}}"
 AGENT_COMPUTER_VERSION="${EMPYRALIS_AGENT_COMPUTER_VERSION:-latest}"
-# No publish pipeline exists yet, so the gateway is built from source on
-# the box at install time rather than downloaded as a prebuilt artifact.
-# The repo is private — REPO_TOKEN is an operator-supplied credential
-# (same shape as PAIRING_TOKEN above), not something this script invents.
-# Interim measure: only works for boxes an Empyralis-repo collaborator is
-# personally installing, not yet a true zero-credential public installer.
+# The gateway ships as a prebuilt, self-contained artifact (dist/ +
+# node_modules) published to our own release host — the box only downloads
+# and runs it, never clones or builds. This is the zero-credential public
+# installer: no repo token ever lands on a provisioned box, so a compromised
+# box cannot read the private source. (Supersedes the interim git-clone
+# build; that path is retained below only behind an explicit opt-in for a
+# repo collaborator installing on their own machine.)
+ARTIFACT_BASE_URL="${EMPYRALIS_ARTIFACT_BASE_URL:-https://empyralis.ai/releases/agent-computer/${AGENT_COMPUTER_VERSION}}"
+GATEWAY_ARTIFACT_URL="${EMPYRALIS_GATEWAY_ARTIFACT_URL:-${ARTIFACT_BASE_URL}/empyralis-gateway-linux-x64.tar.gz}"
+# Opt-in source build (collaborator-only): set EMPYRALIS_GATEWAY_BUILD_FROM_SOURCE=1
+# and supply EMPYRALIS_REPO_TOKEN. Off by default — the artifact path above
+# is the norm.
+BUILD_FROM_SOURCE="${EMPYRALIS_GATEWAY_BUILD_FROM_SOURCE:-0}"
 REPO_URL="${EMPYRALIS_REPO_URL:-https://github.com/mansourMP/Empyralis.git}"
 REPO_REF="${EMPYRALIS_REPO_REF:-verify}"
 REPO_TOKEN="${EMPYRALIS_REPO_TOKEN:-}"
@@ -227,25 +234,66 @@ clone_gateway_source() {
   fi
 }
 
-install_release_artifacts() {
-  local release_dir clone_dir
-  release_dir="${INSTALL_ROOT}/releases/${AGENT_COMPUTER_VERSION}"
-  clone_dir="${release_dir}.tmp"
-
-  rm -rf "${clone_dir}"
-  clone_gateway_source "${clone_dir}"
-
+install_gateway_from_source() {
+  # Collaborator-only opt-in (EMPYRALIS_GATEWAY_BUILD_FROM_SOURCE=1). Clones
+  # the private repo and builds on the box — needs EMPYRALIS_REPO_TOKEN and
+  # leaves a repo-read credential in cloud-init env, so it is NOT the default.
+  local stage_dir="$1"
+  rm -rf "${stage_dir}"
+  clone_gateway_source "${stage_dir}"
   log "building the gateway from source"
-  ( cd "${clone_dir}/empyralis-gateway" && npm install && npm run build ) \
+  ( cd "${stage_dir}/empyralis-gateway" && npm install && npm run build ) \
     || fail "gateway build failed"
-
   # The running gateway has no use for git history, and .git/config can
   # carry credential material (e.g. a credential-helper cache) — drop it
   # rather than leave it sitting under the gateway's own ReadWritePaths.
-  rm -rf "${clone_dir}/.git"
+  rm -rf "${stage_dir}/.git"
+}
+
+install_gateway_from_artifact() {
+  # Default path: download the prebuilt, self-contained gateway artifact
+  # (dist/ + node_modules + package.json) and unpack it. No git, no build,
+  # no credential of any kind on the box.
+  local stage_dir="$1"
+  local tmp_dir gateway_archive
+  tmp_dir="$(mktemp -d)"
+  gateway_archive="${tmp_dir}/gateway.tar.gz"
+
+  log "downloading prebuilt gateway artifact ${GATEWAY_ARTIFACT_URL}"
+  if ! curl -fsSL "${GATEWAY_ARTIFACT_URL}" -o "${gateway_archive}"; then
+    rm -rf "${tmp_dir}"
+    fail "could not download gateway artifact from ${GATEWAY_ARTIFACT_URL}"
+  fi
+
+  rm -rf "${stage_dir}"
+  mkdir -p "${stage_dir}/empyralis-gateway"
+  # The archive root holds dist/, node_modules/, package.json — unpack it
+  # into empyralis-gateway/ so the layout matches the source-build path (and
+  # the `gateway` symlink / run-gateway fast path resolve identically).
+  if ! tar -xzf "${gateway_archive}" -C "${stage_dir}/empyralis-gateway"; then
+    rm -rf "${tmp_dir}" "${stage_dir}"
+    fail "could not extract gateway artifact"
+  fi
+  rm -rf "${tmp_dir}"
+
+  if [[ ! -f "${stage_dir}/empyralis-gateway/dist/index.js" ]]; then
+    fail "gateway artifact is missing dist/index.js — the published archive is malformed"
+  fi
+}
+
+install_release_artifacts() {
+  local release_dir stage_dir
+  release_dir="${INSTALL_ROOT}/releases/${AGENT_COMPUTER_VERSION}"
+  stage_dir="${release_dir}.tmp"
+
+  if [[ "${BUILD_FROM_SOURCE}" == "1" ]]; then
+    install_gateway_from_source "${stage_dir}"
+  else
+    install_gateway_from_artifact "${stage_dir}"
+  fi
 
   rm -rf "${release_dir}"
-  mv "${clone_dir}" "${release_dir}"
+  mv "${stage_dir}" "${release_dir}"
   # Convenience alias so run-gateway's `${INSTALL_DIR}/gateway/...` fast
   # path resolves directly, matching the layout callers already expect.
   ln -sfn empyralis-gateway "${release_dir}/gateway"
