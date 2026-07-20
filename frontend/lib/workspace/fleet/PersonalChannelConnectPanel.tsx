@@ -57,6 +57,7 @@ export function PersonalChannelConnectPanel({
   agentGatewayId,
   agentId,
   onConnected,
+  onDone,
 }: {
   workspaceId: string;
   channelKey: PersonalChannelKey;
@@ -68,6 +69,10 @@ export function PersonalChannelConnectPanel({
    *  refresh its own separate channel list in place instead of staying
    *  stale until a tab-switch/reload happens to remount and refetch it. */
   onConnected?: () => void;
+  /** Optional: renders a "Done" button in the connected state so the flow has
+   *  a positive close/confirm action (collapse the card / close the modal),
+   *  not just the red "Disconnect & start over". */
+  onDone?: () => void;
 }) {
   const scoped = agentGatewayId !== undefined;
   // Fetched unconditionally either way (hooks can't be conditional); when
@@ -145,6 +150,7 @@ export function PersonalChannelConnectPanel({
           view={view}
           onRefresh={refresh}
           agentId={agentId}
+          onDone={onDone}
         />
       ) : (
         <WhatsAppConnectBody
@@ -154,6 +160,7 @@ export function PersonalChannelConnectPanel({
           view={view}
           onRefresh={refresh}
           agentId={agentId}
+          onDone={onDone}
         />
       )}
     </div>
@@ -205,6 +212,7 @@ function TelegramConnectBody({
   view,
   onRefresh,
   agentId,
+  onDone,
 }: {
   label: string;
   gatewayId: string;
@@ -212,6 +220,7 @@ function TelegramConnectBody({
   view: ReturnType<typeof usePersonalChannelStatus>["view"];
   onRefresh: () => void;
   agentId?: string | null;
+  onDone?: () => void;
 }) {
   const [phoneNumber, setPhoneNumber] = useState("");
   const [code, setCode] = useState("");
@@ -295,6 +304,11 @@ function TelegramConnectBody({
           <Check size={16} strokeWidth={2} /> Connected as {maskedIdentity(view?.state)}
         </div>
         <DisconnectControl channelKey="telegram_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
+        {onDone && (
+          <div className="pc-connect-step__footer">
+            <button type="button" className="fleet-btn fleet-btn--mono" onClick={onDone}>Done</button>
+          </div>
+        )}
       </div>
     );
   }
@@ -378,6 +392,7 @@ function WhatsAppConnectBody({
   view,
   onRefresh,
   agentId,
+  onDone,
 }: {
   label: string;
   gatewayId: string;
@@ -385,6 +400,7 @@ function WhatsAppConnectBody({
   view: ReturnType<typeof usePersonalChannelStatus>["view"];
   onRefresh: () => void;
   agentId?: string | null;
+  onDone?: () => void;
 }) {
   const [usePhone, setUsePhone] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -480,6 +496,11 @@ function WhatsAppConnectBody({
           <Check size={16} strokeWidth={2} /> Connected as {maskedIdentity(view?.state)}
         </div>
         <DisconnectControl channelKey="whatsapp_personal" gatewayId={gatewayId} agentId={agentId} onDone={onRefresh} />
+        {onDone && (
+          <div className="pc-connect-step__footer">
+            <button type="button" className="fleet-btn fleet-btn--mono" onClick={onDone}>Done</button>
+          </div>
+        )}
       </div>
     );
   }

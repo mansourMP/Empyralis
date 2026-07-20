@@ -205,6 +205,7 @@ export function SageLauncher({
                         workspaceId={workspaceId}
                         channelKey={REAL_PAIRING_CHANNEL_KEYS[selectedChannel.id]}
                         label={selectedChannel.label}
+                        onDone={onClose}
                       />
                     ) : selectedChannel && NOT_YET_SUPPORTED_CHANNELS[selectedChannel.id] ? (
                       <div className="fleet-sage-connect-unsupported">
