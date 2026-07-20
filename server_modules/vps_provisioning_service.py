@@ -1886,6 +1886,11 @@ def _http_empty(
             if refreshed_token:
                 _http_empty(method, url, token=refreshed_token, provider=provider)
                 return
+        # Idempotent delete: a 404 means the resource is already gone, which is
+        # success for a DELETE (a retried destroy, or a droplet the user removed
+        # in the provider console). Don't turn "already deleted" into a 502.
+        if exc.code == 404 and str(method).upper() == "DELETE":
+            return
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise VPSProvisioningError(f"{provider} cleanup failed: HTTP {exc.code} {detail}") from exc
     except urlerror.URLError as exc:
