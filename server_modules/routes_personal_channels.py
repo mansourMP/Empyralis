@@ -650,6 +650,139 @@ async def send_telegram_personal_message(
         raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
+@router.post("/personal-channels/imessage/gateways/{gateway_id}/recheck")
+async def recheck_imessage_personal_gateway(
+    request: Request,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """Live re-probe (not the cached heartbeat snapshot) of the imsg bridge
+    on a paired gateway — see personal_channels_service.
+    recheck_imessage_personal_gateway()'s doc comment for the transport.
+    This is read-only on the gateway side (it only runs the probe), so
+    "viewer" is enough, same as the GET status routes above."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="viewer",
+    )
+    try:
+        result = await personal_channels_service.recheck_imessage_personal_gateway(
+            gateway_id=gateway_id,
+            registration=registration,
+            agent_id=str(agent_id or "").strip(),
+        )
+        _emit_personal_channel_audit(
+            action="personal_channel.imessage.recheck",
+            status="success",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="imessage_personal",
+            detail="iMessage bridge health was re-probed live from the paired gateway.",
+            metadata={},
+        )
+        return result
+    except KillSwitchBlockedError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.imessage.recheck",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="imessage_personal",
+            detail=exc.decision.detail,
+            metadata={"kill_switch_scope": exc.decision.scope},
+        )
+        error = kill_switch_error(
+            scope=exc.decision.scope,
+            detail=exc.decision.detail,
+            trace_id=exc.decision.trace_id,
+        )
+        raise HTTPException(status_code=to_http_status(error), detail=to_http_body(error)) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.imessage.recheck",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="imessage_personal",
+            detail=detail,
+            metadata={},
+        )
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.post("/personal-channels/imessage/gateways/{gateway_id}/install")
+async def install_imessage_imsg_gateway(
+    request: Request,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """Auto-installs `imsg` via Homebrew on the paired Mac — see
+    personal_channels_service.install_imessage_imsg_gateway()'s doc comment
+    for why running this from the gateway is safe. "member" (not "viewer")
+    because, unlike recheck, this changes what's installed on the Mac."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="member",
+    )
+    try:
+        result = await personal_channels_service.install_imessage_imsg_gateway(
+            gateway_id=gateway_id,
+            registration=registration,
+            agent_id=str(agent_id or "").strip(),
+        )
+        _emit_personal_channel_audit(
+            action="personal_channel.imessage.install",
+            status="success",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="imessage_personal",
+            detail="imsg install (Homebrew) was requested on the paired gateway's Mac.",
+            metadata={},
+        )
+        return result
+    except KillSwitchBlockedError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.imessage.install",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="imessage_personal",
+            detail=exc.decision.detail,
+            metadata={"kill_switch_scope": exc.decision.scope},
+        )
+        error = kill_switch_error(
+            scope=exc.decision.scope,
+            detail=exc.decision.detail,
+            trace_id=exc.decision.trace_id,
+        )
+        raise HTTPException(status_code=to_http_status(error), detail=to_http_body(error)) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.imessage.install",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="imessage_personal",
+            detail=detail,
+            metadata={},
+        )
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
 @router.post("/personal-channels/{channel_key}/gateways/{gateway_id}/messages")
 async def send_local_bridge_personal_message(
     request: Request,

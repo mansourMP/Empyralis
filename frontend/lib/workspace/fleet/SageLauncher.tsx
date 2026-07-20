@@ -8,6 +8,7 @@ import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { AgentChat } from "./AgentChat";
 import { useFleetAgents } from "./fleet-data";
 import { findSageAgent } from "./fleet-presentation";
+import { IMessageSetupPanel } from "./IMessageSetupPanel";
 import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
 import type { PersonalChannelKey } from "./personal-channel-pairing";
 
@@ -41,15 +42,20 @@ const REAL_PAIRING_CHANNEL_KEYS: Record<string, PersonalChannelKey> = {
   whatsapp: "whatsapp_personal",
 };
 
-// These channels have no web-UI pairing flow -- either the bridge has to be
-// run on the user's own machine first (Signal, iMessage), or no working
-// bridge exists yet at all (WeChat, which has no official personal-account
-// API to build one against). Say so plainly instead of falling through to
-// the Gateway hardware-pairing panel, which has nothing to do with these
-// accounts and would look like a working "connect" flow when it isn't one.
+// These channels have no web-UI pairing flow -- the bridge has to be run on
+// the user's own machine first (Signal), or no working bridge exists yet at
+// all (WeChat, which has no official personal-account API to build one
+// against). Say so plainly instead of falling through to the Gateway
+// hardware-pairing panel, which has nothing to do with these accounts and
+// would look like a working "connect" flow when it isn't one.
+//
+// iMessage is NOT in this list — unlike Signal/WeChat, its setup (installing
+// imsg via Homebrew, checking Full Disk Access) genuinely happens in-app now
+// through IMessageSetupPanel, rendered below against Sage's own gateway. It
+// used to point at BlueBubbles Server env vars, which was wrong even when
+// written — the gateway has never used BlueBubbles for iMessage, only imsg.
 const NOT_YET_SUPPORTED_CHANNELS: Record<string, string> = {
   signal: "Signal requires a signal-cli bridge already running on your own computer — there's no in-app setup for this yet. If you run signal-cli, point your Gateway at it with the EMPYRALIS_SIGNAL_BRIDGE environment variables.",
-  imessage: "iMessage requires a Mac running BlueBubbles Server — there's no in-app setup for this yet. Point your Gateway at it with the EMPYRALIS_BLUEBUBBLES_SERVER_URL and EMPYRALIS_BLUEBUBBLES_PASSWORD environment variables.",
   wechat: "Personal WeChat has no official API to build a bridge against, so this isn't supported yet.",
 };
 
@@ -207,6 +213,12 @@ export function SageLauncher({
                         label={selectedChannel.label}
                         onDone={onClose}
                       />
+                    ) : selectedChannel?.id === "imessage" ? (
+                      // No phone/code/QR step — imsg runs on Sage's own
+                      // gateway Mac. Same panel FleetAgentDetail's per-agent
+                      // Channels tab uses, just bound to Sage's gateway
+                      // instead of a specialist agent's.
+                      <IMessageSetupPanel gatewayId={sageAgent?.preferred_gateway_id?.trim() || null} />
                     ) : selectedChannel && NOT_YET_SUPPORTED_CHANNELS[selectedChannel.id] ? (
                       <div className="fleet-sage-connect-unsupported">
                         {NOT_YET_SUPPORTED_CHANNELS[selectedChannel.id]}

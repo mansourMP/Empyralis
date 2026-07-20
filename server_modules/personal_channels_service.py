@@ -60,6 +60,21 @@ WHATSAPP_PERSONAL_DISCONNECT_CAPABILITY = "channel.whatsapp.personal.disconnect"
 WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX = "whatsapp_personal:noreply:"
 TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX = "telegram_personal:noreply:"
 
+# iMessage (imsg) — unlike WhatsApp/Telegram there is no phone/code/QR step;
+# these two capabilities are the in-app setup panel's only real actions,
+# both dispatched live to ImsgIMessagePersonalChannelRuntime on the gateway
+# (empyralis-gateway/src/channels/imsg-imessage-runtime.ts) via the same
+# generic tool-invoke RPC WhatsApp/Telegram's configure/disconnect already
+# use — see recheck_imessage_personal_gateway()/install_imessage_imsg_gateway()
+# below. Provider stays "bluebubbles_local_bridge" — see imsg-imessage-
+# runtime.ts's own doc comment on why that string wasn't renamed.
+IMESSAGE_PERSONAL_CHANNEL_KEY = "imessage_personal"
+IMESSAGE_PERSONAL_PROVIDER = channel_lane_contract_service.assert_personal_gateway_channel(
+    IMESSAGE_PERSONAL_CHANNEL_KEY
+)["provider"]
+IMESSAGE_PERSONAL_RECHECK_CAPABILITY = "channel.imessage.personal.recheck"
+IMESSAGE_PERSONAL_INSTALL_CAPABILITY = "channel.imessage.personal.install"
+
 LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
     "signal_personal": {"provider": "signal_local_bridge", "label": "Signal"},
     "imessage_personal": {"provider": "bluebubbles_local_bridge", "label": "iMessage"},
@@ -2890,6 +2905,115 @@ async def send_local_bridge_personal_message(
         metadata={"dispatch_result": dispatch_result},
     )
     return delivered or outbound
+
+
+async def recheck_imessage_personal_gateway(
+    *,
+    gateway_id: str,
+    registration: Dict[str, Any],
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Live, on-demand re-probe of the imsg bridge on a paired gateway.
+
+    Unlike get_gateway_personal_channel_surfaces() (which reads the LAST
+    health snapshot the gateway pushed on its own connect/disconnect —
+    see sync path: ImsgIMessagePersonalChannelRuntime.getHealthSnapshot ->
+    PersonalChannelRuntimeRegistry.publishRegistryState ->
+    gateway_protocol_service's state_update handler ->
+    metadata.personal_channel_health), this dispatches a live tool-invoke
+    round trip to the gateway RIGHT NOW and returns its fresh per-stage
+    probe result directly in the response. This is what the setup panel's
+    "Re-check" button calls after the user grants Full Disk Access or
+    installs imsg, so the panel doesn't have to wait for the next gateway
+    heartbeat/reconnect to see the fix take effect.
+    """
+    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
+    channel_lane_contract_service.assert_personal_gateway_channel(
+        IMESSAGE_PERSONAL_CHANNEL_KEY,
+        IMESSAGE_PERSONAL_PROVIDER,
+    )
+    run_id = f"gateway-imessage-recheck-{uuid4().hex[:12]}"
+    trace_id = f"gateway-imessage-recheck-{uuid4().hex[:12]}"
+    _enforce_personal_gateway_config_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        registration=registration,
+        capability_id=IMESSAGE_PERSONAL_RECHECK_CAPABILITY,
+        run_id=run_id,
+        trace_id=trace_id,
+    )
+    execution = await gateway_execution_service.execute_tool_via_gateway(
+        gateway_id=str(gateway_id or "").strip(),
+        capability_id=IMESSAGE_PERSONAL_RECHECK_CAPABILITY,
+        arguments={},
+        run_id=run_id,
+        trace_id=trace_id,
+        workspace_id=str(registration.get("workspace_id") or "").strip(),
+        agent_scope="sage",
+    )
+    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
+    return {
+        "gateway_id": str(gateway_id or "").strip(),
+        "channel_key": IMESSAGE_PERSONAL_CHANNEL_KEY,
+        **secret_redaction_service.sanitize_mapping(result),
+    }
+
+
+async def install_imessage_imsg_gateway(
+    *,
+    gateway_id: str,
+    registration: Dict[str, Any],
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Auto-install `imsg` on the paired Mac via Homebrew, run from the
+    gateway process itself so the user never opens a terminal.
+
+    Why this is safe to trigger from the gateway (per the setup panel's
+    design doc): the gateway already runs as the signed-in Mac user and
+    already spawns `imsg` subprocesses directly for the RPC bridge, so one
+    more well-known Homebrew formula install (`brew install
+    steipete/tap/imsg` — the exact command from OpenClaw's own imsg setup
+    docs) under that same already-trusted local process does not cross into
+    a new trust boundary. It is still gated behind an explicit button click
+    in the panel (never run automatically), and the manual command is
+    always ALSO shown in the UI (see IMessageSetupPanel.tsx) as a
+    copy-pasteable fallback regardless of whether this succeeds — e.g. a Mac
+    without Homebrew, where the gateway-side run reports brewFound: false.
+
+    A slower timeout than the default tool-invoke window: a cold Homebrew
+    tap clone (or a source build with no bottle for this macOS/arch) can
+    run for a few minutes, longer than the platform's normal 120s
+    interactive-tool budget.
+    """
+    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
+    channel_lane_contract_service.assert_personal_gateway_channel(
+        IMESSAGE_PERSONAL_CHANNEL_KEY,
+        IMESSAGE_PERSONAL_PROVIDER,
+    )
+    run_id = f"gateway-imessage-install-{uuid4().hex[:12]}"
+    trace_id = f"gateway-imessage-install-{uuid4().hex[:12]}"
+    _enforce_personal_gateway_config_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        registration=registration,
+        capability_id=IMESSAGE_PERSONAL_INSTALL_CAPABILITY,
+        run_id=run_id,
+        trace_id=trace_id,
+    )
+    execution = await gateway_execution_service.execute_tool_via_gateway(
+        gateway_id=str(gateway_id or "").strip(),
+        capability_id=IMESSAGE_PERSONAL_INSTALL_CAPABILITY,
+        arguments={},
+        run_id=run_id,
+        trace_id=trace_id,
+        workspace_id=str(registration.get("workspace_id") or "").strip(),
+        agent_scope="sage",
+        timeout_seconds=280,
+    )
+    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
+    return {
+        "gateway_id": str(gateway_id or "").strip(),
+        "channel_key": IMESSAGE_PERSONAL_CHANNEL_KEY,
+        **secret_redaction_service.sanitize_mapping(result),
+    }
 
 
 async def send_whatsapp_personal_message(

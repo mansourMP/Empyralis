@@ -246,6 +246,27 @@ export async function setupWhatsAppPersonalChannel(
   return parseJsonResponse(res);
 }
 
+// One row of ImsgStagedProbeResult (empyralis-gateway/src/bridges/
+// imsg-imessage-client.ts) as it arrives over the wire: gateway
+// getHealthSnapshot() -> personalChannelHealthToStatePayload() ->
+// gateway.state_update WS frame -> gateway_protocol_service.py's
+// metadata.personal_channel_health -> personal_channels_service.py's
+// get_gateway_personal_channel_surfaces() (health: sanitize_mapping(health),
+// passed through opaquely) -> this item's `health.probe`. See
+// IMessageSetupPanel.tsx for the stage-by-stage UI this feeds.
+export interface ImsgProbeStageStatus {
+  state: "pass" | "fail" | "blocked";
+  error?: string;
+}
+
+export interface ImsgStagedProbe {
+  checkedAt?: string;
+  binary: ImsgProbeStageStatus;
+  rpc: ImsgProbeStageStatus;
+  fullDiskAccess: ImsgProbeStageStatus & { isFullDiskAccessError?: boolean };
+  privateApi: ImsgProbeStageStatus & { checked?: boolean };
+}
+
 export interface GatewayPersonalChannelSurfaceItem {
   channel_key: string;
   label: string;
@@ -257,6 +278,16 @@ export interface GatewayPersonalChannelSurfaceItem {
   connected_identity: string | null;
   detail: string | null;
   next_step: string | null;
+  // Present for every channel that publishes a health snapshot (all of
+  // them); only iMessage's runtime currently attaches `probe`.
+  health?: {
+    status?: string;
+    connected?: boolean;
+    running?: boolean;
+    last_error?: string | null;
+    issues?: string[];
+    probe?: ImsgStagedProbe;
+  } | null;
 }
 
 // Local-bridge channels (iMessage/Signal/WeChat) have no phone/code/QR
@@ -307,6 +338,49 @@ export function useGatewayPersonalChannelSurfaces(gatewayId: string | null) {
   }, [gatewayId, refresh]);
 
   return { items, loading, refresh };
+}
+
+// iMessage-only live actions — see server_modules/routes_personal_channels.py
+// (recheck_imessage_personal_gateway / install_imessage_imsg_gateway) and
+// their doc comments for why these are live tool-invoke round trips rather
+// than reads of the cached surfaces list above. Both resolve with a fresh
+// `probe` object shaped like ImsgStagedProbe (nested under `result.probe` for
+// recheck, `result.install` + `result.manual_command` for install).
+export interface ImessageRecheckResult {
+  gateway_id: string;
+  channel_key: string;
+  probe?: ImsgStagedProbe;
+}
+
+export interface ImessageInstallResult {
+  gateway_id: string;
+  channel_key: string;
+  install?: {
+    ok: boolean;
+    brewFound: boolean;
+    stdout?: string;
+    stderr?: string;
+    error?: string;
+  };
+  manual_command?: string;
+}
+
+export async function recheckImessagePersonalChannel(gatewayId: string): Promise<ImessageRecheckResult> {
+  const res = await fetch(`/api/personal-channels/imessage/gateways/${encodeURIComponent(gatewayId)}/recheck`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+  });
+  return parseJsonResponse(res);
+}
+
+export async function installImsgViaHomebrew(gatewayId: string): Promise<ImessageInstallResult> {
+  const res = await fetch(`/api/personal-channels/imessage/gateways/${encodeURIComponent(gatewayId)}/install`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+  });
+  return parseJsonResponse(res);
 }
 
 export async function disconnectPersonalChannel(

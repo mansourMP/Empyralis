@@ -90,7 +90,7 @@ function readPositiveInt(value: string | undefined, fallback: number): number {
 const LOCAL_BRIDGE_TYPING_KEEPALIVE_MS = 3_000;
 const LOCAL_BRIDGE_TYPING_MAX_TTL_MS = 60_000;
 
-function buildLocalBridgeManifest(config: LocalBridgeRuntimeConfig): PersonalChannelCapabilityManifest {
+export function buildLocalBridgeManifest(config: LocalBridgeRuntimeConfig): PersonalChannelCapabilityManifest {
   return {
     channelKey: config.channelKey,
     label: config.label,

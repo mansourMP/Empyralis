@@ -65,6 +65,13 @@ export interface PersonalChannelHealthSnapshot {
   lastEventAt?: string;
   lastError?: string;
   issues?: string[];
+  /** Optional per-runtime staged-probe detail (currently only iMessage's
+   *  ImsgIMessagePersonalChannelRuntime populates this — see
+   *  channels/imsg-imessage-runtime.ts and bridges/imsg-imessage-client.ts's
+   *  ImsgStagedProbeResult). Passed through opaquely here so a runtime can
+   *  attach whatever shape its own setup UI needs without widening this
+   *  shared interface's other fields for every channel. */
+  probe?: Record<string, unknown>;
 }
 
 export interface PersonalChannelRuntime {
@@ -126,6 +133,7 @@ export function personalChannelHealthToStatePayload(
     last_event_at: snapshot.lastEventAt,
     last_error: snapshot.lastError,
     issues: snapshot.issues ?? [],
+    ...(snapshot.probe ? { probe: snapshot.probe } : {}),
   };
 }
 

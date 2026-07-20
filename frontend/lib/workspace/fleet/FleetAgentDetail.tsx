@@ -1204,6 +1204,7 @@ function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId
 
 // ── Channels ────────────────────────────────────────────────────────────────
 
+import { IMessageSetupPanel } from "./IMessageSetupPanel";
 import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
 import {
   isPersonalChannelStatusActive,
@@ -1252,7 +1253,7 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
     { key: "full_account", label: "Full account", body: "This agent's own Signal, via a signal-cli bridge running on hardware you control as this agent's gateway. Requires a real signal-cli install — there is no cloud path for Signal.", real: true },
   ],
   imessage_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own iMessage, via a Mac running BlueBubbles Server as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage.", real: true },
+    { key: "full_account", label: "Full account", body: "This agent's own iMessage, via imsg — a small CLI that talks to Messages.app directly on a Mac running as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage. Setup (installing imsg, checking Full Disk Access) happens right here, no terminal required.", real: true },
   ],
   wechat_personal: [
     { key: "full_account", label: "Full account", body: "This agent's own WeChat, via a real session on this agent's gateway. WeChat has no official API to build against, so this bridge is rougher than the others and may not hold over time.", real: true },
@@ -1264,9 +1265,13 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
 // the user configures themselves. This shows the REAL health snapshot for
 // one channel_key on one gateway; there is no client-invented "connected"
 // state, and no button that claims to "connect" anything.
+//
+// iMessage is the one exception as of the imsg-based setup panel
+// (IMessageSetupPanel.tsx) — it has its own no-gateway copy inline, since
+// unlike Signal/WeChat its setup (installing imsg, checking Full Disk
+// Access) genuinely does happen in-app once a gateway exists.
 const LOCAL_BRIDGE_NO_GATEWAY_HINT: Record<string, string> = {
   signal_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a signal-cli bridge.",
-  imessage_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a BlueBubbles Server on that Mac.",
   wechat_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a WeChat bridge.",
 };
 
@@ -1880,13 +1885,16 @@ export function ChannelsTab({
                 </div>
               )}
 
-              {/* iMessage: no phone/code/QR step of its own — the bridge lives on
-                   a Mac the user runs themselves, configured via env vars on this
-                   agent's gateway. The only honest thing to show is real bridge
-                   health, not a fake "connect" button. */}
+              {/* iMessage: unlike Signal/WeChat, setup genuinely happens in-app —
+                   imsg runs on this agent's own gateway Mac, and the gateway's
+                   layered probe (binary / rpc / Full Disk Access / private API)
+                   is surfaced live with inline fixes and a Re-check button. The
+                   one truly manual step is Full Disk Access, which macOS will
+                   not let any process grant to itself — see
+                   IMessageSetupPanel.tsx. */}
               {activePlatform.id === "imessage_personal" && activeDoor?.key === "full_account" && (
                 <div style={{ marginTop: 12 }}>
-                  <LocalBridgeChannelStatus channelKey="imessage_personal" gatewayId={agentGatewayId} />
+                  <IMessageSetupPanel gatewayId={agentGatewayId} />
                 </div>
               )}
 
