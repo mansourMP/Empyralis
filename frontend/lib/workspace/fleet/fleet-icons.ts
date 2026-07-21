@@ -124,3 +124,22 @@ const RAW_CONNECTOR_ICONS: Record<string, string> = {
 // per-call-site changes.
 export const CHANNEL_ICONS: Record<string, string> = withVersion(RAW_CHANNEL_ICONS);
 export const CONNECTOR_ICONS: Record<string, string> = withVersion(RAW_CONNECTOR_ICONS);
+
+// Short human label per channel key, keyed the same as CHANNEL_ICONS above —
+// used wherever a channel key needs a name for accessibility (an icon's
+// title/tooltip) rather than the full connect-flow copy CHANNEL_GRID_PLATFORMS
+// (FleetAgentDetail.tsx) carries per platform.
+export const CHANNEL_LABELS: Record<string, string> = {
+  sage_telegram_hosted: "Telegram",
+  telegram_personal: "Telegram",
+  telegram_bot: "Telegram",
+  slack: "Slack",
+  discord_bot: "Discord",
+  whatsapp_personal: "WhatsApp",
+  whatsapp_twilio: "WhatsApp",
+  signal_personal: "Signal",
+  imessage_personal: "iMessage",
+  wechat_personal: "WeChat",
+  apple_messages_business: "iMessage",
+  email: "Email",
+};

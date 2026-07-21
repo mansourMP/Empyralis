@@ -9,8 +9,16 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
 import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
 import { deriveStatus, timeAgo, tintForAgent, TINTS } from "./fleet-presentation";
-import { StatusChip, StatusDot } from "./fleet-indicators";
+import { StatusChip, StatusDot, AgentSigil } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
+import { CHANNEL_ICONS, CHANNEL_LABELS } from "./fleet-icons";
+import {
+  type FleetGateway,
+  gatewayId,
+  hardwarePlacementIsBrainBound,
+  resolveHardwarePlacement,
+  useWorkspaceGateways,
+} from "./gateway-box-picker";
 
 const LAST_VIEWED_KEY = "fleet:list-last-viewed-agent";
 
@@ -72,14 +80,79 @@ function brainLabel(config?: Record<string, any>): string {
   return "";
 }
 
-function channelAbbr(c: string): string {
-  const l = c.toLowerCase();
-  if (l.includes("telegram")) return "TG";
-  if (l.includes("slack")) return "SL";
-  if (l.includes("discord")) return "DC";
-  if (l.includes("whatsapp")) return "WA";
-  if (l.includes("wechat")) return "WC";
-  return c.slice(0, 2).toUpperCase();
+// agent.channel is fleet_tools.py's _fetch_agent_channels() output: the
+// agent's first enabled channel_key verbatim (the same keys CHANNEL_ICONS is
+// keyed by — sage_telegram_hosted, slack, discord_bot, ...), plus a
+// " +N" suffix when the agent has more than one enabled channel. Split those
+// back apart so the icon lookup gets a clean key and the "+N" renders as its
+// own compact pill rather than getting swallowed into the icon's alt text.
+function parseChannelField(raw: string): { key: string; extra: number } {
+  const trimmed = (raw || "").trim();
+  const m = trimmed.match(/^(.*?)\s+\+(\d+)$/);
+  if (m) return { key: m[1].trim(), extra: parseInt(m[2], 10) || 0 };
+  return { key: trimmed, extra: 0 };
+}
+
+/** Channels cell contents — the brand icon for the agent's primary channel
+ *  (falling back to a 2-letter chip for a channel_key CHANNEL_ICONS doesn't
+ *  have an asset for yet, so an unrecognized key never renders blank), plus
+ *  a "+N" pill when _fetch_agent_channels folded more enabled channels into
+ *  this one string. The list API only ever returns that one key + a count,
+ *  not the full set, so a true icon-per-channel row isn't possible from this
+ *  data — "+N" is the honest compact stand-in for "and N more". */
+function ChannelCell({ channel }: { channel: string }) {
+  const trimmed = (channel || "").trim();
+  if (!trimmed) return <span className="fleet-cell-muted">None</span>;
+  const { key, extra } = parseChannelField(trimmed);
+  const icon = CHANNEL_ICONS[key];
+  const label = CHANNEL_LABELS[key] || key;
+  return (
+    <>
+      {icon
+        ? <img src={icon} alt="" width={16} height={16} title={label} />
+        : <span className="fleet-channel-chip" title={label}>{key.slice(0, 2).toUpperCase()}</span>}
+      {extra > 0 && (
+        <span className="fleet-channel-chip" title={`+${extra} more channel${extra === 1 ? "" : "s"}`}>
+          +{extra}
+        </span>
+      )}
+    </>
+  );
+}
+
+// hardware_access ("none" | "gateway" | "vps", legacy "all" normalized to
+// "gateway" elsewhere) is the real placement enum the Hardware tab's picker
+// writes (HardwareTab.tsx's PLACEMENT_OPTIONS: "Cloud only" / "Paired
+// computer" / "Cloud VPS"). For a brain-bound agent (cli_subscription/local
+// model — see hardwarePlacementIsBrainBound) placement instead follows
+// model_config.gateway_binding, same as resolveHardwarePlacement's own
+// brain-priority rule. Either way this collapses to the same short word the
+// placement wizard's three kinds map to: cloud-only -> "Cloud", a Gateway
+// box that IS a cloud VPS (FleetGateway.hardware_kind === "cloud_vps") ->
+// "VPS", any other paired computer -> "Device". The full-precision fact
+// (the real gateway display_name, or "Cloud", or a disconnected/unpaired
+// explainer) is resolveHardwarePlacement's own `label` — never recomputed
+// here, just reused as this badge's hover title so the two never disagree.
+function resolvePlacementBadge(
+  agent: FleetAgent,
+  gateways: FleetGateway[],
+): { short: "Cloud" | "VPS" | "Device"; full: string } {
+  const placement = resolveHardwarePlacement(
+    agent.hardware_access,
+    agent.preferred_gateway_id,
+    gateways,
+    agent.model_config,
+  );
+  if (placement.tone === "cloud") return { short: "Cloud", full: placement.label };
+  let short: "VPS" | "Device" = "Device";
+  if (hardwarePlacementIsBrainBound(agent.model_config)) {
+    const brainGatewayId = String(agent.model_config?.gateway_binding || "").trim();
+    const match = brainGatewayId ? gateways.find((g) => gatewayId(g) === brainGatewayId) : undefined;
+    short = match?.hardware_kind === "cloud_vps" ? "VPS" : "Device";
+  } else {
+    short = (agent.hardware_access || "").toLowerCase() === "vps" ? "VPS" : "Device";
+  }
+  return { short, full: placement.label };
 }
 
 // "2m", "3h", "5d" — the compact tail from fleet-presentation's timeAgo,
@@ -275,13 +348,17 @@ function StopAgentDialog({
 }
 
 /**
- * Fleet agent list — dense, column-aligned rows on a shared 6-column grid, with
+ * Fleet agent list — dense, column-aligned rows on a shared 7-column grid, with
  * a muted header row above and no per-agent cards. Every value has a column;
  * every empty column renders a deliberate placeholder (—, None, never, $0.00,
  * "No activity yet") instead of a naked dash floating in dead space.
  *
- * Grid: Agent(1fr, min 260) · Brain(120) · Channels(120) · Last active(96,
- * right) · Cost(84, right) · Status(132, right).
+ * Grid: Agent(1fr, min 260) · Brain(120) · Placement(84) · Channels(120) ·
+ * Last active(96, right) · Cost(84, right) · Status(132, right). Placement's
+ * short word (Cloud/VPS/Device — see resolvePlacementBadge) carries the real
+ * hardware name as its hover title, same as every other title-attribute
+ * tooltip in this file (e.g. the stop/resume button below) — no separate
+ * popover component for one fact.
  *
  * Keyboard: roving tabindex across rows — ArrowUp/Down and j/k move focus,
  * Home/End jump to the ends, Enter/Space open (native button semantics).
@@ -310,6 +387,11 @@ export function AgentsList({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [activeRowId, setActiveRowId] = useState<string | null>(null);
+  // Same paired-Gateway fetch the Hardware tab and HardwareTab's own
+  // placement picker use — needed here only to turn a placement-bound
+  // agent's raw hardware_access/gateway_binding into resolvePlacementBadge's
+  // short word + real hardware name (see that function below).
+  const { gateways } = useWorkspaceGateways(workspaceId);
   const restoreIdRef = useRef<string | null>(null);
   if (restoreIdRef.current === null) restoreIdRef.current = consumeLastViewedAgent();
   const consumedFocusRef = useRef(false);
@@ -367,6 +449,7 @@ export function AgentsList({
       agent={a}
       index={index}
       cost={costByAgent.get(a.agent_id) || 0}
+      gateways={gateways}
       onSelect={onSelect}
       onStoppedChanged={onAgentStoppedChanged}
       tabIndex={a.agent_id === rovingId ? 0 : -1}
@@ -410,6 +493,7 @@ export function AgentsList({
       <div className="fleet-agents-list-header" aria-hidden>
         <span>Agent</span>
         <span className="fleet-col-brain">Brain</span>
+        <span className="fleet-col-placement">Placement</span>
         <span className="fleet-col-channels">Channels</span>
         <span className="is-right fleet-col-last-active">Last active</span>
         <span className="is-right">Cost</span>
@@ -425,6 +509,7 @@ function AgentRow({
   agent,
   index,
   cost,
+  gateways,
   onSelect,
   onStoppedChanged,
   tabIndex,
@@ -433,6 +518,7 @@ function AgentRow({
   agent: FleetAgent;
   index: number;
   cost: number;
+  gateways: FleetGateway[];
   onSelect: (agentId: string, projectId: string) => void;
   onStoppedChanged?: () => void;
   tabIndex: number;
@@ -453,7 +539,6 @@ function AgentRow({
   // both problems.
   const presetRaw = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
   const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
-  const initial = (agent.label || "A").charAt(0).toUpperCase();
   const tint = tintForAgent(agent, index);
   const avatarStyle = {
     "--tile-bg": TINTS[tint].bg,
@@ -461,6 +546,7 @@ function AgentRow({
   } as CSSProperties;
   const brain = brainLabel(agent.model_config);
   const channel = (agent.channel || "").trim();
+  const placement = resolvePlacementBadge(agent, gateways);
   const relative = compactAgo(agent.last_activity);
   // The workspace operator (Sage) is never deletable (see
   // fleet_tools.fleet_delete_agent's own guard) — don't even offer the
@@ -551,8 +637,9 @@ function AgentRow({
       onKeyDown={handleKey}
     >
       <span className="fleet-agent-cell-agent">
-        <StatusDot tone={st.tone} size={8} />
-        <span className="fleet-agent-avatar" style={avatarStyle}>{initial}</span>
+        <span className="fleet-agent-avatar" style={avatarStyle}>
+          <AgentSigil seed={agent.agent_id} size={16} />
+        </span>
         <span className="fleet-agent-cell-agent-text">
           <span className="fleet-agent-cell-agent-line1">
             <span className="fleet-agent-name">{agent.label || "Unnamed agent"}</span>
@@ -566,10 +653,12 @@ function AgentRow({
         {brain || "—"}
       </span>
 
+      <span className="fleet-agent-cell-placement fleet-col-placement">
+        <span className="fleet-channel-chip" title={placement.full}>{placement.short}</span>
+      </span>
+
       <span className="fleet-agent-cell-channels fleet-col-channels">
-        {channel
-          ? <span className="fleet-channel-chip">{channelAbbr(channel)}</span>
-          : <span className="fleet-cell-muted">None</span>}
+        <ChannelCell channel={channel} />
       </span>
 
       <span className={`fleet-agent-cell-right fleet-col-last-active${relative ? "" : " fleet-cell-muted"}`}>
@@ -617,7 +706,6 @@ function AgentRow({
           for room in a 2-line row the contract didn't spec one into. */}
       <div className="fleet-agent-row-mobile">
         <div className="fleet-agent-row-mobile-line1">
-          <StatusDot tone={st.tone} size={8} />
           <span className="fleet-agent-row-mobile-name">{agent.label || "Unnamed agent"}</span>
           <StatusChip tone={st.tone} label={st.label} />
         </div>

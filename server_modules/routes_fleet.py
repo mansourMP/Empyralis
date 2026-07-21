@@ -237,6 +237,7 @@ class FleetCreateAgentRequest(BaseModel):
     name: str = ""  # optional — server assigns a pool name when absent (see agent_name_pool.py)
     instructions: str = ""
     purpose_preset: str = ""
+    audience: str = ""  # "owner" | "external" — facing flag for the create-agent wizard; derived from purpose_preset when omitted (see fleet_tools._AUDIENCE_BY_PURPOSE_PRESET)
     capability_preset: str = "standard"  # Phase 5B: knowledge | standard
     project_id: str = ""  # Phase 7B: assign to a project at creation
 
@@ -260,6 +261,7 @@ async def fleet_create_agent_route(
             name=body.name,
             instructions=body.instructions,
             purpose_preset=body.purpose_preset,
+            audience=body.audience,
             capability_preset=body.capability_preset,
             project_id=body.project_id,
         )
