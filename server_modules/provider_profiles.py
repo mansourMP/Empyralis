@@ -3170,6 +3170,7 @@ def _rotation_pool_candidates(
     tenant_id: Optional[str],
     run_id: Optional[str],
     seen_labels: Set[str],
+    model_hint: Any = None,
 ) -> List[Dict[str, Any]]:
     """Gap 1.5 -- API key rotation on rate-limit.
 
@@ -3221,7 +3222,7 @@ def _rotation_pool_candidates(
             )
         except Exception:
             continue
-        if openai_compatible_provider_config_error(canonical_provider, credentials):
+        if openai_compatible_provider_config_error(canonical_provider, credentials, model=model_hint):
             continue
         pool.append(
             {
@@ -3280,6 +3281,7 @@ def _build_provider_credential_candidates(context: Dict[str, Any], metadata: Dic
         candidates.extend(
             _rotation_pool_candidates(
                 canonical_provider, workspace_id, str(credential_id), tenant_id, run_id, seen_labels,
+                model_hint=context.get("model") or metadata.get("model"),
             )
         )
 
