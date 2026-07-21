@@ -2707,6 +2707,13 @@ async def handle_gateway_websocket(
                 native_runtime = gateway_inventory_service.sanitize_native_runtime(
                     payload.get("native_runtime")
                 )
+                # Live CPU/memory/GPU/temperature telemetry (empyralis-gateway/
+                # src/health/resource-metrics.ts) — additive, best-effort;
+                # sanitize_resources() degrades any malformed/missing field to
+                # None rather than raising or fabricating a value.
+                resources = gateway_inventory_service.sanitize_resources(
+                    payload.get("resources")
+                )
                 _enforce_gateway_session_mutation(
                     registration=registration,
                     session=session,
@@ -2730,6 +2737,7 @@ async def handle_gateway_websocket(
                         "queue_depth_summary": payload.get("queue_depth_summary"),
                         "service_inventory": service_inventory,
                         "native_runtime": native_runtime,
+                        "resources": resources,
                         "device_trust_state": str(binding["device_link"].get("trust_state") or "verified").strip()
                         or "verified",
                     },

@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 from server_modules import secret_redaction_service
 
 
 SERVICE_STATUSES = {"ready", "degraded", "offline", "missing", "unknown", "blocked"}
+# Live hardware telemetry contract (empyralis-gateway/src/health/
+# resource-metrics.ts's GatewayResourceMetrics) attached to every
+# gateway.heartbeat frame. Percentages are clamped to [0, 100]; byte counts
+# to >= 0. `None` means "this platform/box can't be sampled" and is passed
+# through as-is -- it is never coerced into 0 or fabricated.
+RESOURCE_PERCENT_FIELDS = ("cpu_pct", "gpu_pct")
+RESOURCE_BYTE_FIELDS = ("memory_used_bytes", "memory_total_bytes")
+RESOURCE_UNBOUNDED_NUMERIC_FIELDS = ("temperature_c",)
 MAX_SERVICE_ITEMS = 50
 MAX_TEXT_LENGTH = 240
 PERMISSION_STATES = {"granted", "promptable", "denied", "restricted", "unknown", "not_applicable"}
@@ -100,6 +109,63 @@ def sanitize_native_runtime(value: Any) -> Dict[str, Any]:
         "desktop_session": desktop_session,
         "system_service_mode": system_service_mode,
     }
+
+
+def _resource_number(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def sanitize_resources(value: Any) -> Dict[str, Any]:
+    """Sanitizes the `resources` block a gateway.heartbeat frame carries —
+    see empyralis-gateway/src/health/resource-metrics.ts's
+    GatewayResourceMetrics for the source contract this mirrors. Never
+    raises: any malformed/missing field degrades to `None`, matching the
+    gateway's own "null means can't sample this" rule rather than
+    fabricating or defaulting to zero.
+    """
+    if not isinstance(value, dict):
+        return {}
+    result: Dict[str, Any] = {}
+    for key in RESOURCE_PERCENT_FIELDS:
+        number = _resource_number(value.get(key))
+        result[key] = None if number is None else max(0.0, min(100.0, number))
+    for key in (*RESOURCE_BYTE_FIELDS, *RESOURCE_UNBOUNDED_NUMERIC_FIELDS):
+        number = _resource_number(value.get(key))
+        if number is not None and key in RESOURCE_BYTE_FIELDS:
+            number = max(0.0, number)
+        result[key] = number
+    sampled_at = _public_text(value.get("sampled_at"), "")
+    result["sampled_at"] = sampled_at or None
+    return result
+
+
+def resources_from_metadata(*sources: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Reads the most recent sanitized `resources` reading out of gateway
+    session/registration metadata (touch_gateway_session merges whatever the
+    gateway.heartbeat handler passed it — see gateway_protocol_service.py).
+    Sources are checked in order; the first one carrying at least one
+    non-null field wins, same pattern as native_runtime_from_metadata just
+    below. A plain truthiness check on the sanitized dict would be wrong
+    here: sanitize_resources() always returns all six keys once its input is
+    a dict at all (even `{}`), so an all-None reading is still a "truthy"
+    dict — checking .values() is what actually distinguishes "no real
+    reading" from "a real reading that happens to be all null."
+    """
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        resources = sanitize_resources(source.get("resources"))
+        if any(item is not None for item in resources.values()):
+            return resources
+    return {}
 
 
 def _capability_list(value: Any, *, limit: int = 100) -> List[str]:
