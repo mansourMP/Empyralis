@@ -48,7 +48,8 @@ _SENSITIVE_VALUE_PATTERNS = (
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]+\b"), "[redacted-secret]"),
     (re.compile(r'(?i)("private_key"\s*:\s*")[^"]+(")'), r'\1[redacted-private-key]\2'),
     (re.compile(r'(?i)("auth"\s*:\s*")[A-Za-z0-9+/=]{8,}(")'), r'\1[redacted-secret]\2'),
-    (re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\s*=\s*[^\s&]+"), r"\1=[redacted-secret]"),
+    (re.compile(r"(?i)\b(api[_-]?key|token|secret|password|pwd)\s*[:=]\s*[^\s&\[\]]+"), r"\1=[redacted-secret]"),
+    (re.compile(r"(?i)\b(cvv2?|cvc2?|security code)\s*[:=]\s*\d{3,4}\b"), r"\1: [redacted-cvc]"),
     (re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)"), "[redacted-phone]"),
 )
 

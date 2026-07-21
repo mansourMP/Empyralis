@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from server_modules import secret_redaction_service
+
 
 # ── Path resolution ─────────────────────────────────────────────────────────
 
@@ -176,11 +178,21 @@ async def memory_write(
         )
         safe_path = _resolve_safe_path(memory_dir, path)
 
+        # Security: never let a live secret/credential reach durable
+        # long-term memory verbatim. Any API key, bearer/JWT token,
+        # password, or card-number-like span embedded in the incoming
+        # content is replaced with a placeholder BEFORE it touches disk —
+        # this is the only gate on this path, so it runs unconditionally,
+        # ahead of the append/overwrite branch below. Reuses the same
+        # redactor used for transparency events, activity ledger entries,
+        # and gateway payloads elsewhere in the codebase.
+        clean_content = secret_redaction_service.redact_text(str(content)).strip()
+
         if write_mode == "append" and safe_path.exists():
             existing = safe_path.read_text(encoding="utf-8")
-            new_content = existing.rstrip("\n") + "\n" + str(content).strip() + "\n"
+            new_content = existing.rstrip("\n") + "\n" + clean_content + "\n"
         else:
-            new_content = str(content).strip() + "\n"
+            new_content = clean_content + "\n"
 
         safe_path.parent.mkdir(parents=True, exist_ok=True)
         safe_path.write_text(new_content, encoding="utf-8")
