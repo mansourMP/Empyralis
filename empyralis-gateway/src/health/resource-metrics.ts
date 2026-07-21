@@ -111,16 +111,101 @@ async function sampleCpuPct(): Promise<number | null> {
 }
 
 /**
- * memory_used/total_bytes: os.totalmem()/os.freemem() are reliable on every
- * platform Node supports. Caveat (documented here, not hidden): on macOS
- * "free" memory as reported by the kernel excludes pages the OS is holding
- * as reclaimable file-backed cache, so os.freemem() tends to read low and
- * used = total - free correspondingly reads a bit high vs. Activity
- * Monitor's "Memory Used" gauge. That's an accepted best-effort
- * approximation, not a bug — a fully accurate figure needs `vm_stat`
- * parsing, which is unnecessary complexity for a live gauge.
+ * Parsed subset of `vm_stat`'s page accounting we need for a realistic
+ * macOS "used" figure. Page counts are printed with a trailing "." by
+ * `vm_stat`, e.g. "Pages active:                 410479.".
  */
-function sampleMemory(): { used: number | null; total: number | null } {
+interface DarwinVmStatPages {
+  pageSize: number;
+  active: number;
+  wiredDown: number;
+  occupiedByCompressor: number;
+}
+
+function parseVmStatOutput(stdout: string): DarwinVmStatPages | null {
+  const pageSizeMatch = stdout.match(/page size of (\d+) bytes/);
+  if (!pageSizeMatch) {
+    return null;
+  }
+  const pageSize = Number(pageSizeMatch[1]);
+  if (!Number.isFinite(pageSize) || pageSize <= 0) {
+    return null;
+  }
+  const extractPageCount = (label: string): number | null => {
+    const match = stdout.match(new RegExp(`${label}:\\s*(\\d+)\\.`));
+    if (!match) {
+      return null;
+    }
+    const value = Number(match[1]);
+    return Number.isFinite(value) ? value : null;
+  };
+  const active = extractPageCount("Pages active");
+  const wiredDown = extractPageCount("Pages wired down");
+  const occupiedByCompressor = extractPageCount("Pages occupied by compressor");
+  if (active === null || wiredDown === null || occupiedByCompressor === null) {
+    return null;
+  }
+  return { pageSize, active, wiredDown, occupiedByCompressor };
+}
+
+/**
+ * macOS-only realistic memory reading via `vm_stat` (the standard macOS
+ * tool — same one Activity Monitor's numbers are derived from). The kernel
+ * classifies pages as free / active / inactive / speculative / wired /
+ * purgeable / compressed; macOS deliberately keeps most "unused" RAM
+ * occupied as reclaimable file-backed cache, so it is never truly free.
+ * "Used" here is (active + wired down + occupied by compressor) — the
+ * pages that are NOT reclaimable on demand — which is what Activity
+ * Monitor's "Memory Used" gauge approximates, unlike os.totalmem() -
+ * os.freemem() which counts all of that reclaimable cache as "used" and
+ * reads ~95-99% on a healthy Mac.
+ * Same short-timeout + try/catch pattern as sampleGpuPct/sampleTemperatureC
+ * below: any failure (binary missing, timeout, unparsable output) returns
+ * null so the caller falls back to the os.freemem() approximation instead
+ * of throwing or reporting a stale/fabricated number.
+ */
+async function sampleMemoryDarwin(): Promise<{ used: number; total: number } | null> {
+  try {
+    const total = os.totalmem();
+    if (!Number.isFinite(total) || total <= 0) {
+      return null;
+    }
+    const result = await withTimeout(runCommand("vm_stat", [], PROBE_TIMEOUT_MS), PROBE_TIMEOUT_MS + 250);
+    if (!result.ok) {
+      return null;
+    }
+    const pages = parseVmStatOutput(result.stdout);
+    if (!pages) {
+      return null;
+    }
+    const usedPages = pages.active + pages.wiredDown + pages.occupiedByCompressor;
+    const used = usedPages * pages.pageSize;
+    if (!Number.isFinite(used) || used < 0) {
+      return null;
+    }
+    return { used: Math.min(used, total), total };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * memory_used/total_bytes: os.totalmem()/os.freemem() are reliable on every
+ * platform Node supports EXCEPT macOS, where "free" memory as reported by
+ * the kernel excludes pages the OS is holding as reclaimable file-backed
+ * cache — see sampleMemoryDarwin() above for the accurate `vm_stat`-based
+ * reading used there instead. Linux/Windows keep the plain total-free
+ * calculation, which is accurate on those platforms.
+ */
+async function sampleMemory(): Promise<{ used: number | null; total: number | null }> {
+  if (process.platform === "darwin") {
+    const darwinResult = await sampleMemoryDarwin();
+    if (darwinResult) {
+      return darwinResult;
+    }
+    // vm_stat failed/timed out/was unparsable — fall through to the
+    // os.freemem() approximation below rather than reporting null.
+  }
   try {
     const total = os.totalmem();
     const free = os.freemem();
@@ -251,7 +336,7 @@ async function sampleResourceMetrics(): Promise<GatewayResourceMetrics> {
   try {
     const [cpuPct, memory, gpuPct, temperatureC] = await Promise.all([
       sampleCpuPct(),
-      Promise.resolve(sampleMemory()),
+      sampleMemory(),
       sampleGpuPct(),
       sampleTemperatureC(),
     ]);
