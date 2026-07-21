@@ -5,6 +5,7 @@ import { ArrowLeft, Check, ExternalLink, X } from 'lucide-react';
 
 import { AppButton, joinClassNames } from '@/lib/ui/primitives';
 import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
+import { CountryFlag, countryFlagEmoji, resolveRegionCountry } from '@/lib/workspace/geo/country-flag';
 
 // Fleet routes never mount WorkstationKernelProvider (the legacy workstation
 // shell it depends on is gone), so useWorkspaceServices() throws here. Talk to
@@ -1585,7 +1586,22 @@ export function CloudVpsSetupPanel({
         {step === 'region' && provider ? (
           <section className="cloud-vps-flow-modal__content">
             <div className="cloud-vps-panel__heading">
-              <h2>Choose region</h2>
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {/* Live preview of the currently selected region's flag —
+                    native <select><option> elements can only hold plain
+                    text (no nested elements), so the real <CountryFlag/>
+                    component renders here instead; each option below still
+                    gets its own flag as a plain-text emoji prefix. */}
+                <CountryFlag
+                  code={resolveRegionCountry(
+                    provider.id,
+                    selectedRegionId,
+                    visibleRegions.find((region) => region.id === selectedRegionId)?.label,
+                  )}
+                  size={18}
+                />
+                Choose region
+              </h2>
             </div>
             <label className="app-form-field">
               <span className="app-form-field__label">Region</span>
@@ -1595,11 +1611,20 @@ export function CloudVpsSetupPanel({
                 onChange={(event) => setSelectedRegionId(event.target.value)}
                 disabled={loadingRegions}
               >
-                {visibleRegions.map((region) => (
-                  <option key={region.id} value={region.id}>
-                    {`${region.label} · ${region.id}`}
-                  </option>
-                ))}
+                {visibleRegions.map((region) => {
+                  // <option> content is plain text only (browsers don't
+                  // render nested elements inside it), so the flag is the
+                  // bare emoji character here rather than <CountryFlag/> —
+                  // still a real color flag glyph on macOS/iOS, just without
+                  // the role="img"/aria-label wrapper that component adds.
+                  const flag = countryFlagEmoji(resolveRegionCountry(provider.id, region.id, region.label));
+                  const prefix = flag ? `${flag} ` : '';
+                  return (
+                    <option key={region.id} value={region.id}>
+                      {`${prefix}${region.label} · ${region.id}`}
+                    </option>
+                  );
+                })}
               </select>
               {selectedPlan?.regions?.length ? (
                 <span className="cloud-vps-panel__note">{`Available where ${selectedPlan.label} is offered.`}</span>
