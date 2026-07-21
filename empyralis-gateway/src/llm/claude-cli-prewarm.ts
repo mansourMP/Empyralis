@@ -329,6 +329,19 @@ export class ClaudeCliPrewarmPool {
     try {
       return await Promise.race([outcome, deadline]);
     } finally {
+      // If `claimed.turn` is still set here, neither a `result` line
+      // (handleLine's own retireAfterTurn path) nor the child's own
+      // "exit"/"error" handler ever cleared it — i.e. `deadline` won the
+      // race above (this turn timed out) while the child is presumably
+      // still alive. Every OTHER terminal path already tears the process
+      // down; without this, a genuinely hung `claude` child (no output,
+      // never exits) is orphaned forever — the OS process and this pool's
+      // own `liveCount` both leak permanently. See
+      // claude-cli-prewarm-hang-leak.test.ts.
+      if (claimed.turn) {
+        claimed.turn = null;
+        this.retire(claimed);
+      }
       // Refill regardless of success/failure/timeout — a bad turn on this
       // process doesn't mean the NEXT turn for this agent should also pay
       // full cold-start.

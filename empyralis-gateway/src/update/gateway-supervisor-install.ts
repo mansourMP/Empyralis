@@ -59,6 +59,49 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
+/** Bounds how long `launchctl bootstrap`/`enable` or `systemctl daemon-
+ *  reload`/`enable` may take (passed as execFile's own `timeout` option,
+ *  mirroring health/service-inventory.ts's defaultRunCommand) AND, as a
+ *  second independent backstop, how long repairGatewaySupervisorUnit()
+ *  waits on ANY registerJob callback (including test/caller-injected ones
+ *  that don't go through execFileAsync at all) before giving up on it —
+ *  see REGISTER_JOB_TIMEOUT_MS below. Without either of these, a wedged
+ *  launchctl/systemctl (stuck dbus, hung disk I/O) hangs the whole
+ *  gateway.doctor.run(repair:true) capability invocation forever, since
+ *  its only guard (health/gateway-doctor.ts) is a try/catch that can't
+ *  help a promise that never settles. */
+const OS_REGISTRATION_EXEC_TIMEOUT_MS = 15_000;
+
+/** Slightly above OS_REGISTRATION_EXEC_TIMEOUT_MS so the exec-level timeout
+ *  (when the registerJob callback IS execFileAsync-based, i.e. the real
+ *  production registrars below) gets a chance to fire and produce its own
+ *  clear error first; this is the outer backstop for any registerJob,
+ *  including ones that don't call execFile at all. */
+const REGISTER_JOB_TIMEOUT_MS = OS_REGISTRATION_EXEC_TIMEOUT_MS + 5_000;
+
+/** Races `promise` against a timer; rejects with a clear, recognizable
+ *  error if the timer wins. Never leaves a dangling handle either way —
+ *  the timer is always cleared, and it's unref'd so it can't itself keep
+ *  the process alive while waiting. */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 export type GatewaySupervisorMode = "launchd" | "systemd";
 
 export interface GatewaySupervisorUnitDefinition {
@@ -285,7 +328,20 @@ export async function repairGatewaySupervisorUnit(
   if (opts.fileState === "missing") {
     if (opts.registerJob) {
       try {
-        await opts.registerJob(opts.definition);
+        // Bounded regardless of what registerJob actually does internally
+        // -- the production registrars (createLaunchdJobRegistrar/
+        // createSystemdJobRegistrar) already pass their own execFile
+        // `timeout`, but this outer bound is what actually protects a
+        // wedged/never-settling registerJob (a hung launchctl/systemctl
+        // process execFile's own timeout somehow doesn't catch, or any
+        // other registerJob implementation) from hanging this repair --
+        // and therefore gateway.doctor.run(repair:true) -- forever. See
+        // gateway-supervisor-install-repair-hang.test.ts.
+        await withTimeout(
+          opts.registerJob(opts.definition),
+          REGISTER_JOB_TIMEOUT_MS,
+          `Registering ${opts.definition.unitPath} with the OS supervisor`,
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return {
@@ -333,7 +389,8 @@ export async function repairGatewaySupervisorUnit(
  *  callers get the real `child_process.execFile` via the default. */
 export function createLaunchdJobRegistrar(
   uid: number,
-  exec: (command: string, args: string[]) => Promise<unknown> = (command, args) => execFileAsync(command, args),
+  exec: (command: string, args: string[]) => Promise<unknown> = (command, args) =>
+    execFileAsync(command, args, { timeout: OS_REGISTRATION_EXEC_TIMEOUT_MS }),
 ): (definition: GatewaySupervisorUnitDefinition) => Promise<void> {
   return async (definition) => {
     if (definition.mode !== "launchd") {
@@ -348,7 +405,8 @@ export function createLaunchdJobRegistrar(
 /** Best-effort Linux registrar: `systemctl daemon-reload` + `enable` (never
  *  `--now`/`start` — same reasoning as the launchd registrar above). */
 export function createSystemdJobRegistrar(
-  exec: (command: string, args: string[]) => Promise<unknown> = (command, args) => execFileAsync(command, args),
+  exec: (command: string, args: string[]) => Promise<unknown> = (command, args) =>
+    execFileAsync(command, args, { timeout: OS_REGISTRATION_EXEC_TIMEOUT_MS }),
 ): (definition: GatewaySupervisorUnitDefinition) => Promise<void> {
   return async (definition) => {
     if (definition.mode !== "systemd") {

@@ -30,6 +30,14 @@ type BridgeEvent = {
  *  window needs). */
 const SENT_MESSAGE_ID_CACHE_LIMIT = 500;
 
+/** Steady retry interval used once the fast exponential-backoff cap
+ *  (DEFAULT_RECONNECT_POLICY.maxAttempts) is exhausted -- see
+ *  runSignalCliEventLoop. Long enough not to hammer a daemon that may be
+ *  down for a while, short enough that this bridge self-heals within
+ *  minutes of signal-cli actually coming back, with no operator restart
+ *  required. */
+const SSE_LONG_RETRY_INTERVAL_MS = 5 * 60_000;
+
 type JsonObject = Record<string, unknown>;
 
 export interface SignalCliBridgeOptions {
@@ -452,11 +460,15 @@ interface SignalSseState {
  *  connectSignalCliEvents' onOpen callback. Every drop -- whether the fetch
  *  itself failed or the stream just ended/closed -- is logged (never
  *  silently swallowed) and reflected in `state` before the next attempt is
- *  scheduled. Gives up (leaves `state.connected` false permanently, logging
- *  once more) only after `DEFAULT_RECONNECT_POLICY.maxAttempts` is
- *  exhausted, mirroring TelegramPersonalRuntime.scheduleReconnect's /
- *  WhatsAppPersonalRuntime.scheduleReconnect's own "reconnect_exhausted"
- *  terminal state. */
+ *  scheduled. Once `DEFAULT_RECONNECT_POLICY.maxAttempts` of fast
+ *  exponential backoff are exhausted, this NEVER permanently gives up --
+ *  unlike a terminal "reconnect_exhausted" state, it keeps retrying
+ *  forever at a bounded `SSE_LONG_RETRY_INTERVAL_MS` steady interval, the
+ *  same never-give-up-just-cap-the-delay philosophy as the cloud
+ *  ws-client's own reconnect loop (see cloud/reconnect.ts's
+ *  ReconnectBackoff, which has no maxAttempts at all -- only a capped
+ *  delay). This is what lets the bridge self-heal on its own once
+ *  signal-cli recovers, with no operator restart required. */
 async function runSignalCliEventLoop(
   signalCliBaseUrl: string,
   enqueue: (event: BridgeEvent) => void,
@@ -492,11 +504,21 @@ async function runSignalCliEventLoop(
       // finding.
       console.error(`[signal-cli-bridge] SSE event stream dropped: ${state.lastError}`);
       if (state.reconnectAttempts >= DEFAULT_RECONNECT_POLICY.maxAttempts) {
+        // Fast exponential backoff is exhausted, but this must never
+        // permanently give up (that would require an operator to restart
+        // the whole bridge process to ever hear from Signal again -- see
+        // the reliability audit's signal-cli-reconnect-exhaustion gap).
+        // Keep looping at a bounded, much longer steady interval instead;
+        // reconnect_attempts stays pinned at maxAttempts (not incremented
+        // further) while in this mode, and connectSignalCliEvents' onOpen
+        // callback resets it to 0 the moment signal-cli actually recovers.
         console.error(
-          `[signal-cli-bridge] SSE reconnect attempts exhausted (${DEFAULT_RECONNECT_POLICY.maxAttempts}); ` +
-          "giving up until this bridge process is restarted.",
+          `[signal-cli-bridge] SSE reconnect fast-retry cap (${DEFAULT_RECONNECT_POLICY.maxAttempts}) reached; ` +
+          `retrying every ${Math.round(SSE_LONG_RETRY_INTERVAL_MS / 1000)}s until signal-cli recovers ` +
+          "(bridge stays up, no operator restart required).",
         );
-        return;
+        await new Promise((resolve) => setTimeout(resolve, SSE_LONG_RETRY_INTERVAL_MS));
+        continue;
       }
       const delayMs = computeReconnectDelay(state.reconnectAttempts, DEFAULT_RECONNECT_POLICY);
       state.reconnectAttempts += 1;
@@ -599,7 +621,14 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
         // MapSignalCliReceiveOptions.sentMessageIds.
         sentMessageIds.add(externalMessageId);
         if (sentMessageIds.size > SENT_MESSAGE_ID_CACHE_LIMIT) {
-          sentMessageIds.clear();
+          // Evict oldest (Set iteration order == insertion order) rather
+          // than wiping the whole cache -- a full-wipe would drop
+          // is_reply_to_sage matching for every message sent moments ago,
+          // right as the cache fills up under normal steady-state traffic.
+          const oldest = sentMessageIds.values().next().value;
+          if (oldest !== undefined) {
+            sentMessageIds.delete(oldest);
+          }
         }
         sendJson(response, 200, {
           delivered: true,
