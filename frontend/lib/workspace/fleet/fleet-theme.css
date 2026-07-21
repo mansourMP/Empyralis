@@ -5443,7 +5443,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    Card-less, top-to-bottom surface: control bar (sigil/name/status +
    Pause/Stop), a 4-cell metric strip, then the existing .fleet-work-split
    two-pane body. All classes below are new and WorkTab-only — deliberately
-   NOT reusing .fleet-work-conv-*/.fleet-work-transcript-*/.fleet-work-msg-*,
+   NOT reusing .fleet-work-conv-*, .fleet-work-transcript-*, .fleet-work-msg-*,
    which ConversationsView.tsx (the workspace-wide Conversations page) reuses
    verbatim for its own, simpler rows; changing those would have silently
    changed that page too. .fleet-work-split/.fleet-work-list/
