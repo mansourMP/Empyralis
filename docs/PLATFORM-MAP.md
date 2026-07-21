@@ -3245,6 +3245,71 @@ confirmed to introduce zero regressions elsewhere via git-stash diff
 against `test_skills_service.py`, `test_workspace_context_files.py`, and
 `test_unified_memory_service.py`'s pre-existing baselines.
 
+### 27.8 2026-07-21 full-platform audit: every cross-agent vector, one box
+
+Mansur has now asked this question — "on one box, can agent A read agent
+B's data" — enough times that it needed a single, brutal, file:line pass
+across every vector a shared gateway/runtime touches, not just memory. This
+is that pass. **Bottom line: only-if.** Identity itself cannot be forged —
+every live path resolves "which agent is this" from a signed token or a
+server-populated dict, never from the model's own tool-call text. But one
+vector (connector credentials) has a confirmed, reproduced gap where the
+correctly-known identity is logged and then ignored.
+
+**Verdict table:**
+
+| # | Vector | Verdict | Key evidence |
+|---|---|---|---|
+| A | Memory (`memory_get`/`search`/`save`/`list`, notebook, path traversal) | **HOLDS** | `agent_memory.py:191-199` (per-agent physical `.db` file), `workspace_context.py:217-235` (`agent_workspace_context_dir`), `skills_service.py:4171-4198` (fixed 2026-07-14). 19/19 tests pass. |
+| B | Workspace context files (`SOUL.md`, `MEMORY.md`, etc.) | **HOLDS** | `workspace_context.py:217-235`, `:251-330` (`_validate_context_path` rejects `..`/absolute paths, whitelist regex). Same identity source as A. |
+| C | Conversation / thread history | **HOLDS**, coupled to E | `thread_service.py:249-279` (`get_thread`, scoped by `tenant_id`+`workspace_id`+`thread_id`); `thread_id` itself is server-generated per agent/channel (`hosted_bot_provisioning_service.py:557`, `channel_lane_contract_service.py:933`), never model-suppliable. Before the fix in E, two mis-bound agents would collide in the literal same thread row. |
+| D | Connector credentials (Stripe/Gmail/GitHub/…) | **GAP — CRITICAL, confirmed & reproduced** | `tool_broker.py:1011-1053` (`authorize_connector_action` checks provider *scope* only, never credential ownership); `secrets_broker.py:1038-1154` + `vault_helpers.py:164-196` (`resolve_default_vault_credential` picks by `(workspace_id, provider)` + most-recently-updated, ignoring `agent_install_id` entirely); `mcp_registry_service.py:341-361,619` (MCP credential is fixed on a workspace-level server row, not agent-filtered). Agent-scoped resolver exists (`vault_helpers.py:203-285`, `resolve_agent_credential`) but has **zero live callers**. Reproduced: `test_connector_credential_cross_agent_isolation.py::test_agent_a_tool_call_must_not_receive_agent_bs_stripe_key` fails today. |
+| E | Gateway routing / channel binding | **GAP, closed 2026-07-15 — verify prod migration ran** | `control_plane_repository.py:1577-1583` — `slack` (and `github`) were missing from `uq_agent_channel_bindings_inbound_owner_v2`'s predicate (commit `b7f17d367`), so two agents could both claim inbound ownership of the same Slack channel with non-deterministic routing (`agent_channel_router`'s linear scan). Fixed for all 10 channel types, but `CREATE UNIQUE INDEX IF NOT EXISTS` is a no-op on an already-provisioned DB — `migrations/fix_slack_channel_uniqueness.sql` must actually be run by hand (commit message: "Needs review before running on prod"). Separately: paired personal WhatsApp/Telegram sessions are a documented gateway-level singleton, not per-agent (`connection_catalog_service.py:2116-2177`) — known, open, not new. |
+| F | Agent identity via tool/model input (prompt injection) | **HOLDS**, one hardening note | Identity comes from a signed HMAC token (`tool_broker.py:182-270`) or a server-populated `session_ctx` dict never touched by `argument_payload` (`skills_service.py:4004-4005`). Soft spot: `tool_broker.py:860` lets a plain `agent_id` function parameter outrank the verified token's claim; every traced caller sources that parameter server-side (`universal_operator.py:399-449`), so not currently exploitable — flagged as a footgun, not fixed (outside this audit's file scope). |
+
+**Is agent identity server-authoritative everywhere? Yes, for *who is
+asking* — no live path lets the model or a compromised prompt supply its
+own `agent_install_id` and have it honored.** The gap in D is different in
+kind: identity is correctly known and even threaded down to
+`resolve_provider_secret`'s `actor_id` parameter — it's simply never
+*used* as a filter, only logged. Knowing who's asking doesn't stop the
+wrong secret from being handed over.
+
+**Severity ranking of the findings above:**
+
+1. **D (connector credentials) — CRITICAL.** Reproduced with a real,
+   non-mocked call shape (`resolve_provider_secret("stripe", actor_id="agent-a")`
+   returning agent B's key). Any two agents in one workspace that both hold
+   a connector's scope and each connected their own account for it are
+   exposed to this the moment either one's turn calls that connector —
+   money-moving connectors (Stripe) make this the highest-severity item in
+   the whole audit.
+2. **E (channel routing) — was CRITICAL, now closed pending prod
+   verification.** Same underlying failure mode as D (a resolver that
+   picks "whichever/most-recent" instead of checking ownership), but for
+   inbound message routing + thread storage rather than secrets. Confirm
+   the migration ran in production before treating this as closed there.
+3. **F's precedence footgun — LOW**, defense-in-depth only; no live
+   exploitable path found.
+
+**Deliverable:** `server_modules/tests/test_connector_credential_cross_agent_isolation.py`
+(new) — 4 tests: 1 fails on purpose (proves the live D gap with agent A's
+call resolving to agent B's Stripe key), 1 passes as the mirror case
+(coincidental — B's row also happened to be the most-recent, not real
+isolation), 2 pass as a positive control showing `resolve_agent_credential`
+isolates correctly *when actually called* plus a guardrail that fails loud
+the day someone wires it in (so this section doesn't go stale silently).
+Combined with the pre-existing `test_memory_cross_agent_isolation.py`:
+**22 passed, 1 failed (intentional)** across both files.
+
+**Bottom line for the founder: on one box, can agent A see agent B's data?
+Only if — memory, workspace files, and conversation history are hard
+isolated and proven by test; but if both agents hold the same connector's
+scope (e.g. both are allowed to use Stripe) and each connected their own
+account, agent A's tool call can silently execute against agent B's
+credential today. That is the one vector that needs an actual code fix,
+not just a test.**
+
 ---
 
 ## Part 28: Provider Resolution — Per-Agent `model_config` Audit (2026-07-14)
