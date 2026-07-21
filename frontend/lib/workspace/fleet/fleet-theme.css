@@ -5913,6 +5913,41 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-muted);
   margin: var(--space-4) 0 var(--space-2);
 }
+
+/* Hardware LIST row enrichment (device type, location/flag, agent count,
+   gateway version, optional live resource chip) — text-only additions
+   layered onto the existing .fleet-list-row/.fleet-list-row-desc bordered-
+   row convention above, no new card language. All colors reuse the shared
+   --text-* tokens, so light/dark both fall out of theme-tokens.css with no
+   local override needed here. */
+.fleet-hw-list-type {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-hw-list-resource-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.fleet-hw-list-resource-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.fleet-hw-list-resource-item svg { color: var(--text-muted); flex-shrink: 0; }
+.fleet-hw-list-version {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
 /* Hardware list row actions — one "⋯" menu (Rename / Disconnect) replacing
    the old bare "×" + hover-pencil combo: the always-visible × read as a
    one-click destroy, inconsistent with the pencil's separate hover-reveal
