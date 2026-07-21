@@ -29,10 +29,104 @@ import { GatewayBrowserRuntime } from "./browser/runtime";
 import { GatewayShellRuntime } from "./shell/runtime";
 import { GatewayLLMRuntime } from "./llm/runtime";
 import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
+import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
+import { GatewayDoctorRuntime } from "./health/gateway-doctor";
 import { collectPassiveInventorySnapshot } from "./health/service-inventory";
 import { setCliSetupLocallyEnabled } from "./runtime/desktop-permissions";
 
 const GATEWAY_VERSION = "0.1.0";
+
+/**
+ * A small, explicit denylist of error signatures that mean the process's
+ * own memory/call-stack state may be corrupted — continuing to run risks
+ * doing more damage (e.g. writing bad state to disk) than a clean restart
+ * would. Everything else that reaches the crash guards below is treated as
+ * recoverable and logged-not-exited; see installProcessCrashGuards().
+ */
+const FATAL_PROCESS_ERROR_PATTERNS: RegExp[] = [
+  /maximum call stack size exceeded/i,
+  /heap out of memory/i,
+  /allocation failed/i,
+];
+
+export function isFatalProcessError(error: unknown): boolean {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return FATAL_PROCESS_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/**
+ * Last-resort, process-wide safety net. Today there is NO
+ * `process.on("uncaughtException"/"unhandledRejection")` handler anywhere
+ * in this codebase, so any error that slips past a local mitigation — the
+ * two documented, individually-patched examples are the still-connecting
+ * socket close race (cloud/ws-client.ts openSocket(), ~554-563) and the
+ * null-socket .send() race (cloud/ws-client.ts dispatchRequestFrame(),
+ * ~700-711) — crashes the whole gateway process with no supervisor on most
+ * boxes to bring it back (see docs/design/reliability-audit-1-gateway-
+ * health.md §2: non-systemd hosts get an explicit "no restart supervision"
+ * warning, and even systemd is only wired up by the install script, never
+ * verified afterward).
+ *
+ * Node's own guidance for `uncaughtException` is "always exit" because the
+ * process may be in an inconsistent state — but for this process, the
+ * dominant real-world cause of an uncaught error/rejection is a transient
+ * WebSocket or network fault (exactly the two examples above), which is
+ * NOT a corrupted-process condition: `GatewayWsClient.run()`'s reconnect
+ * loop (cloud/ws-client.ts) and `HeartbeatLoop` (cloud/heartbeat.ts) are
+ * fully intact and able to keep going. Exiting on every one of those would
+ * just reintroduce the crash this file exists to stop. So: log with
+ * context and keep the process alive by default, and only exit for the
+ * narrow, explicit set of signatures in FATAL_PROCESS_ERROR_PATTERNS above
+ * (stack/heap corruption) where continuing is genuinely unsafe — those
+ * exit cleanly so the systemd `Restart=always` unit (scripts/install-
+ * agent-computer.sh write_systemd_units()) can bring up a fresh process.
+ *
+ * unhandledRejection is never treated as fatal: a rejected promise with no
+ * listener cannot corrupt call-stack/heap state the way a thrown exception
+ * potentially can, so there is no scenario here where exiting is safer
+ * than logging and continuing.
+ */
+/**
+ * The actual decision logic behind installProcessCrashGuards()'s two
+ * listeners, factored out so it's unit-testable without ever touching the
+ * real process-wide "uncaughtException"/"unhandledRejection" events —
+ * node:test installs its own listeners for exactly those events to detect
+ * a test crashing the process, and manually emitting them from a test
+ * collides with that (the runner's own listener runs first and re-throws
+ * before ours would even see it). Calling this function directly sidesteps
+ * that entirely.
+ */
+export function handleProcessCrashCondition(
+  kind: "uncaughtException" | "unhandledRejection",
+  error: unknown,
+): void {
+  const detail = error instanceof Error ? error.stack || error.message : String(error);
+  // eslint-disable-next-line no-console -- this is the last-resort log
+  // path; there is no guarantee the journal/db are usable at this point.
+  console.error(
+    `[gateway] ${kind} at ${new Date().toISOString()} (pid ${process.pid}, uptime ${Math.round(process.uptime())}s): ${detail}`,
+  );
+  if (kind === "uncaughtException" && isFatalProcessError(error)) {
+    console.error(
+      "[gateway] uncaughtException classified as fatal (stack/memory corruption signature) — exiting for supervisor restart instead of continuing in a possibly-corrupted state.",
+    );
+    process.exitCode = 1;
+    process.exit(1);
+    return;
+  }
+  // Non-fatal (or any unhandledRejection, which is never fatal): fall
+  // through and keep running. The reconnect loop and heartbeat timers are
+  // unaffected by an exception caught here.
+}
+
+export function installProcessCrashGuards(): void {
+  process.on("uncaughtException", (error) => {
+    handleProcessCrashCondition("uncaughtException", error);
+  });
+  process.on("unhandledRejection", (reason) => {
+    handleProcessCrashCondition("unhandledRejection", reason);
+  });
+}
 
 async function acquireGatewayProcessLock(stateDir: string): Promise<() => Promise<void>> {
   const lockPath = path.join(stateDir, "gateway.lock");
@@ -175,6 +269,36 @@ async function main(): Promise<void> {
   // supportedCapabilities() computation below.
   setCliSetupLocallyEnabled(config.cliSetupLocallyEnabled);
   const cliSetupRuntime = new GatewayCliSetupRuntime();
+  // `triggerShutdown` is reassigned below, once `cleanup`/`identity`/`journal`
+  // exist, to the real SIGINT/SIGTERM shutdown path — self-update needs to
+  // reuse that exact path (see GatewaySelfUpdateRuntimeOptions.requestShutdown's
+  // doc comment), but is constructed here, earlier in startup, before those
+  // exist. The indirection is just a mutable function reference so
+  // selfUpdateRuntime can be built now and still call the real thing later;
+  // self-update can't plausibly be dispatched before startup finishes
+  // (nothing is connected to the cloud WS yet), so the throwing default
+  // below is a safety net, not an expected path.
+  let triggerShutdown: (reason: string) => void = () => {
+    throw new Error("Gateway shutdown was requested before startup finished.");
+  };
+  const selfUpdateRuntime = new GatewaySelfUpdateRuntime({
+    currentVersion: GATEWAY_VERSION,
+    stateDir: config.stateDir,
+    requestShutdown: () => triggerShutdown("gateway.self_update"),
+  });
+  // Same indirection as triggerShutdown just above: the doctor's capability-
+  // readiness check needs the fixed capability list capabilityRouter.
+  // supportedCapabilities() will produce, but doctorRuntime has to exist
+  // BEFORE capabilityRouter (it's one of the constructor args) — so it reads
+  // through a mutable getter reference, reassigned once capabilityRouter
+  // exists a few lines down, rather than capturing a value that doesn't
+  // exist yet.
+  let getDoctorRequestedCapabilities: () => string[] = () => [];
+  const doctorRuntime = new GatewayDoctorRuntime({
+    checkpoints,
+    getRequestedCapabilities: () => getDoctorRequestedCapabilities(),
+    personalChannelRuntimes,
+  });
   const capabilityRouter = new GatewayCapabilityRouter(
     browserRuntime,
     personalChannelRuntimes,
@@ -182,7 +306,10 @@ async function main(): Promise<void> {
     shellRuntime,
     llmRuntime,
     cliSetupRuntime,
+    selfUpdateRuntime,
+    doctorRuntime,
   );
+  getDoctorRequestedCapabilities = () => capabilityRouter.supportedCapabilities();
   const identity = await resolveDeviceIdentity(db, {
     gatewayId: config.gatewayId,
     deviceId: config.deviceId,
@@ -219,15 +346,26 @@ async function main(): Promise<void> {
     await releaseLock();
   };
   let shuttingDown = false;
+  // Now that cleanup/identity/journal exist, replace the throwing stub
+  // passed into GatewaySelfUpdateRuntime above with the real shutdown path —
+  // the SAME journal-flush + lock-release + process.exit(0) sequence SIGINT/
+  // SIGTERM use below, not a second one. A self-update-triggered shutdown is
+  // otherwise indistinguishable from an operator-triggered one: the atomic
+  // symlink swap + restart handoff already happened by the time this fires
+  // (see gateway-self-update-runtime.ts), so this is just "shut down
+  // cleanly," exactly like a signal.
+  triggerShutdown = (reason: string) => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    void cleanup(reason).finally(() => {
+      process.exit(0);
+    });
+  };
   const installSignalHandler = (signal: NodeJS.Signals) => {
     process.once(signal, () => {
-      if (shuttingDown) {
-        return;
-      }
-      shuttingDown = true;
-      void cleanup(signal).finally(() => {
-        process.exit(0);
-      });
+      triggerShutdown(signal);
     });
   };
   installSignalHandler("SIGINT");
@@ -268,6 +406,7 @@ async function main(): Promise<void> {
 }
 
 if (require.main === module) {
+  installProcessCrashGuards();
   void main().catch((error: unknown) => {
     const message = error instanceof Error ? error.stack || error.message : String(error);
     console.error(message);

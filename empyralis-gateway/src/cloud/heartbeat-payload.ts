@@ -1,5 +1,6 @@
 import type { GatewayRuntimeMetadata } from "../runtime/runtime-metadata";
 import type { PassiveInventorySnapshot } from "../health/service-inventory";
+import type { GatewayHealthState } from "../state/checkpoints";
 
 export interface GatewayHeartbeatPayloadInput {
   runtimeMetadata: GatewayRuntimeMetadata;
@@ -7,11 +8,17 @@ export interface GatewayHeartbeatPayloadInput {
   journalCursor: number;
   checkpointCursor: number;
   queueDepthSummary: Record<string, unknown>;
+  // The gateway's own last-recorded connection health (GatewayCheckpoints.
+  // currentHealthState()) — online/offline/reconnecting/degraded. Threaded
+  // through explicitly (not hardcoded) so the backend's freshness/staleness
+  // logic (server_modules/gateway_health_service.py) and the UI stop being
+  // told "online" while the gateway is actually reconnecting or degraded.
+  healthState: GatewayHealthState;
 }
 
 export function buildGatewayHeartbeatPayload(input: GatewayHeartbeatPayloadInput): Record<string, unknown> {
   return {
-    health_state: "online",
+    health_state: input.healthState,
     journal_cursor: input.journalCursor,
     checkpoint_cursor: input.checkpointCursor,
     queue_depth_summary: input.queueDepthSummary,

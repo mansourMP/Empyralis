@@ -1285,6 +1285,32 @@ class DiscordGatewayListener:
     def run_forever(self) -> None:  # pragma: no cover - optional runtime dependency
         self._client.run(_bot_token(self._credentials))
 
+    def live_connection_state(self) -> Dict[str, Any]:
+        """Real-time discord.py Gateway socket state for THIS listener's
+        client.
+
+        This is the bridge the reliability audit called for: vault-credential
+        presence only proves a bot token exists, never that its gateway
+        websocket is actually up. discord.py owns reconnect/resume internally
+        and never surfaced that state to Empyralis's status layer before this
+        method existed (`DiscordBotRuntimeStatus` was hardcoded to "online"
+        at start and only ever flipped on an explicit `.stop()` call).
+
+        `is_ready()` is True once the client has processed its first READY
+        (or a RESUMED) event; `is_closed()` flips True once the client's
+        websocket teardown has completed (explicit stop, forced logout, or
+        discord.py giving up on reconnecting after an unrecoverable error).
+        """
+        try:
+            closed = bool(self._client.is_closed())
+        except Exception:
+            closed = True
+        try:
+            ready = bool(self._client.is_ready())
+        except Exception:
+            ready = False
+        return {"ready": ready, "closed": closed, "connected": ready and not closed}
+
 
 __all__ = [
     "DISCORD_ALLOWED_WRITE_APPROVAL_ACTIONS",

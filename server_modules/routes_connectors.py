@@ -78,11 +78,23 @@ async def _dispatch_public_studio_webhook(
 
 
 async def discord_bot_runtime_status():
+    from server_modules.connectors.discord_bot_runtime_service import get_running_instance
+
+    # `preflight()` on a fresh instance only proves a bot_token credential
+    # exists in the vault — it cannot see whether the process actually
+    # holding the gateway websocket(s) is still connected. `get_running_instance()`
+    # returns the DiscordBotRuntimeService that server.py's boot-time
+    # _launch_discord_bot_runtime() actually started (None if this process
+    # never started one), so its live_status() reflects the real discord.py
+    # Client socket state instead of just credential presence.
     service = DiscordBotRuntimeService()
+    running = get_running_instance()
     return {
         "runtime": "discord_bot",
         "execution": "bot_token_gateway_process",
         "preflight": service.preflight(),
+        "live_status": running.live_status() if running is not None else None,
+        "live_status_available": running is not None,
     }
 
 async def provider_profiles(

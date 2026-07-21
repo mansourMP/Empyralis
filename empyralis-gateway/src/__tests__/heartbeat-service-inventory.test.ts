@@ -55,6 +55,7 @@ test("gateway heartbeat payload carries passive service inventory separately fro
     journalCursor: 9,
     checkpointCursor: 7,
     queueDepthSummary: { pending: 0 },
+    healthState: "online",
   });
 
   assert.equal(payload.health_state, "online");
@@ -67,4 +68,54 @@ test("gateway heartbeat payload carries passive service inventory separately fro
   assert.equal(((payload.service_inventory as any[])[0]).passive, true);
   assert.equal(((payload.service_inventory as any[])[0]).execution_enabled, false);
   assert.equal((payload.native_runtime as any).system_service_mode, false);
+});
+
+test("gateway heartbeat payload transmits the gateway's real health state instead of a hardcoded literal", () => {
+  // Regression test: health_state used to be hardcoded to "online" in
+  // buildGatewayHeartbeatPayload() (cloud/heartbeat-payload.ts) regardless
+  // of the gateway's actual local state, so the backend/UI could be told
+  // "online" while the gateway was actually degraded or reconnecting. It
+  // must now faithfully echo whatever GatewayCheckpoints.currentHealthState()
+  // reports at send time — see cloud/ws-client.ts sendHeartbeat().
+  const runtimeMetadata: GatewayRuntimeMetadata = {
+    gatewayVersion: "0.1.0",
+    hostname: "agent-box",
+    platform: "linux-x64",
+    pid: 123,
+    startedAt: "2026-05-29T00:00:00Z",
+    requestedCapabilities: [],
+    nativeRuntime: {
+      os: "linux",
+      arch: "x64",
+      release: "6.0-test",
+      hostname: "agent-box",
+      desktop_session: "user_session",
+      system_service_mode: false,
+    },
+    deviceMetadata: {},
+  };
+  const inventory: PassiveInventorySnapshot = {
+    service_inventory: [],
+    native_runtime: runtimeMetadata.nativeRuntime,
+    capability_readiness: {
+      requested: [],
+      ready: [],
+      blocked: [],
+      permission_states: {},
+      passive_services: [],
+      service_statuses: {},
+    },
+  };
+
+  for (const healthState of ["online", "offline", "reconnecting", "degraded"] as const) {
+    const payload = buildGatewayHeartbeatPayload({
+      runtimeMetadata,
+      inventory,
+      journalCursor: 0,
+      checkpointCursor: 0,
+      queueDepthSummary: {},
+      healthState,
+    });
+    assert.equal(payload.health_state, healthState);
+  }
 });

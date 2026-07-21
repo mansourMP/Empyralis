@@ -57,12 +57,14 @@ from server_modules import (
     dedicated_workstation_setup_service,
     execution_mode_policy,
     gateway_browser_service,
+    gateway_doctor_service,
     gateway_execution_service,
     gateway_health_service,
     machine_capability_check,
     gateway_pairing_service,
     gateway_protocol_service,
     gateway_registry_service,
+    gateway_self_update_service,
     gateway_state_repository,
     hardware_activity_event_service,
     hardware_action_broker_service,
@@ -949,6 +951,24 @@ class CliInstallRequest(BaseModel):
     workspace_id: Optional[str] = None
     trace_id: Optional[str] = None
     request_id: Optional[str] = None
+
+
+class GatewaySelfUpdateRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    # Both optional: omitted means "resolve the latest published build
+    # server-side" — see gateway_self_update_service.trigger_gateway_self_update.
+    # Explicit values let an operator target a specific rollback/pinned build.
+    target_version: Optional[str] = None
+    artifact_url: Optional[str] = None
+
+
+class GatewayDoctorRunRequest(BaseModel):
+    workspace_id: Optional[str] = None
+    # False (default): report-only — every check still runs, nothing on the
+    # box changes. True: each check's own conservative, idempotent repair is
+    # attempted for anything not already passing, then re-validated. See
+    # gateway_doctor_service.run_gateway_doctor's doc comment.
+    repair: bool = False
 
 
 class CliLoginStartRequest(BaseModel):
@@ -2823,6 +2843,37 @@ async def list_gateway_registration_events(
     }
 
 
+@router.post("/gateway/registrations/{gateway_id}/self-update")
+async def self_update_gateway(
+    gateway_id: str,
+    body: GatewaySelfUpdateRequest,
+    current_user=Depends(require_api_key),
+):
+    """Trigger a self-update on a paired gateway — one button, no SSH. See
+    gateway_self_update_service.trigger_gateway_self_update() for the
+    dispatch (routes through the same tool-invoke transport as cli/install
+    below) and its module docstring for what "latest" means today.
+    "member" (not "viewer") because this changes what's running on the box —
+    same gate cli/install and personal-channels install use."""
+    registration, resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        workspace_id=body.workspace_id,
+        minimum_role="member",
+    )
+    try:
+        return await gateway_self_update_service.trigger_gateway_self_update(
+            gateway_id=gateway_id,
+            workspace_id=resolved_workspace_id,
+            registration=registration,
+            target_version=str(body.target_version or ""),
+            artifact_url=str(body.artifact_url or ""),
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+    except gateway_self_update_service.GatewaySelfUpdateError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @router.post("/gateway/registrations/{gateway_id}/cli/install")
 async def install_gateway_cli_runtime(
     gateway_id: str,
@@ -3634,6 +3685,41 @@ async def get_gateway_registration_doctor(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/gateway/registrations/{gateway_id}/doctor/run")
+async def run_gateway_registration_doctor(
+    gateway_id: str,
+    body: GatewayDoctorRunRequest,
+    current_user=Depends(require_api_key),
+):
+    """Runs the in-gateway detect -> (safe) repair -> re-validate doctor pass
+    LIVE on the paired computer — distinct from the GET .../doctor endpoint
+    just above, which only aggregates backend-stored state plus a few live
+    provider probes and has no repair mode. This dispatches the
+    gateway.doctor.run capability (empyralis-gateway/src/health/gateway-
+    doctor.ts) over the same tool-invoke transport self-update/cli-install
+    use (gateway_doctor_service.run_gateway_doctor()).
+
+    "member" (not "viewer") because repair=true can change local gateway
+    state (refreshing its passive-inventory cache today; more repairs may
+    follow) — same gate self-update and cli/install use, even though a
+    report-only (repair=false) run changes nothing itself."""
+    _registration, resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        workspace_id=body.workspace_id,
+        minimum_role="member",
+    )
+    try:
+        return await gateway_doctor_service.run_gateway_doctor(
+            gateway_id=gateway_id,
+            workspace_id=resolved_workspace_id,
+            repair=bool(body.repair),
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+    except gateway_doctor_service.GatewayDoctorError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.post("/gateway/registrations/{gateway_id}/tools/interrupt")

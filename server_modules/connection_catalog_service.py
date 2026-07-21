@@ -314,12 +314,26 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
     ),
     _item(
         connection_id="wechat_personal",
-        display_name="WeChat",
+        display_name="WeChat (personal — not supported)",
         lane=LANE_SAGE_PERSONAL_CHANNEL,
         surfaces=("sage", "agent_computer"),
         setup_kind="local_bridge",
         launch_status=LAUNCH_LIVE_WHEN_CONFIGURED,
-        description="Planned private WeChat through a selected Agent Computer bridge. Not launch-ready until the local bridge runtime is certified.",
+        # Personal-account WeChat automation has no supported Tencent API and
+        # is not being pursued (there is no third-party bridge process this
+        # can poll — contrast imessage_personal/signal_personal, which do
+        # have one). Empyralis's WeChat investment goes into the official
+        # Official Account / WeChat Work (WeCom) integration instead — see
+        # empyralis-gateway/src/channels/wechat/ for the protocol
+        # implementation (signature verification, inbound XML callback
+        # mapping, access_token management, outbound send) and the
+        # wechat_work catalog entry below for the currently-supported
+        # outbound path. setup_available/runtime_usable were True here with
+        # zero gateway implementation behind them (no transport, no
+        # pairing, no bridge) — see docs/design/reliability-audit-2-channels.md
+        # — flipped False below so this entry stops claiming a working
+        # setup flow that doesn't exist.
+        description="Personal WeChat automation is not supported (no official API exists for it). See WeChat Work for the supported official integration.",
         requires_gateway=True,
         supports_inbound=True,
         supports_outbound=True,
@@ -331,8 +345,8 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         connector_id="wechat_personal",
         account_provider="wechat_personal",
         vault_provider="wechat_personal",
-        setup_available=True,
-        runtime_usable=True,
+        setup_available=False,
+        runtime_usable=False,
         safety=_personal_channel_dm_safety(media_pipeline_active=False),
     ),
     _item(
@@ -394,38 +408,74 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         runtime_usable=True,
     ),
     _item(
+        # FIXED (general catalog truth audit, item 4): this carried
+        # launch_status=LAUNCH_LIVE_WHEN_CONFIGURED with runtime_usable=True
+        # and setup_available=True force-overridden on, despite its own
+        # description literally saying "Planned" — the exact same class of
+        # self-contradiction the audit flagged for WeChat. Independently
+        # verified real (not just descriptive-text) contradiction: the
+        # OTHER, separately-maintained catalog for this same channel —
+        # channel_lane_contract_service.py's STUDIO_CHANNEL_ROADMAP /
+        # CHANNEL_PLATFORM_CATALOG — correctly marks web_chat
+        # stage="roadmap"/live_capable=False/launch_allowed=False (lines
+        # 145-158, 248-262), and channel_platform_service.py:467 actually
+        # ENFORCES that at bind time: any attempt to bind web_chat to a
+        # Studio agent 409s with "not launch-ready for Studio channel
+        # binding" (_validate_account_for_catalog). No widget/webhook code
+        # exists anywhere under server_modules/ (repo-wide grep, zero hits)
+        # to back supports_inbound/supports_outbound either. Now matches the
+        # already-correct sibling catalog instead of contradicting it.
         connection_id="web_chat",
         display_name="Web Chat",
         lane=LANE_STUDIO_BUSINESS_CHANNEL,
         surfaces=("studio",),
         setup_kind="web_widget",
-        launch_status=LAUNCH_LIVE_WHEN_CONFIGURED,
+        launch_status=LAUNCH_PLANNED,
         description="Planned customer web chat channel.",
-        supports_inbound=True,
-        supports_outbound=True,
+        supports_inbound=False,
+        supports_outbound=False,
         media_support=_media(text=True),
         approval_policy="studio_channel_policy",
         health_check="webhook_health",
-        runtime_usable=True,
-        setup_available=True,
     ),
     _item(
+        # RECLASSIFIED (reliability-audit-2-channels.md, Email section):
+        # this used to be lane=LANE_STUDIO_BUSINESS_CHANNEL with
+        # supports_inbound=True and runtime_usable=True/setup_available=True
+        # forced on despite launch_status=LAUNCH_PARTIAL — i.e. the catalog
+        # was declaring a live, connectable messaging channel with inbound
+        # delivery. No such thing exists: there is no inbound email
+        # listener/webhook anywhere under server_modules/ or
+        # empyralis-gateway/src/ (repo-wide grep, zero hits), only an
+        # on-demand SMTP-send/IMAP-fetch tool
+        # (server_modules/connectors/smtp_connector.py's send_email/
+        # fetch_emails, called synchronously mid-run — never a push
+        # listener). Per founder ruling, email is a connector/credential
+        # (an MCP-style app), not a channel: lane is now
+        # LANE_WORK_APP_CONNECTOR, surfaces include "apps" (what the
+        # Connectors tab queries — see routes_fleet.fleet_agent_connectors),
+        # supports_inbound is False, and runtime_usable/setup_available are
+        # no longer force-overridden to True — they now fall through to the
+        # LAUNCH_PARTIAL default (False), matching what
+        # connection_readiness_service already computes
+        # (readiness_status="planned"). This item stays a distinct catalog
+        # id from "smtp" below: it's the not-yet-built generic OAuth mailbox
+        # connector (Google Workspace / Microsoft 365 / generic IMAP),
+        # whereas "smtp" is the real, live direct SMTP/IMAP credential tool.
         connection_id="email",
         display_name="Email",
-        lane=LANE_STUDIO_BUSINESS_CHANNEL,
-        surfaces=("sage", "studio"),
+        lane=LANE_WORK_APP_CONNECTOR,
+        surfaces=("sage", "studio", "apps"),
         setup_kind="oauth_mailbox",
         launch_status=LAUNCH_PARTIAL,
-        description="Use Google Workspace or Microsoft 365 before exposing mailbox setup.",
-        supports_inbound=True,
+        description="Generic OAuth mailbox connector (send/fetch tool only, no inbound listener). Use the direct SMTP/IMAP connector, Google Workspace, or Microsoft 365 until this generic flow is built.",
+        supports_inbound=False,
         supports_outbound=True,
         media_support=_media(text=True, files=True),
-        approval_policy="channel_policy",
+        approval_policy="workspace_app_policy",
         health_check="mailbox_credential",
         connector_ids=["email", "smtp", "google_workspace", "microsoft_365"],
         provider="workspace_mailbox",
-        setup_available=True,
-        runtime_usable=True,
     ),
     _item(
         connection_id="slack",
@@ -439,7 +489,20 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         supports_outbound=True,
         media_support=_media(text=True, files=True),
         approval_policy="channel_policy",
-        health_check="oauth_credential",
+        # health_check was "oauth_credential" — inert metadata, never
+        # dispatched by any code (confirmed by repo-wide grep on the
+        # "health_check" field; reliability-audit-2-channels.md). Unlike
+        # Discord's "bot_health" (now wired to a real live-socket check —
+        # see status_items()'s _discord_bot_live_connection_check dispatch),
+        # Slack has no persistent connection to probe at all: it's Events
+        # API webhook push only (Socket Mode explicitly disabled per
+        # slack-app-manifest.json), so there's no running client/socket
+        # object whose live state could be checked here. The one real
+        # credential check that exists — an auth.test probe — already runs
+        # once, at OAuth-install time, inside connection_oauth_service /
+        # connectors_actions.py, not on every status read. "none" is honest;
+        # "oauth_credential" implied an ongoing check that doesn't exist.
+        health_check="none",
         provider="slack_events",
         runtime_provider="slack_events",
         connector_id="slack",
@@ -1909,7 +1972,20 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         surfaces=("sage", "studio", "apps"),
         setup_kind="webhook_url",
         launch_status=LAUNCH_LIVE_WHEN_CONFIGURED,
-        description="Connect WeChat Work for approved outbound workspace messages through a webhook.",
+        # This is WeCom's simple incoming group-robot webhook (paste a URL,
+        # push one-way notifications) — outbound-only by design, not the
+        # appid/secret/token-based Official Account / WeCom app bot flow
+        # (auth + inbound message callback + access_token-authenticated
+        # replies). That bidirectional flow is prototyped in
+        # empyralis-gateway/src/channels/wechat/ (see its module doc) but
+        # is not wired to a production endpoint yet, so it is not
+        # represented as a separate catalog entry here — see
+        # docs/design/reliability-audit-2-channels.md for why adding one
+        # without the rest of the plumbing (vault storage, validators,
+        # connector manifest — none of which this pass touches) would
+        # just be a new instance of the same "catalog claims more than is
+        # wired" problem this fix is closing for wechat_personal above.
+        description="Connect WeChat Work's incoming group-robot webhook for approved outbound workspace messages (push notifications only — no inbound replies).",
         supports_outbound=True,
         media_support=_media(text=True),
         approval_policy="workspace_app_policy",
@@ -2279,6 +2355,43 @@ def _oauth_setup_unconfigured(item: Dict[str, Any]) -> bool:
         return True
 
 
+def _discord_bot_live_connection_check() -> tuple[Optional[bool], Optional[str]]:
+    """(live_connected, reason) for the Discord bot's actual running
+    discord.py Gateway client(s) in THIS process, as opposed to whether a
+    bot_token credential merely exists in the vault.
+
+    Returns (None, None) when there is nothing to ask — the boot-time
+    Discord bot runtime hasn't registered itself yet, or this process never
+    started a Discord bot listener at all — in which case the caller should
+    fall back to the credential-presence truth it already computed. server.py
+    launches uvicorn with no `workers=` argument (single process), so
+    within-process is the complete picture for today's deployment; a
+    multi-worker deployment would need a shared live-status store instead of
+    this in-process registry.
+    """
+    try:
+        from server_modules.connectors.discord_bot_runtime_service import get_running_instance
+    except Exception:
+        return None, None
+    instance = get_running_instance()
+    if instance is None:
+        return None, None
+    live_status = instance.live_status()
+    if not live_status:
+        return None, None
+    for state in live_status.values():
+        if state.get("connected"):
+            return True, None
+    first = next(iter(live_status.values()), {})
+    if first.get("error"):
+        return False, f"Discord gateway error: {first['error']}"
+    if first.get("closed"):
+        return False, "Discord bot gateway connection is closed."
+    if not first.get("ready"):
+        return False, "Discord bot gateway has not completed its handshake yet."
+    return False, "Discord bot gateway is not connected."
+
+
 def status_items(
     *,
     workspace_id: str,
@@ -2375,6 +2488,23 @@ def status_items(
                 effective_item["setup_available"] = False
                 health_status = "setup_missing"
                 last_error = "OAuth provider credentials are not configured."
+            # Discord: catalog-declared health_check="bot_health" (see
+            # _CATALOG's discord_bot entry) used to be inert metadata — no
+            # code anywhere dispatched on it (confirmed by repo-wide grep on
+            # the "health_check" field). This is that wiring: a bot_token
+            # credential existing in the vault only proves the bot was ever
+            # installed, not that the running discord.py Gateway client is
+            # still connected right now (discord.py owns reconnect/resume
+            # internally and never surfaced that state here before). Cross
+            # -check the live socket state so a real disconnect is reported
+            # instead of "connected" purely because a credential exists.
+            if connected and _token(item.get("health_check")) == "bot_health":
+                live_connected, live_reason = _discord_bot_live_connection_check()
+                if live_connected is False:
+                    connected = False
+                    configured = False
+                    health_status = "disconnected"
+                    last_error = live_reason or "Discord bot gateway connection is not live."
         elif lane == LANE_MCP_PLUGIN:
             health_status = "available"
         elif lane == LANE_APPLICATION:

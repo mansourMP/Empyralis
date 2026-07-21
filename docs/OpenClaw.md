@@ -778,3 +778,260 @@ Telegram/WhatsApp gateway runtimes each independently reimplement their
 own group gate today (real code duplication — see runtime.ts in both
 channels/telegram and channels/whatsapp).
 6. No Regex/KW Matching: Tool selection is 100% LLM-driven via function calling. There's no fallback regex or keyword-based tool dispatch.
+
+---
+IMESSAGE / BLUEBUBBLES ONBOARDING — researched 2026-07-21 for Empyralis
+iMessage setup-quality work.
+
+Source: /Users/mansur/openclaw (checked out git source tree — confirmed via
+`package.json`: `"name": "openclaw"`, `"version": "2026.6.11"`; has
+`src/`, `extensions/`, `dist/`, `docs/`, distinct from the npm-installed
+`/opt/homebrew/lib/node_modules/openclaw` used by earlier STEP sections
+above). `/Users/mansur/OpenClaw` (capitalized) is the SAME directory —
+macOS's filesystem is case-insensitive, confirmed by identical `ls -la`
+output (same inode-level listing, same file sizes/timestamps) for both
+paths. `/Users/mansur/.openclaw` and `/Users/mansur/.openclaw-dev` are
+runtime/config dirs (`openclaw.json`, `agents/`, `cron/`, `logs/` — no
+`package.json` or `src/`), not source.
+
+**CRITICAL FRAMING CORRECTION: OpenClaw does not use BlueBubbles anymore.**
+BlueBubbles support was REMOVED from OpenClaw. The docs are explicit and
+un-hedged about this (docs/channels/imessage.md:15-17):
+
+> BlueBubbles support was removed. Migrate `channels.bluebubbles` configs
+> to `channels.imessage`; OpenClaw supports iMessage through `imsg` only.
+
+And the dedicated migration announcement (docs/announcements/bluebubbles-imessage.md:18):
+
+> There is no BlueBubbles HTTP server, webhook route, REST password, or
+> BlueBubbles plugin runtime in the supported OpenClaw iMessage path.
+
+So "make Empyralis's iMessage work exactly the way OpenClaw does it" cannot
+mean "make BlueBubbles smoother" — OpenClaw's current, only, supported
+iMessage path is a completely different architecture: a native CLI tool
+called `imsg` (https://github.com/steipete/imsg, third-party, MIT, by
+Peter Steinberger — not an OpenClaw-authored project) that OpenClaw's
+gateway spawns as a **child process** and talks to over **JSON-RPC on
+stdio** — no HTTP server, no webhook, no port, no polling loop at all.
+What follows below is what actually makes OpenClaw's iMessage setup smooth
+(so it can be selectively adopted), plus an explicit call-out of the one
+piece (private-API/SIP) Empyralis should NOT blindly copy.
+
+## What OpenClaw actually does (imsg architecture, not BlueBubbles)
+
+1. **The "bridge" is an in-process child, not a separate service the user
+   launches.** `extensions/imessage/src/client.ts:1,63-75` — `IMessageRpcClient`
+   uses Node's `child_process.spawn` directly inside the gateway process;
+   there is no separate daemon, no port to bind, nothing to `npm run`.
+   The channel plugin owns the subprocess's lifecycle (start on gateway
+   start / channel enable, stop on gateway stop) automatically.
+
+2. **Transport is a persistent JSON-RPC stream over stdio — no
+   webhook, no polling.** Confirmed by grep: zero occurrences of "webhook"
+   anywhere in `extensions/imessage/`. Inbound delivery is a live
+   `watch.subscribe` RPC call over the same long-lived stdio connection
+   (docs/channels/imessage.md:736 describes `imsg watch.subscribe` with a
+   `since_rowid` cursor for replay). Every small message is a
+   newline-framed JSON-RPC frame (docs/channels/imessage.md:122-130
+   explicitly documents the anti-buffering contract any transport wrapper,
+   e.g. an SSH pipe, must honor: forward each line as soon as bytes are
+   available, never block on EOF).
+
+3. **A real preflight/health command exists and is invoked by name in
+   every setup step:** `openclaw channels status --probe`
+   (docs/channels/imessage.md:47, 240, 762, 805). Backing implementation
+   is `extensions/imessage/src/probe.ts`'s `probeIMessage()`
+   (probe.ts:290-337) which chains: (a) `detectBinary(cliPath)` — is the
+   CLI even installed (probe.ts:306-309); (b) `imsg rpc --help` — does
+   this build support RPC at all, 5-min TTL cache (probe.ts:113-143); (c)
+   `imsg status --json` — parses `advanced_features`, `v2_ready`,
+   per-method `selectors`, and a human `statusMessage` explaining WHY the
+   private-API bridge is down (SIP/library-validation/AMFI) when it is
+   (probe.ts:222-283); (d) a live `chats.list` RPC call as the actual
+   liveness check (probe.ts:330). This single command tells the operator
+   exactly which of 4 distinct failure layers they're in, not just
+   up/down.
+
+4. **Auto-detection during setup, not manual typing.** The setup wizard's
+   `cliPath` text input (`extensions/imessage/src/setup-core.ts:170-181`,
+   `createIMessageCliPathTextInput`) resolves/validates against
+   `detectBinary` from the shared plugin-sdk (same detector probe.ts
+   calls), so `openclaw setup`/`openclaw onboard` (docs/cli/setup.md:12,
+   docs/cli/index.md:16-17 — the guided first-run CLI wizard) finds an
+   already-installed `imsg` on PATH instead of asking the user to hand-type
+   a path blind.
+
+5. **Remote/non-Mac hosting is a first-class documented pattern, not a
+   workaround.** `channels.imessage.cliPath` can point at an SSH wrapper
+   script that runs `imsg` on a remote Mac (docs/channels/imessage.md:89-134);
+   `resolveIMessageNonMacHostError()` (probe.ts:103-111) detects "you're on
+   Linux/Windows with the default local `imsg` path" and returns a
+   specific, actionable error instead of a generic connection failure.
+
+6. **Setup completion note is concrete and ordered, not generic.**
+   `extensions/imessage/src/setup-core.ts:183-194` (`imessageCompletionNote`)
+   is the literal text the CLI wizard prints after configuring iMessage:
+   run OpenClaw on the Messages Mac (or set an SSH `cliPath`), run
+   `imsg launch`, run `openclaw channels status --probe` to verify, confirm
+   Full Disk Access + Automation, list chats with `imsg chats --limit 20`,
+   link to docs. Every step is copy-pasteable.
+
+7. **Inbound recovery after restart is automatic and explicitly
+   documented, with a named suppression mechanism.**
+   docs/channels/imessage.md:731-747 — on startup the monitor persists the
+   last dispatched `chat.db` rowid per account, replays via
+   `since_rowid`, dedupes by Apple GUID (`imessage.inbound-dedupe`
+   persistent plugin state), and fences out Apple's post-Push-recovery
+   "backlog bomb" by send-date age (~15 min). This is a real reliability
+   feature with zero required config — "there is no config to enable"
+   (docs/channels/imessage.md:12).
+
+8. **The SIP/Private-API tradeoff is disclosed as a deliberate, opt-in
+   decision with a stated default — not silently assumed.**
+   docs/channels/imessage.md:179-194: `imsg` ships in two modes.
+   **Basic mode is the default** — "no SIP changes needed... This is
+   what you get out of the box from a fresh `brew install`" — text/media
+   send-receive only. **Private API mode** (reactions, edit, unsend,
+   threaded replies, effects, polls, group management, typing, read
+   receipts) requires disabling System Integrity Protection AND macOS
+   Library Validation, injecting a helper dylib into `Messages.app`, and
+   is presented with an explicit `<Warning>` block: "Disabling SIP is a
+   real security tradeoff... disabling SIP on Apple Silicon Macs also
+   disables the ability to install and run iOS apps." OpenClaw explicitly
+   tells operators who can't accept that tradeoff to stay in basic mode
+   (docs/channels/imessage.md:247-253) or run a **separate, dedicated bot
+   Mac** with SIP off rather than weakening a primary device.
+
+## Empyralis's current implementation (what exists today)
+
+- `empyralis-gateway/src/bridges/bluebubbles-bridge.ts` — a standalone HTTP
+  server (`http.createServer`, bluebubbles-bridge.ts:373-449) exposing
+  `/health`, `/messages` (POST, outbound send via BlueBubbles REST API),
+  `/events` (GET, drains an in-memory queue), and `/webhook` (POST,
+  BlueBubbles pushes inbound events here). It has a `main()` entrypoint
+  (bluebubbles-bridge.ts:466-486) reading `EMPYRALIS_IMESSAGE_BRIDGE_PORT`,
+  `EMPYRALIS_BLUEBUBBLES_SERVER_URL`, `EMPYRALIS_BLUEBUBBLES_PASSWORD`,
+  `EMPYRALIS_IMESSAGE_BRIDGE_TOKEN` from env — i.e. it is designed to be
+  run as its own process.
+- **Nothing auto-starts it.** `empyralis-gateway/package.json:11-12` has a
+  `signal:bridge` npm script (`node dist/bridges/signal-cli-bridge.js`)
+  but **no `imessage:bridge` script at all** — the only way to run
+  `bluebubbles-bridge.ts`'s `main()` today is to invoke
+  `node dist/bridges/bluebubbles-bridge.js` by hand. `scripts/install-agent-computer.sh`
+  (520 lines, greped in full) has zero mentions of "imessage" or
+  "bluebubbles" anywhere — it writes exactly one systemd unit, for the
+  gateway itself (`write_systemd_units`, install-agent-computer.sh:363-378),
+  with no equivalent unit for any local bridge (Signal's `signal:bridge`
+  isn't auto-started by the installer either — this is a shared gap, not
+  iMessage-specific, but iMessage is the one with a UI door promising
+  "Full account").
+- **Gateway-side transport is polling, not a live subscribe.**
+  `empyralis-gateway/src/channels/local-bridge-runtime.ts:251-258`
+  (`LocalBridgePersonalChannelRuntime.start()`) sets a `setInterval` polling
+  `${baseUrl}/events` every `EMPYRALIS_IMESSAGE_BRIDGE_POLL_MS` (default
+  5000ms, local-bridge-runtime.ts:349). So the real path is: BlueBubbles
+  Server webhook-pushes → `bluebubbles-bridge.ts`'s `/webhook` handler
+  enqueues in memory (bluebubbles-bridge.ts:436-444) → gateway polls that
+  queue every 5s. Two hops, one of which (gateway↔bridge) is poll-based
+  where OpenClaw's imsg path is a single live stdio stream with zero hops.
+- **No preflight/health command equivalent to `openclaw channels status
+  --probe`.** The only health surface is `/health`
+  (bluebubbles-bridge.ts:380-394), which does one thing: pings BlueBubbles'
+  own `/api/v1/ping`. It cannot distinguish "BlueBubbles not installed" vs
+  "wrong password" vs "signed out of iMessage" vs "our own bridge process
+  isn't even running" — that last one is invisible to the gateway entirely
+  until a poll cycle times out, because there is no process supervision
+  linking bridge liveness to gateway state.
+- **No setup wizard / auto-detection.** The only "setup" UX is
+  `frontend/lib/workspace/fleet/SageLauncher.tsx:52`
+  (`NOT_YET_SUPPORTED_CHANNELS.imessage`): *"iMessage requires a Mac
+  running BlueBubbles Server — there's no in-app setup for this yet. Point
+  your Gateway at it with the `EMPYRALIS_BLUEBUBBLES_SERVER_URL` and
+  `EMPYRALIS_BLUEBUBBLES_PASSWORD` environment variables."* — literally
+  tells the user to go set env vars by hand. `FleetAgentDetail.tsx:1273-1302`
+  (`LocalBridgeChannelStatus`) does render a live status pill once
+  something is connected/polling, but there's no path INTO configured
+  state from the UI — no cliPath/URL/password form, no "detected imsg" /
+  "detected BlueBubbles" auto-check.
+- **No SIP/Private-API disclosure at all** — Empyralis's BlueBubbles path
+  is REST-only (BlueBubbles' own Private API is a separate concern
+  BlueBubbles Server itself manages, not surfaced anywhere in Empyralis's
+  UI copy or bridge code) — reactions/typing/edit/unsend are simply absent
+  (`local-bridge-runtime.ts:167-168,486-487` comments confirm typing is a
+  no-op no-op for BlueBubbles today: *"a bridge that doesn't implement
+  /typing (BlueBubbles, WeChat today) simply never gets a successful
+  call"*), with no user-facing explanation of what's missing or why.
+
+## Adoption plan, ordered by leverage
+
+1. **Auto-start the bridge process from the gateway itself, in-process,
+   like OpenClaw's `client.ts` spawn model** — highest leverage, closes the
+   "rough, manual, multi-process" complaint directly. Fold
+   `bluebubbles-bridge.ts`'s HTTP server startup into
+   `LocalBridgePersonalChannelRuntime.start()`
+   (`local-bridge-runtime.ts:242-258`) so enabling the `imessage_personal`
+   channel on a gateway starts the bridge automatically, the same way
+   OpenClaw's channel enable spawns `imsg rpc`. This alone eliminates the
+   missing `imessage:bridge` npm script gap
+   (`empyralis-gateway/package.json:11-12`) and the missing systemd unit
+   gap (`scripts/install-agent-computer.sh:363-378`) without needing a new
+   installer path — it becomes "just enable the channel."
+2. **Add a real preflight/health command, modeled on `probeIMessage()`
+   (probe.ts:290-337).** Extend `bluebubbles-bridge.ts`'s `/health`
+   handler (currently just `/api/v1/ping`, bluebubbles-bridge.ts:380-394)
+   to report the SAME layered breakdown OpenClaw's probe does: is the
+   bridge process running at all / is BlueBubbles reachable / is the
+   password valid / is Messages actually signed in — and surface that
+   breakdown in `LocalBridgeChannelStatus`
+   (`FleetAgentDetail.tsx:1273-1302`) instead of the current binary
+   connected/not-connected pill.
+3. **Replace gateway↔bridge polling with a push/stream model**, closing
+   the gap with OpenClaw's live stdio subscribe. Lowest-effort version:
+   have the bridge push straight to the gateway's existing inbound
+   publish path instead of `local-bridge-runtime.ts`'s `setInterval`
+   poll (`local-bridge-runtime.ts:251-258, 353-410`) — e.g. an SSE or
+   WebSocket connection from bridge to gateway, replacing the 5s poll
+   loop. This does not require adopting `imsg`; it only removes the
+   extra poll hop already identified above.
+4. **Build a real in-app connect/setup panel for `imessage_personal`**,
+   replacing the "paste env vars yourself" message in
+   `SageLauncher.tsx:52`. Modeled on OpenClaw's wizard text-input +
+   auto-detect + completion-note pattern (`setup-core.ts:170-194`): a form
+   for BlueBubbles server URL + password (or, if Empyralis ever adopts
+   `imsg`-style local install, a cliPath field with `detectBinary`-style
+   auto-detection), plus an ordered completion checklist mirroring
+   `imessageCompletionNote` (setup-core.ts:183-194) — "install X, grant Y
+   permission, click verify."
+5. **Document/expose Full Disk Access + Automation as explicit
+   requirements** the way docs/channels/imessage.md:136-152 does, since
+   Empyralis's bridge also ultimately depends on a signed-in Messages.app
+   Mac even though it's mediated through BlueBubbles Server rather than
+   `imsg` directly — today this is entirely undocumented in-app.
+
+## What NOT to blindly copy
+
+- **Do not port `imsg`'s SIP-disable / Library-Validation-disable /
+  dylib-injection private-API path wholesale.** OpenClaw itself treats
+  this as an opt-in, disclosed tradeoff, not a default
+  (docs/channels/imessage.md:190-194, 247-253) — "if your threat model
+  can't tolerate SIP being off, bundled iMessage is limited to basic
+  mode." For Empyralis, shipping guidance that tells a customer to
+  disable a core macOS security boundary (with the explicit Apple
+  Silicon iOS-app-support side effect OpenClaw's own docs flag) is a
+  bigger ask than anything currently promised in the product surface —
+  if ever pursued, it should be presented with the same explicit
+  Warning-block treatment OpenClaw uses, opt-in, and reserved for a
+  dedicated bot Mac, never the default path.
+- **Do not adopt `imsg` itself without a legal/security review.** It is a
+  third-party MIT tool (github.com/steipete/imsg) that injects into
+  Apple-signed `Messages.app` via an adhoc-signed helper dylib once SIP is
+  off — a meaningfully different trust boundary than shelling out to
+  BlueBubbles' own REST API, and worth evaluating independently of the
+  onboarding-UX lessons above (which are transport/process-supervision
+  lessons, not an endorsement of the specific binary).
+- **OpenClaw's CLI-wizard-first UX (`openclaw setup`) doesn't map
+  directly** — Empyralis is a hosted product with a web UI as the primary
+  surface, not a CLI tool users run locally, so "auto-detect binary on
+  PATH during an interactive terminal wizard" becomes "detect
+  bridge/BlueBubbles reachability from the web UI's health poll" instead
+  of a literal port of the CLI flow.

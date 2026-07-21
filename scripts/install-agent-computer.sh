@@ -330,16 +330,37 @@ if [[ -r "${ENV_FILE}" ]]; then
   set +a
 fi
 INSTALL_DIR="${EMPYRALIS_AGENT_COMPUTER_INSTALL_DIR:-/opt/empyralis/agent-computer/current}"
+# Self-update (empyralis-gateway/src/update/*) writes new releases under a
+# directory it can actually get write access to as the unprivileged service
+# user — INSTALL_DIR above is root-owned (see prepare_directories/
+# install_release_artifacts) — defaulting to a `gateway-releases` dir next to
+# EMPYRALIS_GATEWAY_STATE_DIR, or EMPYRALIS_GATEWAY_INSTALL_ROOT when set
+# explicitly (see gateway-release-layout.ts's resolveGatewayReleaseLayout,
+# which this block mirrors). Checked FIRST: once a self-update has ever
+# swapped this symlink, it is the freshest known-good build on the box and
+# should win over the installer-provisioned INSTALL_DIR, which self-update
+# never touches (and structurally cannot, without the ownership change this
+# script deliberately does not make — see gateway-release-layout.ts's doc
+# comment).
+SELF_UPDATE_INSTALL_ROOT="${EMPYRALIS_GATEWAY_INSTALL_ROOT:-}"
+if [[ -z "${SELF_UPDATE_INSTALL_ROOT}" && -n "${EMPYRALIS_GATEWAY_STATE_DIR:-}" ]]; then
+  SELF_UPDATE_INSTALL_ROOT="$(dirname "${EMPYRALIS_GATEWAY_STATE_DIR}")/gateway-releases"
+fi
 entry=""
-for candidate in \
-  "${INSTALL_DIR}/gateway/dist/index.js" \
-  "${INSTALL_DIR}/gateway/index.js" \
-  "${INSTALL_DIR}/gateway/build/index.js"; do
-  if [[ -f "${candidate}" ]]; then
-    entry="${candidate}"
-    break
-  fi
-done
+if [[ -n "${SELF_UPDATE_INSTALL_ROOT}" && -f "${SELF_UPDATE_INSTALL_ROOT}/current/gateway/dist/index.js" ]]; then
+  entry="${SELF_UPDATE_INSTALL_ROOT}/current/gateway/dist/index.js"
+fi
+if [[ -z "${entry}" ]]; then
+  for candidate in \
+    "${INSTALL_DIR}/gateway/dist/index.js" \
+    "${INSTALL_DIR}/gateway/index.js" \
+    "${INSTALL_DIR}/gateway/build/index.js"; do
+    if [[ -f "${candidate}" ]]; then
+      entry="${candidate}"
+      break
+    fi
+  done
+fi
 if [[ -z "${entry}" ]]; then
   entry="$(find "${INSTALL_DIR}/gateway" -type f -path '*/dist/index.js' 2>/dev/null | head -n 1 || true)"
 fi

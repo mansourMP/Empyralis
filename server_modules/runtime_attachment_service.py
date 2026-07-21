@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from server_modules import (
     agent_registry_repository,
     auth,
+    billing_credit_config,
     control_plane_repository,
     credit_ledger_contract,
     entitlements_service,
@@ -481,7 +482,11 @@ def build_runtime_usage_credit_event(
         platform_cost_usd=cost if payer == "platform_credits" else 0,
         provider_reported_cost=cost,
         provider_reported_currency="USD",
-        credits_debited=line_item.get("quantity") if payer == "platform_credits" else 0,
+        credits_debited=(
+            line_item.get("quantity")
+            if payer == "platform_credits"
+            else billing_credit_config.credits_for_byo_usage_cost_usd(cost)
+        ),
         estimation_mode="runtime_metered",
         created_at=ended_token,
     )

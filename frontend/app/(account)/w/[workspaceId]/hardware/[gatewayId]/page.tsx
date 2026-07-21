@@ -871,6 +871,254 @@ function CliSetupControl({
   );
 }
 
+/** Platform-triggered gateway self-update — one button, no SSH. Dispatches
+ *  through routes_gateway.py's POST .../self-update (member-gated), which
+ *  routes the SAME tool-invoke transport CliSetupControl's install button
+ *  above uses, to the gateway.self_update capability
+ *  (empyralis-gateway/src/update/gateway-self-update-runtime.ts). Unlike
+ *  CliSetupControl there is no "probe" to poll — the one fact that changes
+ *  on success is gateway_version itself, so this polls for THAT to move
+ *  past its pre-update value, reusing the same verify-poll shape (refresh()
+ *  on an interval, bounded by VERIFY_TIMEOUT_MS) rather than inventing a
+ *  second one. */
+function GatewaySelfUpdateControl({
+  gateway,
+  gatewayId,
+  workspaceId,
+  refresh,
+}: {
+  gateway: FleetGateway;
+  gatewayId: string;
+  workspaceId: string;
+  refresh: (opts?: { silent?: boolean }) => Promise<FleetGateway[]>;
+}) {
+  const currentVersion = gateway.gateway_version || null;
+  const latestVersion = gateway.latest_gateway_version || null;
+  const updateAvailable = Boolean(gateway.gateway_update_available);
+
+  const [busy, setBusy] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyTimedOut, setVerifyTimedOut] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+    };
+  }, []);
+
+  const runUpdate = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    setVerifyTimedOut(false);
+    const versionBeforeUpdate = currentVersion;
+    try {
+      await postCliAction(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/self-update`, {
+        workspace_id: workspaceId,
+      });
+      setBusy(false);
+      setVerifying(true);
+      const startedAt = Date.now();
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollRef.current = window.setInterval(async () => {
+        if (Date.now() - startedAt > VERIFY_TIMEOUT_MS) {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+          pollRef.current = null;
+          setVerifying(false);
+          setVerifyTimedOut(true);
+          return;
+        }
+        const list = await refresh({ silent: true });
+        const match = list.find((g) => idOf(g) === gatewayId);
+        const nowVersion = match?.gateway_version || null;
+        if (match && nowVersion && nowVersion !== versionBeforeUpdate) {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+          pollRef.current = null;
+          setVerifying(false);
+        }
+      }, VERIFY_POLL_MS);
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : "Update failed.");
+    }
+  }, [gatewayId, workspaceId, currentVersion, refresh]);
+
+  // Nothing meaningful to show for a box whose gateway_version this backend
+  // has never recorded (a gateway build old enough to predate self-update
+  // reports no version at all) AND has no known newer build to offer either.
+  if (!currentVersion && !updateAvailable) {
+    return null;
+  }
+
+  return (
+    <div className="fleet-hw-row">
+      <span className="fleet-hw-label">Gateway version</span>
+      <span className="fleet-hw-value" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span>{currentVersion ? `v${currentVersion}` : "Unknown"}</span>
+        {verifying ? (
+          <span className="fleet-list-row-desc" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Updating…
+          </span>
+        ) : updateAvailable ? (
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => void runUpdate()} disabled={busy}>
+            {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+            {busy ? "Starting…" : `Update to v${latestVersion}`}
+          </button>
+        ) : (
+          <span className="fleet-list-row-desc">Up to date</span>
+        )}
+      </span>
+      {error && (
+        <span className="fleet-channel-expand-error" style={{ margin: 0, width: "100%" }}>
+          {error}
+        </span>
+      )}
+      {verifyTimedOut && (
+        <span className="fleet-channel-expand-error" style={{ margin: 0, width: "100%" }}>
+          The update was triggered but this computer hasn&apos;t reported a new version yet — it may still be downloading, or it may need a manual check.
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** One check result from the gateway's own in-process doctor pass — see
+ *  empyralis-gateway/src/health/gateway-doctor.ts's GatewayDoctorCheckResult.
+ *  `status` mirrors the exact same detect->repair->re-validate contract the
+ *  gateway ran; this UI never re-interprets it. */
+type GatewayDoctorCheckResult = {
+  id: string;
+  label: string;
+  status: "pass" | "warn" | "fail" | "skip";
+  detail: string;
+  repairable: boolean;
+  repaired?: boolean;
+  repair_detail?: string;
+};
+
+type GatewayDoctorRunResponse = {
+  checked_at?: string;
+  repair_requested?: boolean;
+  results?: GatewayDoctorCheckResult[];
+};
+
+function doctorStatusTone(status: GatewayDoctorCheckResult["status"]): AgentStatusTone {
+  switch (status) {
+    case "pass":
+      return "ready";
+    case "warn":
+      return "degraded";
+    case "fail":
+      return "offline";
+    default:
+      return "unknown";
+  }
+}
+
+function doctorStatusLabel(status: GatewayDoctorCheckResult["status"]): string {
+  switch (status) {
+    case "pass":
+      return "OK";
+    case "warn":
+      return "Attention";
+    case "fail":
+      return "Issue";
+    default:
+      return "Skipped";
+  }
+}
+
+/** Runs the live in-gateway doctor (detect -> safe repair -> re-validate,
+ *  see gateway-doctor.ts) and renders one compact row per check — label,
+ *  status chip, and a single plain-language line. Deliberately terse: every
+ *  check is ONE row, never a multi-line breakdown, so this never turns into
+ *  the kind of dense diagnostic wall of text the iMessage setup panel's
+ *  staged probe shows (that panel's audience is "debug my iMessage bridge";
+ *  this one is "is my computer healthy," answered at a glance). */
+function GatewayDoctorControl({ gatewayId, workspaceId }: { gatewayId: string; workspaceId: string }) {
+  const [result, setResult] = useState<GatewayDoctorRunResponse | null>(null);
+  const [running, setRunning] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = useCallback(
+    async (repair: boolean) => {
+      if (repair) setRepairing(true);
+      else setRunning(true);
+      setError(null);
+      try {
+        const data = await postCliAction(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/doctor/run`, {
+          workspace_id: workspaceId,
+          repair,
+        });
+        setResult(data as unknown as GatewayDoctorRunResponse);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Diagnostics couldn't run.");
+      } finally {
+        setRunning(false);
+        setRepairing(false);
+      }
+    },
+    [gatewayId, workspaceId],
+  );
+
+  const results = result?.results ?? [];
+  const hasRepairableIssue = results.some((r) => r.repairable && (r.status === "fail" || r.status === "warn"));
+  const busy = running || repairing;
+
+  return (
+    <>
+      <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Diagnostics</div>
+      <div className="fleet-hw-card">
+        {results.length === 0 ? (
+          <div className="fleet-hw-row">
+            <span className="fleet-list-row-desc">
+              Check this computer's connection, features, and sign-ins in one pass.
+            </span>
+          </div>
+        ) : (
+          results.map((r) => (
+            <div
+              className="fleet-hw-row"
+              key={r.id}
+              style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", gap: 4 }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                <span className="fleet-hw-label">{r.label}</span>
+                <StatusChip tone={doctorStatusTone(r.status)} label={r.repaired ? "Fixed" : doctorStatusLabel(r.status)} />
+              </div>
+              <span className="fleet-list-row-desc">{r.detail}</span>
+            </div>
+          ))
+        )}
+        <div className="fleet-hw-row" style={{ justifyContent: "flex-end", gap: 8 }}>
+          {hasRepairableIssue && (
+            <button type="button" className="fleet-btn" onClick={() => void run(true)} disabled={busy}>
+              {repairing ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+              {repairing ? "Fixing…" : "Fix what's safe to fix"}
+            </button>
+          )}
+          <button type="button" className="fleet-btn" onClick={() => void run(false)} disabled={busy}>
+            {running ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+            {running ? "Checking…" : result ? "Run again" : "Run diagnostics"}
+          </button>
+        </div>
+        {result?.checked_at && (
+          <div className="fleet-hw-row">
+            <span className="fleet-list-row-desc">Checked {timeAgo(result.checked_at)}</span>
+          </div>
+        )}
+        {error && (
+          <span className="fleet-channel-expand-error" style={{ margin: 0, width: "100%" }}>
+            {error}
+          </span>
+        )}
+      </div>
+    </>
+  );
+}
+
 export default function GatewayDetailPage() {
   const params = useParams();
   const workspaceId = String(params?.workspaceId || "");
@@ -992,6 +1240,7 @@ export default function GatewayDetailPage() {
           <span className="fleet-hw-label">Paired since</span>
           <span className="fleet-hw-value">{gateway.created_at ? formatDateTime(gateway.created_at) : "—"}</span>
         </div>
+        <GatewaySelfUpdateControl gateway={gateway} gatewayId={targetGatewayId} workspaceId={workspaceId} refresh={refresh} />
         {gateway.runtime_access_label && (
           <div className="fleet-hw-row">
             <span className="fleet-hw-label">Shell access</span>
@@ -1055,6 +1304,8 @@ export default function GatewayDetailPage() {
           );
         })}
       </div>
+
+      <GatewayDoctorControl gatewayId={targetGatewayId} workspaceId={workspaceId} />
 
       <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>
         Agents running here{boundAgents.length > 0 ? ` · ${boundAgents.length}` : ""}

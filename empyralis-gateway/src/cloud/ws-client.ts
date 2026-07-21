@@ -245,6 +245,33 @@ export class GatewayWsClient {
       this.socket.onmessage = (event) => {
         void this.handleIncomingFrame(typeof event.data === "string" ? event.data : String(event.data));
       };
+      // openSocket() below only wires `onerror` for the connect handshake
+      // (to reject its promise) and never clears or reassigns it once
+      // `onopen` resolves that promise — so today a post-connect 'error'
+      // event on this same socket instance still invokes that stale
+      // handshake-era closure, which just calls an already-settled
+      // promise's reject()/clearTimeout() on an inert timer: a silent
+      // no-op, not a crash, but also not a deliberate handler — the error
+      // is dropped with no journal entry and no context captured for the
+      // 'close' event that follows it. Replacing it here with a real
+      // handler is the robust fix rather than relying on that accidental
+      // leftover closure staying harmless. (`ws`'s WebSocket emits a real
+      // EventEmitter 'error' event under the hood — if this socket ever
+      // reached a state with truly zero 'error' listeners, Node's default
+      // EventEmitter behavior would be to *throw* that error as an
+      // uncaughtException, same class of crash as openSocket()'s
+      // documented connect-timeout mitigation just below.) A post-connect
+      // 'error' (e.g. ECONNRESET) is always immediately followed by a
+      // 'close' event from the `ws` library (see emitErrorAndClose in
+      // ws/lib/websocket.js), so this handler's only job is to record
+      // context — the existing onclose -> handleSocketFailure() ->
+      // run()'s reconnect loop already does the actual recovery; this
+      // must not itself throw, close, or reconnect.
+      this.socket.onerror = (event) => {
+        const message = event && typeof event.message === "string" ? event.message : "WebSocket error";
+        this.socketFailureReason = this.socketFailureReason || `socket_error:${message}`;
+        void this.journal.append("system", "gateway.socket.error", { message });
+      };
       this.socket.onclose = async (event) => {
         const closeCode = Number(event.code || 1000);
         const closeContext: CloseCodeContext = {
@@ -408,6 +435,11 @@ export class GatewayWsClient {
       journalCursor: await this.journal.lastCursor(),
       checkpointCursor: checkpoints.lastAck ?? 0,
       queueDepthSummary: { ...outboxSummary },
+      // The state as of right before THIS attempt (e.g. "degraded" if the
+      // previous heartbeat failed but the socket stayed open) — honest
+      // as-of-send-time reporting, not the outcome of this attempt, which
+      // isn't known yet. See GatewayCheckpoints.currentHealthState().
+      healthState: this.checkpoints.currentHealthState(),
     });
     await this.sendRequest(
       "gateway.heartbeat",

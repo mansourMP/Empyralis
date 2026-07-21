@@ -11,8 +11,23 @@ interface PendingWrite {
 
 export class GatewayCheckpoints {
   private readonly pendingWrites = new Map<string, PendingWrite>();
+  // In-memory mirror of the last healthState written via save()/
+  // saveHealthState(), kept synchronously readable so hot paths (the
+  // heartbeat payload builder) don't need an async disk read — and so they
+  // see a state that was just written even inside the debounced-write
+  // window (see debouncedWrite() below). Defaults to "offline": nothing
+  // has confirmed a live connection yet.
+  private lastKnownHealthState: GatewayHealthState = "offline";
 
   constructor(private readonly db: GatewayStateDb) {}
+
+  /** The most recently recorded health state, synchronously available.
+   *  This is what GatewayWsClient.sendHeartbeat() threads into the
+   *  heartbeat payload's `health_state` field instead of a hardcoded
+   *  literal — see heartbeat-payload.ts. */
+  currentHealthState(): GatewayHealthState {
+    return this.lastKnownHealthState;
+  }
 
   async load(): Promise<GatewayStateSnapshot> {
     return this.db.readJson<GatewayStateSnapshot>("checkpoints.json", {});
@@ -25,6 +40,9 @@ export class GatewayCheckpoints {
       ...snapshot,
       updatedAt: new Date().toISOString(),
     };
+    if (merged.healthState) {
+      this.lastKnownHealthState = merged.healthState;
+    }
     return this.debouncedWrite(merged);
   }
 

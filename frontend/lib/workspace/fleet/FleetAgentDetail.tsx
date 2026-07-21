@@ -53,7 +53,7 @@ import {
   type FleetCapability,
   type FleetScheduleItem,
 } from "./fleet-data";
-import { deriveStatus, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, type AgentStatusTone } from "./fleet-presentation";
+import { deriveStatus, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, usagePayerLabel, type AgentStatusTone, type UsageMatrixRow } from "./fleet-presentation";
 import { StatusChip, StatusDot } from "./fleet-indicators";
 import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./FleetRightPanel";
 import { UsageStat, bucketSeries, type UsageBucket } from "./fleet-sparkline";
@@ -296,6 +296,7 @@ export function FleetAgentDetail({
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
   const [costToday, setCostToday] = useState<number | null>(null);
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
+  const [costMatrix, setCostMatrix] = useState<UsageMatrixRow[]>([]);
 
   const status = deriveStatus(agent?.hardware_status || "unknown", agent?.stopped?.active, Boolean(agent?.current_run_id));
 
@@ -305,8 +306,21 @@ export function FleetAgentDetail({
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d) return;
-        if (d.totals) setCostToday(Number(d.totals.usd_cost || 0));
-        if (Array.isArray(d.buckets)) setCostBuckets(d.buckets);
+        // `totals` isn't date-filtered by the backend (summarize_usage only
+        // date_trunc's `buckets`) — it's an all-time sum, so using it here
+        // would silently mislabel all-time spend as "today's". Match the
+        // bucket whose UTC day is actually today instead; no match (an agent
+        // with no usage yet today) correctly reads as $0, not all-time spend.
+        if (Array.isArray(d.buckets)) {
+          setCostBuckets(d.buckets);
+          const now = new Date();
+          const todayKey = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+            .toISOString()
+            .slice(0, 10);
+          const todayBucket = d.buckets.find((b: UsageBucket) => String(b.bucket || "").slice(0, 10) === todayKey);
+          setCostToday(Number(todayBucket?.usd_cost ?? 0));
+        }
+        if (Array.isArray(d.matrix)) setCostMatrix(d.matrix);
       })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -409,6 +423,26 @@ export function FleetAgentDetail({
         formattedTotal={costToday === null ? "…" : `$${costToday.toFixed(4)}`}
         values={bucketSeries(costBuckets, "usd_cost")}
       />
+      {/* Full attribution, not just a total: every real model/source this
+          agent has actually billed against, all-time — real tokens at that
+          model's real per-1M provider price, whoever pays for it. "Not
+          priced" (never a fabricated $0.00) when the source has no per-token
+          price to charge, e.g. a flat CLI subscription turn. */}
+      {[...costMatrix]
+        .sort((a, b) => b.usd_cost - a.usd_cost)
+        .slice(0, 5)
+        .map((row, i) => {
+          const modelLabel = [row.provider, row.model].filter(Boolean).join(" · ") || "Unknown model";
+          return (
+            <PanelRow
+              key={`${row.provider}:${row.model}:${row.mode}:${i}`}
+              label={modelLabel}
+              hint={`${usagePayerLabel(row.payer)} · ${formatNumber(row.tokens_in)} in / ${formatNumber(row.tokens_out)} out`}
+              value={row.pricing_known ? `$${row.usd_cost.toFixed(4)}` : "Not priced"}
+              tone={row.pricing_known ? "default" : "muted"}
+            />
+          );
+        })}
       <PanelRow label="Channels" value={connectedChannels} />
       <PanelRow label="Connectors" value={connectedConnectors} />
     </PanelSection>

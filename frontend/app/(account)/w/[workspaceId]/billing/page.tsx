@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 
 import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
-import { formatNumber, tintKeyForIndex, TINTS } from "@/lib/workspace/fleet/fleet-presentation";
+import { formatNumber, tintKeyForIndex, TINTS, usagePayerLabel, type UsageMatrixRow } from "@/lib/workspace/fleet/fleet-presentation";
 import { MultiSeriesChart, type ChartSeries } from "@/lib/workspace/fleet/fleet-sparkline";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
@@ -70,6 +70,7 @@ export default function UsagePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [bucketsByAgent, setBucketsByAgent] = useState<Map<string, UsageBucket[]>>(new Map());
+  const [matrix, setMatrix] = useState<UsageMatrixRow[]>([]);
 
   const { agents } = useFleetAgents(workspaceId);
   // Unlike the Agents list (where Sage is rightly hidden — it's the operator,
@@ -109,6 +110,23 @@ export default function UsagePage() {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [workspaceId, agents]);
+
+  // Full attribution matrix — one workspace-scoped call (not per-agent) since
+  // it's already grouped server-side by agent/provider/model/mode. Like
+  // totals/by_agent, summarize_usage() doesn't date-filter this, so it's
+  // honestly labeled "all-time" below rather than implied to match `period`.
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=workspace&period=day`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled) return;
+        if (d?.ok !== false && Array.isArray(d?.matrix)) setMatrix(d.matrix);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [workspaceId]);
 
   // 90 days fetched once (the backend's own bucket cap); slicing to 7/30
   // client-side means toggling the period never re-fetches.
@@ -159,6 +177,22 @@ export default function UsagePage() {
     perAgent.map((a) => ({ key: a.agentId, color: a.color, values: days.map((d) => a.byDate.get(d)?.[field] || 0) }));
 
   const hasAnyUsage = legend.length > 0;
+
+  const agentLabelById = useMemo(
+    () => new Map(agents.map((a) => [a.agent_id, a.label || "Unnamed agent"])),
+    [agents],
+  );
+  const matrixRows = useMemo(
+    () =>
+      matrix
+        .map((row) => ({
+          ...row,
+          agentLabel: (row.agent_install_id && agentLabelById.get(row.agent_install_id)) || "Unassigned",
+          modelLabel: [row.provider, row.model].filter(Boolean).join(" · ") || "Unknown model",
+        }))
+        .sort((a, b) => b.usd_cost - a.usd_cost),
+    [matrix, agentLabelById],
+  );
 
   return (
     <main className="fleet-content">
@@ -243,6 +277,37 @@ export default function UsagePage() {
                   </div>
                 ))}
               </div>
+
+              {/* Full attribution matrix — every agent × model × source
+                  combination that has real usage, all-time (see the effect
+                  above: summarize_usage() doesn't date-filter this field).
+                  Real per-1M-token provider pricing × real token counts for
+                  every row regardless of who pays; "Cost" reads "Not priced"
+                  rather than $0.0000 when the source has no per-token price
+                  (a flat CLI subscription, a free local model) — an unknown
+                  cost is never shown as a zero one. */}
+              {matrixRows.length > 0 && (
+                <div className="fleet-usage-legend fleet-usage-legend--matrix">
+                  <div className="fleet-usage-legend-header" aria-hidden>
+                    <span>Agent · model</span>
+                    <span>Source</span>
+                    <span className="is-right">Tokens in</span>
+                    <span className="is-right">Tokens out</span>
+                    <span className="is-right">Cost</span>
+                  </div>
+                  {matrixRows.map((row, i) => (
+                    <div key={`${row.agent_install_id}:${row.provider}:${row.model}:${row.mode}:${i}`} className="fleet-usage-legend-row">
+                      <span className="fleet-usage-legend-name" title={row.modelLabel}>
+                        {row.agentLabel} · {row.modelLabel}
+                      </span>
+                      <span className="fleet-usage-legend-name">{usagePayerLabel(row.payer)}</span>
+                      <span className="fleet-agent-cell-right">{formatNumber(row.tokens_in)}</span>
+                      <span className="fleet-agent-cell-right">{formatNumber(row.tokens_out)}</span>
+                      <span className="fleet-agent-cell-right">{row.pricing_known ? money(row.usd_cost) : "Not priced"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           )}
         </>
