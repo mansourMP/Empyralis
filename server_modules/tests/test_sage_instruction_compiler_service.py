@@ -88,6 +88,54 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertEqual(bundle.diagnostics["extra_context_files"], ["CUSTOM.md"])
         self.assertEqual(bundle.diagnostics["available_memory_file_count"], 1)
 
+    def test_sage_chat_always_loads_instruction_files_every_turn(self) -> None:
+        # Regression test for docs/design/memory-context-design.md finding #1:
+        # on the sage_chat surface, SOUL.md/AGENTS.md/TOOLS.md/USER.md/IDENTITY.md
+        # used to vanish from context entirely — only MEMORY.md was injected,
+        # and the agent ran the primary path with none of its own operating
+        # instructions. These must always be injected in full every turn.
+        bundle = compiler.build_sage_instruction_bundle(
+            workspace_id="ws-1",
+            message="hello",
+            provider="deepseek",
+            model="deepseek-chat",
+            root_context_files={
+                "SOUL.md": "# Soul\n\nSOUL_MARKER: be warm and direct.",
+                "IDENTITY.md": "# Identity\n\nIDENTITY_MARKER: goes by Sage.",
+                "USER.md": "# User\n\nUSER_MARKER: prefers concise replies.",
+                "AGENTS.md": "# Agents\n\nAGENTS_MARKER: never mention internal routing.",
+                "TOOLS.md": "# Tools\n\nTOOLS_MARKER: approval-gate sensitive actions.",
+                "GOALS.md": "# Goals\n\nGOALS_MARKER: ship the Q3 launch.",
+                "MEMORY.md": "# Memory\n\n- fact: MEMORY_MARKER stored fact.",
+                "memory/files/customers/acme.md": "# Acme\n\nTOPIC_FILE_MARKER: on-demand only.",
+            },
+            capability_payload={"items": []},
+        )
+
+        system_prompt = bundle.system_prompt
+        # All six always-load instruction files' content is present verbatim.
+        for marker in (
+            "SOUL_MARKER",
+            "IDENTITY_MARKER",
+            "USER_MARKER",
+            "AGENTS_MARKER",
+            "TOOLS_MARKER",
+            "GOALS_MARKER",
+        ):
+            self.assertIn(marker, system_prompt)
+        # MEMORY.md keeps its index-only treatment: content is still injected
+        # (capped), unlike the always-load tier's uncapped-per-call injection.
+        self.assertIn("MEMORY_MARKER", system_prompt)
+        # Topic files under memory/files/** stay on-demand: never injected in
+        # full, only listed by path for memory_search/memory_get to fetch.
+        self.assertNotIn("TOPIC_FILE_MARKER", system_prompt)
+        self.assertIn("memory/files/customers/acme.md", system_prompt)
+
+        self.assertEqual(
+            bundle.diagnostics["included_official_root_files"],
+            ["SOUL.md", "IDENTITY.md", "USER.md", "GOALS.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"],
+        )
+
     def test_capability_manifest_only_includes_currently_callable_tools(self) -> None:
         bundle = compiler.build_sage_instruction_bundle(
             workspace_id="ws-1",

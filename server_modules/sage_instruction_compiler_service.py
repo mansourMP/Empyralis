@@ -31,6 +31,18 @@ ROOT_MEMORY_BRIEF_PRIORITY: tuple[str, ...] = (
     "TOOLS.md",
     "MEMORY.md",
 )
+# The agent's always-loaded operating instructions and profile — the
+# Claude-Code `CLAUDE.md`-equivalent tier. Everything in OFFICIAL_ROOT_MEMORY_FILES
+# except MEMORY.md belongs here: persona (SOUL.md), surface identity
+# (IDENTITY.md), who the user is (USER.md), what they're working toward
+# (GOALS.md), operating rules (AGENTS.md), and tool notes (TOOLS.md).
+# Unlike MEMORY.md (a capped index backed by memory_search/memory_get for
+# on-demand detail), these files are injected in full every turn — dropping
+# them silently regresses the agent to running without its own operating
+# instructions. See docs/design/memory-context-design.md finding #1 / C5.
+ALWAYS_LOAD_INSTRUCTION_FILES: tuple[str, ...] = tuple(
+    filename for filename in ROOT_MEMORY_BRIEF_PRIORITY if filename != "MEMORY.md"
+)
 ROOT_MEMORY_SECTION_CHAR_LIMIT = 12_000
 ROOT_MEMORY_TOTAL_CHAR_LIMIT = 48_000
 ROOT_MEMORY_BRIEF_SECTION_CHAR_LIMIT = 900
@@ -257,9 +269,35 @@ def build_root_memory_brief_sections(context_files: Mapping[str, Any] | None) ->
     total_brief_chars = 0
     truncated = False
 
-    # ── Phase N (Stage 5): inject ONLY MEMORY.md content ──────────────
-    # Every other file is available on-demand via memory_read.
-    # MEMORY.md is the index the agent maintains.
+    # ── Always-loaded instruction tier ──────────────────────────────────
+    # SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS are the agent's operating
+    # instructions, not on-demand memory — inject them in full every turn,
+    # bounded by the same per-file/total caps the (now-dead) full-file path
+    # used, so one runaway file can't blow the prompt budget. This is the
+    # fix for the Pipeline B content blackout (design doc finding #1 / C5):
+    # previously only MEMORY.md was ever injected here and these six files
+    # were tracked as "consumed" but never surfaced anywhere.
+    for filename in ALWAYS_LOAD_INSTRUCTION_FILES:
+        content = _meaningful_context_file_content(filename, payload.get(filename))
+        if not content or total_source_chars >= ROOT_MEMORY_TOTAL_CHAR_LIMIT:
+            continue
+        consumed, was_truncated = _append_file_section(
+            sections=sections,
+            filename=filename,
+            content=content,
+            remaining_budget=ROOT_MEMORY_TOTAL_CHAR_LIMIT - total_source_chars,
+        )
+        total_source_chars += len(content)
+        if consumed <= 0:
+            continue
+        consumed_paths.add(filename)
+        included_official.append(filename)
+        total_brief_chars += consumed
+        truncated = truncated or was_truncated
+
+    # ── MEMORY.md: index only, capped + backed by memory_search/memory_get ──
+    # This is the one file that keeps the Phase N (Stage 5) index-only
+    # treatment — correct and intentional, not part of the regression.
     mem_content = _meaningful_context_file_content("MEMORY.md", payload.get("MEMORY.md"))
     if mem_content:
         consumed_paths.add("MEMORY.md")
@@ -277,8 +315,12 @@ def build_root_memory_brief_sections(context_files: Mapping[str, Any] | None) ->
             total_brief_chars += len(sanitized)
             truncated = truncated or was_truncated
 
-    # Track which official files exist on disk (but don't inject them)
+    # Track any remaining official files that exist on disk but weren't
+    # injected above (e.g. entirely redacted by red-fact stripping) so they
+    # still get accounted for and don't leak into the "extra files" bucket.
     for filename in OFFICIAL_ROOT_MEMORY_FILES:
+        if filename in consumed_paths:
+            continue
         if _meaningful_context_file_content(filename, payload.get(filename)):
             consumed_paths.add(filename)
 
