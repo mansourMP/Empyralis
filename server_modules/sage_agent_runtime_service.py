@@ -2226,7 +2226,7 @@ async def _resolve_specialist_toolset(
 # toggle state, so the toggle must be authoritative for those instead of a
 # blanket always-on bypass (a disabled Web Search toggle must actually stop
 # Web Search, not just look disabled).
-_ALWAYS_MANDATORY_TOOL_NAMES = frozenset({"task_complete", "query_tool_registry"})
+_ALWAYS_MANDATORY_TOOL_NAMES = frozenset({"task_complete", "query_tool_registry", "update_plan"})
 
 # web__fetch and hardware__action have no toggle of their own anywhere in the
 # UI — "Web Search" is the only web-lookup control an owner ever sees. Live

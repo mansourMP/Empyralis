@@ -25,6 +25,7 @@ from server_modules import skills_service
 # registry and is loaded on demand via query_tool_registry.
 ALWAYS_ON_TOOL_NAMES: frozenset = frozenset({
     "task_complete",
+    "update_plan",
     "memory_write",
     "memory_read",
     "memory_search",
