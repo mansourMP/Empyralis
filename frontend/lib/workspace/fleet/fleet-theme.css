@@ -5630,6 +5630,187 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-hw-value { font-size: var(--text-sm); color: var(--text-primary); display: inline-flex; align-items: center; gap: 6px; }
 .fleet-hw-note { font-size: var(--text-sm); color: var(--text-muted); line-height: var(--leading-normal); margin-top: var(--space-3); }
 
+/* ── Hardware detail — wide dashboard shell ──────────────────────────────
+   The founder-approved reshape: this page used to render inside plain
+   .fleet-content (820px reading column, centered) — on a wide monitor that
+   floats as a narrow ribbon with huge dead margins on both sides. This is a
+   dashboard, not a reading page, so it gets its own wide, left-aligned
+   shell (same "kill the auto-margin trap" fix .fleet-content--wide already
+   established for the Hardware LIST page just above it in the nav — see
+   that class's own comment for why margin-inline must be 0, not auto, to
+   actually fill the panel instead of shrink-to-fit-then-recenter). Capped
+   wider than the general --content-max-wide (1140px, sized for dense
+   tables) since this page is a multi-column gauge+card dashboard that
+   genuinely wants the extra room; not promoted to a global token since nothing
+   else needs this exact cap yet. */
+.fleet-hw-dashboard {
+  flex: 0 1 auto;
+  min-width: 0;
+  background: transparent;
+  padding: 28px 32px 48px;
+  max-width: 1320px;
+  margin-inline: 0;
+}
+
+.fleet-hw-dash-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+.fleet-hw-dash-identity { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.fleet-hw-dash-identity-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fleet-hw-dash-subline { font-size: var(--text-sm); color: var(--text-muted); }
+.fleet-hw-dash-status { flex-shrink: 0; padding-top: 4px; }
+
+/* Resource gauges — up to 4 cards (CPU/GPU/Memory/Temp), auto-fit so 2 or 3
+   present metrics reflow instead of stretching into awkward whitespace.
+   Only a metric this box actually reported gets a card (see
+   buildGaugeCards in page.tsx) — never an empty/fake gauge. */
+.fleet-hw-dash-gauges {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+.fleet-hw-dash-gauge {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  min-width: 0;
+}
+.fleet-hw-dash-gauge-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  color: var(--text-muted);
+}
+.fleet-hw-dash-gauge-head svg { flex-shrink: 0; }
+.fleet-hw-dash-gauge-value {
+  font-size: 20px;
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-hw-dash-gauge-bar {
+  display: block;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.fleet-hw-dash-gauge-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--online-text);
+  transition: width var(--motion-slow) ease;
+}
+.fleet-hw-dash-gauge-bar-fill--warn { background: var(--warning-text); }
+.fleet-hw-dash-gauge-bar-fill--danger { background: var(--offline-text); }
+
+/* Honest fallback when the gateway hasn't reported `resources` at all yet
+   (older build, or hasn't heartbeated with the field yet) — one subtle
+   line instead of a grid of empty/fake gauges. */
+.fleet-hw-dash-gauges-empty {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  padding: var(--space-2) 0 var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+/* Two-column dashboard bands (Agents|Gateway, then Channels|Capabilities).
+   Left column wider — the founder called the Agents panel the crucial one.
+   Collapses to one column under 900px so neither panel gets crushed. */
+.fleet-hw-dash-band {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: var(--space-5);
+  margin-bottom: var(--space-2);
+  align-items: start;
+}
+.fleet-hw-dash-panel { min-width: 0; }
+
+@media (max-width: 900px) {
+  .fleet-hw-dash-band { grid-template-columns: 1fr; }
+}
+
+/* Agents-running-here rows: status dot + name + "Working · Telegram"-style
+   sub-status — denser than .fleet-list-row (no title-rename affordance,
+   no meta column) since this is a read-only reflection of the agent, not
+   the agent's own management row. */
+.fleet-hw-dash-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.fleet-hw-dash-agent-row:last-child { border-bottom: none; }
+.fleet-hw-dash-agent-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.fleet-hw-dash-agent-name {
+  font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fleet-hw-dash-agent-sub {
+  font-size: var(--text-xs); color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Channel brand-icon pills — CHANNEL_ICONS lookup, one pill per unique
+   channel key among the agents pinned to this box. */
+.fleet-hw-dash-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  min-height: 52px;
+}
+.fleet-hw-dash-channel-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.fleet-hw-dash-channel-pill img { width: 14px; height: 14px; object-fit: contain; flex-shrink: 0; }
+
+/* Compact honest-empty state for a dashboard panel (no agents pinned, no
+   channels yet) — .fleet-empty's 64px centered treatment is sized for a
+   whole-page empty state and looks broken squeezed into a half-width grid
+   cell next to a dense card; this is the same message shape at panel
+   density, left-aligned like every other panel here. */
+.fleet-hw-dash-empty {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fleet-hw-dash-empty-title { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-primary); }
+.fleet-hw-dash-empty-desc { font-size: var(--text-xs); color: var(--text-muted); line-height: var(--leading-normal); }
+
 /* Billing: project → agent breakdown */
 .fleet-bill-group { margin-top: var(--space-5); }
 .fleet-bill-group-head {
@@ -6159,7 +6340,8 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
      two tables, since the same over-wide gutter shows up on Hardware/
      Settings/Billing/FleetHome too. */
   .fleet-content,
-  .fleet-content-main {
+  .fleet-content-main,
+  .fleet-hw-dashboard {
     padding: 16px 12px;
   }
 

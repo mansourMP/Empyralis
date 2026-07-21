@@ -1,14 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, Cpu, Loader2, Server } from "lucide-react";
+import { ArrowLeft, Cpu, Gpu, Loader2, MemoryStick, Server, Thermometer } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
-import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
-import { deriveStatus, formatDateTime, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
+import { StatusChip, StatusDot, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
+import { CHANNEL_ICONS, CHANNEL_LABELS } from "@/lib/workspace/fleet/fleet-icons";
+import { deriveStatus, formatDate, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
 import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
 import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
@@ -22,6 +23,7 @@ import {
   RUNTIME_LABELS,
   useWorkspaceGateways,
   type FleetGateway,
+  type GatewayResources,
   type ServiceInventoryItem,
   type RuntimeState,
 } from "@/lib/workspace/fleet/gateway-box-picker";
@@ -48,6 +50,145 @@ function serviceItemPresentation(status: string | undefined): { tone: AgentStatu
   if (s === "degraded") return { tone: "degraded", label: "Degraded" };
   if (s === "missing" || s === "offline") return { tone: "unknown", label: "Not detected" };
   return { tone: "unknown", label: "Unknown" };
+}
+
+/** Right-aligned header status pill's honest tail — connPresentation already
+ *  gives the raw connection word (Online/Degraded/Offline/…); this adds the
+ *  plain-language "what that means" clause the approved design calls for
+ *  ("● Online · gateway healthy"). */
+function connectionHealthSuffix(tone: AgentStatusTone): string {
+  switch (tone) {
+    case "online":
+      return "gateway healthy";
+    case "degraded":
+      return "needs attention";
+    case "offline":
+      return "not reachable";
+    case "error":
+      return "re-pair required";
+    default:
+      return "";
+  }
+}
+
+/** Resource-gauge bar color tier — "" (default/green) below 60%, amber at
+ *  60-84%, red at 85%+. Shared by CPU/GPU/Memory; Temp uses its own
+ *  Celsius-scale thresholds below since 34% CPU and 34°C don't mean the
+ *  same thing. */
+type GaugeTone = "" | "warn" | "danger";
+
+function toneForPct(pct: number): GaugeTone {
+  if (pct >= 85) return "danger";
+  if (pct >= 60) return "warn";
+  return "";
+}
+
+function toneForTempC(c: number): GaugeTone {
+  if (c >= 90) return "danger";
+  if (c >= 75) return "warn";
+  return "";
+}
+
+function clampPct(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, n));
+}
+
+function formatGB(bytes: number): string {
+  return (bytes / 1_000_000_000).toFixed(1);
+}
+
+type GaugeCardDef = {
+  key: string;
+  icon: ReactNode;
+  label: string;
+  value: string;
+  pct: number;
+  tone: GaugeTone;
+};
+
+/** Builds only the cards for metrics this box actually reported — a null
+ *  field (no GPU, no temp sensor) is hidden, never rendered as a fake/empty
+ *  gauge. `resources` itself can be undefined (older gateway build, or one
+ *  that hasn't heartbeated with this field yet) — same result, empty list,
+ *  which the caller renders as the "live metrics will appear" line instead
+ *  of an empty grid. */
+function buildGaugeCards(resources: GatewayResources | null | undefined): GaugeCardDef[] {
+  if (!resources) return [];
+  const cards: GaugeCardDef[] = [];
+  if (typeof resources.cpu_pct === "number" && Number.isFinite(resources.cpu_pct)) {
+    const pct = clampPct(resources.cpu_pct);
+    cards.push({
+      key: "cpu",
+      icon: <Cpu size={13} strokeWidth={1.75} />,
+      label: "CPU",
+      value: `${Math.round(pct)}%`,
+      pct,
+      tone: toneForPct(pct),
+    });
+  }
+  if (typeof resources.gpu_pct === "number" && Number.isFinite(resources.gpu_pct)) {
+    const pct = clampPct(resources.gpu_pct);
+    cards.push({
+      key: "gpu",
+      icon: <Gpu size={13} strokeWidth={1.75} />,
+      label: "GPU",
+      value: `${Math.round(pct)}%`,
+      pct,
+      tone: toneForPct(pct),
+    });
+  }
+  if (
+    typeof resources.memory_used_bytes === "number" && Number.isFinite(resources.memory_used_bytes)
+    && typeof resources.memory_total_bytes === "number" && resources.memory_total_bytes > 0
+  ) {
+    const pct = clampPct((resources.memory_used_bytes / resources.memory_total_bytes) * 100);
+    cards.push({
+      key: "memory",
+      icon: <MemoryStick size={13} strokeWidth={1.75} />,
+      label: "Memory",
+      value: `${formatGB(resources.memory_used_bytes)} / ${formatGB(resources.memory_total_bytes)} GB`,
+      pct,
+      tone: toneForPct(pct),
+    });
+  }
+  if (typeof resources.temperature_c === "number" && Number.isFinite(resources.temperature_c)) {
+    const c = resources.temperature_c;
+    cards.push({
+      key: "temp",
+      icon: <Thermometer size={13} strokeWidth={1.75} />,
+      label: "Temp",
+      value: `${Math.round(c)}°C`,
+      // No universal "100% = danger" ceiling for temperature the way there
+      // is for a percent-based metric — 100°C is a reasonable upper bound
+      // for a bar visualization only, not a claim about any real limit.
+      pct: clampPct((c / 100) * 100),
+      tone: toneForTempC(c),
+    });
+  }
+  return cards;
+}
+
+/** Compact elapsed-duration string ("3h 42m", "2d 6h") for the Gateway
+ *  card's Uptime row. Measures time since latest_connected_at — this
+ *  session's own connected duration (the one uptime signal the backend
+ *  actually reports; no host-OS process uptime is transmitted) — not
+ *  "ago" phrasing like timeAgo(), since a duration reads oddly as "X ago". */
+function formatUptime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "—";
+  const diffMs = Date.now() - then;
+  if (diffMs < 0) return "—";
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 1) return "<1m";
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  if (hours < 24) return remMins > 0 ? `${hours}h ${remMins}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
 }
 
 const VERIFY_POLL_MS = 5_000;
@@ -1147,7 +1288,7 @@ export default function GatewayDetailPage() {
 
   if (loading) {
     return (
-      <main className="fleet-content">
+      <main className="fleet-hw-dashboard">
         {backLink}
         <div className="fleet-list" style={{ marginTop: 16 }}>
           <div className="fleet-list-row">
@@ -1160,7 +1301,7 @@ export default function GatewayDetailPage() {
 
   if (!gateway) {
     return (
-      <main className="fleet-content">
+      <main className="fleet-hw-dashboard">
         {backLink}
         <div className="fleet-empty" style={{ marginTop: 20 }}>
           <div className="fleet-empty-title">This computer isn't in your workspace</div>
@@ -1200,148 +1341,231 @@ export default function GatewayDetailPage() {
   const serviceInventory: ServiceInventoryItem[] = gateway.metadata?.service_inventory || [];
   const byId = new Map(serviceInventory.map((item) => [String(item.id || ""), item]));
 
+  // Header sub-line: "darwin-arm64 · Local computer · paired Jul 21, 2026" —
+  // platform · location/type · paired date, each segment omitted when this
+  // box genuinely has no value for it rather than printing a placeholder.
+  const platformSegment = (gateway.platform || "").trim() || "unknown platform";
+  const locationSegment = isCloud ? (gateway.hardware_label || "Cloud server") : "Local computer";
+  const pairedSegment = gateway.created_at
+    ? `paired ${formatDate(gateway.created_at, { month: "short", day: "numeric", year: "numeric" })}`
+    : null;
+  const headerSubline = [platformSegment, locationSegment, pairedSegment].filter(Boolean).join(" · ");
+
+  const statusSuffix = connectionHealthSuffix(connPresentation.tone);
+  const statusPillLabel = statusSuffix ? `${connPresentation.label} · ${statusSuffix}` : connPresentation.label;
+
+  const gaugeCards = buildGaugeCards(gateway.metadata?.resources ?? gateway.resources);
+
+  // Channels through this box — derived from the SAME boundAgents this
+  // page already resolves for "Agents running on this computer" (see
+  // boundAgents above: agent.preferred_gateway_id === this gateway).
+  // fleet_list_agents only returns each agent's PRIMARY enabled channel
+  // (key, plus a "+N" suffix when more are enabled) — a real, known gap:
+  // an agent with 2+ channels only contributes its first one here.
+  const channelKeys = Array.from(
+    new Set(
+      boundAgents
+        .map((a) => (a.channel || "").split(" ")[0].trim())
+        .filter((key) => key.length > 0),
+    ),
+  );
+
   return (
-    <main className="fleet-content">
+    <main className="fleet-hw-dashboard">
       {backLink}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16 }}>
-        <TintTile tint={isCloud ? "blue" : "teal"} size={36}>
-          {isCloud ? <Server size={18} strokeWidth={1.75} /> : <Cpu size={18} strokeWidth={1.75} />}
-        </TintTile>
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <HardwareRenameField
-            gatewayId={targetGatewayId}
-            displayName={gatewayLabel(gateway)}
-            onRenamed={() => void refresh()}
-          />
-          <span className="fleet-list-row-desc">
-            {isCloud ? gateway.hardware_label || "Agent Computer" : gateway.platform || "unknown platform"}
-          </span>
-        </div>
-      </div>
-
-      <div className="fleet-detail-section-title" style={{ marginTop: 24 }}>Health</div>
-      <div className="fleet-hw-card">
-        <div className="fleet-hw-row">
-          <span className="fleet-hw-label">Connection</span>
-          <span className="fleet-hw-value">
-            <StatusChip tone={connPresentation.tone} label={connPresentation.label} />
-          </span>
-        </div>
-        <div className="fleet-hw-row">
-          <span className="fleet-hw-label">Last heartbeat</span>
-          <span className="fleet-hw-value">
-            {typeof heartbeatAge === "number"
-              ? heartbeatAge < 60 ? `${heartbeatAge}s ago` : timeAgo(gateway.last_heartbeat_at)
-              : gateway.last_heartbeat_at ? timeAgo(gateway.last_heartbeat_at) : "—"}
-          </span>
-        </div>
-        <div className="fleet-hw-row">
-          <span className="fleet-hw-label">Paired since</span>
-          <span className="fleet-hw-value">{gateway.created_at ? formatDateTime(gateway.created_at) : "—"}</span>
-        </div>
-        <GatewaySelfUpdateControl gateway={gateway} gatewayId={targetGatewayId} workspaceId={workspaceId} refresh={refresh} />
-        {gateway.runtime_access_label && (
-          <div className="fleet-hw-row">
-            <span className="fleet-hw-label">Shell access</span>
-            <span className="fleet-hw-value">{gateway.runtime_access_label}</span>
+      <header className="fleet-hw-dash-header">
+        <div className="fleet-hw-dash-identity">
+          <TintTile accent size={40}>
+            {isCloud ? <Server size={20} strokeWidth={1.75} /> : <Cpu size={20} strokeWidth={1.75} />}
+          </TintTile>
+          <div className="fleet-hw-dash-identity-text">
+            <HardwareRenameField
+              gatewayId={targetGatewayId}
+              displayName={gatewayLabel(gateway)}
+              onRenamed={() => void refresh()}
+            />
+            <span className="fleet-hw-dash-subline">{headerSubline}</span>
           </div>
-        )}
+        </div>
+        <span className="fleet-hw-dash-status">
+          <StatusChip tone={connPresentation.tone} label={statusPillLabel} />
+        </span>
+      </header>
+
+      {gaugeCards.length > 0 ? (
+        <div className="fleet-hw-dash-gauges">
+          {gaugeCards.map((g) => (
+            <div className="fleet-hw-dash-gauge" key={g.key}>
+              <span className="fleet-hw-dash-gauge-head">
+                {g.icon}
+                {g.label}
+              </span>
+              <span className="fleet-hw-dash-gauge-value">{g.value}</span>
+              <span className="fleet-hw-dash-gauge-bar">
+                <span
+                  className={`fleet-hw-dash-gauge-bar-fill${g.tone ? ` fleet-hw-dash-gauge-bar-fill--${g.tone}` : ""}`}
+                  style={{ width: `${g.pct}%` }}
+                />
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="fleet-hw-dash-gauges-empty">
+          Live metrics will appear once this computer&apos;s gateway updates.
+        </div>
+      )}
+
+      <div className="fleet-hw-dash-band">
+        <div className="fleet-hw-dash-panel">
+          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>
+            Agents running on this computer{boundAgents.length > 0 ? ` · ${boundAgents.length}` : ""}
+          </div>
+          {agentsLoading ? (
+            <div className="fleet-hw-card">
+              <div className="fleet-hw-row">
+                <div className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} />
+              </div>
+            </div>
+          ) : boundAgents.length === 0 ? (
+            <div className="fleet-hw-dash-empty">
+              <div className="fleet-hw-dash-empty-title">No agents are pinned to this computer</div>
+              <div className="fleet-hw-dash-empty-desc">
+                Bind an agent to it from that agent&apos;s Hardware tab — this only lists agents whose
+                &quot;which computer&quot; choice points here specifically, not every agent allowed to use
+                any paired box.
+              </div>
+            </div>
+          ) : (
+            <div className="fleet-hw-card">
+              {boundAgents.map((a) => {
+                const status = deriveStatus(a.hardware_status, a.stopped?.active, Boolean(a.current_run_id));
+                const primaryChannelKey = (a.channel || "").split(" ")[0].trim();
+                const channelLabel = primaryChannelKey ? CHANNEL_LABELS[primaryChannelKey] || primaryChannelKey : "";
+                const subText = channelLabel ? `${status.label} · ${channelLabel}` : status.label;
+                return (
+                  <div key={a.agent_id} className="fleet-hw-dash-agent-row">
+                    <StatusDot tone={status.tone} />
+                    <span className="fleet-hw-dash-agent-text">
+                      <span className="fleet-hw-dash-agent-name">{a.label || "Unnamed agent"}</span>
+                      <span className="fleet-hw-dash-agent-sub">{subText}</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="fleet-hw-dash-panel">
+          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Gateway</div>
+          <div className="fleet-hw-card">
+            <GatewaySelfUpdateControl gateway={gateway} gatewayId={targetGatewayId} workspaceId={workspaceId} refresh={refresh} />
+            <div className="fleet-hw-row">
+              <span className="fleet-hw-label">Heartbeat</span>
+              <span className="fleet-hw-value">
+                {typeof heartbeatAge === "number"
+                  ? heartbeatAge < 60 ? `${heartbeatAge}s ago` : timeAgo(gateway.last_heartbeat_at)
+                  : gateway.last_heartbeat_at ? timeAgo(gateway.last_heartbeat_at) : "—"}
+              </span>
+            </div>
+            <div className="fleet-hw-row">
+              <span className="fleet-hw-label">Uptime</span>
+              <span className="fleet-hw-value">{formatUptime(gateway.latest_connected_at)}</span>
+            </div>
+            {gateway.runtime_access_label && (
+              <div className="fleet-hw-row">
+                <span className="fleet-hw-label">Shell access</span>
+                <span className="fleet-hw-value">{gateway.runtime_access_label}</span>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Capabilities</div>
-      <div className="fleet-hw-card">
-        {CAPABILITY_ORDER.map((id) => {
-          const isCli = id === "claude_cli" || id === "codex_cli";
-          if (isCli) {
-            const runtime: "claude_code" | "codex" = id === "claude_cli" ? "claude_code" : "codex";
-            const state = gatewayRuntimeState(gateway, runtime);
-            // A CLI row with state==="ready" collapses to nothing extra —
-            // the CliSetupControl returns null and we render just the
-            // label + status chip like every other row.
-            if (state === "ready") {
+      <div className="fleet-hw-dash-band">
+        <div className="fleet-hw-dash-panel">
+          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Channels through this box</div>
+          {channelKeys.length === 0 ? (
+            <div className="fleet-hw-dash-empty">
+              <div className="fleet-hw-dash-empty-title">No channels yet</div>
+              <div className="fleet-hw-dash-empty-desc">
+                Agents pinned to this computer aren&apos;t connected to a channel yet.
+              </div>
+            </div>
+          ) : (
+            <div className="fleet-hw-dash-channels">
+              {channelKeys.map((key) => (
+                <span className="fleet-hw-dash-channel-pill" key={key}>
+                  {CHANNEL_ICONS[key] && <img src={CHANNEL_ICONS[key]} alt="" />}
+                  {CHANNEL_LABELS[key] || key}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="fleet-hw-dash-panel">
+          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Capabilities</div>
+          <div className="fleet-hw-card">
+            {CAPABILITY_ORDER.map((id) => {
+              const isCli = id === "claude_cli" || id === "codex_cli";
+              if (isCli) {
+                const runtime: "claude_code" | "codex" = id === "claude_cli" ? "claude_code" : "codex";
+                const state = gatewayRuntimeState(gateway, runtime);
+                // A CLI row with state==="ready" collapses to nothing extra —
+                // the CliSetupControl returns null and we render just the
+                // label + status chip like every other row.
+                if (state === "ready") {
+                  return (
+                    <div className="fleet-hw-row" key={id}>
+                      <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
+                      <span className="fleet-hw-value">
+                        <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />
+                      </span>
+                    </div>
+                  );
+                }
+                // CliSetupControl now OWNS the row layout for missing /
+                // unauthenticated states — label, status chip, primary action
+                // button all sit on ONE flex row, with the expansion area
+                // (chooser / URL+code / input / error) rendered below only
+                // when non-empty. See the memo at
+                // https://claude.ai/code/artifact/d3280431-5697-49e7-89bc-cad15f013af2
+                return (
+                  <div
+                    className="fleet-hw-row"
+                    key={id}
+                    style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", gap: 4 }}
+                  >
+                    <CliSetupControl
+                      runtime={runtime}
+                      state={state}
+                      gatewayId={targetGatewayId}
+                      workspaceId={workspaceId}
+                      refresh={refresh}
+                      isCloud={isCloud}
+                    />
+                  </div>
+                );
+              }
+              const item = byId.get(id);
+              const presentation = serviceItemPresentation(item?.status);
               return (
                 <div className="fleet-hw-row" key={id}>
                   <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
                   <span className="fleet-hw-value">
-                    <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />
+                    <StatusChip tone={presentation.tone} label={presentation.label} />
                   </span>
                 </div>
               );
-            }
-            // CliSetupControl now OWNS the row layout for missing /
-            // unauthenticated states — label, status chip, primary action
-            // button all sit on ONE flex row, with the expansion area
-            // (chooser / URL+code / input / error) rendered below only
-            // when non-empty. See the memo at
-            // https://claude.ai/code/artifact/d3280431-5697-49e7-89bc-cad15f013af2
-            return (
-              <div
-                className="fleet-hw-row"
-                key={id}
-                style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", gap: 4 }}
-              >
-                <CliSetupControl
-                  runtime={runtime}
-                  state={state}
-                  gatewayId={targetGatewayId}
-                  workspaceId={workspaceId}
-                  refresh={refresh}
-                  isCloud={isCloud}
-                />
-              </div>
-            );
-          }
-          const item = byId.get(id);
-          const presentation = serviceItemPresentation(item?.status);
-          return (
-            <div className="fleet-hw-row" key={id}>
-              <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
-              <span className="fleet-hw-value">
-                <StatusChip tone={presentation.tone} label={presentation.label} />
-              </span>
-            </div>
-          );
-        })}
+            })}
+          </div>
+        </div>
       </div>
 
       <GatewayDoctorControl gatewayId={targetGatewayId} workspaceId={workspaceId} />
-
-      <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>
-        Agents running here{boundAgents.length > 0 ? ` · ${boundAgents.length}` : ""}
-      </div>
-      {agentsLoading ? (
-        <div className="fleet-list">
-          <div className="fleet-list-row">
-            <div className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} />
-          </div>
-        </div>
-      ) : boundAgents.length === 0 ? (
-        <div className="fleet-empty">
-          <div className="fleet-empty-title">No agents are pinned to this computer</div>
-          <div className="fleet-empty-desc">
-            Bind an agent to it from that agent's Hardware tab — this only lists agents whose "which
-            computer" choice points here specifically, not every agent allowed to use any paired box.
-          </div>
-        </div>
-      ) : (
-        <div className="fleet-list">
-          {boundAgents.map((a) => {
-            const status = deriveStatus(a.hardware_status, a.stopped?.active, Boolean(a.current_run_id));
-            return (
-              <div key={a.agent_id} className="fleet-list-row" style={{ cursor: "default" }}>
-                <span className="fleet-list-row-main">
-                  <span className="fleet-list-row-title">{a.label || "Unnamed agent"}</span>
-                  <span className="fleet-list-row-desc">{a.role}</span>
-                </span>
-                <span className="fleet-list-row-meta">
-                  <StatusChip tone={status.tone} label={status.label} />
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
 
       {canDestroy && (
         <>
