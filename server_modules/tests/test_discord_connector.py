@@ -195,6 +195,113 @@ class DiscordConnectorTests(unittest.TestCase):
         self.assertEqual(result[0]["name"], "Acme Guild")
         self.assertIn("/users/@me/guilds?limit=20", calls[0][0])
 
+    # ── Outbound 429 rate-limit retry ───────────────────────────────────
+
+    def test_send_message_retries_after_429_then_succeeds(self):
+        """A single 429 (Discord's documented shape: JSON `retry_after` +
+        `Retry-After` header) must be retried in place, not raised."""
+        calls = []
+
+        def fake_request(url, **kwargs):
+            calls.append((url, kwargs))
+            if len(calls) == 1:
+                return {
+                    "status": 429,
+                    "json": {"message": "You are being rate limited.", "retry_after": 0.25, "global": False},
+                    "headers": {"Retry-After": "1"},
+                }
+            return {"status": 200, "json": {"id": "msg-1", "content": "hi"}}
+
+        with patch("server_modules.connectors.discord_connector.time.sleep") as mock_sleep:
+            result = discord_connector.send_message(
+                {"bot_token": "discord-token"},
+                "123",
+                "hi",
+                http_json_request=fake_request,
+            )
+
+        self.assertEqual(len(calls), 2, "should retry exactly once after the 429")
+        self.assertEqual(result, {"id": "msg-1", "content": "hi"})
+        # The JSON body's sub-second retry_after (0.25s) is authoritative
+        # over the coarser 1s Retry-After header.
+        mock_sleep.assert_called_once_with(0.25)
+
+    def test_send_message_gives_up_after_exhausting_429_retries(self):
+        """Persistent 429s must still raise — never retry unboundedly."""
+        calls = []
+
+        def fake_request(url, **kwargs):
+            calls.append((url, kwargs))
+            return {
+                "status": 429,
+                "json": {"message": "You are being rate limited.", "retry_after": 0.1, "global": False},
+                "headers": {},
+            }
+
+        with patch("server_modules.connectors.discord_connector.time.sleep") as mock_sleep:
+            with self.assertRaises(RuntimeError):
+                discord_connector.send_message(
+                    {"bot_token": "discord-token"},
+                    "123",
+                    "hi",
+                    http_json_request=fake_request,
+                )
+
+        self.assertEqual(
+            len(calls),
+            discord_connector._DISCORD_RATE_LIMIT_MAX_ATTEMPTS,
+            "must stop at the bounded attempt cap, never retry forever",
+        )
+        # One sleep between each pair of attempts, never after the last.
+        self.assertEqual(mock_sleep.call_count, discord_connector._DISCORD_RATE_LIMIT_MAX_ATTEMPTS - 1)
+
+    def test_send_message_retry_wait_is_capped_per_attempt(self):
+        """A pathological Retry-After from Discord must be clamped, never
+        turned into an effectively unbounded single wait."""
+        calls = []
+
+        def fake_request(url, **kwargs):
+            calls.append((url, kwargs))
+            if len(calls) == 1:
+                return {
+                    "status": 429,
+                    "json": {"message": "rate limited", "retry_after": 9999.0, "global": True},
+                    "headers": {},
+                }
+            return {"status": 200, "json": {"id": "msg-2"}}
+
+        with patch("server_modules.connectors.discord_connector.time.sleep") as mock_sleep:
+            result = discord_connector.send_message(
+                {"bot_token": "discord-token"},
+                "123",
+                "hi",
+                http_json_request=fake_request,
+            )
+
+        self.assertEqual(result, {"id": "msg-2"})
+        mock_sleep.assert_called_once_with(discord_connector._DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS)
+
+    def test_non_429_error_status_does_not_retry(self):
+        """A plain 4xx/5xx (not a rate limit) must fail immediately — the
+        retry path is 429-specific, not a generic error retry."""
+        calls = []
+
+        def fake_request(url, **kwargs):
+            calls.append((url, kwargs))
+            return {"status": 500, "json": {"message": "internal error"}}
+
+        with patch("server_modules.connectors.discord_connector.time.sleep") as mock_sleep:
+            with self.assertRaises(RuntimeError):
+                discord_connector.send_message(
+                    {"bot_token": "discord-token"},
+                    "123",
+                    "hi",
+                    http_json_request=fake_request,
+                )
+
+        self.assertEqual(len(calls), 1)
+        mock_sleep.assert_not_called()
+
     # ── Deduplication guard tests ──────────────────────────────────────
 
     def test_dedup_first_call_not_duplicate(self):

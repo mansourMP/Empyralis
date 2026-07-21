@@ -25,6 +25,23 @@ RouteMessageFn = Callable[..., Awaitable[Dict[str, Any]]]
 ResolveTenantFn = Callable[[Dict[str, Any], str], Awaitable[str]]
 
 
+# ── Gateway reconnect supervision ───────────────────────────────────────────
+# Mirrors the capped-exponential-backoff shape ConnectorRuntime.mark_error
+# uses for the Telegram/WhatsApp bot connectors' own reconnect-after-error
+# backoff (server_modules/connectors/connector_runtime.py:347 —
+# `min(60.0, base * (1.6 ** min(consecutive_errors, 8)))`), so Discord's
+# gateway supervision matches the rest of the house style instead of
+# inventing its own schedule.
+_DISCORD_RECONNECT_BASE_SECONDS = 2.0
+_DISCORD_RECONNECT_MAX_SECONDS = 60.0
+_DISCORD_RECONNECT_BACKOFF_MULTIPLIER = 1.6
+# A session that stayed connected at least this long before dropping counts
+# as "was healthy" — the consecutive-failure streak (and therefore the
+# backoff) resets instead of ratcheting toward the cap forever on a bot that
+# mostly works but blips occasionally.
+_DISCORD_RECONNECT_HEALTHY_SECONDS = 120.0
+
+
 @dataclass(frozen=True)
 class DiscordBotRuntimeStatus:
     connector_id: str
@@ -129,6 +146,11 @@ class DiscordBotRuntimeService:
         # same Discord bot token's inbound stream. Released in stop().
         self._locked_credentials: List[tuple] = []
         self._statuses: List[DiscordBotRuntimeStatus] = []
+        # Gateway reconnect supervision: signals every per-connector
+        # reconnect-supervisor thread (see _supervise_gateway_reconnect) to
+        # stop scheduling further reconnect attempts. Set by stop(), cleared
+        # at the top of start() so a stop() -> start() restart cycle works.
+        self._stop_event = threading.Event()
         # FIX (mention/reply addressing gate): the bot's own Discord user id,
         # resolved once the gateway client for each connector has finished
         # logging in (see start(), same value used for slash-command
@@ -178,6 +200,10 @@ class DiscordBotRuntimeService:
         }
 
     def start(self, *, block: bool = False) -> Dict[str, Any]:
+        # A start() following a prior stop() is a restart — clear the signal
+        # so the new reconnect-supervisor threads spawned below don't see a
+        # stale "stop requested" and refuse to ever reconnect.
+        self._stop_event.clear()
         rows = self.connector_rows()
         if not rows:
             # ── Discord chatbot v1 fallback: use DISCORD_BOT_TOKEN from env ──
@@ -265,9 +291,24 @@ class DiscordBotRuntimeService:
             self._listeners.append(listener)
             self._listener_by_connector[connector_id] = listener
             if block:
+                # Single foreground run, no reconnect supervision — used for
+                # `--check`-adjacent/blocking invocations only; the real
+                # server (server.py:_launch_discord_bot_runtime) and the
+                # standalone runner (scripts/run_discord_bot_runtime.py)
+                # both always call start(block=False).
                 listener.run_forever()
             else:
-                thread = threading.Thread(target=listener.run_forever, daemon=True)
+                thread = threading.Thread(
+                    target=self._supervise_gateway_reconnect,
+                    kwargs={
+                        "connector_id": connector_id,
+                        "row": dict(row),
+                        "credentials": dict(credentials),
+                        "allowed_channel_ids": list(allowed_channel_ids),
+                        "initial_listener": listener,
+                    },
+                    daemon=True,
+                )
                 thread.start()
                 self._threads.append(thread)
             started += 1
@@ -314,6 +355,108 @@ class DiscordBotRuntimeService:
         _set_running_instance(self)
         return {"ok": True, "started": started, "statuses": self.statuses()}
 
+    def _supervise_gateway_reconnect(
+        self,
+        *,
+        connector_id: str,
+        row: Dict[str, Any],
+        credentials: Dict[str, Any],
+        allowed_channel_ids: Sequence[str],
+        initial_listener: Any,
+    ) -> None:
+        """Daemon-thread body owning ONE connector's Discord Gateway
+        connection for the life of the process.
+
+        `DiscordGatewayListener.run_forever()` (`discord_connector.py`) wraps
+        discord.py's `Client.run()`, which already retries *transient*
+        Gateway drops internally (brief network blips, momentary disconnects)
+        — this method only takes over once `run_forever()` itself RETURNS,
+        i.e. `Client.run()` gave up for good: a fatal close code, an
+        uncaught exception escaping an event handler, or discord.py
+        exhausting its own reconnect attempts. Before this method existed,
+        that return value was silently discarded — the daemon thread just
+        ended and the bot went dark until the whole process was redeployed
+        (see `discord_connector.py`'s `live_connection_state` docstring,
+        which documents the same "never surfaced" gap on the read side).
+
+        Reconnects with the same capped-exponential-backoff shape the
+        Telegram/WhatsApp connector supervisor uses
+        (`connector_runtime.py:347`), so a permanently-dead token or a
+        flapping network can never turn this into a tight loop — every
+        attempt is separated by a bounded sleep, and `stop()` (which sets
+        `self._stop_event`) is checked before each reconnect so an
+        intentional shutdown doesn't get raced by a fresh connection.
+        """
+        import logging as _disc_log
+
+        log = _disc_log.getLogger(__name__)
+        listener = initial_listener
+        consecutive_failures = 0
+        while True:
+            started_at = time.monotonic()
+            try:
+                listener.run_forever()
+            except Exception as exc:  # discord.py surfaces some fatal errors as raises, not a plain return
+                log.warning("Discord gateway listener crashed for connector=%s: %s", connector_id, exc)
+
+            if self._stop_event.is_set():
+                return
+
+            alive_seconds = time.monotonic() - started_at
+            if alive_seconds >= _DISCORD_RECONNECT_HEALTHY_SECONDS:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+            backoff_seconds = min(
+                _DISCORD_RECONNECT_MAX_SECONDS,
+                _DISCORD_RECONNECT_BASE_SECONDS * (_DISCORD_RECONNECT_BACKOFF_MULTIPLIER ** min(consecutive_failures, 8)),
+            )
+            log.warning(
+                "Discord gateway dropped for connector=%s after %.1fs alive; reconnecting in %.1fs (attempt %d)",
+                connector_id, alive_seconds, backoff_seconds, consecutive_failures,
+            )
+            # Event.wait() doubles as the bounded sleep AND an immediate
+            # wake-up if stop() fires mid-backoff — returns True in that case.
+            if self._stop_event.wait(backoff_seconds):
+                return
+
+            # Construct the replacement listener. On failure (e.g. a
+            # transient DNS blip resolving discord.com, or a momentarily
+            # unreachable network), retry construction itself with the same
+            # bounded backoff rather than falling through to run_forever()
+            # on the `listener` variable, which would still point at the
+            # already-dead object from the top of this iteration — calling
+            # run_forever() on it again would not reconnect anything, and
+            # doing so with no wait in between is exactly the tight loop
+            # this supervisor must never become.
+            new_listener = None
+            while new_listener is None:
+                try:
+                    new_listener = self.listener_factory(
+                        credentials,
+                        allowed_channel_ids=allowed_channel_ids,
+                        on_event=lambda parsed, entry=dict(row), secret=dict(credentials): self.handle_parsed_event_sync(
+                            parsed,
+                            connector_entry=entry,
+                            credentials=secret,
+                        ),
+                    )
+                except Exception as exc:
+                    consecutive_failures += 1
+                    construct_backoff_seconds = min(
+                        _DISCORD_RECONNECT_MAX_SECONDS,
+                        _DISCORD_RECONNECT_BASE_SECONDS * (_DISCORD_RECONNECT_BACKOFF_MULTIPLIER ** min(consecutive_failures, 8)),
+                    )
+                    log.warning(
+                        "Discord gateway reconnect failed to construct a new listener for connector=%s: %s; retrying in %.1fs",
+                        connector_id, exc, construct_backoff_seconds,
+                    )
+                    if self._stop_event.wait(construct_backoff_seconds):
+                        return
+            listener = new_listener
+            self._listeners.append(listener)
+            self._listener_by_connector[connector_id] = listener
+
     def live_status(self) -> Dict[str, Dict[str, Any]]:
         """Per-connector live discord.py gateway state, keyed by connector_id.
 
@@ -336,6 +479,11 @@ class DiscordBotRuntimeService:
         return out
 
     def stop(self) -> Dict[str, Any]:
+        # Tell every _supervise_gateway_reconnect thread to stop scheduling
+        # further reconnect attempts once its current listener.run_forever()
+        # call returns (or immediately, if one is currently sleeping through
+        # its backoff window — Event.wait() wakes early on this).
+        self._stop_event.set()
         stopped = len(self._listeners)
         self._listeners.clear()
         self._listener_by_connector.clear()

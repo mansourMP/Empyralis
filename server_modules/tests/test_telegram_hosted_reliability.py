@@ -6,8 +6,12 @@ Verifies:
   - _should_skip_reply correctly suppresses [SILENT] markers
   - _to_telegram_markdown doesn't break common formatting
   - Guaranteed-response: every error path produces a user-visible reply
+  - GAP 1.3: 401 (revoked token) trips a circuit breaker that stops the
+    background poll/typing loops from hammering Telegram, while transient
+    429/5xx errors keep retrying at the normal cadence
 """
 
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -230,6 +234,136 @@ class TypingTasksTests(unittest.IsolatedAsyncioTestCase):
         from server_modules.sage_telegram_hosted_service import stop_typing
         # Should not raise
         await stop_typing("nonexistent_chat_12345")
+
+
+def _fake_response(status_code: int, json_body: dict):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_body
+    return resp
+
+
+class CircuitBreaker401Tests(unittest.IsolatedAsyncioTestCase):
+    """GAP 1.3 — a revoked/invalid bot token (HTTP 401 from Telegram) must
+    trip a circuit breaker so the background poll loop (2s cadence) and the
+    typing-indicator loop (4s cadence) stop hammering Telegram, instead of
+    retrying forever. Transient errors (429/5xx/network) must NOT trip it
+    and must keep the normal retry cadence."""
+
+    def setUp(self):
+        from server_modules import sage_telegram_hosted_service as svc
+        self.svc = svc
+        svc._clear_circuit_breaker()
+        self._token_patch = patch.object(svc, "_bot_token", return_value="test-token-123")
+        self._token_patch.start()
+
+    def tearDown(self):
+        self._token_patch.stop()
+        self.svc._clear_circuit_breaker()
+
+    def _patched_client(self, response):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=response)
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        return patch("httpx.AsyncClient", return_value=mock_ctx)
+
+    async def test_401_trips_breaker_and_raises_distinct_error(self):
+        response = _fake_response(401, {"ok": False, "error_code": 401, "description": "Unauthorized"})
+        with self._patched_client(response):
+            with self.assertRaises(self.svc.TelegramUnauthorizedError):
+                await self.svc._telegram_api("getUpdates", {})
+        status = self.svc.hosted_bot_auth_status()
+        self.assertTrue(status["suspended"])
+        self.assertEqual(status["reason"], "Unauthorized")
+
+    async def test_429_does_not_trip_breaker(self):
+        response = _fake_response(429, {"ok": False, "error_code": 429, "description": "Too Many Requests: retry later"})
+        with self._patched_client(response):
+            result = await self.svc._telegram_api("getUpdates", {})
+        self.assertFalse(result.get("ok"))
+        status = self.svc.hosted_bot_auth_status()
+        self.assertFalse(status["suspended"], "429 is transient — must not trip the 401 breaker")
+
+    async def test_500_does_not_trip_breaker(self):
+        response = _fake_response(500, {"ok": False, "description": "Internal Server Error"})
+        with self._patched_client(response):
+            result = await self.svc._telegram_api("sendMessage", {})
+        self.assertFalse(result.get("ok"))
+        self.assertFalse(self.svc.hosted_bot_auth_status()["suspended"])
+
+    async def test_successful_call_clears_prior_suspension(self):
+        self.svc._trip_circuit_breaker("stale token")
+        self.assertTrue(self.svc.hosted_bot_auth_status()["suspended"])
+        response = _fake_response(200, {"ok": True, "result": []})
+        with self._patched_client(response):
+            await self.svc._telegram_api("getUpdates", {})
+        self.assertFalse(
+            self.svc.hosted_bot_auth_status()["suspended"],
+            "a successful call should self-heal the breaker (no restart required)",
+        )
+
+    async def test_polling_loop_backs_off_hard_on_401_instead_of_hammering(self):
+        """The actual anti-hammer fix: the background poll loop must switch
+        from its 2s cadence to the long suspended-probe cadence the moment
+        poll_updates raises TelegramUnauthorizedError."""
+        svc = self.svc
+        svc._SAGE_HOSTED_PAIRS["circuit-breaker-test-chat"] = {"workspace_id": "ws-cb-test"}
+        sleep_calls = []
+
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+            raise asyncio.CancelledError()  # stop the `while True` after one iteration
+
+        try:
+            with patch.object(svc, "poll_updates", AsyncMock(side_effect=svc.TelegramUnauthorizedError("Unauthorized"))), \
+                 patch("asyncio.sleep", fake_sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    await svc._background_polling_loop()
+        finally:
+            svc._SAGE_HOSTED_PAIRS.pop("circuit-breaker-test-chat", None)
+
+        self.assertEqual(sleep_calls[-1], svc._SUSPENDED_POLL_INTERVAL_SECONDS)
+        self.assertNotEqual(sleep_calls[-1], svc._BG_POLL_INTERVAL)
+
+    async def test_polling_loop_keeps_normal_cadence_on_transient_error(self):
+        """A non-401 error (network blip, 5xx) must NOT trigger the heavy
+        backoff — only a real 401 should."""
+        svc = self.svc
+        svc._SAGE_HOSTED_PAIRS["circuit-breaker-test-chat-2"] = {"workspace_id": "ws-cb-test-2"}
+        sleep_calls = []
+
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+            raise asyncio.CancelledError()
+
+        try:
+            with patch.object(svc, "poll_updates", AsyncMock(side_effect=RuntimeError("network blip"))), \
+                 patch("asyncio.sleep", fake_sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    await svc._background_polling_loop()
+        finally:
+            svc._SAGE_HOSTED_PAIRS.pop("circuit-breaker-test-chat-2", None)
+
+        self.assertEqual(sleep_calls[-1], svc._BG_POLL_INTERVAL)
+
+    async def test_typing_loop_skips_api_calls_while_suspended(self):
+        svc = self.svc
+        svc._trip_circuit_breaker("token dead")
+        sleep_calls = []
+
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+            raise asyncio.CancelledError()
+
+        with patch.object(svc, "send_chat_action", AsyncMock()) as mock_action, \
+             patch("asyncio.sleep", fake_sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await svc._typing_loop("some-chat-id")
+
+        mock_action.assert_not_called()
+        self.assertEqual(sleep_calls[-1], svc._SUSPENDED_POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
