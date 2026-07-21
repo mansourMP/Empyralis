@@ -28,6 +28,23 @@ export type ServiceInventoryItem = {
   last_checked_at?: string;
 };
 
+/** Live resource snapshot from the gateway's own heartbeat — CPU/GPU load,
+ *  memory, and (when a sensor is available) temperature. Any field can be
+ *  null when that sensor/metric isn't available on this box (e.g. no
+ *  discrete GPU, no temperature sensor exposed) — the UI must hide, never
+ *  fake, a null metric. The `resources` key on FleetGateway itself can be
+ *  entirely absent/undefined — that means this gateway build predates
+ *  resource reporting, or hasn't heartbeated with it yet; also degrade to
+ *  the same "no live metrics yet" treatment as an all-null object. */
+export type GatewayResources = {
+  cpu_pct: number | null;
+  memory_used_bytes: number | null;
+  memory_total_bytes: number | null;
+  gpu_pct: number | null;
+  temperature_c: number | null;
+  sampled_at?: string | null;
+};
+
 /** A paired Gateway box (subset of /api/gateway/registrations items). */
 export type FleetGateway = {
   gateway_id?: string;
@@ -43,11 +60,21 @@ export type FleetGateway = {
   heartbeat_age_seconds?: number | null;
   last_heartbeat_at?: string | null;
   last_seen_at?: string | null;
+  /** Real, server-computed (gateway_registry_service._gateway_connection_
+   *  payload) timestamp the box's CURRENT WSS session connected at — i.e.
+   *  this session's own uptime, not host-OS process uptime (nothing reports
+   *  that to the backend today). Null/undefined when there's no live
+   *  session (box has never connected, or the session table has no record). */
+  latest_connected_at?: string | null;
   created_at?: string | null;
   runtime_access_mode?: string | null;
   runtime_access_label?: string | null;
   llm_runtimes?: LlmRuntimeSummary | null;
-  metadata?: { service_inventory?: ServiceInventoryItem[] } & Record<string, unknown>;
+  /** Optional — a concurrent backend change adds this to the gateway
+   *  registration payload. Absent on older backends/gateway builds; every
+   *  reader must treat it as possibly undefined, not assume presence. */
+  resources?: GatewayResources | null;
+  metadata?: { service_inventory?: ServiceInventoryItem[]; resources?: GatewayResources | null } & Record<string, unknown>;
   /** Gateway self-update (server_modules/gateway_self_update_service.py's
    *  gateway_update_status(), folded into gateway_registration_public_
    *  payload()). gateway_version is the build this box is actually running
