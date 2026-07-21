@@ -305,3 +305,66 @@ test("llm.generate (claude_code): a plain (non-CliRunError) cliRunner throw stil
     /generation failed on this Gateway \(unexpected wiring bug\)/,
   );
 });
+
+// ── Live readiness (G-reliability-3): invalidate the passive install/auth
+// cache exactly when a turn's own outcome just proved it stale — never on
+// every turn (service-inventory.ts documents invalidatePassiveInventoryCache
+// as "never call from a hot path"), so only not_installed/not_authenticated
+// failures should trigger it. ──────────────────────────────────────────────
+
+for (const kind of ["not_installed", "not_authenticated"] as const) {
+  test(`llm.generate (claude_code): a ${kind} cliRunner failure invalidates the readiness cache so the next heartbeat re-probes`, async () => {
+    let calls = 0;
+    const runtime = new GatewayLLMRuntime({
+      cliRunner: async () => {
+        throw new CliRunError(kind, "detail from the CLI");
+      },
+      invalidateReadinessCache: () => {
+        calls += 1;
+      },
+    });
+    await assert.rejects(() => runtime.handleCapabilityInvoke(makeInvokeFrame({ runtime: "claude_code", prompt: "hi" })));
+    assert.equal(calls, 1, `${kind} must invalidate the readiness cache exactly once`);
+  });
+}
+
+for (const kind of ["timeout", "crash"] as const) {
+  test(`llm.generate (claude_code): a ${kind} cliRunner failure does NOT invalidate the readiness cache (not a readiness-relevant signal)`, async () => {
+    let calls = 0;
+    const runtime = new GatewayLLMRuntime({
+      cliRunner: async () => {
+        throw new CliRunError(kind, "detail from the CLI");
+      },
+      invalidateReadinessCache: () => {
+        calls += 1;
+      },
+    });
+    await assert.rejects(() => runtime.handleCapabilityInvoke(makeInvokeFrame({ runtime: "claude_code", prompt: "hi" })));
+    assert.equal(calls, 0);
+  });
+}
+
+test("llm.generate: a successful CLI turn never invalidates the readiness cache (this must never run on the hot path)", async () => {
+  let calls = 0;
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async () => ({ text: "ok", usage: { input_tokens: 1, output_tokens: 1 } }),
+    invalidateReadinessCache: () => {
+      calls += 1;
+    },
+  });
+  await runtime.handleCapabilityInvoke(makeInvokeFrame({ runtime: "claude_code", prompt: "hi" }));
+  assert.equal(calls, 0);
+});
+
+test("llm.generate: an Ollama failure never invalidates the CLI readiness cache (unrelated runtime)", async () => {
+  let calls = 0;
+  const capture: Capture = {};
+  const runtime = new GatewayLLMRuntime({
+    fetchImpl: stubFetch({}, capture, false, 500),
+    invalidateReadinessCache: () => {
+      calls += 1;
+    },
+  });
+  await assert.rejects(() => runtime.handleCapabilityInvoke(makeInvokeFrame({ prompt: "hi" })));
+  assert.equal(calls, 0);
+});

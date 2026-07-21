@@ -2,6 +2,7 @@ import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protoc
 import { runCliSubscription, CliRunError, type CliRunResult, type CliSubscriptionRuntime } from "./cli-runner";
 import { sharedCodexAppServer, codexAppServerEnabled } from "./codex-app-server";
 import { sharedClaudeCliPrewarmPool, claudeCliPrewarmEnabled } from "./claude-cli-prewarm";
+import { invalidatePassiveInventoryCache } from "../health/service-inventory";
 
 // BYO-brain Phase 2: the on-box LLM capability. This runs on the USER's paired
 // box and forwards a turn to the box's OWN local Ollama endpoint
@@ -62,6 +63,12 @@ export interface GatewayLLMRuntimeConfig {
   /** Injectable for tests. Defaults to cli-runner.ts's runCliSubscription
    *  (spawns the real claude/codex binary). */
   cliRunner?: CliRunnerImpl;
+  /** Injectable for tests. Defaults to service-inventory.ts's
+   *  invalidatePassiveInventoryCache — called (never on every turn, only
+   *  when a turn's own failure just proved the cache stale) so the next
+   *  heartbeat re-probes instead of serving up-to-60s-old install/auth data.
+   *  See generateViaCli's catch block for exactly which failures qualify. */
+  invalidateReadinessCache?: () => void;
 }
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
@@ -179,6 +186,7 @@ export class GatewayLLMRuntime {
   private readonly fetchImpl: FetchImpl;
   private readonly defaultTimeoutMs: number;
   private readonly cliRunner: CliRunnerImpl;
+  private readonly invalidateReadinessCache: () => void;
   // Phase 2 (streaming): set post-construction by index.ts once the
   // GatewayWsClient exists (same "setter after the fact" pattern already
   // used for cliSetupRuntime.setEventPublisher — the ws client and the
@@ -195,6 +203,7 @@ export class GatewayLLMRuntime {
     this.fetchImpl = config.fetchImpl ?? ((globalThis.fetch as unknown) as FetchImpl);
     this.defaultTimeoutMs = config.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.cliRunner = config.cliRunner ?? runCliSubscription;
+    this.invalidateReadinessCache = config.invalidateReadinessCache ?? invalidatePassiveInventoryCache;
   }
 
   /** Wires the ability to stream partial-text `tool.invoke.chunk` events for
@@ -407,6 +416,27 @@ export class GatewayLLMRuntime {
         });
       }
     } catch (error) {
+      // G-reliability-3, live readiness: the passive install/auth-presence
+      // probe that gates capability advertisement (service-inventory.ts) is
+      // cached up to 60s (PASSIVE_INVENTORY_CACHE_TTL_MS) and only refreshed
+      // on the next heartbeat cycle — so a Gateway can keep advertising
+      // "ready" for up to a heartbeat interval + 60s after its CLI's install
+      // or auth state actually changed underneath it. invalidatePassiveInventoryCache()
+      // is documented as "never call from a hot path" (service-inventory.ts)
+      // because it forces the NEXT read to re-probe instead of serving
+      // cache — so this deliberately does NOT run on every turn (that would
+      // defeat the cache entirely under any real turn volume). It only runs
+      // when a turn's own outcome just proved the cached readiness signal
+      // was stale: not_installed/not_authenticated are exactly the two
+      // failure kinds this probe's installed/authenticated booleans exist to
+      // predict, and a turn only reaches this catch after dispatch already
+      // believed the Gateway was ready — so seeing one of these kinds here
+      // means the last heartbeat's cache is already wrong RIGHT NOW. Forcing
+      // a fresh probe on the next heartbeat closes that gap down to one
+      // heartbeat interval instead of up to heartbeat interval + 60s.
+      if (error instanceof CliRunError && (error.kind === "not_installed" || error.kind === "not_authenticated")) {
+        this.invalidateReadinessCache();
+      }
       throw new Error(cliErrorMessage(params.runtime, error));
     }
     return {
