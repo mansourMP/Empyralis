@@ -145,6 +145,10 @@ export default function HardwarePage() {
   const [showManualPairing, setShowManualPairing] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = useState<{ gatewayId: string; label: string } | null>(null);
+  // Cloud servers only: full destroy (tear down the provider droplet + revoke),
+  // distinct from pendingRemove/Disconnect which only revokes the pairing and
+  // leaves the droplet running (and billing) at the provider.
+  const [pendingDelete, setPendingDelete] = useState<{ gatewayId: string; vpsId: string; label: string; provider: string } | null>(null);
   // Row-level "⋯" menu: one open at a time (opening a new row's menu closes
   // any other), and one row renaming at a time — both single shared values,
   // same convention as pendingRemove/removingId above.
@@ -246,6 +250,41 @@ export default function HardwarePage() {
       await loadRegistrations();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove that computer");
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  // Cloud servers only: destroy the provider droplet (stops billing) via the
+  // VPS teardown endpoint, then revoke the paired gateway registration so the
+  // row clears. vps_id is threaded onto the registration metadata by
+  // vps_provisioning_service. Only ever runs from the delete confirm dialog.
+  const confirmDelete = async () => {
+    const target = pendingDelete;
+    if (!target) return;
+    setRemovingId(target.gatewayId);
+    try {
+      if (target.vpsId) {
+        const res = await fetch(`/api/hardware/vps/${encodeURIComponent(target.vpsId)}`, {
+          method: "DELETE",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("DELETE"),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      }
+      // Revoke the pairing too so the row disappears; best-effort (the droplet
+      // is already gone, which is the destructive part the user asked for).
+      await fetch(`/api/gateway/registrations/${encodeURIComponent(target.gatewayId)}/revoke`, {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ reason: "server_deleted_from_hardware_page" }),
+      }).catch(() => undefined);
+      setPendingDelete(null);
+      setDisconnectNotice(`${target.label} deleted`);
+      await loadRegistrations();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not delete that server");
     } finally {
       setRemovingId(null);
     }
@@ -358,6 +397,15 @@ export default function HardwarePage() {
               setPendingRemove({
                 gatewayId,
                 label: r.display_name || r.hardware_label || r.platform || "this computer",
+              })
+            }
+            canDelete={isCloud}
+            onDelete={() =>
+              setPendingDelete({
+                gatewayId,
+                vpsId: String((r.metadata as Record<string, unknown> | undefined)?.vps_id || ""),
+                label: r.display_name || r.hardware_label || r.platform || "this server",
+                provider: cloudProviderLabel(r.hardware_provider) || "the provider",
               })
             }
           />
@@ -480,6 +528,17 @@ export default function HardwarePage() {
         onCancel={() => setPendingRemove(null)}
       />
 
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this server?"
+        body={`"${pendingDelete?.label}" will be permanently destroyed at ${pendingDelete?.provider} — the server is torn down and its billing stops. Any data on it is gone. This can't be undone.`}
+        confirmLabel="Delete server"
+        confirmTone="danger"
+        busy={removingId !== null}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setPendingDelete(null)}
+      />
+
       {disconnectNotice ? (
         <PlatformNotification
           tone="success"
@@ -503,6 +562,8 @@ function HardwareRowMenu({
   onOpenChange,
   onRename,
   onDisconnect,
+  onDelete,
+  canDelete,
   disabled,
   removing,
 }: {
@@ -511,6 +572,8 @@ function HardwareRowMenu({
   onOpenChange: (open: boolean) => void;
   onRename: () => void;
   onDisconnect: () => void;
+  onDelete?: () => void;
+  canDelete?: boolean;
   disabled?: boolean;
   removing?: boolean;
 }) {
@@ -575,6 +638,20 @@ function HardwareRowMenu({
           >
             Disconnect
           </button>
+          {canDelete && onDelete ? (
+            <button
+              type="button"
+              role="menuitem"
+              className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenChange(false);
+                onDelete();
+              }}
+            >
+              Delete server
+            </button>
+          ) : null}
         </div>
       )}
     </div>
