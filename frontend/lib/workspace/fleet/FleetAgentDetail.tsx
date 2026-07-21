@@ -555,7 +555,7 @@ export function FleetAgentDetail({
               onRenamed={onRenamed}
             />
           )}
-          {activeTab === "work" && <WorkTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
+          {activeTab === "work" && <WorkTab workspaceId={workspaceId} agentId={agentId} agent={agent} onAgentChanged={onRenamed} />}
           {activeTab === "channels" && (
             <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} />
           )}
@@ -1275,7 +1275,7 @@ const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
   { label: "WhatsApp", id: "whatsapp_personal" },
   { label: "Signal", id: "signal_personal" },
   { label: "iMessage", id: "imessage_personal" },
-  { label: "WeChat", id: "wechat_personal" },
+  { label: "WeChat / WeCom", id: "wechat_official" },
 ];
 
 type ChannelDoor = { key: string; label: string; body: string; real: boolean };
@@ -1308,8 +1308,8 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   imessage_personal: [
     { key: "full_account", label: "Full account", body: "This agent's own iMessage, via imsg — a small CLI that talks to Messages.app directly on a Mac running as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage. Setup (installing imsg, checking Full Disk Access) happens right here, no terminal required.", real: true },
   ],
-  wechat_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own WeChat, via a real session on this agent's gateway. WeChat has no official API to build against, so this bridge is rougher than the others and may not hold over time.", real: true },
+  wechat_official: [
+    { key: "app_credential_pair", label: "Official Account / WeCom", body: "This agent's own WeChat Official Account or WeChat Work (WeCom) bot — paste the AppID/AppSecret (or CorpID/CorpSecret/AgentId) from your own WeChat/WeCom admin console. Bidirectional: inbound messages route to this agent, replies send as this bot.", real: true },
   ],
 };
 
@@ -1325,7 +1325,6 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
 // Access) genuinely does happen in-app once a gateway exists.
 const LOCAL_BRIDGE_NO_GATEWAY_HINT: Record<string, string> = {
   signal_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a signal-cli bridge.",
-  wechat_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a WeChat bridge.",
 };
 
 function LocalBridgeChannelStatus({ channelKey, gatewayId }: { channelKey: string; gatewayId: string | null }) {
@@ -1411,6 +1410,23 @@ export function ChannelsTab({
   const [slackBindBusy, setSlackBindBusy] = useState(false);
   const [slackBindError, setSlackBindError] = useState<string | null>(null);
   const [slackBindSaved, setSlackBindSaved] = useState(false);
+  // WeChat Official Account / WeCom: a 3-4 field credential pair (AppID/
+  // CorpID + AppSecret/CorpSecret + Token, plus WeCom's numeric AgentId),
+  // not a single pasted token — same BYO-per-agent shape as Telegram/
+  // Discord's byo_bot door above, just more fields (see
+  // routes_fleet.py's fleet_assign_agent_wechat).
+  const [wechatAccountKind, setWechatAccountKind] = useState<"official_account" | "wecom">("official_account");
+  const [wechatAppId, setWechatAppId] = useState("");
+  const [wechatAppSecret, setWechatAppSecret] = useState("");
+  const [wechatVerifyToken, setWechatVerifyToken] = useState("");
+  const [wechatWecomAgentId, setWechatWecomAgentId] = useState("");
+  const [wechatBusy, setWechatBusy] = useState(false);
+  const [wechatError, setWechatError] = useState<string | null>(null);
+  const [wechatSaved, setWechatSaved] = useState(false);
+  // The per-agent callback URL to paste into WeChat/WeCom's admin console
+  // (Server Configuration) — only known once assign_wechat_official returns
+  // it, so there is nothing to show before a successful save.
+  const [wechatWebhookUrl, setWechatWebhookUrl] = useState<string | null>(null);
   const [firstContactReply, setFirstContactReply] = useState(!!agent?.telegram_first_contact_reply);
   const [firstContactSaving, setFirstContactSaving] = useState(false);
   // agent starts null and loads async — resync once the real value arrives
@@ -1448,6 +1464,46 @@ export function ChannelsTab({
       setByoBotBusy(false);
     }
   }, [workspaceId, agentId, byoToken, handleChannelsChanged]);
+
+  const saveWeChatCredentials = useCallback(async () => {
+    if (!wechatAppId.trim() || !wechatAppSecret.trim() || !wechatVerifyToken.trim()) {
+      setWechatError("AppID/CorpID, AppSecret/CorpSecret, and Token are all required.");
+      return;
+    }
+    if (wechatAccountKind === "wecom" && !wechatWecomAgentId.trim()) {
+      setWechatError("WeCom's AgentId (from the app's admin page) is required for a WeCom account.");
+      return;
+    }
+    setWechatBusy(true);
+    setWechatError(null);
+    try {
+      const res = await fetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/wechat?agent_id=${encodeURIComponent(agentId)}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            account_kind: wechatAccountKind,
+            app_id: wechatAppId.trim(),
+            app_secret: wechatAppSecret.trim(),
+            verify_token: wechatVerifyToken.trim(),
+            wecom_agent_id: wechatAccountKind === "wecom" ? wechatWecomAgentId.trim() : undefined,
+          }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      setWechatSaved(true);
+      setWechatWebhookUrl(typeof data?.channel?.webhook_url === "string" ? data.channel.webhook_url : null);
+      handleChannelsChanged();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Could not save the WeChat/WeCom credentials.";
+      setWechatError(friendlyChannelOwnershipError(message));
+    } finally {
+      setWechatBusy(false);
+    }
+  }, [workspaceId, agentId, wechatAccountKind, wechatAppId, wechatAppSecret, wechatVerifyToken, wechatWecomAgentId, handleChannelsChanged]);
 
   const saveFirstContactReply = useCallback(async (next: boolean) => {
     setFirstContactReply(next);
@@ -1609,6 +1665,13 @@ export function ChannelsTab({
     setSlackChannelId("");
     setSlackBindError(null);
     setSlackBindSaved(false);
+    setWechatAppId("");
+    setWechatAppSecret("");
+    setWechatVerifyToken("");
+    setWechatWecomAgentId("");
+    setWechatError(null);
+    setWechatSaved(false);
+    setWechatWebhookUrl(null);
   }
 
   function handleCardClick(platform: typeof CHANNEL_GRID_PLATFORMS[number], pill: { tone: string }) {
@@ -1642,6 +1705,16 @@ export function ChannelsTab({
     setSlackChannelId("");
     setSlackBindError(null);
     setSlackBindSaved(platform.id === "slack" ? Boolean(slackChannelBinding) : false);
+    setWechatAppId("");
+    setWechatAppSecret("");
+    setWechatVerifyToken("");
+    setWechatWecomAgentId("");
+    setWechatError(null);
+    // wechat_official's `connected` comes straight off its own catalog item
+    // (no separate "rides along" field, unlike Slack/Telegram's byo doors
+    // above) — a real enabled agent_channel_binding IS the truth here.
+    setWechatSaved(platform.id === "wechat_official" ? Boolean(byId.get("wechat_official")?.connected) : false);
+    setWechatWebhookUrl(null);
   }
 
   return (
@@ -1951,15 +2024,91 @@ export function ChannelsTab({
                 </div>
               )}
 
-              {/* WeChat: same local-bridge shape as iMessage, but there is no
-                   protocol client at all yet (no official API to build one
-                   against) — rails only, said honestly, no live status to check. */}
-              {activePlatform.id === "wechat_personal" && activeDoor?.key === "full_account" && (
+              {/* WeChat Official Account / WeCom: BYO AppID+AppSecret (or
+                   CorpID+CorpSecret+AgentId) — bidirectional, unlike the
+                   separate "WeChat Work" catalog entry's outbound-only
+                   incoming-webhook connector. Real credential validation
+                   happens server-side (a live access_token fetch against
+                   Tencent) before anything is stored — see
+                   wechat_official_service.assign_wechat_official. */}
+              {activePlatform.id === "wechat_official" && activeDoor?.key === "app_credential_pair" && (
                 <div style={{ marginTop: 12 }}>
-                  <p className="fleet-channel-expand-hint">
-                    WeChat has no official API. This bridge is a best-effort rail on this agent's own gateway,
-                    not a certified integration — it may break without warning.
-                  </p>
+                  {wechatSaved ? (
+                    <div className="fleet-channel-expand-success">
+                      <Check size={16} strokeWidth={2} /> Credentials saved — this agent&apos;s own WeChat/WeCom bot is live.
+                    </div>
+                  ) : (
+                    <>
+                      <p className="fleet-channel-expand-hint">
+                        Paste the credentials from your own WeChat Official Account or WeCom (WeChat Work) admin console.
+                      </p>
+                      <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                        <span>Account type</span>
+                        <select
+                          value={wechatAccountKind}
+                          onChange={(e) => { setWechatAccountKind(e.currentTarget.value === "wecom" ? "wecom" : "official_account"); setWechatError(null); }}
+                        >
+                          <option value="official_account">WeChat Official Account</option>
+                          <option value="wecom">WeCom (WeChat Work)</option>
+                        </select>
+                      </label>
+                      <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                        <span>{wechatAccountKind === "wecom" ? "CorpID" : "AppID"}</span>
+                        <input
+                          type="text"
+                          autoComplete="off"
+                          value={wechatAppId}
+                          onChange={(e) => { setWechatAppId(e.currentTarget.value); setWechatError(null); }}
+                        />
+                      </label>
+                      <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                        <span>{wechatAccountKind === "wecom" ? "CorpSecret" : "AppSecret"}</span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={wechatAppSecret}
+                          onChange={(e) => { setWechatAppSecret(e.currentTarget.value); setWechatError(null); }}
+                        />
+                      </label>
+                      {wechatAccountKind === "wecom" && (
+                        <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                          <span>AgentId</span>
+                          <input
+                            type="text"
+                            autoComplete="off"
+                            value={wechatWecomAgentId}
+                            onChange={(e) => { setWechatWecomAgentId(e.currentTarget.value); setWechatError(null); }}
+                          />
+                        </label>
+                      )}
+                      <label className="gw-pair-panel-field" style={{ marginBottom: 10, display: "flex" }}>
+                        <span>Token</span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={wechatVerifyToken}
+                          onChange={(e) => { setWechatVerifyToken(e.currentTarget.value); setWechatError(null); }}
+                        />
+                      </label>
+                      <p className="fleet-channel-expand-hint" style={{ color: "var(--text-tertiary)" }}>
+                        The Token must match exactly what you enter in WeChat/WeCom&apos;s own Server Configuration — it verifies inbound callbacks are really from Tencent. Message encryption ("safe mode") is not supported yet — leave EncodingAESKey / message encryption off.
+                      </p>
+                      <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => void saveWeChatCredentials()} disabled={wechatBusy}>
+                        {wechatBusy ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save credentials"}
+                      </button>
+                    </>
+                  )}
+                  {wechatError && <p className="fleet-channel-expand-error">{wechatError}</p>}
+                  {wechatWebhookUrl && (
+                    <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                      <p className="fleet-channel-expand-hint">
+                        Paste this URL into WeChat/WeCom&apos;s admin console as the Server Configuration callback URL:
+                      </p>
+                      <code style={{ display: "block", padding: "8px 10px", background: "var(--bg-inset)", borderRadius: 6, fontSize: 12, wordBreak: "break-all" }}>
+                        {wechatWebhookUrl}
+                      </code>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

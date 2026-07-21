@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { FileText, Info, Loader2, Trash2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { parseMarkdownLiteBlocks, renderMarkdownLiteInline } from "@/lib/workspace/markdown-lite";
 import type { FleetAgent } from "../fleet-data";
 
 /**
@@ -12,7 +13,110 @@ import type { FleetAgent } from "../fleet-data";
  * Paths are server-hardened, so we pass them through as-is.
  */
 
-type TreeFile = { path: string; chars?: number };
+type TreeFile = { path: string; size?: number };
+
+// ── Rendering: MEMORY.md and topic files are hand-authored markdown-ish text
+// (see workspace_context.py's DEFAULT_CONTEXT_FILE_CONTENTS), not full CommonMark.
+// Every scaffold starts with a `---`-fenced "Purpose:" blob that's hard-wrapped
+// at ~78 columns in the source file — rendered verbatim in a monospace box that
+// wrap width doesn't match, those hard breaks read as a cramped, run-together
+// mess (the exact "looks broken" the owner flagged). Splitting that fence out
+// and reflowing it into one real paragraph (browser-wrapped, not source-wrapped)
+// fixes that at the render layer without touching the seeded content itself.
+// The rest of the body reuses the same block parser chat turns already use
+// (markdown-lite.tsx) so bold/italic/code/links/lists render instead of
+// showing as literal punctuation, plus light heading detection on top.
+
+type MemBlock =
+  | { type: "meta"; text: string }
+  | { type: "h1" | "h2" | "h3"; text: string }
+  | { type: "p"; text: string }
+  | { type: "ul" | "ol"; items: string[] };
+
+function splitFrontmatter(raw: string): { meta: string | null; body: string } {
+  const text = String(raw || "").replace(/\r\n/g, "\n");
+  const lines = text.split("\n");
+  if (lines[0]?.trim() !== "---") return { meta: null, body: text };
+  let i = 1;
+  const metaLines: string[] = [];
+  while (i < lines.length && lines[i].trim() !== "---") {
+    metaLines.push(lines[i]);
+    i++;
+  }
+  if (i >= lines.length) return { meta: null, body: text }; // no closing fence — not real frontmatter
+  const meta = metaLines.join(" ").replace(/\s+/g, " ").trim();
+  const body = lines.slice(i + 1).join("\n").replace(/^\n+/, "");
+  return { meta: meta || null, body };
+}
+
+function parseMemoryBlocks(raw: string): MemBlock[] {
+  const { meta, body } = splitFrontmatter(raw);
+  const blocks: MemBlock[] = [];
+  if (meta) blocks.push({ type: "meta", text: meta });
+  for (const b of parseMarkdownLiteBlocks(body)) {
+    if (b.type === "ul" || b.type === "ol") {
+      blocks.push({ type: b.type, items: b.items || [] });
+      continue;
+    }
+    const text = b.text || "";
+    // Only a single-line block can be a heading — a multi-line paragraph that
+    // happens to start with "#" (rare, but possible in freeform topic notes)
+    // stays a paragraph rather than swallowing its own continuation lines.
+    const h = !text.includes("\n") ? /^(#{1,3})\s+(.*)$/.exec(text.trim()) : null;
+    if (h) {
+      blocks.push({ type: (`h${h[1].length}` as "h1" | "h2" | "h3"), text: h[2].trim() });
+    } else if (text) {
+      blocks.push({ type: "p", text });
+    }
+  }
+  return blocks;
+}
+
+function MemoryPreview({ content }: { content: string }) {
+  const blocks = useMemo(() => parseMemoryBlocks(content), [content]);
+  if (blocks.length === 0) {
+    return <div className="fleet-memory-preview-empty">Empty — nothing written here yet.</div>;
+  }
+  return (
+    <div className="fleet-memory-preview">
+      {blocks.map((b, i) => {
+        switch (b.type) {
+          case "meta":
+            return <p key={i} className="fleet-memory-preview-meta">{renderMarkdownLiteInline(b.text, `m${i}`)}</p>;
+          case "h1":
+            return <h3 key={i} className="fleet-memory-preview-heading">{renderMarkdownLiteInline(b.text, `h${i}`)}</h3>;
+          case "h2":
+          case "h3":
+            return (
+              <h4 key={i} className="fleet-memory-preview-heading fleet-memory-preview-heading--sub">
+                {renderMarkdownLiteInline(b.text, `h${i}`)}
+              </h4>
+            );
+          case "ul":
+          case "ol": {
+            const ListTag = b.type;
+            return (
+              <ListTag key={i} className="fleet-memory-preview-list">
+                {b.items.map((item, ii) => (
+                  <li key={ii}>{renderMarkdownLiteInline(item, `${i}-${ii}`)}</li>
+                ))}
+              </ListTag>
+            );
+          }
+          default:
+            return <p key={i} className="fleet-memory-preview-p">{renderMarkdownLiteInline(b.text, `p${i}`)}</p>;
+        }
+      })}
+    </div>
+  );
+}
+
+function formatMemSize(n?: number): string | null {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return null;
+  if (n < 1000) return `${Math.round(n)} B`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")} KB`;
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")} MB`;
+}
 
 export function MemoryTab({
   workspaceId,
@@ -34,6 +138,7 @@ export function MemoryTab({
   const [fileLoading, setFileLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<"preview" | "edit">("preview");
 
   // Agent identity guard — this tab can stay mounted across an agent switch
   // (command palette / Back nav swap the agentId prop without unmounting it,
@@ -50,6 +155,7 @@ export function MemoryTab({
     setContent("");
     setOriginal("");
     setIsDefault(false);
+    setMode("preview");
   }, [agentId]);
 
   const loadTree = useCallback(async () => {
@@ -59,9 +165,9 @@ export function MemoryTab({
       const d = await res.json().catch(() => ({}));
       const idxPath = String(d?.index?.path || "MEMORY.md");
       setIndexPath(idxPath);
-      const idx: TreeFile[] = d?.index?.path ? [{ path: idxPath, chars: d.index.chars }] : [];
+      const idx: TreeFile[] = d?.index?.path ? [{ path: idxPath, size: d.index.chars }] : [];
       const topics: TreeFile[] = Array.isArray(d?.topics)
-        ? d.topics.map((t: any) => ({ path: String(t?.path || t?.name || t), chars: t?.chars }))
+        ? d.topics.map((t: any) => ({ path: String(t?.path || t?.name || t), size: t?.chars ?? t?.size }))
         : [];
       // MEMORY.md (index) first, then topics, de-duplicated.
       const all = [...idx, ...topics.filter((t) => t.path && t.path !== idxPath)];
@@ -77,6 +183,7 @@ export function MemoryTab({
 
   const openFile = useCallback(async (path: string) => {
     setSelected(path);
+    setMode("preview");
     setFileLoading(true);
     setError(null);
     try {
@@ -151,6 +258,7 @@ export function MemoryTab({
   }
 
   const dirty = content !== original;
+  const topicCount = Math.max(0, files.length - 1);
 
   if (loading) {
     return <div className="fleet-detail-pad"><div className="fleet-page-state-body">Loading memory…</div></div>;
@@ -159,25 +267,59 @@ export function MemoryTab({
   return (
     <div className="fleet-memory-browser">
       <div className="fleet-memory-file-list">
-        {files.map((f) => (
-          <button
-            key={f.path}
-            type="button"
-            className={`fleet-memory-file-item${selected === f.path ? " is-active" : ""}`}
-            onClick={() => openFile(f.path)}
-          >
-            <FileText size={13} strokeWidth={1.75} />
-            <span>{f.path}{f.path === indexPath ? "  · index" : ""}</span>
-          </button>
-        ))}
+        <div className="fleet-memory-file-list-title">
+          Memory files
+          {files.length > 0 && <span className="fleet-memory-file-list-count">{files.length}</span>}
+        </div>
+        {files.map((f) => {
+          const sizeLabel = f.path === indexPath ? null : formatMemSize(f.size);
+          return (
+            <button
+              key={f.path}
+              type="button"
+              className={`fleet-memory-file-item${selected === f.path ? " is-active" : ""}`}
+              onClick={() => openFile(f.path)}
+            >
+              <FileText size={13} strokeWidth={1.75} />
+              <span className="fleet-memory-file-item-path">{f.path}</span>
+              {f.path === indexPath && <span className="fleet-badge fleet-memory-file-item-badge">index</span>}
+              {sizeLabel && <span className="fleet-memory-file-item-size">{sizeLabel}</span>}
+            </button>
+          );
+        })}
         {files.length === 0 && <div className="fleet-page-state-body">No memory files yet.</div>}
+        {topicCount === 0 && files.length > 0 && (
+          <div className="fleet-memory-file-list-hint">
+            The agent creates topic files here as it learns things worth remembering.
+          </div>
+        )}
       </div>
       <div className="fleet-memory-editor">
         {selected ? (
           <>
             <div className="fleet-memory-editor-header">
-              <span>{selected}</span>
-              <div style={{ display: "flex", gap: 8 }}>
+              <span className="fleet-memory-editor-filename">{selected}</span>
+              <div className="fleet-memory-editor-actions">
+                <div className="fleet-segmented" role="tablist" aria-label="View mode">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === "preview"}
+                    className={`fleet-segmented-btn${mode === "preview" ? " fleet-segmented-btn--active" : ""}`}
+                    onClick={() => setMode("preview")}
+                  >
+                    Preview
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === "edit"}
+                    className={`fleet-segmented-btn${mode === "edit" ? " fleet-segmented-btn--active" : ""}`}
+                    onClick={() => setMode("edit")}
+                  >
+                    Edit
+                  </button>
+                </div>
                 <button
                   type="button"
                   className="fleet-btn"
@@ -203,12 +345,19 @@ export function MemoryTab({
                     <span>Starter scaffold — nobody has written to this file yet. This is Empyralis&apos; default template, not saved content.</span>
                   </div>
                 )}
-                <textarea
-                  className="fleet-memory-editor-textarea"
-                  value={content}
-                  onChange={(e) => setContent(e.currentTarget.value)}
-                  spellCheck={false}
-                />
+                {mode === "preview" ? (
+                  <div className="fleet-memory-preview-scroll">
+                    <MemoryPreview content={content} />
+                  </div>
+                ) : (
+                  <textarea
+                    className="fleet-memory-editor-textarea"
+                    value={content}
+                    onChange={(e) => setContent(e.currentTarget.value)}
+                    spellCheck={false}
+                    autoFocus
+                  />
+                )}
               </>
             )}
           </>
