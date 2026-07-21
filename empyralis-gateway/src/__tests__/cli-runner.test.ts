@@ -66,6 +66,42 @@ function spawnImplReturning(fake: FakeChild): CliSpawnImpl {
   return () => fake.child;
 }
 
+/** Zero-delay stand-in for CliRunnerConfig.delayImpl so retry/backoff/
+ *  recovery tests run instantly instead of actually sleeping through real
+ *  backoff windows (500ms-4000ms per the module's own schedule). */
+async function noDelay(): Promise<void> {
+  // intentionally empty — resolves immediately
+}
+
+function emitCrash(fake: FakeChild, message: string, exitCode = 1): void {
+  fake.emitStderr(`${message}\n`);
+  fake.emitClose(exitCode, null);
+}
+
+/** Drives a MULTI-attempt runCliSubscription call: each retry/recovery
+ *  re-spawn gets its own fresh fake child (exactly like a real re-spawn
+ *  would), and each attempt's script runs once that attempt's spawnImpl is
+ *  actually invoked — via queueMicrotask, which is guaranteed to run only
+ *  after the synchronous spawnAndCollect() call that attaches this attempt's
+ *  stdout/stderr listeners has finished, so the script can never race ahead
+ *  of listener attachment. Throws if runCliSubscription ever calls spawnImpl
+ *  more times than scripts were provided, so a test asserting N attempts
+ *  fails loudly instead of hanging if the module tries an (N+1)th. */
+function scriptedSpawnImpl(scripts: Array<(fake: FakeChild) => void>): { spawnImpl: CliSpawnImpl; callCount: () => number } {
+  let index = 0;
+  const spawnImpl: CliSpawnImpl = () => {
+    const script = scripts[index];
+    if (!script) {
+      throw new Error(`scriptedSpawnImpl: unexpected spawn attempt #${index + 1} (only ${scripts.length} scripted)`);
+    }
+    const fake = makeFakeChild();
+    index += 1;
+    queueMicrotask(() => script(fake));
+    return fake.child;
+  };
+  return { spawnImpl, callCount: () => index };
+}
+
 // ---- Happy path -------------------------------------------------------
 
 test("claude_code: parses the stream-json result event into {text, usage}", async () => {
@@ -135,28 +171,33 @@ test("binary not found (ENOENT) classifies as not_installed for either runtime",
 
 // ---- Not authenticated ---------------------------------------------------
 
-test("claude_code: 'Not logged in' result classifies as not_authenticated", async () => {
-  const fake = makeFakeChild();
-  const promise = runCliSubscription(baseParams({ runtime: "claude_code" }), {
-    spawnImpl: spawnImplReturning(fake),
-  });
-  fake.emitStdout(
-    `${JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: "Not logged in · Please run /login" }] },
-      error: "authentication_failed",
-    })}\n`,
-  );
-  fake.emitStdout(
-    `${JSON.stringify({
-      type: "result",
-      subtype: "success",
-      is_error: true,
-      result: "Not logged in · Please run /login",
-      usage: { input_tokens: 0, output_tokens: 0 },
-    })}\n`,
-  );
-  fake.emitClose(1, null);
+test("claude_code: 'Not logged in' result classifies as not_authenticated (after the one bounded recovery re-spawn also fails identically)", async () => {
+  // Since auth_expired now gets exactly one bounded, silent recovery
+  // re-spawn (see the session-expired recovery tests below), a scenario
+  // where the CLI is genuinely not logged in must script BOTH attempts —
+  // otherwise the module's second (recovery) spawn would hang waiting for
+  // stdio events a single-attempt test never sends.
+  const notLoggedInScript = (fake: FakeChild) => {
+    fake.emitStdout(
+      `${JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Not logged in · Please run /login" }] },
+        error: "authentication_failed",
+      })}\n`,
+    );
+    fake.emitStdout(
+      `${JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: "Not logged in · Please run /login",
+        usage: { input_tokens: 0, output_tokens: 0 },
+      })}\n`,
+    );
+    fake.emitClose(1, null);
+  };
+  const { spawnImpl } = scriptedSpawnImpl([notLoggedInScript, notLoggedInScript]);
+  const promise = runCliSubscription(baseParams({ runtime: "claude_code" }), { spawnImpl, delayImpl: noDelay });
   await assert.rejects(promise, (err: unknown) => {
     assert.ok(err instanceof CliRunError);
     assert.equal((err as CliRunError).kind, "not_authenticated");
@@ -164,23 +205,25 @@ test("claude_code: 'Not logged in' result classifies as not_authenticated", asyn
   });
 });
 
-test("codex: a 401 Unauthorized turn.failed classifies as not_authenticated", async () => {
-  const fake = makeFakeChild();
-  const promise = runCliSubscription(baseParams({ runtime: "codex" }), { spawnImpl: spawnImplReturning(fake) });
-  fake.emitStdout(`${JSON.stringify({ type: "thread.started", thread_id: "t1" })}\n`);
-  fake.emitStdout(
-    `${JSON.stringify({
-      type: "error",
-      message: "Reconnecting... 1/5 (unexpected status 401 Unauthorized: Missing bearer or basic authentication in header)",
-    })}\n`,
-  );
-  fake.emitStdout(
-    `${JSON.stringify({
-      type: "turn.failed",
-      error: { message: "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" },
-    })}\n`,
-  );
-  fake.emitClose(1, null);
+test("codex: a 401 Unauthorized turn.failed classifies as not_authenticated (after the one bounded recovery re-spawn also fails identically)", async () => {
+  const unauthorizedScript = (fake: FakeChild) => {
+    fake.emitStdout(`${JSON.stringify({ type: "thread.started", thread_id: "t1" })}\n`);
+    fake.emitStdout(
+      `${JSON.stringify({
+        type: "error",
+        message: "Reconnecting... 1/5 (unexpected status 401 Unauthorized: Missing bearer or basic authentication in header)",
+      })}\n`,
+    );
+    fake.emitStdout(
+      `${JSON.stringify({
+        type: "turn.failed",
+        error: { message: "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" },
+      })}\n`,
+    );
+    fake.emitClose(1, null);
+  };
+  const { spawnImpl } = scriptedSpawnImpl([unauthorizedScript, unauthorizedScript]);
+  const promise = runCliSubscription(baseParams({ runtime: "codex" }), { spawnImpl, delayImpl: noDelay });
   await assert.rejects(promise, (err: unknown) => {
     assert.ok(err instanceof CliRunError);
     assert.equal((err as CliRunError).kind, "not_authenticated");
@@ -222,25 +265,32 @@ test("a process that dies on SIGTERM never needs SIGKILL, still reports timeout"
 
 // ---- Crash / generic failure ------------------------------------------
 
-test("claude_code: a non-auth error result classifies as crash, not not_authenticated", async () => {
-  const fake = makeFakeChild();
-  const promise = runCliSubscription(baseParams({ runtime: "claude_code" }), {
-    spawnImpl: spawnImplReturning(fake),
-  });
-  fake.emitStdout(
-    `${JSON.stringify({
-      type: "result",
-      subtype: "error_during_execution",
-      is_error: true,
-      result: "The model is temporarily overloaded.",
-    })}\n`,
-  );
-  fake.emitClose(1, null);
+test("claude_code: a non-auth 'overloaded' error classifies as crash/overloaded, not not_authenticated, and retries are bounded", async () => {
+  // "Overloaded" is retryable (failureClass "overloaded") — so this exercises
+  // BOTH the original classification intent (never confuse this with an auth
+  // failure) and the new bounded-retry policy: with the default maxRetries=2,
+  // exactly 3 total spawn attempts should occur, each seeing the identical
+  // overloaded result, before the module gives up and surfaces the failure.
+  const overloadedScript = (fake: FakeChild) => {
+    fake.emitStdout(
+      `${JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        result: "The model is temporarily overloaded.",
+      })}\n`,
+    );
+    fake.emitClose(1, null);
+  };
+  const { spawnImpl, callCount } = scriptedSpawnImpl([overloadedScript, overloadedScript, overloadedScript]);
+  const promise = runCliSubscription(baseParams({ runtime: "claude_code" }), { spawnImpl, delayImpl: noDelay });
   await assert.rejects(promise, (err: unknown) => {
     assert.ok(err instanceof CliRunError);
     assert.equal((err as CliRunError).kind, "crash");
+    assert.equal((err as CliRunError).failureClass, "overloaded");
     return true;
   });
+  assert.equal(callCount(), 3, "expected exactly 3 attempts (1 initial + 2 bounded retries)");
 });
 
 test("codex: a non-auth turn.failed (bad model) classifies as crash", async () => {
@@ -260,18 +310,18 @@ test("codex: a non-auth turn.failed (bad model) classifies as crash", async () =
   });
 });
 
-test("no parsable output at all + non-zero exit classifies as crash", async () => {
-  const fake = makeFakeChild();
-  const promise = runCliSubscription(baseParams({ runtime: "claude_code" }), {
-    spawnImpl: spawnImplReturning(fake),
-  });
-  fake.emitStderr("segmentation fault\n");
-  fake.emitClose(139, null);
+test("no parsable output at all + non-zero exit classifies as crash/fatal (unrecognized signal, never retried)", async () => {
+  const { spawnImpl, callCount } = scriptedSpawnImpl([
+    (fake) => emitCrash(fake, "segmentation fault", 139),
+  ]);
+  const promise = runCliSubscription(baseParams({ runtime: "claude_code" }), { spawnImpl, delayImpl: noDelay });
   await assert.rejects(promise, (err: unknown) => {
     assert.ok(err instanceof CliRunError);
     assert.equal((err as CliRunError).kind, "crash");
+    assert.equal((err as CliRunError).failureClass, "fatal");
     return true;
   });
+  assert.equal(callCount(), 1, "an unrecognized/fatal crash must never be retried");
 });
 
 // ---- Invocation shape ---------------------------------------------------
@@ -416,4 +466,219 @@ test("CLAUDE_CLI_PATH / CODEX_CLI_PATH env overrides pick a different binary", a
   fake.emitClose(0, null);
   await promise;
   assert.equal(capturedCommand, "/opt/custom/codex");
+});
+
+// ---- Reliability: retry policy (rate_limited / overloaded / transient) ---
+
+test("codex: a rate-limited (429) failure retries and succeeds on the second attempt", async () => {
+  const { spawnImpl, callCount } = scriptedSpawnImpl([
+    (fake) => emitCrash(fake, "Error: 429 Too Many Requests — rate limit exceeded, please retry later"),
+    (fake) => {
+      fake.emitStdout(
+        `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "ok now" } })}\n`
+        + `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 3, output_tokens: 2 } })}\n`,
+      );
+      fake.emitClose(0, null);
+    },
+  ]);
+  const result = await runCliSubscription(baseParams({ runtime: "codex" }), { spawnImpl, delayImpl: noDelay });
+  assert.equal(result.text, "ok now");
+  assert.equal(callCount(), 2, "expected the rate-limited first attempt plus one successful retry");
+});
+
+test("claude_code: a transient (ECONNRESET-shaped) crash retries and succeeds on the second attempt", async () => {
+  const { spawnImpl, callCount } = scriptedSpawnImpl([
+    (fake) => emitCrash(fake, "FetchError: request to https://api.anthropic.com failed, reason: ECONNRESET"),
+    (fake) => {
+      fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "recovered", usage: { input_tokens: 1, output_tokens: 1 } })}\n`);
+      fake.emitClose(0, null);
+    },
+  ]);
+  const result = await runCliSubscription(baseParams({ runtime: "claude_code" }), { spawnImpl, delayImpl: noDelay });
+  assert.equal(result.text, "recovered");
+  assert.equal(callCount(), 2);
+});
+
+test("a transient local spawn error (EAGAIN) is retried; an unrecognized spawn error is not", async () => {
+  // EAGAIN simulates the OS momentarily refusing to fork (resource limits) —
+  // genuinely transient, unlike ENOENT (not_installed, never retried).
+  let attempt = 0;
+  const spawnImpl: CliSpawnImpl = () => {
+    attempt += 1;
+    const fake = makeFakeChild();
+    if (attempt === 1) {
+      queueMicrotask(() => fake.emitError(Object.assign(new Error("spawn EAGAIN"), { code: "EAGAIN" }) as NodeJS.ErrnoException));
+    } else {
+      queueMicrotask(() => {
+        fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "ok", usage: {} })}\n`);
+        fake.emitClose(0, null);
+      });
+    }
+    return fake.child;
+  };
+  const result = await runCliSubscription(baseParams({ runtime: "claude_code" }), { spawnImpl, delayImpl: noDelay });
+  assert.equal(result.text, "ok");
+  assert.equal(attempt, 2, "EAGAIN must be treated as transient and retried once");
+});
+
+test("an unrecognized (non-EAGAIN-class) spawn error is fatal and never retried", async () => {
+  const { spawnImpl, callCount } = scriptedSpawnImpl([
+    (fake) => fake.emitError(Object.assign(new Error("spawn EACCES"), { code: "EACCES" }) as NodeJS.ErrnoException),
+  ]);
+  const promise = runCliSubscription(baseParams({ runtime: "claude_code" }), { spawnImpl, delayImpl: noDelay });
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliRunError);
+    assert.equal((err as CliRunError).kind, "crash");
+    assert.equal((err as CliRunError).failureClass, "fatal");
+    return true;
+  });
+  assert.equal(callCount(), 1);
+});
+
+// ---- Reliability: session-expired ("auth_expired") recovery -------------
+
+test("claude_code: auth_expired self-heals — a not-logged-in first attempt followed by a clean second attempt succeeds silently", async () => {
+  const { spawnImpl, callCount } = scriptedSpawnImpl([
+    (fake) => {
+      fake.emitStdout(
+        `${JSON.stringify({
+          type: "result", subtype: "success", is_error: true,
+          result: "Not logged in · Please run /login", usage: { input_tokens: 0, output_tokens: 0 },
+        })}\n`,
+      );
+      fake.emitClose(1, null);
+    },
+    (fake) => {
+      // A fresh process re-reads ~/.claude from scratch — this simulates the
+      // CLI's own token having been refreshed (by itself, or a concurrent
+      // invocation) between the two spawns, entirely without human input.
+      fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "back online", usage: { input_tokens: 2, output_tokens: 2 } })}\n`);
+      fake.emitClose(0, null);
+    },
+  ]);
+  const result = await runCliSubscription(baseParams({ runtime: "claude_code" }), { spawnImpl, delayImpl: noDelay });
+  assert.equal(result.text, "back online");
+  assert.equal(callCount(), 2, "expected exactly one silent recovery re-spawn, not zero and not more");
+});
+
+test("codex: auth_expired recovery attempt ALSO fails — surfaces not_authenticated after exactly 2 attempts, never loops", async () => {
+  const authFailScript = (fake: FakeChild) => {
+    fake.emitStdout(
+      `${JSON.stringify({ type: "turn.failed", error: { message: "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" } })}\n`,
+    );
+    fake.emitClose(1, null);
+  };
+  const { spawnImpl, callCount } = scriptedSpawnImpl([authFailScript, authFailScript]);
+  const promise = runCliSubscription(baseParams({ runtime: "codex" }), { spawnImpl, delayImpl: noDelay });
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliRunError);
+    assert.equal((err as CliRunError).kind, "not_authenticated");
+    assert.equal((err as CliRunError).failureClass, "auth_expired");
+    return true;
+  });
+  assert.equal(callCount(), 2, "must attempt exactly one bounded recovery re-spawn, then stop — never a retry loop");
+});
+
+test("not_installed (ENOENT) is never retried, not even once", async () => {
+  const { spawnImpl, callCount } = scriptedSpawnImpl([
+    (fake) => fake.emitError(Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }) as NodeJS.ErrnoException),
+  ]);
+  const promise = runCliSubscription(baseParams({ runtime: "codex" }), { spawnImpl, delayImpl: noDelay });
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliRunError);
+    assert.equal((err as CliRunError).kind, "not_installed");
+    return true;
+  });
+  assert.equal(callCount(), 1);
+});
+
+// ---- Reliability: no-output watchdog, distinct from the overall timeout --
+
+test("a process producing zero output trips the no-output watchdog well before the overall timeout, and is classified transient", async () => {
+  const fake = makeFakeChild();
+  fake.dieOnKill = { code: null, signal: "SIGKILL" };
+  const startedAt = Date.now();
+  const promise = runCliSubscription(
+    baseParams({ runtime: "claude_code", timeoutMs: 5_000 }),
+    { spawnImpl: spawnImplReturning(fake), killGraceMs: 5, noOutputTimeoutMs: 20, maxRetries: 0 },
+  );
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliRunError);
+    assert.equal((err as CliRunError).kind, "timeout");
+    assert.equal((err as CliRunError).failureClass, "transient");
+    assert.match((err as CliRunError).message, /no output/i);
+    assert.match((err as CliRunError).message, /watchdog/i);
+    return true;
+  });
+  assert.ok(Date.now() - startedAt < 5_000, "the watchdog (20ms) must fire well before the 5s overall timeout");
+  assert.deepEqual(fake.killCalls, ["SIGTERM", "SIGKILL"]);
+});
+
+test("the no-output watchdog resets on ANY stdout/stderr activity — a slow-but-talking process is not killed early", async () => {
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(
+    baseParams({ runtime: "claude_code", timeoutMs: 5_000 }),
+    { spawnImpl: spawnImplReturning(fake), noOutputTimeoutMs: 30 },
+  );
+  // Keep feeding small chunks of a still-incomplete stream, each well inside
+  // the 30ms no-output window, so the watchdog keeps getting reset instead
+  // of ever tripping.
+  for (let i = 0; i < 4; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 12));
+    fake.emitStdout(" ");
+  }
+  fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "done", usage: { input_tokens: 1, output_tokens: 1 } })}\n`);
+  fake.emitClose(0, null);
+  const result = await promise;
+  assert.equal(result.text, "done");
+});
+
+test("a no-output watchdog trip is retried and can succeed on the next attempt", async () => {
+  const { spawnImpl, callCount } = scriptedSpawnImpl([
+    (fake) => {
+      // Deliberately emits nothing — the watchdog must trip on its own. Dies
+      // on the watchdog's own SIGTERM so the attempt actually resolves
+      // (a real CLI process terminates on SIGTERM; this fake must too).
+      fake.dieOnKill = { code: null, signal: "SIGTERM" };
+    },
+    (fake) => {
+      fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "second try worked", usage: { input_tokens: 1, output_tokens: 1 } })}\n`);
+      fake.emitClose(0, null);
+    },
+  ]);
+  const result = await runCliSubscription(
+    baseParams({ runtime: "claude_code", timeoutMs: 5_000 }),
+    { spawnImpl, delayImpl: noDelay, noOutputTimeoutMs: 15 },
+  );
+  assert.equal(result.text, "second try worked");
+  assert.equal(callCount(), 2);
+});
+
+test("no-output watchdog is not armed when noOutputTimeoutMs is not strictly less than timeoutMs (overall timeout alone governs, fatal, no retry)", async () => {
+  // Mirrors the existing "hung process" timeout tests: with the DEFAULT
+  // noOutputTimeoutMs (45s) and a short custom timeoutMs (15ms), the overall
+  // timer must fire first and the result must be the ORIGINAL single-attempt
+  // "fatal" timeout, not a watchdog-classified retryable one.
+  const fake = makeFakeChild();
+  fake.dieOnKill = { code: null, signal: "SIGKILL" };
+  const { spawnImpl, callCount } = (() => {
+    let attempts = 0;
+    const impl: CliSpawnImpl = () => {
+      attempts += 1;
+      return fake.child;
+    };
+    return { spawnImpl: impl, callCount: () => attempts };
+  })();
+  const promise = runCliSubscription(
+    baseParams({ runtime: "claude_code", timeoutMs: 15 }),
+    { spawnImpl, killGraceMs: 5, delayImpl: noDelay },
+  );
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliRunError);
+    assert.equal((err as CliRunError).kind, "timeout");
+    assert.equal((err as CliRunError).failureClass, "fatal");
+    assert.doesNotMatch((err as CliRunError).message, /watchdog/i);
+    return true;
+  });
+  assert.equal(callCount(), 1, "the overall-timeout path must never be retried");
 });
