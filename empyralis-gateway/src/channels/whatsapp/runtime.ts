@@ -699,8 +699,16 @@ export class WhatsAppPersonalRuntime {
       for (const id of sentIds) {
         this.sentMessageIds.add(id);
       }
-      if (this.sentMessageIds.size > 500) {
-        this.sentMessageIds.clear();
+      // Evict oldest (Set iteration order == insertion order) rather than
+      // wiping the whole cache -- a full-wipe would drop is_reply_to_sage /
+      // isOwnSelfChatEcho matching for every message sent moments ago,
+      // right as the cache fills up under normal steady-state traffic.
+      while (this.sentMessageIds.size > 500) {
+        const oldest = this.sentMessageIds.values().next().value;
+        if (oldest === undefined) {
+          break;
+        }
+        this.sentMessageIds.delete(oldest);
       }
       return mapped;
     } finally {
@@ -1142,9 +1150,35 @@ export class WhatsAppPersonalRuntime {
     this.stopHealthCheck();
     const adapter = await this.getAdapter();
     const reconnectState = resolveWhatsAppReconnectState(lastDisconnect, adapter.disconnectReason);
+    const abandonedSocket = this.socket as unknown as {
+      end?: (error?: unknown) => void;
+      ws?: { close?: () => void };
+    } | null;
     this.socket = null;
     this.authBundle = null;
     this.pairingCodeRequested = false;
+    // Release the abandoned socket's own transport/timers -- deliberately
+    // NOT logout(), unlike handleDisconnect()'s full reset. This teardown
+    // fires both for a real Baileys "close" (harmless no-op there; Baileys
+    // already tore its own socket down) and for runHealthCheck()'s
+    // half-dead-but-not-closed case (the actual leak: nothing else ever
+    // released that socket's resources -- see
+    // whatsapp-health-check-teardown-leak.test.ts). logout() would
+    // actively deauthorize the linked device over the network, which is
+    // wrong here regardless of whether reconnectState.shouldReconnect --
+    // even the loggedOut/401 branch below already handles "must relink" by
+    // wiping the local auth state, not by calling logout() on a socket
+    // that may itself be the reason we got here.
+    try {
+      abandonedSocket?.end?.(undefined);
+    } catch {
+      // Already gone -- nothing to close.
+    }
+    try {
+      abandonedSocket?.ws?.close?.();
+    } catch {
+      // Already gone.
+    }
     if (!reconnectState.shouldReconnect) {
       // Genuine logout only -- shouldReconnect is false exclusively for
       // Baileys' loggedOut/401 code (see resolveWhatsAppReconnectState in
