@@ -20,6 +20,7 @@ PERSISTED_TRACE_EVENT_TYPES = frozenset(
         "plan.item.created",
         "plan.item.updated",
         "plan.replanned",
+        "plan.updated",
         "tool.started",
         "tool.result",
         "search.query",
@@ -496,6 +497,26 @@ async def emit_plan_replanned(
             "new_plan_id": str(new_plan_id or "").strip(),
             "supersedes_plan_id": str(supersedes_plan_id or "").strip(),
             "reason_summary": str(reason_summary or "").strip(),
+        },
+        persisted=True,
+    )
+
+
+async def emit_plan_updated(
+    trace_context: Optional[TraceContext],
+    tasks: List[Dict[str, Any]],
+) -> Optional[str]:
+    """The `update_plan` tool's contract event (Tier A #1, backbone-plan.md /
+    docs/design/backbone-empyralis.md §6 continuous-work gap). Distinct from
+    `plan.item.*` above (this trace's own internal per-turn planning node) —
+    `plan.updated` carries the model-authored task list from the `update_plan`
+    tool, full-replace semantics, so the frontend Work tab always renders the
+    latest `tasks` array as the whole plan, not a diff."""
+    return await emit(
+        trace_context,
+        "plan.updated",
+        {
+            "tasks": [dict(task) for task in (tasks or []) if isinstance(task, dict)],
         },
         persisted=True,
     )

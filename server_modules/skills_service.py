@@ -639,6 +639,46 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             audience_note="Safe: only signals task completion, no privileged access.",
         ),
         ToolDescriptor(
+            tool_name="update_plan",
+            label="Update plan",
+            connector_id="sage",
+            action_id="update_plan",
+            description=(
+                "For a multi-step task, call this first to lay out the steps as a short "
+                "task list, then call it again to mark a task 'active' when you start it "
+                "and 'done' when finished. Each call REPLACES the current plan — always "
+                "pass the full, current list of tasks (not just the one that changed). "
+                "For a simple single-step request, don't use this tool — just do the work."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "The full current list of tasks for this turn, in order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "Short description of the task.",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "active", "done", "skipped"],
+                                    "description": "Task status. Defaults to 'pending' if omitted.",
+                                },
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                },
+                "required": ["tasks"],
+            },
+            audience_safe=True,
+            audience_note="Safe: only tracks this turn's own task list, no privileged access.",
+        ),
+        ToolDescriptor(
             tool_name="hardware__action",
             label="Hardware action",
             connector_id="hardware",

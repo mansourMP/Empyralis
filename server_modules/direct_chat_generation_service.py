@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import contextvars
 import json
+import os
 import re
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional
 import uuid
 
 from server_modules import agent_trace_service
+from server_modules import compaction_service
 from server_modules import direct_chat_tool_catalog_service
 from server_modules import direct_tool_execution_service
 from server_modules import empyralis_model_tier_contract
@@ -243,6 +245,79 @@ _STREAM_INTERNAL_MARKUP_LOOKBACK_CHARS = 96
 # this is a narrow workaround allowlist, not a default-safe posture, and an
 # unnecessary entry silently caps that provider back at one tool round.
 _TOOL_STRIP_REQUIRED_PROVIDERS = {"deepseek"}
+
+
+# ── Continuous work (Tier A #1, docs/design/backbone-plan.md /
+# docs/design/backbone-empyralis.md §6) ──────────────────────────────────────
+# A turn that called `update_plan` and still has pending/active tasks may
+# continue past `max_iterations` (normally _SAGE_OPERATOR_LOOP_MAX_ITERATIONS
+# = 5) instead of being cut off mid-task. This is strictly additive: a turn
+# that never calls `update_plan` (current_plan stays empty) hits the exact
+# same cap, at the exact same iteration, as before this feature existed — see
+# the `iteration >= max_iterations` check in the main loop below, which
+# degrades to the old `for...else` exhaustion path whenever
+# `_plan_has_open_tasks` is False.
+#
+# Reversible with zero code changes: EMPYRALIS_CONTINUOUS_WORK_ENABLED=0.
+def _continuous_work_enabled() -> bool:
+    return str(os.environ.get("EMPYRALIS_CONTINUOUS_WORK_ENABLED", "1")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _plan_has_open_tasks(plan_tasks: Optional[List[Dict[str, Any]]]) -> bool:
+    return any(
+        str((task or {}).get("status") or "").strip().lower() in {"pending", "active"}
+        for task in (plan_tasks or [])
+        if isinstance(task, dict)
+    )
+
+
+# Belt-and-suspenders hard ceiling on top of (not instead of) the token-budget
+# guard below. A real multi-step plan finishes well under this; it exists
+# purely so a pathological plan (agent never marks tasks done, tool results
+# stay small enough that the budget check never trips) still cannot loop
+# forever. "Never a hard runaway" per the build brief — this is the backstop
+# for the backstop.
+_CONTINUOUS_WORK_HARD_ITERATION_CAP = 40
+
+
+def _continuous_work_budget_allows_more(
+    *,
+    system_prompt: Optional[str],
+    conversation_messages: List[Dict[str, Any]],
+    current_prompt: str,
+    provider: Optional[str],
+    model: Optional[str],
+) -> bool:
+    """The actual ceiling on continuous work: the SAME token-budget primitives
+    the proactive preflight already uses (sage_agent_runtime_service.py's
+    B2 pre-flight check, ~line 4956-5049 — estimate_tokens +
+    COMPACTION_RESERVE_TOKENS against resolve_context_window), applied here
+    as the per-iteration continuation gate instead of a once-per-turn
+    preflight. Once the turn's own accumulated context (system prompt +
+    everything exchanged so far) would leave no room under the model's real
+    context window, the loop stops extending past max_iterations exactly as
+    if the plan were finished — the model never gets a call that's likely to
+    overflow anyway, and the existing reactive-overflow-retry path
+    (sage_agent_runtime_service.py ~line 5089-5233) remains the backstop for
+    whatever this estimate misses on the call that does go out.
+    """
+    try:
+        window = compaction_service.resolve_context_window(provider, model)
+        text_parts = [str(system_prompt or ""), str(current_prompt or "")]
+        for message in conversation_messages or []:
+            if isinstance(message, dict):
+                text_parts.append(str(message.get("content") or ""))
+        estimated = (
+            compaction_service.estimate_tokens("".join(text_parts))
+            + compaction_service.COMPACTION_RESERVE_TOKENS
+        )
+        return estimated <= window
+    except Exception:
+        # Fail closed: any error estimating the budget must not be allowed to
+        # extend the loop past the pre-existing max_iterations cap.
+        return False
 
 
 def _tool_result_context_is_local_private(provider: Any, credentials: Any) -> bool:
@@ -1009,6 +1084,20 @@ def stream_provider_backed_direct_chat(
     conversation_messages: List[Dict[str, Any]] = []
     conversation_messages.extend(compacted_prior_messages)
     current_prompt = normalized_message
+    # This turn's plan (Tier A #1 continuous work) — set/replaced by the
+    # `update_plan` tool below. Empty for every turn that never calls it,
+    # which is what keeps the main loop's cap check below a no-op for
+    # ordinary (non-planning) turns. Lives only for this turn/run — not
+    # persisted beyond it (Tier C's "plans as files" is separate, future work).
+    current_plan: List[Dict[str, Any]] = []
+    # True for exactly the one round immediately after an update_plan call
+    # transitions the plan from "has open tasks" to fully done/skipped — so
+    # that round (where the model, having just closed out its plan, is the
+    # one that should say so) is never cut off by the cap check below even
+    # though `_plan_has_open_tasks(current_plan)` has already gone False.
+    # Reset every round (see the cap check) so it only ever grants one grace
+    # round, never a standing bypass.
+    _plan_completion_needs_wrapup_round = False
 
     # --- Attachment context injection ---
     attachment_context = ""
@@ -1198,9 +1287,41 @@ def stream_provider_backed_direct_chat(
         }
         return
 
-    for iteration in range(max_iterations):
+    iteration = 0
+    while True:
+        if iteration >= max_iterations:
+            # ── Continuous-work extension point ──
+            # Reached exactly when the old `for iteration in range(max_iterations):
+            # ... else:` would have exhausted the loop. A turn with no plan
+            # (current_plan empty) always fails `_plan_has_open_tasks` here and
+            # takes this break on the very same iteration as before — byte-for-
+            # byte the original cap. Only a turn that called update_plan and
+            # still has open tasks (or JUST closed its last one and hasn't had
+            # a round to say so yet — `_plan_completion_needs_wrapup_round`)
+            # can continue, and only while the flag is on and the token budget
+            # (same accounting as the proactive preflight) still has room.
+            if not (
+                _continuous_work_enabled()
+                and (_plan_has_open_tasks(current_plan) or _plan_completion_needs_wrapup_round)
+                and iteration < _CONTINUOUS_WORK_HARD_ITERATION_CAP
+                and _continuous_work_budget_allows_more(
+                    system_prompt=system_prompt,
+                    conversation_messages=conversation_messages,
+                    current_prompt=current_prompt,
+                    provider=str(actual_provider or context.get("provider") or "").strip() or None,
+                    model=str(actual_model or "").strip() or None,
+                )
+            ):
+                llm_error = llm_error or f"max_tool_iterations_reached:{max_iterations}"
+                break
         thinking_iteration = iteration + 1
-        print(f"[DG_ITER] iteration={iteration} thinking_iteration={thinking_iteration} conv_msgs={len(conversation_messages)} executed_any_tools={executed_any_tools}", flush=True)
+        _loop_iteration = iteration
+        iteration += 1
+        # The grace round (if this one is it) is being spent now — consumed
+        # unconditionally so it can only ever bypass the cap once per
+        # completion, never become a standing bypass.
+        _plan_completion_needs_wrapup_round = False
+        print(f"[DG_ITER] iteration={_loop_iteration} thinking_iteration={thinking_iteration} conv_msgs={len(conversation_messages)} executed_any_tools={executed_any_tools}", flush=True)
         yield services.thinking_step_payload(thinking_iteration, "active")
 
         # Strip tools for synthesis ONLY for providers with a confirmed
@@ -1211,15 +1332,16 @@ def stream_provider_backed_direct_chat(
         # multi-round tool use (call toolA -> observe -> call toolB) until it
         # naturally stops calling tools, at which point the "result" handling
         # below (no iteration_tool_calls) synthesizes the final reply and
-        # returns — max_iterations stays the hard ceiling either way.
+        # returns — max_iterations stays the hard ceiling either way, unless a
+        # plan is actively extending it (see the continuous-work check above).
         _strip_tools_provider = str(actual_provider or context.get("provider") or "").strip().lower()
         if executed_any_tools and _strip_tools_provider in _TOOL_STRIP_REQUIRED_PROVIDERS:
-            print(f"[TRACE_STRIP] stripping tools from metadata and context iteration={iteration} provider={_strip_tools_provider!r}", flush=True)
+            print(f"[TRACE_STRIP] stripping tools from metadata and context iteration={_loop_iteration} provider={_strip_tools_provider!r}", flush=True)
             if isinstance(metadata, dict) and metadata.get("tools"):
-                print(f"[DG_STRIP_TOOLS] stripping {len(metadata['tools'])} tools from metadata for synthesis iteration={iteration}", flush=True)
+                print(f"[DG_STRIP_TOOLS] stripping {len(metadata['tools'])} tools from metadata for synthesis iteration={_loop_iteration}", flush=True)
                 metadata = {**metadata, "tools": []}
             if isinstance(context, dict) and context.get("tools"):
-                print(f"[DG_STRIP_TOOLS] stripping {len(context['tools'])} tools from context for synthesis iteration={iteration}", flush=True)
+                print(f"[DG_STRIP_TOOLS] stripping {len(context['tools'])} tools from context for synthesis iteration={_loop_iteration}", flush=True)
                 context = {**context, "tools": []}
 
         iteration_reply = ""
@@ -1267,7 +1389,7 @@ def stream_provider_backed_direct_chat(
                 actual_provider = str(event.get("provider") or actual_provider or "").strip() or actual_provider
                 actual_model = str(event.get("model") or actual_model or "").strip() or actual_model
                 iteration_tool_calls = event.get("tool_calls") if isinstance(event.get("tool_calls"), list) else []
-                print(f"[DG_RESULT] iteration={iteration} reply_len={len(final_reply)} error={llm_error!r} tool_calls_count={len(iteration_tool_calls)} provider={actual_provider} model={actual_model}", flush=True)
+                print(f"[DG_RESULT] iteration={_loop_iteration} reply_len={len(final_reply)} error={llm_error!r} tool_calls_count={len(iteration_tool_calls)} provider={actual_provider} model={actual_model}", flush=True)
                 if attempted_providers and ',' in attempted_providers:
                     providers_list = [p.strip() for p in attempted_providers.split(',') if p.strip()]
                     if len(providers_list) >= 2:
@@ -1483,14 +1605,17 @@ def stream_provider_backed_direct_chat(
                             tool_item_id = uuid.uuid4().hex
                             raw_tool_name = str(tool_call.get("name") or "").strip()
                             argument_payload = services.tool_arguments_payload(tool_call.get("arguments"))
-                            # query_tool_registry is a meta-tool (search the lazy-load
-                            # catalog), not a "connector__action" pair — parse_tool_name
-                            # only recognizes a fixed bare-name whitelist plus that shape
-                            # and raises on anything else. Specialists with a narrow
-                            # explicit toolset lean on this discovery tool far more than
-                            # Sage's full toolset does, so skip straight to its handling
-                            # below instead of parsing it as a connector action.
+                            # query_tool_registry and update_plan are both meta-tools (no
+                            # connector/action to run), not "connector__action" pairs —
+                            # parse_tool_name only recognizes a fixed bare-name whitelist
+                            # plus that shape and raises on anything else. Skip straight to
+                            # their handling below instead of parsing as a connector action.
+                            # (query_tool_registry keeps its original `and tool_registry`
+                            # gate byte-for-byte — when there's no registry to search it
+                            # falls through to parse_tool_name exactly as before, unchanged.)
                             if raw_tool_name == "query_tool_registry" and tool_registry:
+                                connector_id, action_id = "", ""
+                            elif raw_tool_name == "update_plan":
                                 connector_id, action_id = "", ""
                             else:
                                 connector_id, action_id = services.parse_tool_name(raw_tool_name)
@@ -1559,6 +1684,77 @@ def stream_provider_backed_direct_chat(
                                 )
                                 continue
                             # ── End query_tool_registry handler ──
+                            # ── update_plan: replace this turn's plan (Tier A #1 continuous
+                            # work) ── A meta-tool like query_tool_registry above: no
+                            # connector/action, handled entirely in-loop, never reaches the
+                            # connector-action executor below. REPLACES current_plan whole
+                            # (idempotent) rather than diffing — the model is told to always
+                            # pass the full task list. Stable ids: a task whose title matches
+                            # an existing plan entry keeps that entry's id; a new title gets a
+                            # fresh one — so the frontend Work tab can key off `id` across
+                            # repeated update_plan calls instead of re-keying by list position.
+                            if tool_name == "update_plan":
+                                _raw_tasks = argument_payload.get("tasks")
+                                if not isinstance(_raw_tasks, list):
+                                    _raw_tasks = []
+                                _valid_statuses = {"pending", "active", "done", "skipped"}
+                                _old_ids_by_title = {
+                                    str(t.get("title") or "").strip(): str(t.get("id") or "")
+                                    for t in current_plan
+                                    if isinstance(t, dict) and str(t.get("title") or "").strip()
+                                }
+                                _new_plan: List[Dict[str, Any]] = []
+                                for _raw_task in _raw_tasks:
+                                    if not isinstance(_raw_task, dict):
+                                        continue
+                                    _title = str(_raw_task.get("title") or "").strip()
+                                    if not _title:
+                                        continue
+                                    _status = str(_raw_task.get("status") or "pending").strip().lower()
+                                    if _status not in _valid_statuses:
+                                        _status = "pending"
+                                    _task_id = _old_ids_by_title.get(_title) or uuid.uuid4().hex
+                                    _new_plan.append({"id": _task_id, "title": _title, "status": _status})
+                                # This call just closed out the last open task (open ->
+                                # fully done/skipped) — grant the NEXT round a bypass of
+                                # the cap check even though the new plan itself has no
+                                # open tasks, so the model that just finished its plan
+                                # gets to say so instead of being cut off mid-wrap-up.
+                                if _plan_has_open_tasks(current_plan) and not _plan_has_open_tasks(_new_plan):
+                                    _plan_completion_needs_wrapup_round = True
+                                current_plan = _new_plan
+                                executed_any_tools = True
+                                _plan_summary = (
+                                    f"Plan updated: {len(current_plan)} task(s) "
+                                    f"({sum(1 for t in current_plan if t['status'] == 'done')} done)."
+                                    if current_plan else "Plan cleared."
+                                )
+                                tool_result_for_context = _plan_summary
+                                conversation_messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call_id,
+                                        "name": tool_name,
+                                        "content": tool_result_for_context,
+                                    }
+                                )
+                                plan_updated_event = _emit_trace_event(
+                                    trace_context,
+                                    event_type="plan.updated",
+                                    data={"tasks": current_plan},
+                                    persisted=True,
+                                )
+                                if plan_updated_event is not None:
+                                    yield plan_updated_event
+                                current_prompt = (
+                                    "Your plan was recorded. Continue working through the "
+                                    "pending/active tasks one at a time, calling update_plan "
+                                    "again (with the full task list) whenever a task's status "
+                                    "changes. Respond normally once every task is done or "
+                                    "skipped."
+                                )
+                                continue
+                            # ── End update_plan handler ──
                             tool_trace_metadata = direct_tool_execution_service.build_direct_tool_trace_metadata(
                                 connector_id,
                                 action_id,
@@ -2234,7 +2430,7 @@ def stream_provider_backed_direct_chat(
             if event_type == "failure":
                 attempted_providers = str(event.get("attempted_providers") or "").strip()
                 llm_error = str(event.get("error") or "").strip()
-                print(f"[DG_FAILURE] iteration={iteration} llm_error={llm_error!r} attempted_providers={attempted_providers!r}", flush=True)
+                print(f"[DG_FAILURE] iteration={_loop_iteration} llm_error={llm_error!r} attempted_providers={attempted_providers!r}", flush=True)
                 is_platform_credits = _platform_paid_ai_identity(
                     availability_payload=availability_payload,
                     metadata=metadata,
@@ -2282,8 +2478,12 @@ def stream_provider_backed_direct_chat(
         if not iteration_tool_calls:
             print(f"[DG_LOOP_END] broke with no tool_calls llm_error={llm_error!r} executed_any_tools={executed_any_tools} final_reply_len={len(final_reply)}", flush=True)
             break
-    else:
-        llm_error = llm_error or f"max_tool_iterations_reached:{max_iterations}"
+    # NOTE: the old `for iteration in range(max_iterations): ... else: llm_error =
+    # ... f"max_tool_iterations_reached:..."` exhaustion branch now lives at the
+    # TOP of the loop above (the `if iteration >= max_iterations:` check) so the
+    # continuous-work extension has a single point of truth for "should this turn
+    # keep going past the normal cap." Behavior for a turn with no plan is
+    # unchanged: same error, same message, same iteration count.
 
     # Nuclear fallback: synthesis failed (transport/empty/rate-limit/anything) after
     # tools already ran. Runs here, OUTSIDE the for loop, so break cannot skip it.
