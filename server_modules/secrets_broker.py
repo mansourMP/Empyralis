@@ -17,6 +17,7 @@ from server_modules.vault_helpers import (
     DecryptFn,
     LoadVaultFn,
     normalize_workspace_id,
+    resolve_agent_credential as _raw_resolve_agent_credential,
     resolve_default_vault_credential as _raw_resolve_default_vault_credential,
     resolve_vault_credential as _raw_resolve_vault_credential,
 )
@@ -1103,7 +1104,29 @@ def resolve_provider_secret(
         if credential_id:
             secret = _raw_resolve_vault_credential(load_vault_fn, decrypt_fn, credential_id, workspace_id)
         else:
-            secret = _raw_resolve_default_vault_credential(load_vault_fn, decrypt_fn, normalized_provider_id, workspace_id)
+            # Stage 4B wiring: a tool call made on behalf of a specific AGENT
+            # (actor_type="agent") must resolve that agent's own credential —
+            # or a genuinely workspace-shared/unassigned one — never a row
+            # bound to a DIFFERENT agent. resolve_agent_credential already
+            # implements this scoring (exact agent match > unassigned
+            # workspace-default > reject); it raises rather than silently
+            # falling back to another agent's row. Non-agent actors (the
+            # runtime resolving its own model-provider key, workflow runs,
+            # provider-profile candidates, etc.) are unaffected — they never
+            # pass actor_type="agent", so they keep today's
+            # (provider, workspace) "most recently updated" behavior.
+            agent_actor_id = str(actor_id or "").strip()
+            agent_workspace_id = normalize_workspace_id(workspace_id)
+            if str(actor_type or "").strip().lower() == "agent" and agent_actor_id and agent_workspace_id:
+                secret = _raw_resolve_agent_credential(
+                    load_vault_fn,
+                    decrypt_fn,
+                    normalized_provider_id,
+                    agent_workspace_id,
+                    agent_actor_id,
+                )
+            else:
+                secret = _raw_resolve_default_vault_credential(load_vault_fn, decrypt_fn, normalized_provider_id, workspace_id)
         resolved_provider = str(secret.get("_provider") or "").strip().lower()
         if resolved_provider and resolved_provider != normalized_provider_id:
             raise SecretAccessDeniedError("provider_mismatch", "Resolved credential does not match the requested provider.")
