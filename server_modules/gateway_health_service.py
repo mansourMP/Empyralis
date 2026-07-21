@@ -433,6 +433,15 @@ def gateway_doctor_payload(gateway_id: str, *, force_provider_probe: bool = Fals
         registration_metadata=registration_metadata,
         heartbeat_fresh=heartbeat_fresh,
     )
+    # Live CPU/memory/GPU/temperature telemetry (empyralis-gateway/src/
+    # health/resource-metrics.ts's GatewayResourceMetrics, sanitized on
+    # ingest by gateway_inventory_service.sanitize_resources() in the
+    # gateway.heartbeat branch of gateway_protocol_service.py). `{}` here
+    # just means no gateway.heartbeat carrying `resources` has landed yet
+    # (e.g. an un-updated gateway build) — the frontend already treats a
+    # missing/None field as "can't sample this," so no extra placeholder is
+    # synthesized.
+    resources = gateway_inventory_service.resources_from_metadata(session_metadata, registration_metadata)
     registration_active = str(registration.get("status") or "").strip().lower() == "active"
     device_verified = str(registration.get("device_trust_state") or "").strip().lower() not in {"revoked", ""}
     checkpoint_drift = max(
@@ -725,6 +734,7 @@ def gateway_doctor_payload(gateway_id: str, *, force_provider_probe: bool = Fals
         "telegram_personal": telegram_state,
         "personal_channels": personal_channel_health,
         "service_inventory": service_inventory,
+        "resources": resources,
         "browser": {
             "status": "pass" if active_browser_sessions else ("warn" if browser_sessions else "pass"),
             "summary": (

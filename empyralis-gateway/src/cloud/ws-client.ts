@@ -46,6 +46,7 @@ import {
   collectPassiveInventorySnapshot,
   type PassiveInventorySnapshot,
 } from "../health/service-inventory";
+import { collectResourceMetrics } from "../health/resource-metrics";
 
 /**
  * Message types that are safe to replay automatically.
@@ -489,6 +490,9 @@ export class GatewayWsClient {
       localRunnerReady,
     }), localRunnerReady);
     void this.refreshPassiveInventorySnapshot(runtimeMetadata.requestedCapabilities, localRunnerReady);
+    // Cached internally for ~5s (health/resource-metrics.ts) so back-to-back
+    // heartbeat ticks don't each pay the ~500ms CPU-delta sample cost.
+    const resources = await collectResourceMetrics();
     const payload = buildGatewayHeartbeatPayload({
       runtimeMetadata,
       inventory,
@@ -500,6 +504,7 @@ export class GatewayWsClient {
       // as-of-send-time reporting, not the outcome of this attempt, which
       // isn't known yet. See GatewayCheckpoints.currentHealthState().
       healthState: this.checkpoints.currentHealthState(),
+      resources,
     });
     await this.sendRequest(
       "gateway.heartbeat",

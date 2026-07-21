@@ -1,5 +1,6 @@
 import type { GatewayRuntimeMetadata } from "../runtime/runtime-metadata";
 import type { PassiveInventorySnapshot } from "../health/service-inventory";
+import type { GatewayResourceMetrics } from "../health/resource-metrics";
 import type { GatewayHealthState } from "../state/checkpoints";
 
 export interface GatewayHeartbeatPayloadInput {
@@ -14,6 +15,9 @@ export interface GatewayHeartbeatPayloadInput {
   // logic (server_modules/gateway_health_service.py) and the UI stop being
   // told "online" while the gateway is actually reconnecting or degraded.
   healthState: GatewayHealthState;
+  // Live CPU/memory/GPU/temperature sampled by health/resource-metrics.ts —
+  // best-effort fields are null, never fabricated. See its module doc.
+  resources: GatewayResourceMetrics;
 }
 
 export function buildGatewayHeartbeatPayload(input: GatewayHeartbeatPayloadInput): Record<string, unknown> {
@@ -32,5 +36,6 @@ export function buildGatewayHeartbeatPayload(input: GatewayHeartbeatPayloadInput
     },
     service_inventory: input.inventory.service_inventory,
     native_runtime: input.inventory.native_runtime,
+    resources: input.resources,
   };
 }
