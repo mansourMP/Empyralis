@@ -10,6 +10,7 @@ from server_modules import (
     agent_action_metering_service,
     activity_ledger_service,
     artifact_service,
+    billing_credit_config,
     control_plane_repository,
     deployed_agent_config_schema,
     deployed_agent_runtime_contract_service,
@@ -113,6 +114,54 @@ def _coerce_dict(value: Any) -> Dict[str, Any]:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def runtime_usage_credit_debit_plan(
+    *,
+    payer: Any,
+    estimated_cost_usd: Any,
+    runtime_session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Decide whether a terminated runtime session's usage should debit the
+    workspace's real credit_balance_usd, and if so, with what request_id and
+    credit amount. Pure and DB-free — the actual debit call
+    (control_plane_repository.debit_workspace_credits_for_turn_atomic) is
+    made by the caller so this stays independently testable.
+
+    Gate: ``payer`` must be exactly "platform_credits" — the value
+    runtime_attachment_service.build_runtime_usage_credit_event derives from
+    billing_source == "empyralis_credits" (runtime_attachment_service.py:464).
+    Any other payer (e.g. "local" for self-hosted/BYO runtimes) returns None:
+    those must NEVER be debited. A non-positive/unknown cost also returns
+    None — no ground-truth cost, no charge.
+
+    request_id is namespaced (``runtime_usage:<session_id>``) and derived
+    only from the session id — stable across retries of the SAME
+    terminate-session flow (e.g. an idle-reaper re-running after a transient
+    failure) so debit_workspace_credits_for_turn_atomic's own request_id
+    dedup guarantees the session is charged at most once, no matter how many
+    times termination is retried.
+    """
+    if str(payer or "").strip() != "platform_credits":
+        return None
+    try:
+        cost_usd = float(estimated_cost_usd or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if cost_usd <= 0:
+        return None
+    session_token = _text(runtime_session_id)
+    if not session_token:
+        return None
+    credits_owed = billing_credit_config.credits_for_turn_cost_usd(cost_usd)
+    if credits_owed <= 0:
+        return None
+    return {
+        "request_id": f"runtime_usage:{session_token}",
+        "credits_to_charge": credits_owed,
+        "floor_usd": billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD,
+        "credits_per_usd": billing_credit_config.HOSTED_SAGE_AI_CREDITS_PER_USD,
+    }
 
 
 def _parse_iso_datetime(value: Any) -> Optional[datetime]:
@@ -2660,6 +2709,52 @@ async def _record_bound_cloud_runtime_usage_event(
             source_table="activity_ledger_events",
             source_event_id=_text((activity or {}).get("id")) or runtime_session_id,
         )
+        # ── Actually debit platform-credit runtime minutes (2026-07-21) ──
+        # build_runtime_usage_credit_event already computed the ground-truth
+        # payer: "platform_credits" only when the session ran on Empyralis's
+        # own cloud fabric (billing_source == "empyralis_credits" — see
+        # runtime_attachment_service.py:464); local/self-hosted/BYO runtimes
+        # always resolve to "local" there and MUST NEVER be debited. Below
+        # this line used to hardcode credits_debited=0.0 — the unified
+        # ledger event above was transparency-only bookkeeping that never
+        # touched the real spendable balance. Route through the SAME
+        # idempotent, clamp-at-zero debit primitive the Sage per-turn credit
+        # reconnect uses (control_plane_repository.
+        # debit_workspace_credits_for_turn_atomic — dedupes by request_id
+        # against the workspace's shared credit_transactions ledger, the
+        # exact list debit_workspace_credit_balance_for_hosted_usage_atomic
+        # also dedupes against), keyed on a namespaced, stable-per-session id
+        # so terminate-session retries (e.g. an idle-reaper re-running after
+        # a transient failure) can never double-charge the same session.
+        _runtime_credits_debited = 0.0
+        _runtime_platform_cost_usd = 0.0
+        _runtime_debit_plan = runtime_usage_credit_debit_plan(
+            payer=unified_event.get("payer"),
+            estimated_cost_usd=estimated_cost_usd,
+            runtime_session_id=runtime_session_id,
+        )
+        if _runtime_debit_plan is not None:
+            try:
+                _runtime_debit_result = await control_plane_repository.debit_workspace_credits_for_turn_atomic(
+                    workspace_id=workspace_token,
+                    tenant_id=tenant_token,
+                    **_runtime_debit_plan,
+                )
+                if isinstance(_runtime_debit_result, dict) and _runtime_debit_result.get("ok"):
+                    _runtime_credits_debited = float(_runtime_debit_result.get("credits_debited") or 0.0)
+                    _runtime_platform_cost_usd = float(_runtime_debit_result.get("debited_usd") or 0.0)
+            except Exception:
+                # Best-effort, matching the Sage per-turn debit's non-blocking
+                # contract: metering/ledger bookkeeping above has already
+                # succeeded, and a session has already been torn down — a
+                # debit failure here must never raise back into the
+                # terminate-session flow. Logged via record_completed's
+                # metadata below (credits_debited stays 0.0) for visibility.
+                import logging as _rt_logging
+                _rt_logging.getLogger(__name__).exception(
+                    "runtime credit debit failed for session=%s workspace=%s",
+                    runtime_session_id, workspace_token,
+                )
         await agent_action_metering_service.record_completed(
             tenant_id=tenant_token,
             workspace_id=workspace_token,
@@ -2673,8 +2768,8 @@ async def _record_bound_cloud_runtime_usage_event(
             payer=unified_event.get("payer") or "platform_credits",
             billing_mode="transparency",
             credit_type=unified_event.get("credit_type") or "computer_runtime",
-            credits_debited=0.0,
-            platform_cost_usd=0.0,
+            credits_debited=_runtime_credits_debited,
+            platform_cost_usd=_runtime_platform_cost_usd,
             usage_ref={"credit_ledger_source_table": "activity_ledger_events", "source_event_id": _text((activity or {}).get("id")) or runtime_session_id},
             thread_id=_text(metadata.get("thread_id")) or _text(session_record.get("thread_id")) or runtime_session_id,
             run_id=_text(metadata.get("run_id")) or _text(session_record.get("run_id")) or runtime_session_id,

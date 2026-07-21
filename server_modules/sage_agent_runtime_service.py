@@ -209,6 +209,42 @@ def _coerce_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _turn_credit_idempotency_key(request_id: Any, trace_id: Any) -> str:
+    """The single canonical per-turn credit-debit idempotency key.
+
+    Both credit-debit paths reachable from a single ``handle_sage_chat``
+    call — the action-loop-v3 path (``_run_sage_action_loop_v3`` ->
+    ``stream_provider_backed_direct_chat`` ->
+    ``direct_chat_hosted_usage_service.persist_direct_chat_hosted_usage_best_effort``
+    -> ``billing_service.debit_workspace_credit_balance_for_hosted_usage`` ->
+    ``control_plane_repository.debit_workspace_credit_balance_for_hosted_usage_atomic``)
+    and the "cloud fallthrough" text-only path
+    (``control_plane_repository.debit_workspace_credits_for_turn_atomic``) —
+    MUST dedupe against each other using the exact same ``request_id``: both
+    functions write their "already charged this id" markers into the SAME
+    workspace ``credit_transactions`` ledger (see
+    ``_workspace_admin_defaults_payload`` / ``_workspace_credit_transactions``
+    in control_plane_repository.py, shared by both
+    ``_build_workspace_credit_debit_result`` and
+    ``_build_workspace_credit_turn_debit_result``).
+
+    Prefers the caller-supplied ``request_id`` when present — often a
+    genuinely stable platform message id (e.g. agent_channel_router.py passes
+    ``message_id or run_id``) that survives a channel/webhook redelivery,
+    which a freshly-minted-per-call ``trace_id`` cannot. Falls back to
+    ``trace_id``. Deliberately NEVER falls back further to a fresh
+    ``uuid.uuid4()`` — that would defeat retry dedup entirely (two calls for
+    the exact same logical turn would mint two different keys and both would
+    debit). Both inputs are trusted to already be non-empty in the real
+    ``handle_sage_chat`` call (``trace_id`` is always ``str(uuid.uuid4())``),
+    but this function stays defensive — it returns whichever of the two
+    cleaned strings is non-empty, `request_id` first — so it can never
+    silently return an empty key even if a future caller regresses that
+    guarantee.
+    """
+    return _coerce_text(request_id) or _coerce_text(trace_id)
+
+
 def resolve_model_for_capability(
     workspace_id: str,
     capability: str = "tools",
@@ -2739,6 +2775,19 @@ async def _run_sage_action_loop_v3(
     # validated by the caller (handle_sage_chat) against
     # _VALID_REASONING_EFFORTS. Empty = no override (provider/model default).
     reasoning_effort: str = "",
+    # The SAME per-turn credit-debit idempotency key handle_sage_chat computed
+    # once (turn_credit_idempotency_key — prefers the caller's stable
+    # request_id, falls back to trace_id, never a fresh uuid). Threaded into
+    # session_ctx below so that IF this turn's generation debits credits via
+    # direct_chat_hosted_usage_service (billing_service.
+    # debit_workspace_credit_balance_for_hosted_usage_atomic), it writes the
+    # SAME request_id into the workspace's credit_transactions ledger that
+    # handle_sage_chat's own fallback debit (debit_workspace_credits_for_
+    # turn_atomic) would use for this same logical turn — making the two
+    # paths dedupe against each other by construction instead of by luck.
+    # Empty (default) falls back to trace_id, preserving prior behavior for
+    # any other caller of this function.
+    credit_idempotency_key: str = "",
 ) -> dict[str, Any] | None:
     # Phase 4B: when agent_install_id is set this turn runs as that specialist —
     # its tool whitelist, tool-call executor identity, and mid-turn memory
@@ -2874,12 +2923,20 @@ async def _run_sage_action_loop_v3(
     # No keyword-based MCP routing — the LLM decides which tools to use.
 
     generation_services = direct_chat_runtime_exports._direct_chat_generation_services()
+    # Billing dedup key — see the credit_idempotency_key parameter doc above.
+    # Only feeds session_ctx["request_id"]/["client_request_id"] (and the
+    # mirrored agent_turn_request/context_hints copies below), which is all
+    # direct_chat_hosted_usage_service._session_request_id ever reads for the
+    # credit-debit request_id. thread_id/session_id below stay trace_id —
+    # unrelated to billing, and trace_id remains the right per-attempt value
+    # for tracing/session-key purposes.
+    _credit_key = str(credit_idempotency_key or "").strip() or trace_id
     session_ctx = {
         "tenant_id": tenant_id or "default",
         "workspace_id": workspace_id,
         "thread_id": trace_id,
-        "request_id": trace_id,
-        "client_request_id": trace_id,
+        "request_id": _credit_key,
+        "client_request_id": _credit_key,
         # Mandate: the tool-execution choke point (skills_service.py's
         # execute_single_direct_tool_call{,_async}) reads this to decide
         # whether a non-audience_safe tool call is in-mandate. Derived from
@@ -2920,8 +2977,8 @@ async def _run_sage_action_loop_v3(
             "workspace_id": workspace_id,
             "thread_id": trace_id,
             "session_id": trace_id,
-            "request_id": trace_id,
-            "client_request_id": trace_id,
+            "request_id": _credit_key,
+            "client_request_id": _credit_key,
             "message": message,
             "attachments": attachments or [],
             "channel": channel_origin or "sage",
@@ -2931,8 +2988,8 @@ async def _run_sage_action_loop_v3(
                 "agent_id": SAGE_MAIN_AGENT_ID,
             },
             "context_hints": {
-                "request_id": trace_id,
-                "client_request_id": trace_id,
+                "request_id": _credit_key,
+                "client_request_id": _credit_key,
                 "metadata": {
                     "source": "sage_chat",
                     "trace_id": trace_id,
@@ -3803,6 +3860,9 @@ async def handle_sage_chat(
     print(f"[TRACE_SAGE_ENTRY] ws={normalized_workspace_id} channel={channel_origin or 'sage'} surface={normalized_surface} message_preview={normalized_message[:80]}", flush=True, file=_sys.stderr)
 
     trace_id = str(uuid.uuid4())
+    # See _turn_credit_idempotency_key's docstring for why this exists and
+    # what both credit-debit call sites below thread it into.
+    turn_credit_idempotency_key = _turn_credit_idempotency_key(request_id, trace_id)
     actor_user_id = _coerce_text((current_user or {}).get("user_id"))
     actor_email = _coerce_text((current_user or {}).get("email"))
     actor_auth_type = _coerce_text((current_user or {}).get("auth_type"))
@@ -4530,6 +4590,7 @@ async def handle_sage_chat(
         agent_install_id=_spec_install_id,
         preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
         reasoning_effort=requested_reasoning_effort,
+        credit_idempotency_key=turn_credit_idempotency_key,
     )
     if action_result is not None:
         if "sage_action_loop" not in used_context:
@@ -4607,6 +4668,7 @@ async def handle_sage_chat(
                     agent_install_id=_spec_install_id,
                     preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
                     reasoning_effort=requested_reasoning_effort,
+                    credit_idempotency_key=turn_credit_idempotency_key,
                 )
                 if not isinstance(_corrected, dict):
                     return None
@@ -5239,7 +5301,7 @@ async def handle_sage_chat(
                     _debit_result = await _cpr.debit_workspace_credits_for_turn_atomic(
                         workspace_id=normalized_workspace_id,
                         tenant_id=normalized_tenant_id,
-                        request_id=trace_id or str(uuid.uuid4()),
+                        request_id=turn_credit_idempotency_key,
                         credits_to_charge=_credits_owed,
                         floor_usd=_credit_cfg.NEW_ACCOUNT_SIGNUP_CREDIT_USD,
                         credits_per_usd=_credit_cfg.HOSTED_SAGE_AI_CREDITS_PER_USD,
