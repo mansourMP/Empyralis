@@ -648,6 +648,20 @@ export class GatewayWsClient {
         "empyralis.gateway.v1",
         `empyralis.gateway.session.${sessionToken}`,
       ]);
+      // Permanent unhandled-'error' guard. `ws` emits 'error' on its
+      // EventEmitter; the `.onerror` PROPERTY below is reassigned across this
+      // socket's life (handshake reject here -> the post-connect handler in
+      // connect()), so there are brief windows with zero 'error' listeners. If
+      // a close() (a reconnect race, a timeout, terminateSocket) lands in one
+      // of those windows, `ws` throws "WebSocket was closed before the
+      // connection was established" as an uncaughtException that crash-loops
+      // the whole gateway. An `.on('error')` listener is never cleared by
+      // `.onerror =` reassignment, so this guarantees there is always >=1
+      // listener; recovery still runs via onclose -> handleSocketFailure().
+      const sock = socket as unknown as { on?: (event: string, cb: (...args: unknown[]) => void) => void };
+      if (typeof sock.on === "function") {
+        sock.on("error", () => {});
+      }
       const timeout = setTimeout(() => {
         socket.onopen = null;
         // Keep a no-op error handler (NOT null): closing a still-connecting
