@@ -2007,31 +2007,31 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         lane=LANE_STUDIO_BUSINESS_CHANNEL,
         surfaces=("sage", "studio"),
         setup_kind="app_credential_pair",
-        # PARTIAL, not LIVE_WHEN_CONFIGURED: this is the real bidirectional
-        # official-WeChat channel — appid/secret (Official Account) or
-        # corpid/corpsecret/AgentId (WeCom) credentials, signature-verified
-        # inbound XML callback, access-token-managed outbound send. The
-        # protocol itself is faithfully ported from
+        # Was PARTIAL (setup_available/runtime_usable False) — this is the
+        # real bidirectional official-WeChat channel: appid/secret (Official
+        # Account) or corpid/corpsecret/AgentId (WeCom) credentials,
+        # signature-verified inbound XML callback, access-token-managed
+        # outbound send. Protocol faithfully ported from
         # empyralis-gateway/src/channels/wechat/ into
         # server_modules/wechat_official_service.py (signature, XML
         # parsing, token fetch/refresh, outbound send — see that module's
-        # doc for the exact source-file mapping) and the per-agent inbound
-        # webhook route exists at server_modules/routes_wechat_official.py.
-        # Two things still make this NOT genuinely usable end-to-end today,
-        # which is why setup_available/runtime_usable are False below
-        # rather than the copy-pasted True this exact self-contradiction
-        # class was flagged for on wechat_personal/web_chat elsewhere in
-        # this file (docs/design/reliability-audit-2-channels.md):
-        #   1. routes_wechat_official.py's router is not yet registered in
-        #      server.py (app.include_router) — the webhook path is not
-        #      reachable by Tencent yet.
-        #   2. No UI/route exposes wechat_official_service.assign_wechat_official
-        #      (credential entry + webhook-URL display) — there is no way
-        #      for a workspace owner to actually bind an agent to a WeChat/
-        #      WeCom app yet, only the service-layer function to do so.
-        # Flip both flags to True only once both are closed for real.
-        launch_status=LAUNCH_PARTIAL,
-        description="Bidirectional Official Account / WeCom bot channel (appid+secret or corpid+corpsecret+AgentId credentials). Backend protocol and inbound webhook route are implemented but not yet reachable end-to-end — see wechat_official_service.py.",
+        # doc for the exact source-file mapping); per-agent inbound webhook
+        # route at server_modules/routes_wechat_official.py.
+        # The two gaps that used to keep setup_available/runtime_usable
+        # False are both closed now:
+        #   1. routes_wechat_official.py's router is registered in
+        #      server.py (app.include_router(wechat_official_router,
+        #      prefix="/api")) — the webhook path is reachable by Tencent.
+        #   2. routes_fleet.py's fleet_assign_agent_wechat /
+        #      fleet_release_agent_wechat (POST/DELETE
+        #      /api/w/{workspace_id}/fleet/agent-channels/wechat) expose
+        #      wechat_official_service.assign_wechat_official /
+        #      release_agent_wechat — a workspace owner can bind an agent to
+        #      a WeChat/WeCom app from the Channels tab (FleetAgentDetail.tsx
+        #      CHANNEL_DOORS.wechat_official) the same way Telegram/Discord's
+        #      BYO-bot doors already work.
+        launch_status=LAUNCH_LIVE_WHEN_CONFIGURED,
+        description="Bidirectional Official Account / WeCom bot channel (appid+secret or corpid+corpsecret+AgentId credentials, brought by the workspace owner).",
         supports_inbound=True,
         supports_outbound=True,
         media_support=_media(text=True),
@@ -2042,8 +2042,8 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         connector_id="wechat_official",
         account_provider="wechat_official",
         vault_provider="wechat_official",
-        setup_available=False,
-        runtime_usable=False,
+        setup_available=True,
+        runtime_usable=True,
     ),
     _item(
         connection_id="instagram_business",
