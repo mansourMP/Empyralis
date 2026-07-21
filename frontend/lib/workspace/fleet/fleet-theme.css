@@ -4636,18 +4636,18 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 
 /* ── Dense agent list — column grid, flush on the sheet, no card ─────────── */
-/* One shared 6-column grid used by both the header row and every agent row,
-   so every column ("Agent · Brain · Channels · Last active · Cost · Status")
-   aligns down the page. The Agent col is 1fr with a 260px floor — that's what
-   absorbs the width and kills the space-between "hollow gulf" the old row
-   design had. Ultrawide guardrail: max-width 1400px on the whole list.
-   No border/radius/background here — the list sits flush on the content
-   sheet (Linear list style), not in a floating rounded card. Rows are
-   hairline-divided only. The properties panel is an overlay now (never a
+/* One shared 7-column grid used by both the header row and every agent row,
+   so every column ("Agent · Brain · Placement · Channels · Last active ·
+   Cost · Status") aligns down the page. The Agent col is 1fr with a 260px
+   floor — that's what absorbs the width and kills the space-between "hollow
+   gulf" the old row design had. Ultrawide guardrail: max-width 1400px on the
+   whole list. No border/radius/background here — the list sits flush on the
+   content sheet (Linear list style), not in a floating rounded card. Rows
+   are hairline-divided only. The properties panel is an overlay now (never a
    permanent flex sibling stealing width), so the sheet is always wide enough
-   for all 6 columns — no horizontal scroll on this list, ever. */
+   for all 7 columns — no horizontal scroll on this list, ever. */
 .fleet-agents-list {
-  --fleet-list-grid: minmax(260px, 1fr) 120px 120px 96px 84px 132px;
+  --fleet-list-grid: minmax(260px, 1fr) 120px 84px 120px 96px 84px 132px;
   --fleet-list-gap: 16px;
   --fleet-list-padding-x: 16px;
   max-width: 1400px;
@@ -4798,6 +4798,17 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Placement column: one compact chip carrying the short kind word (Cloud/
+   VPS/Device) — reuses .fleet-channel-chip's own pill styling rather than
+   inventing a second "small categorical tag" look. The real hardware name
+   lives in its title attribute (native hover tooltip), same pattern as
+   every other title= in this file. */
+.fleet-agent-cell-placement {
+  display: flex;
+  align-items: center;
+  min-width: 0;
 }
 
 /* Channels column: compact colored chip per connected channel, "None" muted
@@ -5873,6 +5884,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   }
   .fleet-agent-cell-agent,
   .fleet-agent-cell-brain,
+  .fleet-agent-cell-placement,
   .fleet-agent-cell-channels,
   .fleet-agent-cell-right,
   .fleet-agent-cell-status {

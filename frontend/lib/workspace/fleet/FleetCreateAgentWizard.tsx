@@ -34,11 +34,23 @@ const STEP_LABELS = ["Placement", "Brain", "Channels", "Connections"];
 // nothing in authority enforcement reads it. Who may do what is decided
 // per-message by sender identity (see the Tools tab / Properties "Customer
 // access" hint), the same way for every agent regardless of this pick.
-const PURPOSE_PRESETS: { value: string; label: string; body: string }[] = [
-  { value: "customer_facing", label: "Customer Support", body: "Talks to your customers directly — professional, accurate, careful with what it promises." },
-  { value: "internal_assistant", label: "Personal Assistant", body: "Helps you and your team — concise, assumes shared context." },
-  { value: "operator", label: "Operator", body: "Helps manage and coordinate your other agents." },
+//
+// "Operator" is intentionally not offered here — the owner is the
+// operator, and Sage/the platform's own operator role still exists
+// internally (fleet_tools.OPERATOR_ROLE), just never as a pick for a new
+// agent. The remaining two picks ARE an architectural distinction: each
+// carries a separate `audience` field (owner | external, see below) that a
+// later backend task uses to gate the owner's connectors/credentials/
+// memory — kept distinct from purpose_preset so that non-security,
+// instruction-seeding field never has to double as the security signal.
+const PURPOSE_PRESETS: { value: string; label: string; body: string; audience: "owner" | "external" }[] = [
+  { value: "customer_facing", label: "Customer Support", audience: "external", body: "Talks to your customers — kept separate from your private accounts." },
+  { value: "internal_assistant", label: "Personal Assistant", audience: "owner", body: "Works for you — trusted with your connected accounts and memory." },
 ];
+
+function audienceForPreset(preset: string): "owner" | "external" {
+  return PURPOSE_PRESETS.find((p) => p.value === preset)?.audience || "owner";
+}
 
 // ── Hardware nodes (VPS + paired Gateways) — same /api/gateway/registrations
 // endpoint the Hardware page reads, partitioned by hardware_kind. A local,
@@ -222,7 +234,12 @@ export function FleetCreateAgentWizard({
           method: "POST",
           credentials: "include",
           headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-          body: JSON.stringify({ capability_preset: "standard", project_id: initialProjectId || "", purpose_preset: purposePreset }),
+          body: JSON.stringify({
+            capability_preset: "standard",
+            project_id: initialProjectId || "",
+            purpose_preset: purposePreset,
+            audience: audienceForPreset(purposePreset),
+          }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
@@ -437,9 +454,10 @@ export function FleetCreateAgentWizard({
                 ))}
               </div>
               <p className="fleet-wizard-hint" style={{ marginTop: 8 }}>
-                Just a starting point for its instructions — edit them anytime from Overview. Who it's
-                allowed to do things for is decided per-message, the same way for every agent, not by
-                this pick.
+                A starting point for its instructions — edit them anytime from Overview. It also marks
+                this agent as yours or your customers' to talk to, so Customer Support agents stay off
+                your private accounts. What it's allowed to do during a conversation is still decided
+                per-message, the same way for every agent, not by this pick.
               </p>
 
               {/* Same three placements as the Hardware tab's own picker

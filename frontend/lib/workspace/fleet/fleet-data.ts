@@ -21,6 +21,11 @@ export type FleetAgent = {
   label: string;
   role: string;
   purpose_preset?: "customer_facing" | "internal_assistant" | "operator";
+  /** Owner-facing vs external-facing flag (server: fleet_tools.resolve_agent_audience).
+   * "owner" = trusted with the owner's connectors/credentials/memory (Personal Assistant).
+   * "external" = talks to strangers, must not get them (Customer Support). Credential/
+   * connector/memory isolation enforcement on this flag is a separate, later task. */
+  audience?: "owner" | "external";
   status: string;
   enabled: boolean;
   runtime_target: string;

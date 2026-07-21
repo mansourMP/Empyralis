@@ -29,7 +29,7 @@ _ALLOWED_CONFIGURE_KEYS = {
     "subagents_enabled", "hardware_access", "model_config", "display_name",
     "purpose_preset", "instructions", "context_policy", "tool_toggles",
     "preferred_gateway_id", "telegram_first_contact_reply", "mandate",
-    "capability_config",
+    "capability_config", "audience",
 }
 _MAX_MANDATE_AUDIENCE_TOOLS = 200
 _MAX_INSTRUCTIONS_CHARS = 8000
@@ -79,6 +79,21 @@ _PURPOSE_PRESET_INSTRUCTIONS = {
     ),
 }
 
+# credential/connector/memory "facing" flag — separate from purpose_preset
+# above (which only seeds default instructions; nothing in authority
+# enforcement reads it, see FleetCreateAgentWizard.tsx's own comment).
+# `audience` is the stable signal a later credential/connector/memory
+# resolver gates on: "owner" (trusted with the owner's connectors/
+# credentials/memory — Personal Assistant) or "external" (talks to
+# strangers, must not get them — Customer Support). That gating is a
+# separate, not-yet-built task; this only defines and persists the flag.
+_VALID_AUDIENCES = {"owner", "external"}
+_AUDIENCE_BY_PURPOSE_PRESET = {
+    "customer_facing": "external",
+    "internal_assistant": "owner",
+    "operator": "owner",
+}
+
 
 # ── Metadata helpers ────────────────────────────────────────────────────────
 
@@ -110,6 +125,23 @@ def resolve_purpose_preset(install: Optional[Dict[str, Any]]) -> str:
     if preset in _VALID_PURPOSE_PRESETS:
         return preset
     return OPERATOR_ROLE if resolve_agent_role(install) == OPERATOR_ROLE else "internal_assistant"
+
+
+def resolve_agent_audience(install: Optional[Dict[str, Any]]) -> str:
+    """Resolve the owner-facing vs external-facing flag for an agent install.
+
+    Reads install_metadata.audience directly when present and valid ("owner"
+    | "external"). Falls back to deriving it from purpose_preset (see
+    _AUDIENCE_BY_PURPOSE_PRESET) for installs created before this field
+    existed, and defaults to "owner" — today's implicit behavior, every
+    agent has full run of the owner's credentials/connectors/memory — when
+    neither is set. This is only the signal; the actual credential/
+    connector/memory gate that reads it is a separate, later task.
+    """
+    audience = str(_meta(install).get("audience") or "").strip().lower()
+    if audience in _VALID_AUDIENCES:
+        return audience
+    return _AUDIENCE_BY_PURPOSE_PRESET.get(resolve_purpose_preset(install), "owner")
 
 
 def resolve_subagents_enabled(install: Optional[Dict[str, Any]]) -> bool:
@@ -717,6 +749,7 @@ async def fleet_list_agents(
             "label": str(inst_dict.get("label") or "").strip(),
             "role": role,
             "purpose_preset": resolve_purpose_preset(inst_dict),
+            "audience": resolve_agent_audience(inst_dict),
             "project_id": str(inst_dict.get("project_id") or "").strip(),
             "status": str(inst_dict.get("status") or "active").strip(),
             "enabled": bool(inst_dict.get("enabled", True)),
@@ -1996,6 +2029,7 @@ async def fleet_create_agent(
     name: str = "",
     instructions: str = "",
     purpose_preset: str = "",
+    audience: str = "",
     capability_preset: str = "standard",
     project_id: str = "",
     enabled_tools: Optional[List[str]] = None,
@@ -2007,10 +2041,14 @@ async def fleet_create_agent(
     Only callable by operator-role agents.
     The new agent is seeded with role="specialist" and subagents_enabled=False.
     `purpose_preset` (customer_facing | internal_assistant | operator) shapes
-    the default instructions. `capability_preset` (knowledge | standard) seeds
-    hardware/tools/model/subagents/context DEFAULTS; 'operator' is reserved
-    (Sage-class) and not creatable via this flow. All fields remain overridable
-    afterward except a knowledge agent's policy-locked hardware access.
+    the default instructions. `audience` ("owner" | "external") is the
+    separate, stable facing flag a later credential/connector/memory
+    resolver gates on; when omitted it's derived from purpose_preset (see
+    _AUDIENCE_BY_PURPOSE_PRESET). `capability_preset` (knowledge | standard)
+    seeds hardware/tools/model/subagents/context DEFAULTS; 'operator' is
+    reserved (Sage-class) and not creatable via this flow. All fields remain
+    overridable afterward except a knowledge agent's policy-locked hardware
+    access.
     """
     from server_modules import agent_registry_repository as repo
     from server_modules import capability_presets as _caps
@@ -2062,6 +2100,11 @@ async def fleet_create_agent(
     clean_preset = str(purpose_preset or "").strip().lower()
     if clean_preset in _VALID_PURPOSE_PRESETS:
         meta["purpose_preset"] = clean_preset
+
+    clean_audience = str(audience or "").strip().lower()
+    if clean_audience not in _VALID_AUDIENCES:
+        clean_audience = _AUDIENCE_BY_PURPOSE_PRESET.get(clean_preset, "owner")
+    meta["audience"] = clean_audience
 
     clean_instructions = str(instructions or "").strip()
     if not clean_instructions and clean_preset in _PURPOSE_PRESET_INSTRUCTIONS:
@@ -2153,7 +2196,7 @@ async def fleet_create_agent(
         target_agent_id=agent_id,
         metadata={"agent_name": agent_label},
     )
-    return {"ok": True, "agent_id": agent_id, "role": SPECIALIST_ROLE, "name": agent_label, "project_id": _project_id}
+    return {"ok": True, "agent_id": agent_id, "role": SPECIALIST_ROLE, "audience": clean_audience, "name": agent_label, "project_id": _project_id}
 
 
 # ── Phase M: Sage operator bootstrap ─────────────────────────────────────────
