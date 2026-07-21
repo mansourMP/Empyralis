@@ -1208,6 +1208,83 @@ async def fleet_release_agent_slack(
         return {"ok": False, "error": str(exc)}
 
 
+# ── Per-agent WeChat Official Account / WeCom provisioning (BYO app credentials) ──
+# Closes the gap connection_catalog_service.py's "wechat_official" catalog
+# entry itself flags ("No UI/route exposes wechat_official_service.
+# assign_wechat_official ... there is no way for a workspace owner to
+# actually bind an agent to a WeChat/WeCom app yet"). Same BYO-per-agent
+# shape as Telegram/Discord above -- WeChat/WeCom credentials are a
+# workspace's own AppID+AppSecret (or CorpID+CorpSecret+AgentId) pair, not a
+# first-party pool the platform owns (see wechat_official_service.py's
+# module doc).
+
+class FleetWeChatAssignRequest(BaseModel):
+    account_kind: str = Field(..., description="'official_account' (WeChat Official Account) or 'wecom' (WeChat Work).")
+    app_id: str = Field(..., description="WeChat AppID (official_account) or WeCom CorpID (wecom).")
+    app_secret: str = Field(..., description="WeChat AppSecret (official_account) or WeCom CorpSecret (wecom).")
+    verify_token: str = Field(..., description="The Token value configured in the WeChat/WeCom admin console's Server Configuration -- used to verify inbound callback signatures.")
+    wecom_agent_id: Optional[str] = Field(
+        default=None,
+        description="WeCom app AgentId -- required when account_kind is 'wecom', unused for 'official_account'.",
+    )
+
+
+@router.post("/api/w/{workspace_id}/fleet/agent-channels/wechat")
+async def fleet_assign_agent_wechat(
+    request: Request,
+    workspace_id: str,
+    body: FleetWeChatAssignRequest,
+    agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Give this agent its own WeChat Official Account / WeCom bot from the
+    user's own AppID+AppSecret (or CorpID+CorpSecret+AgentId) credentials.
+    Validates the credentials for real (a live access_token fetch against
+    Tencent) before storing anything, same as assign_byo_bot's get_me()
+    check for Telegram. Returns the per-agent webhook URL
+    (wechat_official_service.agent_wechat_webhook_url) the workspace owner
+    must paste into the WeChat/WeCom admin console's Server Configuration."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import wechat_official_service as wechat
+
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    try:
+        result = await wechat.assign_wechat_official(
+            agent_install_id=agent_id, workspace_id=resolved_workspace_id, tenant_id=tenant_id,
+            account_kind=body.account_kind, app_id=body.app_id, app_secret=body.app_secret,
+            verify_token=body.verify_token, agent_id=body.wecom_agent_id,
+        )
+        return {"ok": True, "channel": result}
+    except wechat.WeChatAlreadyBoundError as exc:
+        return {"ok": False, "error": str(exc), "reason": "already_bound"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/agent-channels/wechat")
+async def fleet_release_agent_wechat(
+    request: Request,
+    workspace_id: str,
+    agent_id: str = Query(..., description="Agent install ID"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Release this agent's WeChat/WeCom binding: clear the binding and
+    delete its BYO credential. No remote "delete webhook" call exists on
+    Tencent's side -- the callback URL stays registered in the WeChat/WeCom
+    admin console until the user manually clears it there."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import wechat_official_service as wechat
+
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    try:
+        result = await wechat.release_agent_wechat(
+            agent_install_id=agent_id, workspace_id=resolved_workspace_id, tenant_id=tenant_id,
+        )
+        return {"ok": True, **result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/api/w/{workspace_id}/fleet/agent-tools")
 async def fleet_agent_tools(
     request: Request,
