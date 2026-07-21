@@ -221,6 +221,29 @@ _ASSISTANT_SHELL_PLAN_MARKERS = (
 _LOCAL_PRIVATE_TOOL_RESULT_PROVIDERS = {"ollama"}
 _STREAM_INTERNAL_MARKUP_LOOKBACK_CHARS = 96
 
+# Providers with a CONFIRMED "tools + tool_result messages coexist in the same
+# payload" incompatibility — the provider returns empty content when a request
+# carries both live tool definitions and prior tool-result messages. When a
+# provider is in this set, stream_provider_backed_direct_chat() strips tool
+# definitions after the first tool-executing round so synthesis can complete,
+# at the cost of that provider never getting a second round of tool calls in
+# the same turn.
+#
+# "deepseek" is confirmed live: see the strip site in
+# stream_provider_backed_direct_chat() and the corroborating live-test notes
+# in tool_honesty_guard.py's module docstring (deepseek-chat / deepseek-reasoner
+# denying a tool call that had just succeeded — same root cause, a different
+# symptom of the model not reliably seeing its own tool result alongside tool
+# definitions).
+#
+# Every provider NOT in this set is trusted to handle tools + tool_result
+# together and keeps tools available across iterations, enabling real
+# multi-round tool use (call toolA -> observe result -> call toolB). Add a
+# provider here ONLY on the same kind of live-verified evidence as DeepSeek —
+# this is a narrow workaround allowlist, not a default-safe posture, and an
+# unnecessary entry silently caps that provider back at one tool round.
+_TOOL_STRIP_REQUIRED_PROVIDERS = {"deepseek"}
+
 
 def _tool_result_context_is_local_private(provider: Any, credentials: Any) -> bool:
     provider_token = str(provider or "").strip().lower().replace("-", "_")
@@ -1180,11 +1203,18 @@ def stream_provider_backed_direct_chat(
         print(f"[DG_ITER] iteration={iteration} thinking_iteration={thinking_iteration} conv_msgs={len(conversation_messages)} executed_any_tools={executed_any_tools}", flush=True)
         yield services.thinking_step_payload(thinking_iteration, "active")
 
-        # Strip tools for synthesis so DeepSeek does not receive tool definitions
-        # alongside tool_result messages (known DeepSeek bug: empty content when
-        # tools + tool-result messages coexist in the payload).
-        if executed_any_tools:
-            print(f"[TRACE_STRIP] stripping tools from metadata and context iteration={iteration}", flush=True)
+        # Strip tools for synthesis ONLY for providers with a confirmed
+        # tools + tool_result incompatibility (see _TOOL_STRIP_REQUIRED_PROVIDERS
+        # above — DeepSeek returns empty content when tool definitions and
+        # tool-result messages coexist in the same payload). Every other
+        # provider keeps its tools live across iterations so it can do real
+        # multi-round tool use (call toolA -> observe -> call toolB) until it
+        # naturally stops calling tools, at which point the "result" handling
+        # below (no iteration_tool_calls) synthesizes the final reply and
+        # returns — max_iterations stays the hard ceiling either way.
+        _strip_tools_provider = str(actual_provider or context.get("provider") or "").strip().lower()
+        if executed_any_tools and _strip_tools_provider in _TOOL_STRIP_REQUIRED_PROVIDERS:
+            print(f"[TRACE_STRIP] stripping tools from metadata and context iteration={iteration} provider={_strip_tools_provider!r}", flush=True)
             if isinstance(metadata, dict) and metadata.get("tools"):
                 print(f"[DG_STRIP_TOOLS] stripping {len(metadata['tools'])} tools from metadata for synthesis iteration={iteration}", flush=True)
                 metadata = {**metadata, "tools": []}
