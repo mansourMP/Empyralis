@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from server_modules import credit_ledger_contract
+from server_modules import billing_credit_config, credit_ledger_contract
 
 
 def test_hosted_light_tier_maps_to_light_token_line_item() -> None:
@@ -141,6 +141,19 @@ def test_pro_line_item_preserves_internal_route_metadata() -> None:
 
 
 def test_unified_ledger_event_carries_measurement_dimensions() -> None:
+    # BYO (BYOK) usage is now metered: the workspace's own key/subscription
+    # pays the provider directly, so `platform_cost_usd` (what EMPYRALIS
+    # itself paid) legitimately stays 0 — but `credits_debited` (what the
+    # workspace's Empyralis credit balance is charged for running BYO usage
+    # through the platform) is now derived from the real, already-recorded
+    # `provider_reported_cost` via billing_credit_config's BYO billing rate,
+    # exactly as a real call site (e.g. deployed_agent_cost_cap_service.py)
+    # now computes it. See test_credits_for_byo_usage_cost_usd_defaults_to_1_to_1
+    # and test_credits_for_byo_usage_cost_usd_honors_configurable_rate below
+    # for direct coverage of that conversion.
+    provider_reported_cost = 0.0003
+    expected_credits_debited = billing_credit_config.credits_for_byo_usage_cost_usd(provider_reported_cost)
+
     event = credit_ledger_contract.build_unified_credit_ledger_event(
         surface="studio",
         source_surface="deployed_agent_channel",
@@ -156,9 +169,9 @@ def test_unified_ledger_event_carries_measurement_dimensions() -> None:
         agent_id="agent-1",
         provider_usage={"prompt_tokens": 10, "completion_tokens": 5},
         platform_cost_usd=0,
-        provider_reported_cost=0.0003,
+        provider_reported_cost=provider_reported_cost,
         provider_reported_currency="USD",
-        credits_debited=0,
+        credits_debited=expected_credits_debited,
         estimation_mode="provider_usage_exact",
         created_at="2026-05-21T00:00:00Z",
     )
@@ -167,9 +180,45 @@ def test_unified_ledger_event_carries_measurement_dimensions() -> None:
     assert event["source_surface"] == "deployed_agent_channel"
     assert event["payer"] == "BYOK"
     assert event["credit_type"] == "ai_tokens"
+    assert event["platform_cost_usd"] == 0.0
     assert event["provider_reported_cost"] == 0.0003
-    assert event["credits_debited"] == 0.0
+    # BYO usage is billed now: at the default 1:1 rate, $0.0003 of real
+    # provider cost converts to a non-zero credits_debited (0.0003 * 2000
+    # credits/$ = 0.6 credits at the default HOSTED_SAGE_AI_CREDITS_PER_USD).
+    assert event["credits_debited"] == expected_credits_debited
+    assert event["credits_debited"] > 0.0
     assert event["provider_usage"]["prompt_tokens"] == 10
+
+
+def test_credits_for_byo_usage_cost_usd_defaults_to_1_to_1() -> None:
+    # Default policy: no markup. billed_usd == provider_reported_cost when
+    # EMPYRALIS_BYO_BILLING_RATE is left at its default of 1.0.
+    assert billing_credit_config.EMPYRALIS_BYO_BILLING_RATE == 1.0
+    assert billing_credit_config.billed_cost_usd_for_byo_usage(0.001) == 0.001
+    assert billing_credit_config.credits_for_byo_usage_cost_usd(0.001) == round(
+        0.001 * billing_credit_config.HOSTED_SAGE_AI_CREDITS_PER_USD, 6
+    )
+
+
+def test_credits_for_byo_usage_cost_usd_zero_cost_bills_zero() -> None:
+    # No recorded provider cost (e.g. a local Ollama call, or a flat-fee CLI
+    # subscription turn with no per-call price) legitimately debits 0.
+    assert billing_credit_config.credits_for_byo_usage_cost_usd(0.0) == 0.0
+    assert billing_credit_config.credits_for_byo_usage_cost_usd(None) == 0.0
+
+
+def test_credits_for_byo_usage_cost_usd_honors_configurable_rate(monkeypatch) -> None:
+    # The rate is a single named config knob so a BYO markup can be tuned in
+    # later WITHOUT another code change — verify the knob is actually wired
+    # through the conversion, not just present.
+    monkeypatch.setattr(billing_credit_config, "EMPYRALIS_BYO_BILLING_RATE", 1.5)
+
+    billed = billing_credit_config.billed_cost_usd_for_byo_usage(0.002)
+    credits = billing_credit_config.credits_for_byo_usage_cost_usd(0.002)
+
+    assert billed == round(0.002 * 1.5, 8)
+    assert credits == round(billed * billing_credit_config.HOSTED_SAGE_AI_CREDITS_PER_USD, 6)
+    assert credits != billing_credit_config.credits_for_byo_usage_cost_usd(0.002 / 1.5)
 
 
 def test_unified_ledger_event_accepts_knowledge_retrieval_transparency_rows() -> None:

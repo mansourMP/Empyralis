@@ -739,6 +739,14 @@ PROVIDER_GOVERNANCE_CATALOG = {
         "capability_labels": ["Enterprise", "Tools", "Project-scoped"],
         "local_self_hosted_compatible": False,
     },
+    "xai": {
+        "privacy_posture": "Managed API with vendor-hosted processing.",
+        "jurisdiction": "United States",
+        "residency": "Provider-managed cloud regions.",
+        "enterprise_risk_note": "Review regional residency and vendor retention requirements before sending regulated data.",
+        "capability_labels": ["Reasoning", "Tools", "Hosted API"],
+        "local_self_hosted_compatible": False,
+    },
     "qwen": {
         "privacy_posture": "Managed third-party API.",
         "jurisdiction": "Alibaba Cloud regions",

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from server_modules import (
+    billing_credit_config,
     control_plane_repository,
     credit_ledger_contract,
     empyralis_model_tier_routing_service,
@@ -387,7 +388,9 @@ def _record_direct_chat_transparency_usage(
         platform_cost_usd=0,
         provider_reported_cost=(row or {}).get("provider_cost_usd") if isinstance(row, dict) else None,
         provider_reported_currency="USD" if isinstance(row, dict) and (row.get("provider_cost_usd") is not None) else None,
-        credits_debited=0,
+        credits_debited=billing_credit_config.credits_for_byo_usage_cost_usd(
+            (row or {}).get("provider_cost_usd") if isinstance(row, dict) else None
+        ),
         estimation_mode=(row or {}).get("estimation_mode") if isinstance(row, dict) else "provider_usage_missing",
         created_at=(row or {}).get("completed_at") if isinstance(row, dict) else timestamp,
         metadata={

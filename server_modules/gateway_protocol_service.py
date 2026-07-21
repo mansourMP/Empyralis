@@ -2408,6 +2408,14 @@ async def handle_gateway_websocket(
             metadata={
                 "auth_session_id": session_id,
                 "runtime_session_id": session_id,
+                # Self-update version-check (gateway_self_update_service.py)
+                # reads this off the registration's own metadata, not the
+                # short-lived session row, so "current version" survives a
+                # disconnect and is queryable without a live socket. Refreshed
+                # on every connect (never dropped like it used to be — this
+                # session-metadata copy at touch_gateway_session() above was
+                # the only place it landed before this line existed).
+                "gateway_version": connect_payload.get("gateway_version"),
             },
             # Refresh from what THIS connect declares — a Gateway build that
             # adds a capability (e.g. a new disconnect/reset action) becomes

@@ -198,6 +198,35 @@ async def record_usage_event(
 
 _PERIOD_TRUNC = {"day": "day", "week": "week", "month": "month"}
 
+# Display-only canonicalization of the free-form `mode` column into the same
+# four-source taxonomy the credit ledger uses (credit_ledger_contract.
+# LEDGER_PAYERS: platform_credits | BYOK | local | subscription_passthrough)
+# so the usage matrix's "source" column always reads as one of a stable,
+# known set — never a raw internal token like "cli_subscription" or
+# "byok_api" leaking into the transparency UI unexplained.
+_USAGE_MODE_TO_PAYER = {
+    "platform_credits": "platform_credits",
+    "empyralis_credits": "platform_credits",
+    "empyralis": "platform_credits",
+    "byok": "BYOK",
+    "byok_api": "BYOK",
+    "workspace_api_key": "BYOK",
+    "workspace_connection": "BYOK",
+    "local": "local",
+    "local_model": "local",
+    "local_companion": "local",
+    "cli_subscription": "subscription_passthrough",
+    "subscription": "subscription_passthrough",
+    "subscription_passthrough": "subscription_passthrough",
+    "codex_cli": "subscription_passthrough",
+    "claude_code_cli": "subscription_passthrough",
+}
+
+
+def _canonical_usage_payer(mode: Any) -> str:
+    token = str(mode or "").strip().lower()
+    return _USAGE_MODE_TO_PAYER.get(token, "unknown")
+
 
 async def summarize_usage(
     *,
@@ -226,7 +255,7 @@ async def summarize_usage(
     empty = {
         "ok": True, "scope": scope_norm, "scope_id": scope_id, "period": period_key,
         "totals": {"events": 0, "tokens_in": 0, "tokens_out": 0, "total_tokens": 0, "usd_cost": 0.0},
-        "buckets": [], "by_agent": [],
+        "buckets": [], "by_agent": [], "matrix": [],
     }
     try:
         pool = await _cpr.ensure_control_plane_schema()
@@ -264,6 +293,31 @@ async def summarize_usage(
                 """,
                 *args,
             )
+            # Full attribution matrix: every distinct (agent, provider, model,
+            # payer/source) combination actually billed in this window, with
+            # its real summed input/output tokens and the real dollar cost
+            # pricing_registry_service computed for those tokens at that
+            # model's real per-1M rate (see record_usage_event — usd_cost is
+            # never a flat/blended estimate). This is the row set the "full
+            # matrix" transparency UI (FleetAgentDetail Properties panel +
+            # workspace usage panel) renders; `by_agent`/`buckets` above only
+            # answer "how much" and "when", never "which model, whose bill".
+            matrix_rows = await conn.fetch(
+                f"""
+                SELECT agent_install_id, provider, model, mode,
+                       count(*) AS events,
+                       COALESCE(sum(tokens_in),0) AS tokens_in,
+                       COALESCE(sum(tokens_out),0) AS tokens_out,
+                       COALESCE(sum(total_tokens),0) AS total_tokens,
+                       COALESCE(sum(usd_cost),0) AS usd_cost,
+                       bool_or(pricing_known) AS pricing_known
+                FROM usage_events WHERE {where_sql}
+                GROUP BY agent_install_id, provider, model, mode
+                ORDER BY usd_cost DESC
+                LIMIT 200
+                """,
+                *args,
+            )
         return {
             "ok": True,
             "scope": scope_norm,
@@ -283,6 +337,22 @@ async def summarize_usage(
                 {"agent_install_id": r["agent_install_id"], "events": int(r["events"]),
                  "total_tokens": int(r["total_tokens"]), "usd_cost": round(float(r["usd_cost"]), 6)}
                 for r in by_agent
+            ],
+            "matrix": [
+                {
+                    "agent_install_id": r["agent_install_id"],
+                    "provider": r["provider"],
+                    "model": r["model"],
+                    "mode": r["mode"],
+                    "payer": _canonical_usage_payer(r["mode"]),
+                    "events": int(r["events"]),
+                    "tokens_in": int(r["tokens_in"]),
+                    "tokens_out": int(r["tokens_out"]),
+                    "total_tokens": int(r["total_tokens"]),
+                    "usd_cost": round(float(r["usd_cost"]), 6),
+                    "pricing_known": bool(r["pricing_known"]),
+                }
+                for r in matrix_rows
             ],
         }
     except Exception:

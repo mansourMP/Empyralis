@@ -936,20 +936,25 @@ class LocalBridgePersonalChannelsCertification(unittest.TestCase):
         self.assertEqual(item["provider"], "bluebubbles_local_bridge")
         self.assertEqual(item["setup_kind"], "mac_bridge")
 
-    def test_wechat_is_live_when_configured_with_local_bridge_runtime(self):
-        """WeChat is a first-class, owner-connectable gateway channel (like
-        Telegram/WhatsApp) because it has a concrete runtime contract: the
-        generic Agent Computer local-bridge client/protocol
-        (empyralis-gateway/src/channels/local-bridge-runtime.ts) that any
-        owner-run WeChat bridge process can speak. WeChat has no official
-        API, so — unlike iMessage's BlueBubbles adapter — Empyralis does not
-        ship a ready-made WeChat bridge process; the owner supplies one. It
-        stays live_when_configured, never unconditionally "live", because a
-        real bridge must be connected and certified per-instance."""
+    def test_wechat_personal_is_not_supported_no_bridge_exists(self):
+        """Unlike Signal (real, installable signal-cli daemon) or iMessage
+        (Empyralis-shipped BlueBubbles adapter), there is no third-party
+        "WeChat bridge process" an owner can plausibly supply — personal
+        WeChat automation has no supported API at all, full stop. This test
+        previously asserted the opposite (live_when_configured / True / True,
+        on the theory that WeChat was BYO-bridge like Signal) — that theory
+        doesn't hold up: docs/design/reliability-audit-2-channels.md found
+        zero pairing flow anywhere in the codebase and confirmed "Empyralis
+        ships no such bridge", and there is no real-world equivalent to
+        signal-cli for personal WeChat. Empyralis's WeChat investment goes
+        into the official Official Account / WeCom integration instead — see
+        empyralis-gateway/src/channels/wechat/ and the wechat_work catalog
+        entry — so this entry now honestly reports itself as not usable
+        rather than claiming a working bridge flow that doesn't exist."""
         item = _catalog_item("wechat_personal")
         self.assertEqual(item["launch_status"], "live_when_configured")
-        self.assertTrue(item["setup_available"])
-        self.assertTrue(item["runtime_usable"])
+        self.assertFalse(item["setup_available"])
+        self.assertFalse(item["runtime_usable"])
         self.assertEqual(item["lane"], connection_catalog_service.LANE_SAGE_PERSONAL_CHANNEL)
         self.assertEqual(item["provider"], "wechat_local_bridge")
         self.assertEqual(item["setup_kind"], "local_bridge")
@@ -1038,10 +1043,19 @@ class LocalBridgePersonalChannelsCertification(unittest.TestCase):
             self.assertTrue(wechat["configured"])
             self.assertEqual(wechat["health_status"], "unavailable")
             self.assertEqual(wechat["last_error"], "bridge refused connection")
-            # Shipped, not locked: an unreachable bridge still offers a
-            # "connect" CTA rather than presenting as fake-connected or as a
-            # feature that doesn't exist.
-            self.assertEqual(wechat["next_action"], "connect")
+            # Locked, not "connect": wechat_personal's setup_available/
+            # runtime_usable are now False (see
+            # test_wechat_personal_is_not_supported_no_bridge_exists and
+            # the wechat_personal _item() in connection_catalog_service.py)
+            # because there is no real bridge an owner can install, unlike
+            # Signal/iMessage. _next_action() only short-circuits straight
+            # to "manage" for an already-connected bridge (the branch
+            # test_wechat_status_uses_selected_gateway_bridge_health above
+            # covers); for a not-currently-connected report like this one it
+            # falls through to the runtime_usable gate, so offering a
+            # "connect" CTA here would be the same false promise this fix is
+            # closing — there is nothing to connect to.
+            self.assertEqual(wechat["next_action"], "locked")
 
     def test_no_channel_card_claims_supported_without_runtime(self):
         """Every catalog item with a usable launch status must have a real

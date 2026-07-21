@@ -9,6 +9,8 @@ import { GatewayLLMRuntime } from "../llm/runtime";
 import { GatewayCliSetupRuntime } from "../llm/cli-setup-runtime";
 import { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
 import { ExternalAgentProxyRuntime } from "../external-agent/proxy-runtime";
+import { GatewaySelfUpdateRuntime } from "../update/gateway-self-update-runtime";
+import { GatewayDoctorRuntime } from "../health/gateway-doctor";
 import {
   agentComputerSystemServiceModeEnabled,
   agentComputerUserSessionBridgeEnabled,
@@ -27,7 +29,7 @@ const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // execution — see src/shell/runtime.ts. Unlike the old supervisor, this has
 // no unsandboxed path: it only exists where Docker (or an explicitly
 // authorized full_access mode) is actually verified present.
-type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm" | "cli_setup";
+type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm" | "cli_setup" | "self_update" | "doctor";
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -54,6 +56,22 @@ export class GatewayCapabilityRouter {
     private readonly shellRuntime?: GatewayShellRuntime,
     private readonly llmRuntime?: GatewayLLMRuntime,
     private readonly cliSetupRuntime?: GatewayCliSetupRuntime,
+    // gateway.self_update is deliberately NOT gated behind a desktop
+    // permission the way shell_sandbox/llm/cli_setup are above — those gate
+    // on a *local capability being detected* (Docker present, Ollama
+    // reachable, operator opt-in). Self-update has no such local
+    // precondition: it should always be advertised so the platform can
+    // always offer the "Update" button, and safety instead lives entirely
+    // in the explicit member-role-gated trigger on the backend
+    // (server_modules/routes_gateway.py's self-update route) plus this
+    // capability's own no-op-safe / atomic-swap / rollback behavior.
+    private readonly selfUpdateRuntime?: GatewaySelfUpdateRuntime,
+    // gateway.doctor.run: same "always advertise, never desktop-permission-
+    // gated" reasoning as self-update just above — a detect/repair/re-
+    // validate pass over this computer's own health has no local-capability
+    // precondition either; it should always be runnable so the fleet UI can
+    // always offer the "Run doctor" action. See health/gateway-doctor.ts.
+    private readonly doctorRuntime?: GatewayDoctorRuntime,
   ) {}
 
   supportedCapabilities(): string[] {
@@ -75,6 +93,8 @@ export class GatewayCapabilityRouter {
       // cli.install/cli.login.* are gated on the "cli_setup" permission —
       // granted only once the box operator has explicitly opted in (Build F).
       ...filterCapabilitiesByDesktopPermission(this.cliSetupRuntime?.requestedCapabilities() ?? []),
+      ...(this.selfUpdateRuntime?.requestedCapabilities() ?? []),
+      ...(this.doctorRuntime?.requestedCapabilities() ?? []),
     ];
   }
 
@@ -174,13 +194,37 @@ export class GatewayCapabilityRouter {
         result,
       };
     }
+    if (this.selfUpdateRuntime?.supportsCapability(capabilityId)) {
+      this.trackExecutor(runId, "self_update");
+      const result = await this.selfUpdateRuntime.handleCapabilityInvoke(
+        frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
+      );
+      return {
+        request_id: frame.id,
+        capability_id: capabilityId,
+        run_id: runId,
+        result,
+      };
+    }
+    if (this.doctorRuntime?.supportsCapability(capabilityId)) {
+      this.trackExecutor(runId, "doctor");
+      const result = await this.doctorRuntime.handleCapabilityInvoke(
+        frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
+      );
+      return {
+        request_id: frame.id,
+        capability_id: capabilityId,
+        run_id: runId,
+        result,
+      };
+    }
     // ARCHIVED (Phase U1): supervisor executor removed.
     // Capabilities that don't match browser, external-agent-proxy, personal-channel,
     // or shell_sandbox are no longer supported. Desktop control (mouse/keyboard/
     // screen) is still OUT — only shell/filesystem came back, and only sandboxed.
     throw new Error(
       `No executor available for capability "${capabilityId}". ` +
-      `Supported executors: browser, external_agent_proxy, personal_channel, shell_sandbox, llm, cli_setup. ` +
+      `Supported executors: browser, external_agent_proxy, personal_channel, shell_sandbox, llm, cli_setup, self_update, doctor. ` +
       `Desktop control capabilities are not part of the Empyralis product.`,
     );
   }
@@ -247,6 +291,22 @@ export class GatewayCapabilityRouter {
       };
     }
 
+    if (executor === "self_update") {
+      // gateway.self_update is a single awaited call, deliberately never
+      // interruptible mid-flight: once the download/extract has started,
+      // cancelling partway would leave a half-staged release dir — the
+      // runtime's own atomicity (stage under a temp name, rename only once
+      // valid) is what protects against that, not tool.interrupt. Safe to
+      // just report "not applicable" rather than build a cancel path that
+      // would only ever be able to interrupt the download, not the parts
+      // that actually matter.
+      return {
+        interrupted: false,
+        error: `gateway.self_update interrupt not applicable for run_id "${runId}" — the update either completes or fails atomically on its own.`,
+        run_id: runId,
+      };
+    }
+
     if (executor === "llm") {
       // llm.generate is a single awaited request/response to the local Ollama
       // endpoint, bounded by its own timeout — there is no long-lived session
@@ -255,6 +315,18 @@ export class GatewayCapabilityRouter {
       return {
         interrupted: false,
         error: `llm interrupt not applicable for run_id "${runId}" (single bounded request).`,
+        run_id: runId,
+      };
+    }
+
+    if (executor === "doctor") {
+      // gateway.doctor.run is a single bounded pass over a fixed, small set
+      // of checks (each with its own fast probe/cache) — there is no
+      // long-lived session handle to cancel out-of-band, same reasoning as
+      // "llm" above.
+      return {
+        interrupted: false,
+        error: `gateway.doctor.run interrupt not applicable for run_id "${runId}" (a bounded set of checks that completes quickly).`,
         run_id: runId,
       };
     }

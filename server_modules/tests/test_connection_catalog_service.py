@@ -19,13 +19,25 @@ def test_catalog_promotes_supported_work_app_connectors() -> None:
         assert item["certification_required"] is True
 
 
-def test_catalog_keeps_email_channel_partial_while_smtp_app_is_live() -> None:
+def test_catalog_reclassifies_email_as_connector_not_channel_while_smtp_app_is_live() -> None:
+    """reliability-audit-2-channels.md's Email finding: "email" used to
+    carry lane=LANE_STUDIO_BUSINESS_CHANNEL with supports_inbound=True and
+    runtime_usable/setup_available force-overridden to True despite
+    launch_status=LAUNCH_PARTIAL and despite no inbound email listener
+    existing anywhere in the codebase — the catalog was advertising a live
+    messaging channel that doesn't exist. Per founder ruling, email is a
+    connector/credential (send/fetch tool), not a channel: lane is now
+    LANE_WORK_APP_CONNECTOR, supports_inbound is False, and
+    runtime_usable/setup_available fall through to the LAUNCH_PARTIAL
+    default (False) instead of being force-overridden."""
     payload = service.list_catalog_payload()
     by_id = {item["id"]: item for item in payload["items"]}
 
-    assert by_id["email"]["lane"] == service.LANE_STUDIO_BUSINESS_CHANNEL
+    assert by_id["email"]["lane"] == service.LANE_WORK_APP_CONNECTOR
     assert by_id["email"]["launch_status"] == service.LAUNCH_PARTIAL
+    assert by_id["email"]["supports_inbound"] is False
     assert by_id["email"]["runtime_usable"] is False
+    assert by_id["email"]["setup_available"] is False
     assert by_id["email"]["readiness_status"] == "planned"
     assert by_id["email"]["certification_required"] is True
     assert by_id["smtp"]["lane"] == service.LANE_WORK_APP_CONNECTOR
@@ -44,13 +56,25 @@ def test_catalog_exposes_channel_certification_truth() -> None:
     # catalog fix (a separate file this test doesn't touch): this catalog's
     # own signal_personal _item() has carried launch_status="live_when_configured"
     # + runtime_usable=True + setup_available=True (identical to
-    # imessage_personal/wechat_personal below) since before this fix, so
+    # imessage_personal below) since before this fix, so
     # _catalog_readiness already computed "implementation_ready" — this
-    # assertion just never caught up. Now asserted against all three
+    # assertion just never caught up. Now asserted against both real
     # local-bridge siblings together so they can't silently drift apart again.
     assert by_id["signal_personal"]["readiness_status"] == "implementation_ready"
     assert by_id["imessage_personal"]["readiness_status"] == "implementation_ready"
-    assert by_id["wechat_personal"]["readiness_status"] == "implementation_ready"
+    # wechat_personal is the opposite fix: it used to carry the same
+    # setup_available=True/runtime_usable=True as its local-bridge siblings
+    # above despite zero gateway implementation backing it (no transport, no
+    # pairing, no bridge — see docs/design/reliability-audit-2-channels.md and
+    # the wechat_personal _item() in connection_catalog_service.py for the
+    # full writeup). Personal WeChat automation has no supported API and is
+    # not being pursued, so those flags were flipped to False, which now
+    # correctly computes "planned" via _catalog_readiness's launchable-gate
+    # fallthrough (connection_readiness_service.py:108-112) instead of
+    # falsely claiming "implementation_ready".
+    assert by_id["wechat_personal"]["readiness_status"] == "planned"
+    assert by_id["wechat_personal"]["setup_available"] is False
+    assert by_id["wechat_personal"]["runtime_usable"] is False
     assert by_id["signal_personal"]["requires_local_bridge"] is True
     assert by_id["signal_personal"]["certification_required"] is True
     assert by_id["signal_personal"]["certification_requirements"]

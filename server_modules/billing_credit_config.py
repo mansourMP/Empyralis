@@ -155,6 +155,23 @@ MIN_CREDITS_CHARGED_PER_TURN = _env_positive_int(
     1,
 )
 
+# ── 5. BYO (BYOK / subscription_passthrough / local) usage metering ────
+# The platform's own dollar outlay for BYO-paid usage is genuinely $0 (the
+# workspace's own API key or subscription covers the provider bill), so
+# `platform_cost_usd` correctly stays 0 for these payers — that field means
+# "what Empyralis itself paid," and Empyralis paid nothing. But the
+# workspace still gets its BYO usage run through Empyralis's orchestration,
+# storage, observability, and cap enforcement, so its own Empyralis credit
+# balance IS now debited for it — at this configurable rate against the
+# real off-platform cost already captured in `provider_reported_cost`
+# (the ground-truth dollar cost of the call, recorded regardless of payer).
+# Default 1.0 = bill 1:1 at the recorded provider cost, no markup. Raise
+# above 1.0 later to add a BYO margin WITHOUT another code change.
+EMPYRALIS_BYO_BILLING_RATE = _env_non_negative_float(
+    "EMPYRALIS_BYO_BILLING_RATE",
+    1.0,
+)
+
 
 def _safe_float(value: Any) -> float:
     try:
@@ -195,3 +212,37 @@ def credits_for_turn_cost_usd(raw_cost_usd: Any) -> int:
     billed_usd = billed_cost_usd_for_turn(raw)
     exact_credits = billed_usd * HOSTED_SAGE_AI_CREDITS_PER_USD
     return max(MIN_CREDITS_CHARGED_PER_TURN, int(math.ceil(exact_credits)))
+
+
+def billed_cost_usd_for_byo_usage(provider_reported_cost_usd: Any) -> float:
+    """Real off-platform provider cost -> billed cost, BYO rate applied.
+
+    Mirrors ``billed_cost_usd_for_turn`` but uses ``EMPYRALIS_BYO_BILLING_RATE``
+    (default 1.0, i.e. cost pass-through) instead of the hosted-AI margin —
+    BYO usage is not run on Empyralis's own provider account, so the hosted
+    margin multiplier does not apply to it by default.
+    """
+    raw = max(0.0, _safe_float(provider_reported_cost_usd))
+    return round(raw * EMPYRALIS_BYO_BILLING_RATE, 8)
+
+
+def credits_for_byo_usage_cost_usd(provider_reported_cost_usd: Any) -> float:
+    """Real off-platform provider cost -> Empyralis credits to debit for
+    BYO-paid usage (BYOK / subscription_passthrough / local payers).
+
+    This is the BYO counterpart to ``credits_for_turn_cost_usd``. It differs
+    in two ways that matter for correctness, not just style:
+      - It does NOT floor at ``MIN_CREDITS_CHARGED_PER_TURN``: BYO usage with
+        no recorded provider cost (a local Ollama call, or a flat-fee CLI
+        subscription turn with no per-call price attached) legitimately
+        debits 0 credits — there is no real dollar cost to meter.
+      - It returns a float rather than a `ceil`'d whole credit, so small BYO
+        turns accumulate fractional credit debits instead of always rounding
+        up to at least 1 (which would over-charge relative to the
+        1:1-by-default policy).
+    """
+    raw = max(0.0, _safe_float(provider_reported_cost_usd))
+    if raw <= 0:
+        return 0.0
+    billed_usd = billed_cost_usd_for_byo_usage(raw)
+    return round(billed_usd * HOSTED_SAGE_AI_CREDITS_PER_USD, 6)

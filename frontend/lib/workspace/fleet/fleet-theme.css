@@ -1895,6 +1895,17 @@ a.fleet-breadcrumb:hover {
 .fleet-usage-legend--credits {
   --fleet-list-grid: minmax(160px, 1fr) 160px;
 }
+
+/* Five-column variant (Agent · model / Source / Tokens in / Tokens out /
+   Cost) for the Billing page's full attribution matrix — one row per real
+   (agent, provider, model, source) combination billed. Two name columns
+   (agent·model, source) both left-aligned via fleet-usage-legend-name, so
+   this reuses that class for the Source cell too instead of introducing a
+   second text-alignment variant. */
+.fleet-usage-legend--matrix {
+  --fleet-list-grid: minmax(220px, 1fr) 150px 90px 90px 100px;
+  max-width: 900px;
+}
 .fleet-usage-legend-row--muted {
   color: var(--text-muted);
 }

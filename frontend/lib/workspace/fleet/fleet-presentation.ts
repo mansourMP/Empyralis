@@ -25,6 +25,46 @@ export function formatNumber(value: number): string {
   return value.toLocaleString(LOCALE);
 }
 
+/** One row of the full usage/cost attribution matrix — GET /fleet/usage's
+ *  `matrix` field (server_modules/usage_events_repository.py:summarize_usage).
+ *  Every row is a real (agent, provider, model, source) combination that was
+ *  actually billed, with real summed input/output tokens and the real
+ *  dollar cost pricing_registry_service computed for those tokens at that
+ *  model's real per-1M rate — never a flat/blended estimate. `payer` is
+ *  already canonicalized to the same four-source taxonomy the credit ledger
+ *  uses (credit_ledger_contract.LEDGER_PAYERS); `pricing_known` is false
+ *  when the source has no per-token price to charge against (a flat CLI
+ *  subscription, a free local model) — that must read as "not priced", not
+ *  a fabricated $0.00. */
+export type UsageMatrixRow = {
+  agent_install_id: string | null;
+  provider: string | null;
+  model: string | null;
+  mode: string | null;
+  payer: string | null;
+  events?: number;
+  tokens_in: number;
+  tokens_out: number;
+  total_tokens?: number;
+  usd_cost: number;
+  pricing_known: boolean;
+};
+
+const USAGE_PAYER_LABEL: Record<string, string> = {
+  platform_credits: "Platform credits",
+  BYOK: "Your API key",
+  subscription_passthrough: "Your subscription",
+  local: "Self-hosted",
+  unknown: "Unknown",
+};
+
+/** Human label for a usage-matrix row's canonicalized `payer` — the "who
+ *  actually paid for this" column shown next to every model in the cost
+ *  transparency matrix (Billing page + agent Properties panel). */
+export function usagePayerLabel(payer: string | null | undefined): string {
+  return USAGE_PAYER_LABEL[payer || "unknown"] || (payer || "Unknown");
+}
+
 /** "working" is the agent-lifecycle tone (deriveStatus() below never
  *  produces anything else for a running task). "online" is kept only for
  *  the Hardware page's own device-reachability chip — a different domain

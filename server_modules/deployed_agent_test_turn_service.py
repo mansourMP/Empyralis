@@ -4,6 +4,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from server_modules import (
+    billing_credit_config,
     billing_service,
     control_plane_repository,
     credit_ledger_contract,
@@ -548,7 +549,13 @@ async def _persist_studio_test_turn_usage(
         platform_cost_usd=row.get("estimated_cost_usd") if usage_accounting_service.is_platform_paid_usage_value(payer) else 0,
         provider_reported_cost=row.get("provider_cost_usd") or row.get("estimated_cost_usd"),
         provider_reported_currency="USD" if row.get("estimated_cost_usd") is not None else None,
-        credits_debited=row.get("retail_credits_charged") if usage_accounting_service.is_platform_paid_usage_value(payer) else 0,
+        credits_debited=(
+            row.get("retail_credits_charged")
+            if usage_accounting_service.is_platform_paid_usage_value(payer)
+            else billing_credit_config.credits_for_byo_usage_cost_usd(
+                row.get("provider_cost_usd") or row.get("estimated_cost_usd")
+            )
+        ),
         estimation_mode=row.get("estimation_mode"),
         created_at=row.get("completed_at") or row.get("created_at"),
     )

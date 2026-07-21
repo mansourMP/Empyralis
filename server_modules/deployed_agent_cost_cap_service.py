@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from server_modules import (
     activity_ledger_service,
+    billing_credit_config,
     control_plane_repository,
     credit_ledger_contract,
     deployed_agent_config_schema,
@@ -492,7 +493,13 @@ async def settle_deployed_agent_monthly_cost_cap(
         platform_cost_usd=usage_row.get("estimated_cost_usd") if platform_paid_ai else 0,
         provider_reported_cost=usage_row.get("provider_cost_usd") or usage_row.get("estimated_cost_usd"),
         provider_reported_currency="USD",
-        credits_debited=usage_row.get("retail_credits_charged") if platform_paid_ai else 0,
+        credits_debited=(
+            usage_row.get("retail_credits_charged")
+            if platform_paid_ai
+            else billing_credit_config.credits_for_byo_usage_cost_usd(
+                usage_row.get("provider_cost_usd") or usage_row.get("estimated_cost_usd")
+            )
+        ),
         estimation_mode=_normalize_optional_text(usage_row.get("estimation_mode")),
         created_at=_normalize_optional_text(usage_row.get("completed_at") or now_iso),
     )

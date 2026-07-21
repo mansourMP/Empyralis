@@ -48,6 +48,16 @@ export type FleetGateway = {
   runtime_access_label?: string | null;
   llm_runtimes?: LlmRuntimeSummary | null;
   metadata?: { service_inventory?: ServiceInventoryItem[] } & Record<string, unknown>;
+  /** Gateway self-update (server_modules/gateway_self_update_service.py's
+   *  gateway_update_status(), folded into gateway_registration_public_
+   *  payload()). gateway_version is the build this box is actually running
+   *  right now (from its own gateway.connect handshake); the other three are
+   *  computed against the backend's EMPYRALIS_GATEWAY_LATEST_VERSION config —
+   *  see that module's docstring for why "latest" isn't auto-discovered yet. */
+  gateway_version?: string | null;
+  latest_gateway_version?: string | null;
+  gateway_update_available?: boolean;
+  latest_gateway_artifact_url?: string | null;
 };
 
 /** Whether this box has a local model runtime (Ollama) ready to serve turns. */

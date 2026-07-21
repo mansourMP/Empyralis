@@ -7,7 +7,12 @@ from urllib.parse import quote
 from fastapi import HTTPException
 from fastapi import Request
 
-from server_modules import auth, execution_mode_policy, gateway_state_repository, session_service
+from server_modules import (
+    auth,
+    execution_mode_policy,
+    gateway_state_repository,
+    session_service,
+)
 
 
 DEFAULT_GATEWAY_SESSION_TTL_SECONDS = 15 * 60
@@ -187,6 +192,12 @@ def _llm_runtime_summary(metadata: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
+    # Lazy import to break a module-load cycle: gateway_self_update_service pulls
+    # in gateway_execution_service -> gateway_protocol_service, and protocol reads
+    # a constant from THIS module at import time. Importing it here (call time)
+    # instead of at module top keeps the update-status merge without the cycle.
+    from server_modules import gateway_self_update_service
+
     metadata = dict(registration.get("metadata") or {})
     runtime_access_mode = execution_mode_policy.normalize_runtime_access_mode(
         metadata.get("runtime_access_mode")
@@ -223,6 +234,7 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
         "revoked_reason": registration.get("revoked_reason"),
         **_gateway_connection_payload(registration),
         **_hardware_presentation(metadata),
+        **gateway_self_update_service.gateway_update_status(registration),
     }
 
 

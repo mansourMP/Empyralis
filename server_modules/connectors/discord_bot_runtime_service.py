@@ -122,6 +122,7 @@ class DiscordBotRuntimeService:
         self.route_message = route_message
         self.resolve_tenant = resolve_tenant
         self._listeners: List[Any] = []
+        self._listener_by_connector: Dict[str, Any] = {}
         self._threads: List[threading.Thread] = []
         # Phase 3A: machine-local credential locks held for the lifetime of each
         # bot listener, so two gateway processes on one host can't consume the
@@ -262,6 +263,7 @@ class DiscordBotRuntimeService:
                 ),
             )
             self._listeners.append(listener)
+            self._listener_by_connector[connector_id] = listener
             if block:
                 listener.run_forever()
             else:
@@ -301,11 +303,42 @@ class DiscordBotRuntimeService:
                     "Discord slash commands NOT registered: client did not become ready within 30 s"
                 )
 
+        # Publish this instance as the process-wide "the Discord bot runtime
+        # that's actually running" singleton, so status readers (e.g.
+        # connection_catalog_service.status_items()) can reach the real
+        # listener objects instead of only ever seeing vault-credential
+        # presence. See get_running_instance(). server.py runs uvicorn with
+        # no `workers=` argument (single process), so an in-process registry
+        # is the complete picture today; a multi-worker deployment would need
+        # a shared store instead.
+        _set_running_instance(self)
         return {"ok": True, "started": started, "statuses": self.statuses()}
+
+    def live_status(self) -> Dict[str, Dict[str, Any]]:
+        """Per-connector live discord.py gateway state, keyed by connector_id.
+
+        Bridges DiscordGatewayListener.live_connection_state() — the actual
+        running Client's websocket state — into a dict the catalog/status
+        layer can read, so a real disconnect (socket dropped, forced logout,
+        discord.py giving up on reconnect) is visible instead of only ever
+        checking that a bot_token credential exists in the vault.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        for connector_id, listener in self._listener_by_connector.items():
+            get_state = getattr(listener, "live_connection_state", None)
+            if not callable(get_state):
+                out[connector_id] = {"ready": False, "closed": True, "connected": False}
+                continue
+            try:
+                out[connector_id] = get_state()
+            except Exception as exc:
+                out[connector_id] = {"ready": False, "closed": True, "connected": False, "error": str(exc)}
+        return out
 
     def stop(self) -> Dict[str, Any]:
         stopped = len(self._listeners)
         self._listeners.clear()
+        self._listener_by_connector.clear()
         self._threads.clear()
         # Phase 3A: release the per-bot-token credential locks we hold.
         if self._locked_credentials:
@@ -455,7 +488,36 @@ class DiscordBotRuntimeService:
         return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-__all__ = ["DiscordBotRuntimeService", "DiscordBotRuntimeStatus"]
+# ── Process-wide running-instance registry ──
+#
+# _launch_discord_bot_runtime() in server.py previously built a
+# DiscordBotRuntimeService(), started it, and let the local `svc` variable
+# fall out of scope — nothing kept a reference to the instance actually
+# holding the live DiscordGatewayListener objects. Any later status read
+# (e.g. routes_connectors.discord_bot_runtime_status(), or
+# connection_catalog_service.status_items()) had no way to reach it and
+# could only ever re-derive vault-credential presence via a fresh
+# DiscordBotRuntimeService().preflight(). This registry closes that gap.
+_RUNNING_INSTANCE_LOCK = threading.Lock()
+_RUNNING_INSTANCE: Optional["DiscordBotRuntimeService"] = None
+
+
+def _set_running_instance(instance: "DiscordBotRuntimeService") -> None:
+    global _RUNNING_INSTANCE
+    with _RUNNING_INSTANCE_LOCK:
+        _RUNNING_INSTANCE = instance
+
+
+def get_running_instance() -> Optional["DiscordBotRuntimeService"]:
+    """The DiscordBotRuntimeService instance actually holding live
+    DiscordGatewayListener sockets in this process, if start() has run.
+    Returns None before boot has reached _launch_discord_bot_runtime(), or
+    if this worker process never started a Discord bot listener."""
+    with _RUNNING_INSTANCE_LOCK:
+        return _RUNNING_INSTANCE
+
+
+__all__ = ["DiscordBotRuntimeService", "DiscordBotRuntimeStatus", "get_running_instance"]
 
 
 # ── Discord slash command registration ──
