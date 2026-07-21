@@ -25,7 +25,7 @@ const SHORTCUTS: { keys: string; label: string }[] = [
  * content area; moved into the rail alongside Ask AI because on mobile that
  * floating pair sat directly on top of the chat composer's Send button.
  */
-export function FleetHelpButton() {
+export function FleetHelpButton({ asControl = false }: { asControl?: boolean } = {}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -47,7 +47,7 @@ export function FleetHelpButton() {
   }, [open]);
 
   return (
-    <div ref={ref} className="fleet-help-float">
+    <div ref={ref} className={`fleet-help-float${asControl ? " fleet-help-float--control" : ""}`}>
       {open && (
         <div className="fleet-help-popover" role="menu" aria-label="Keyboard shortcuts">
           <div className="fleet-help-popover-title">Keyboard shortcuts</div>
@@ -61,7 +61,11 @@ export function FleetHelpButton() {
       )}
       <button
         type="button"
-        className={`fleet-rail-item fleet-help-float-btn${open ? " fleet-rail-item--active" : ""}`}
+        className={
+          asControl
+            ? `fleet-rail-control-btn${open ? " is-active" : ""}`
+            : `fleet-rail-item fleet-help-float-btn${open ? " fleet-rail-item--active" : ""}`
+        }
         onClick={() => setOpen((v) => !v)}
         title="Keyboard shortcuts"
         aria-label="Keyboard shortcuts"
@@ -71,7 +75,7 @@ export function FleetHelpButton() {
         <span className="fleet-rail-item-icon">
           <HelpCircle size={16} strokeWidth={1.75} />
         </span>
-        <span className="fleet-rail-item-label">Shortcuts</span>
+        {!asControl && <span className="fleet-rail-item-label">Shortcuts</span>}
       </button>
     </div>
   );

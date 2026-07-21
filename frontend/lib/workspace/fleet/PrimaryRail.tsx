@@ -15,7 +15,6 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Plus,
   Search,
   Settings,
   Sun,
@@ -253,10 +252,6 @@ export function PrimaryRail({
   // Same custom-event mechanism as fleet:open-sage (FleetShell.tsx) — no
   // prop-drilling a setter from FleetCommandPalette back down into the rail.
   const openCommandPalette = () => window.dispatchEvent(new Event("fleet:open-command-palette"));
-  // Reuses the existing ?new=1 hand-off agents/page.tsx already handles
-  // (command palette + onboarding use the same convention) rather than
-  // standing up a second, rail-local wizard instance.
-  const openNewAgent = () => router.push(`${hrefFor("agents")}?new=1`);
 
   // The backend echoes the raw workspace id back as `name` for a workspace
   // that was never given a real one — same guard Breadcrumbs used to apply.
@@ -268,9 +263,20 @@ export function PrimaryRail({
       className={`fleet-rail${effectiveCollapsed ? " fleet-rail--collapsed" : ""}${mobileOpen ? " fleet-rail--mobile-open" : ""}`}
     >
       <div className="fleet-rail-header">
-        <div className="fleet-rail-workspace">
-          <div className="fleet-rail-brand-mark">{(workspaceName || "E").charAt(0).toUpperCase()}</div>
-          {!effectiveCollapsed && <span className="fleet-rail-workspace-name">{workspaceName}</span>}
+        <div className="fleet-rail-header-top">
+          <div className="fleet-rail-workspace">
+            <div className="fleet-rail-brand-mark">{(workspaceName || "E").charAt(0).toUpperCase()}</div>
+            {!effectiveCollapsed && <span className="fleet-rail-workspace-name">{workspaceName}</span>}
+          </div>
+          <button
+            type="button"
+            className="fleet-rail-control-btn fleet-rail-control-btn--collapse fleet-rail-collapse-top"
+            onClick={onToggleCollapsed}
+            title={collapsed ? "Expand" : "Collapse"}
+            aria-label="Toggle rail"
+          >
+            {collapsed ? <PanelLeftOpen size={CONTROL_ICON} strokeWidth={1.75} /> : <PanelLeftClose size={CONTROL_ICON} strokeWidth={1.75} />}
+          </button>
         </div>
         {!effectiveCollapsed && (
           <div className="fleet-rail-quick-actions">
@@ -278,15 +284,6 @@ export function PrimaryRail({
               <Search size={13} strokeWidth={1.75} />
               <span>Search</span>
               <kbd>⌘K</kbd>
-            </button>
-            <button
-              type="button"
-              className="fleet-rail-new-btn"
-              onClick={openNewAgent}
-              aria-label="New agent"
-              title="New agent"
-            >
-              <Plus size={14} strokeWidth={2} />
             </button>
           </div>
         )}
@@ -394,7 +391,6 @@ export function PrimaryRail({
           render within it sidesteps that entirely. */}
       <div className="fleet-rail-utility">
         <SageLauncher workspaceId={workspaceId} open={sageOpen} onOpen={onOpenSage} onClose={onCloseSage} />
-        <FleetHelpButton />
       </div>
 
       <div className="fleet-rail-controls">
@@ -407,15 +403,7 @@ export function PrimaryRail({
         >
           {theme === "dark" ? <Sun size={CONTROL_ICON} strokeWidth={1.75} /> : <Moon size={CONTROL_ICON} strokeWidth={1.75} />}
         </button>
-        <button
-          type="button"
-          className="fleet-rail-control-btn fleet-rail-control-btn--collapse"
-          onClick={onToggleCollapsed}
-          title={collapsed ? "Expand" : "Collapse"}
-          aria-label="Toggle rail"
-        >
-          {collapsed ? <PanelLeftOpen size={CONTROL_ICON} strokeWidth={1.75} /> : <PanelLeftClose size={CONTROL_ICON} strokeWidth={1.75} />}
-        </button>
+        <FleetHelpButton asControl />
       </div>
 
       {!effectiveCollapsed && (

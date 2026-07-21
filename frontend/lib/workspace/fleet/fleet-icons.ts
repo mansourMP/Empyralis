@@ -27,6 +27,7 @@ const RAW_CHANNEL_ICONS: Record<string, string> = {
   signal_personal: "/brand-assets/channels/signal.svg",
   imessage_personal: "/brand-assets/channels/imessage.svg",
   wechat_personal: "/brand-assets/channels/wechat.svg",
+  wechat_official: "/brand-assets/channels/wechat.svg",
   apple_messages_business: "/brand-assets/channels/imessage.svg",
   email: "/brand-assets/generic/email.svg",
 };
@@ -140,6 +141,7 @@ export const CHANNEL_LABELS: Record<string, string> = {
   signal_personal: "Signal",
   imessage_personal: "iMessage",
   wechat_personal: "WeChat",
+  wechat_official: "WeChat / WeCom",
   apple_messages_business: "iMessage",
   email: "Email",
 };
