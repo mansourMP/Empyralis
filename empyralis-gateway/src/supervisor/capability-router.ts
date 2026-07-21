@@ -10,6 +10,7 @@ import { GatewayCliSetupRuntime } from "../llm/cli-setup-runtime";
 import { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
 import { ExternalAgentProxyRuntime } from "../external-agent/proxy-runtime";
 import { GatewaySelfUpdateRuntime } from "../update/gateway-self-update-runtime";
+import { GatewayRestartRuntime } from "../update/gateway-restart-runtime";
 import { GatewayDoctorRuntime } from "../health/gateway-doctor";
 import {
   agentComputerSystemServiceModeEnabled,
@@ -29,7 +30,7 @@ const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // execution — see src/shell/runtime.ts. Unlike the old supervisor, this has
 // no unsandboxed path: it only exists where Docker (or an explicitly
 // authorized full_access mode) is actually verified present.
-type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm" | "cli_setup" | "self_update" | "doctor";
+type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm" | "cli_setup" | "self_update" | "doctor" | "restart";
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -72,6 +73,10 @@ export class GatewayCapabilityRouter {
     // precondition either; it should always be runnable so the fleet UI can
     // always offer the "Run doctor" action. See health/gateway-doctor.ts.
     private readonly doctorRuntime?: GatewayDoctorRuntime,
+    // gateway.restart: same reasoning again — "restart this computer" has
+    // no local-capability precondition, so it's always advertised. See
+    // update/gateway-restart-runtime.ts.
+    private readonly restartRuntime?: GatewayRestartRuntime,
   ) {}
 
   supportedCapabilities(): string[] {
@@ -95,6 +100,7 @@ export class GatewayCapabilityRouter {
       ...filterCapabilitiesByDesktopPermission(this.cliSetupRuntime?.requestedCapabilities() ?? []),
       ...(this.selfUpdateRuntime?.requestedCapabilities() ?? []),
       ...(this.doctorRuntime?.requestedCapabilities() ?? []),
+      ...(this.restartRuntime?.requestedCapabilities() ?? []),
     ];
   }
 
@@ -218,13 +224,25 @@ export class GatewayCapabilityRouter {
         result,
       };
     }
+    if (this.restartRuntime?.supportsCapability(capabilityId)) {
+      this.trackExecutor(runId, "restart");
+      const result = await this.restartRuntime.handleCapabilityInvoke(
+        frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
+      );
+      return {
+        request_id: frame.id,
+        capability_id: capabilityId,
+        run_id: runId,
+        result,
+      };
+    }
     // ARCHIVED (Phase U1): supervisor executor removed.
     // Capabilities that don't match browser, external-agent-proxy, personal-channel,
     // or shell_sandbox are no longer supported. Desktop control (mouse/keyboard/
     // screen) is still OUT — only shell/filesystem came back, and only sandboxed.
     throw new Error(
       `No executor available for capability "${capabilityId}". ` +
-      `Supported executors: browser, external_agent_proxy, personal_channel, shell_sandbox, llm, cli_setup, self_update, doctor. ` +
+      `Supported executors: browser, external_agent_proxy, personal_channel, shell_sandbox, llm, cli_setup, self_update, doctor, restart. ` +
       `Desktop control capabilities are not part of the Empyralis product.`,
     );
   }
@@ -327,6 +345,20 @@ export class GatewayCapabilityRouter {
       return {
         interrupted: false,
         error: `gateway.doctor.run interrupt not applicable for run_id "${runId}" (a bounded set of checks that completes quickly).`,
+        run_id: runId,
+      };
+    }
+
+    if (executor === "restart") {
+      // gateway.restart is a single awaited call, deliberately never
+      // interruptible mid-flight — same reasoning as "self_update" above:
+      // once the handoff has been spawned (or the supervised shutdown
+      // scheduled), cancelling would only ever be able to stop the
+      // scheduled shutdown, not the handoff process that's already
+      // detached and running on its own.
+      return {
+        interrupted: false,
+        error: `gateway.restart interrupt not applicable for run_id "${runId}" — the restart either completes or fails on its own.`,
         run_id: runId,
       };
     }

@@ -1124,6 +1124,85 @@ function GatewaySelfUpdateControl({
   );
 }
 
+/** In-product "restart the gateway" — gap-hardware-gateway.md Part 1 item 2.
+ *  Before this, the only way to restart a stuck gateway process without
+ *  destroying the whole VPS was SSH + `systemctl restart` (see the manual
+ *  token-setup guide above, which still shows that raw command for the
+ *  narrower "apply a new env var" case). This dispatches through
+ *  routes_gateway.py's POST .../restart (member-gated) to the
+ *  gateway.restart capability (empyralis-gateway/src/update/gateway-
+ *  restart-runtime.ts) — same tool-invoke transport as self-update/doctor,
+ *  no artifact download, re-execs the build already on disk. Confirm-first:
+ *  restarting briefly disconnects the box and interrupts anything running
+ *  on it right now. */
+function GatewayRestartControl({ gatewayId, workspaceId }: { gatewayId: string; workspaceId: string }) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [justRestarted, setJustRestarted] = useState(false);
+  const clearJustRestartedRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (clearJustRestartedRef.current) window.clearTimeout(clearJustRestartedRef.current);
+    };
+  }, []);
+
+  const runRestart = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await postCliAction(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/restart`, {
+        workspace_id: workspaceId,
+      });
+      setConfirmOpen(false);
+      setJustRestarted(true);
+      if (clearJustRestartedRef.current) window.clearTimeout(clearJustRestartedRef.current);
+      clearJustRestartedRef.current = window.setTimeout(() => setJustRestarted(false), 30_000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Restart failed.");
+    } finally {
+      setBusy(false);
+    }
+  }, [gatewayId, workspaceId]);
+
+  return (
+    <div className="fleet-hw-row">
+      <span className="fleet-hw-label">Gateway process</span>
+      <span className="fleet-hw-value" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {justRestarted ? (
+          <span className="fleet-list-row-desc" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Restarting — should reconnect within
+            a few seconds.
+          </span>
+        ) : (
+          <button type="button" className="fleet-btn" onClick={() => setConfirmOpen(true)}>
+            Restart gateway
+          </button>
+        )}
+      </span>
+      {error && (
+        <span className="fleet-channel-expand-error" style={{ margin: 0, width: "100%" }}>
+          {error}
+        </span>
+      )}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Restart this computer's gateway?"
+        body="This briefly disconnects the gateway process and interrupts anything running on it right now. It should reconnect automatically within a few seconds — no data or pairing is lost."
+        confirmLabel="Restart gateway"
+        confirmTone="primary"
+        busy={busy}
+        onConfirm={() => void runRestart()}
+        onCancel={() => {
+          setConfirmOpen(false);
+          setError(null);
+        }}
+      />
+    </div>
+  );
+}
+
 /** One check result from the gateway's own in-process doctor pass — see
  *  empyralis-gateway/src/health/gateway-doctor.ts's GatewayDoctorCheckResult.
  *  `status` mirrors the exact same detect->repair->re-validate contract the
@@ -1462,6 +1541,7 @@ export default function GatewayDetailPage() {
           <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Gateway</div>
           <div className="fleet-hw-card">
             <GatewaySelfUpdateControl gateway={gateway} gatewayId={targetGatewayId} workspaceId={workspaceId} refresh={refresh} />
+            <GatewayRestartControl gatewayId={targetGatewayId} workspaceId={workspaceId} />
             <div className="fleet-hw-row">
               <span className="fleet-hw-label">Heartbeat</span>
               <span className="fleet-hw-value">
