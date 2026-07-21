@@ -331,7 +331,7 @@ export default function HardwarePage() {
     return (
       <div
         key={gatewayId}
-        className="fleet-list-row"
+        className="fleet-list-row fleet-list-row--hw"
         style={{ cursor: "pointer" }}
         role="link"
         tabIndex={0}
