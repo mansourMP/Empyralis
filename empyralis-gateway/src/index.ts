@@ -251,12 +251,19 @@ async function main(): Promise<void> {
   );
   // Docker readiness feeds the shell_sandbox permission (runtime/desktop-
   // permissions.ts), which gates what capabilityRouter.supportedCapabilities()
-  // below advertises. requestedCapabilities is computed exactly once at
-  // startup and never recomputed for this process's lifetime (heartbeats
-  // only re-evaluate ready/blocked within that fixed list) — so this probe
-  // MUST be awaited here, before that one-time computation, or a Docker
-  // daemon that's genuinely available could still be wrongly excluded for
-  // the whole life of this process.
+  // below advertises. This probe MUST still be awaited here, before that
+  // FIRST computation just below, so the very first advertised set (sent on
+  // gateway.connect/registerFromPairing) isn't wrongly missing a Docker
+  // daemon that was already available at boot.
+  //
+  // After startup, requestedCapabilities is no longer frozen for the rest of
+  // the process's life: GatewayWsClient.syncRequestedCapabilities() (cloud/
+  // ws-client.ts) re-calls capabilityRouter.supportedCapabilities() on every
+  // heartbeat tick and, if the advertised SET changed (not just ready/
+  // blocked status within it — e.g. Docker/Ollama/a CLI became available
+  // after this process already started), mutates runtimeMetadata below IN
+  // PLACE so the next heartbeat re-advertises it without a restart. See that
+  // method's doc comment for the full mechanism.
   await collectPassiveInventorySnapshot({});
   // BYO-brain Phase 2: on-box LLM runtime. Its llm.generate capability is only
   // advertised when the llm_runtime permission reads granted — i.e. when the
@@ -298,6 +305,7 @@ async function main(): Promise<void> {
     checkpoints,
     getRequestedCapabilities: () => getDoctorRequestedCapabilities(),
     personalChannelRuntimes,
+    stateDir: config.stateDir,
   });
   const capabilityRouter = new GatewayCapabilityRouter(
     browserRuntime,

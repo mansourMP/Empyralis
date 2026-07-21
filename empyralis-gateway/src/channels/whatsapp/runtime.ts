@@ -97,7 +97,15 @@ interface BaileysSocketLike {
     content: Record<string, unknown>,
     options?: { messageId?: string },
   ) => Promise<Record<string, unknown> | undefined>;
-  sendPresenceUpdate?: (type: WhatsAppPresenceAction, jid: string) => Promise<void> | void;
+  // Widened beyond WhatsAppPresenceAction ("composing"|"paused", the typing
+  // indicator's own vocabulary) to also accept "available" -- the value
+  // runHealthCheck's active probe sends (see its doc comment). Real Baileys
+  // sockets accept the same "available"/"unavailable"/"composing"/
+  // "recording"/"paused" set either way (see
+  // @whiskeysockets/baileys/lib/Socket/chats.js's sendPresenceUpdate); jid
+  // is optional for "available"/"unavailable" (Baileys ignores it for
+  // those, sending a global presence stanza instead of a per-chat one).
+  sendPresenceUpdate?: (type: WhatsAppPresenceAction | "available" | "unavailable", jid?: string) => Promise<void> | void;
   requestPairingCode?: (phoneNumber: string, customPairingCode?: string) => Promise<string>;
   user?: { id?: string; name?: string };
   /** Tells WhatsApp's servers to unlink this device (a real logout, not
@@ -122,7 +130,7 @@ interface BaileysSocketLike {
 interface WhatsAppBaileysAdapter {
   loadAuthState: (folder: string) => Promise<BaileysAuthBundle>;
   createSocket: (config: Record<string, unknown>) => BaileysSocketLike;
-  disconnectReason: { loggedOut?: number; restartRequired?: number };
+  disconnectReason: { loggedOut?: number; restartRequired?: number; connectionReplaced?: number };
   browserDescriptor: (appName: string) => unknown;
   /** Fetches the currently-live WhatsApp Web client version directly from
    *  web.whatsapp.com (not Baileys' own bundled default, which goes stale
@@ -180,6 +188,22 @@ export function redactWhatsAppCredentials(state: Record<string, unknown>): Recor
 // ORION_RUN_TIMEOUT_SECONDS defaults to 300s, and
 // ORION_WHATSAPP_AUTOPILOT_RUN_TIMEOUT_SECONDS defaults to 180s.
 const WHATSAPP_INBOUND_TYPING_MAX_TTL_MS = 5 * 60_000;
+
+/**
+ * How often a LIVE socket is actively re-probed (a real sendPresenceUpdate
+ * round trip over the WebSocket) to catch a silently-dead connection --
+ * mirrors TelegramPersonalRuntime's identically-purposed
+ * TELEGRAM_HEALTH_CHECK_INTERVAL_MS (same 3-minute cadence) and closes the
+ * same class of gap: connection.update's "close" event is Baileys' OWN
+ * best-effort signal, but a half-dead network path (no close frame ever
+ * received by the client) can leave `this.socket` pointing at a WebSocket
+ * that's already unusable without Baileys ever telling us. Without an
+ * active probe, the persisted session status stays "connected" -- and every
+ * UI reading it keeps showing a false green checkmark -- until the next
+ * real inbound/outbound traffic finally surfaces the failure, which for an
+ * otherwise-idle DM channel could be a long time.
+ */
+const WHATSAPP_HEALTH_CHECK_INTERVAL_MS = 3 * 60 * 1000;
 
 // Inbound/outbound media size ceiling -- generous enough for WhatsApp's own
 // client-side media limits (images/voice/most documents) while bounding
@@ -253,6 +277,11 @@ export class WhatsAppPersonalRuntime {
   private authPersistence: WhatsAppAuthPersistence | null = null;
   private started = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  /** Drives runHealthCheck's active re-probe of a live socket -- see
+   *  WHATSAPP_HEALTH_CHECK_INTERVAL_MS's doc comment. Mirrors
+   *  TelegramPersonalRuntime's identically-purposed healthCheckTimer field
+   *  exactly (armed on a fresh "open", cleared on close/stop/disconnect). */
+  private healthCheckTimer: NodeJS.Timeout | null = null;
   private pairingCodeRequested = false;
   private connectPromise: Promise<void> | null = null;
   private reconnectAttempts = 0;
@@ -370,6 +399,7 @@ export class WhatsAppPersonalRuntime {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.stopHealthCheck();
     this.reconnectAttempts = 0;
     this.pairingCodeRequested = false;
     if (this.socket) {
@@ -467,7 +497,14 @@ export class WhatsAppPersonalRuntime {
         ? ["whatsapp_personal_auth_write_in_flight"]
         : snapshot.status === "connected"
           ? []
-          : ["whatsapp_personal_not_connected"],
+          // "conflict" gets its own issue tag (in addition to the distinct
+          // status value above) -- another device holding the connection
+          // slot is a materially different problem from an ordinary drop,
+          // and a consumer that only scans `issues` (rather than switching
+          // on `status`) should still be able to tell them apart.
+          : snapshot.status === "conflict"
+            ? ["whatsapp_personal_connection_conflict"]
+            : ["whatsapp_personal_not_connected"],
     };
   }
 
@@ -493,6 +530,7 @@ export class WhatsAppPersonalRuntime {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.stopHealthCheck();
     if (this.socket && typeof this.socket.sendMessage === "function") {
       // No-op close path; Baileys exposes end/logout on some surfaces, but phase 4 keeps this minimal.
     }
@@ -1069,44 +1107,152 @@ export class WhatsAppPersonalRuntime {
         lastDisconnectCode: undefined,
       });
       await this.flushState();
+      // Start actively re-probing this now-live socket -- see
+      // WHATSAPP_HEALTH_CHECK_INTERVAL_MS's doc for why connection.update's
+      // own "close" event isn't sufficient on its own. Mirrors
+      // TelegramPersonalRuntime.connectClient's identical call on its own
+      // successful connect.
+      this.scheduleHealthCheck();
       return;
     }
     if (connection === "close") {
-      const adapter = await this.getAdapter();
-      const reconnectState = resolveWhatsAppReconnectState(
-        update.lastDisconnect,
-        adapter.disconnectReason,
-      );
-      this.socket = null;
-      this.authBundle = null;
-      this.pairingCodeRequested = false;
-      if (!reconnectState.shouldReconnect) {
-        // Genuine logout only -- shouldReconnect is false exclusively for
-        // Baileys' loggedOut/401 code (see resolveWhatsAppReconnectState in
-        // ./reconnect.ts), matching what OpenClaw treats as "must relink"
-        // (extensions/whatsapp/src/connection-controller.ts). Every other
-        // disconnect code (badSession, restartRequired, connectionClosed,
-        // etc) reconnects with the existing creds intact -- this branch was
-        // already scoped correctly; what was missing was safety on the
-        // delete itself, which clearAuthStateDir() now provides. Drain any
-        // in-flight write first so the delete isn't racing a rename.
-        await waitForAuthWriteIdle(this.sessionStore.authStateDir());
-        this.authPersistence = null;
-        await this.sessionStore.clearAuthStateDir();
+      await this.handleSocketClose(update.lastDisconnect);
+    }
+  }
+
+  /**
+   * Classifies a disconnect (via resolveWhatsAppReconnectState) and persists
+   * the resulting state -- the single place that tears down a dead socket,
+   * whether Baileys itself reported it via connection.update's "close" event
+   * (the ordinary path) or runHealthCheck's active probe found one
+   * connection.update never fired for (see that method's doc comment).
+   * Mirrors TelegramPersonalRuntime.handleConnectionFailure's identical
+   * dual-caller shape.
+   *
+   * `lastDisconnect` is passed straight through to
+   * resolveWhatsAppReconnectState -- either Baileys' own real
+   * `update.lastDisconnect` object (close-event path) or a synthetic
+   * `{ error: { message } }` runHealthCheck builds from its probe's thrown
+   * error (statusCode absent, so it falls through resolveWhatsAppReconnectState's
+   * generic reconnectable-with-status:"disconnected" branch -- correct,
+   * since an active-probe failure carries no Baileys disconnect code to
+   * classify against).
+   */
+  private async handleSocketClose(lastDisconnect: unknown): Promise<void> {
+    this.stopHealthCheck();
+    const adapter = await this.getAdapter();
+    const reconnectState = resolveWhatsAppReconnectState(lastDisconnect, adapter.disconnectReason);
+    this.socket = null;
+    this.authBundle = null;
+    this.pairingCodeRequested = false;
+    if (!reconnectState.shouldReconnect) {
+      // Genuine logout only -- shouldReconnect is false exclusively for
+      // Baileys' loggedOut/401 code (see resolveWhatsAppReconnectState in
+      // ./reconnect.ts), matching what OpenClaw treats as "must relink"
+      // (extensions/whatsapp/src/connection-controller.ts). Every other
+      // disconnect code (badSession, restartRequired, connectionClosed,
+      // connectionReplaced/conflict, etc) reconnects with the existing
+      // creds intact -- this branch was already scoped correctly; what was
+      // missing was safety on the delete itself, which clearAuthStateDir()
+      // now provides. Drain any in-flight write first so the delete isn't
+      // racing a rename.
+      await waitForAuthWriteIdle(this.sessionStore.authStateDir());
+      this.authPersistence = null;
+      await this.sessionStore.clearAuthStateDir();
+    }
+    await this.sessionStore.save({
+      status: reconnectState.status,
+      retryable: reconnectState.shouldReconnect,
+      qrCode: undefined,
+      pairingCode: undefined,
+      pairingCodeGeneratedAt: undefined,
+      lastDisconnectReason: reconnectState.reason,
+      lastDisconnectCode: reconnectState.statusCode,
+    });
+    await this.flushState();
+    if (reconnectState.shouldReconnect && this.started) {
+      // A "conflict" (another device holding the connection slot right now
+      // -- see resolveWhatsAppReconnectState's connectionReplaced/440
+      // branch) backs off to the policy's ceiling delay instead of the
+      // normal fast-start ramp, so a persistent conflict doesn't turn into
+      // a tight retry loop racing the other device — see
+      // scheduleReconnect's forceMaxDelay doc.
+      this.scheduleReconnect({ forceMaxDelay: reconnectState.status === "conflict" });
+    }
+  }
+
+  /** Schedules the next active health-probe (see
+   *  WHATSAPP_HEALTH_CHECK_INTERVAL_MS's doc). Idempotent -- always clears
+   *  any existing timer first, so it's safe to call from runHealthCheck's
+   *  own re-schedule as well as right after a fresh "open". Mirrors
+   *  TelegramPersonalRuntime.scheduleHealthCheck exactly, including the
+   *  unref() so this background probe never keeps the process alive on its
+   *  own. */
+  private scheduleHealthCheck(): void {
+    this.stopHealthCheck();
+    this.healthCheckTimer = setTimeout(() => {
+      this.healthCheckTimer = null;
+      void this.runHealthCheck();
+    }, WHATSAPP_HEALTH_CHECK_INTERVAL_MS);
+    this.healthCheckTimer.unref?.();
+  }
+
+  private stopHealthCheck(): void {
+    if (this.healthCheckTimer) {
+      clearTimeout(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+  }
+
+  /**
+   * Actively probes the live socket with a real `sendPresenceUpdate`
+   * ("available") round trip over the WebSocket and re-schedules itself on
+   * success. See WHATSAPP_HEALTH_CHECK_INTERVAL_MS's doc for why this is
+   * needed alongside connection.update's own "close" event: Baileys'
+   * sendRawMessage throws the instant its underlying WebSocket is no longer
+   * open (see @whiskeysockets/baileys/lib/Socket/socket.js), so this catches
+   * a socket that's gone dead WITHOUT Baileys ever having fired its own
+   * close event for it (e.g. a half-dead network path where no close frame
+   * was ever received) -- exactly the gap TelegramPersonalRuntime's
+   * checkAuthorized probe closes for GramJS's own silent-death case.
+   *
+   * A single failure is enough to hand off to handleSocketClose -- no
+   * debounce/retry-count needed here, mirroring
+   * TelegramPersonalRuntime.runHealthCheck's identical reasoning: that
+   * method already schedules its own reconnect for anything reconnectable,
+   * so a one-off blip still self-heals via the normal reconnect path.
+   */
+  private async runHealthCheck(): Promise<void> {
+    const socket = this.socket;
+    if (!socket || typeof socket.sendPresenceUpdate !== "function") {
+      // No live socket, or an adapter/mock build too old to support the
+      // probe -- nothing to check right now; try again next interval rather
+      // than spinning the loop down entirely (a reconnect that lands later
+      // would otherwise never get probed).
+      this.scheduleHealthCheck();
+      return;
+    }
+    try {
+      await socket.sendPresenceUpdate("available", String(socket.user?.id ?? "").trim() || undefined);
+      // A reconnect could have already replaced this.socket while the probe
+      // above was in flight -- the new socket's own connection.update
+      // handling already governs scheduling in that case, so don't
+      // re-arm on top of it.
+      if (this.socket === socket) {
+        this.scheduleHealthCheck();
       }
-      await this.sessionStore.save({
-        status: reconnectState.shouldReconnect ? "disconnected" : "logged_out",
-        retryable: reconnectState.shouldReconnect,
-        qrCode: undefined,
-        pairingCode: undefined,
-        pairingCodeGeneratedAt: undefined,
-        lastDisconnectReason: reconnectState.reason,
-        lastDisconnectCode: reconnectState.statusCode,
+    } catch (error) {
+      if (this.socket !== socket) {
+        // A reconnect already replaced this socket while the probe was in
+        // flight -- the NEW socket's own state already governs; don't let a
+        // stale probe's failure clobber it (mirrors connection.update's own
+        // `if (this.socket !== socket) return;` staleness guard elsewhere in
+        // this file).
+        return;
+      }
+      await this.handleSocketClose({
+        error: { message: error instanceof Error ? error.message : String(error ?? "whatsapp_health_check_failed") },
       });
-      await this.flushState();
-      if (reconnectState.shouldReconnect && this.started) {
-        this.scheduleReconnect();
-      }
     }
   }
 
@@ -1453,7 +1599,7 @@ export class WhatsAppPersonalRuntime {
     return existing.typing;
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(options: { forceMaxDelay?: boolean } = {}): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
     }
@@ -1467,7 +1613,18 @@ export class WhatsAppPersonalRuntime {
         .catch(() => undefined);
       return;
     }
-    const delayMs = computeWhatsAppReconnectDelay(this.reconnectAttempts);
+    // A WhatsApp "stream conflict" (DisconnectReason.connectionReplaced/440
+    // -- another device linked to this same account is active right now,
+    // see resolveWhatsAppReconnectState) means an immediate retry at the
+    // ramp's normal fast-start delay would just race the other device for
+    // the same connection slot over and over. Jump straight to the policy's
+    // own ceiling delay instead -- still bounded by the same maxAttempts
+    // exhaustion check above, so a conflict that never clears still
+    // eventually surfaces as "reconnect_exhausted" rather than retrying
+    // forever.
+    const delayMs = options.forceMaxDelay
+      ? DEFAULT_WHATSAPP_RECONNECT_POLICY.maxDelayMs
+      : computeWhatsAppReconnectDelay(this.reconnectAttempts);
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

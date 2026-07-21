@@ -1,6 +1,11 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 
+import {
+  DEFAULT_RECONNECT_POLICY,
+  computeReconnectDelay,
+} from "../channels/foundation/reconnect-utils";
+
 const SIGNAL_CHANNEL_KEY = "signal_personal";
 const SIGNAL_PROVIDER = "signal_local_bridge";
 
@@ -379,6 +384,7 @@ async function connectSignalCliEvents(
   enqueue: (event: BridgeEvent) => void,
   controller: AbortController,
   mapOptions: MapSignalCliReceiveOptions,
+  onOpen?: () => void,
 ): Promise<void> {
   const response = await fetch(`${signalCliBaseUrl}/api/v1/events`, {
     method: "GET",
@@ -388,6 +394,12 @@ async function connectSignalCliEvents(
   if (!response.ok || !response.body) {
     throw new Error(`signal-cli events returned HTTP ${response.status}`);
   }
+  // The stream is genuinely open now -- lets the reconnect loop below reset
+  // its attempt counter and mark the connection healthy, mirroring
+  // TelegramPersonalRuntime.connectClient's `this.reconnectAttempts = 0` /
+  // WhatsAppPersonalRuntime's `connection === "open"` handling on their own
+  // successful (re)connects.
+  onOpen?.();
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -412,6 +424,87 @@ async function connectSignalCliEvents(
   }
 }
 
+/** Live state of the SSE connection this bridge itself holds open against
+ *  signal-cli's own `/api/v1/events` stream -- separate from (and a level
+ *  below) the daemon-reachability probe `/api/v1/check` already reports on
+ *  `/health`. Before this, a dropped/failed SSE stream was invisible: the
+ *  connect promise's rejection was swallowed (`.catch(() => undefined)`)
+ *  and nothing ever tried to reconnect it -- `/health` kept reporting
+ *  "connected" as long as signal-cli's own `/check` kept succeeding, since
+ *  `/check` only proves the daemon itself is up, not that THIS bridge still
+ *  has a live subscription to it. Surfaced on `/health` below as
+ *  `sse_connected`/`reconnect_attempts`/`sse_last_error` so a poller (or an
+ *  operator) can actually see a stuck reconnect loop instead of it being
+ *  silently invisible forever. */
+interface SignalSseState {
+  connected: boolean;
+  reconnectAttempts: number;
+  lastError?: string;
+}
+
+/** Keeps signal-cli's `/api/v1/events` SSE stream alive for the life of the
+ *  bridge process, using the SAME bounded exponential-backoff policy
+ *  Telegram's/WhatsApp's own gateway runtimes use for their socket
+ *  reconnects (see `foundation/reconnect-utils.ts`'s
+ *  `DEFAULT_RECONNECT_POLICY`/`computeReconnectDelay`) -- this bridge had no
+ *  reconnect concept at all before (a dropped stream's rejection was simply
+ *  swallowed). A successful (re)connect resets the attempt counter via
+ *  connectSignalCliEvents' onOpen callback. Every drop -- whether the fetch
+ *  itself failed or the stream just ended/closed -- is logged (never
+ *  silently swallowed) and reflected in `state` before the next attempt is
+ *  scheduled. Gives up (leaves `state.connected` false permanently, logging
+ *  once more) only after `DEFAULT_RECONNECT_POLICY.maxAttempts` is
+ *  exhausted, mirroring TelegramPersonalRuntime.scheduleReconnect's /
+ *  WhatsAppPersonalRuntime.scheduleReconnect's own "reconnect_exhausted"
+ *  terminal state. */
+async function runSignalCliEventLoop(
+  signalCliBaseUrl: string,
+  enqueue: (event: BridgeEvent) => void,
+  controller: AbortController,
+  mapOptions: MapSignalCliReceiveOptions,
+  state: SignalSseState,
+): Promise<void> {
+  while (!controller.signal.aborted) {
+    try {
+      await connectSignalCliEvents(signalCliBaseUrl, enqueue, controller, mapOptions, () => {
+        state.connected = true;
+        state.reconnectAttempts = 0;
+        state.lastError = undefined;
+      });
+      if (controller.signal.aborted) {
+        // A deliberate shutdown (bridge.close()), not a drop -- nothing to
+        // reconnect, nothing to log as an error.
+        return;
+      }
+      // The stream ended (signal-cli closed the response / the connection
+      // was reset) without us having aborted it ourselves -- a genuine
+      // drop, handled identically to a thrown connect error below.
+      throw new Error("signal_cli_events_stream_closed");
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      state.connected = false;
+      state.lastError = error instanceof Error ? error.message : String(error);
+      // Previously swallowed via `.catch(() => undefined)` -- surfaced
+      // deliberately now, both here and via /health's sse_last_error, per
+      // the reliability audit's "SSE drop failures are silently swallowed"
+      // finding.
+      console.error(`[signal-cli-bridge] SSE event stream dropped: ${state.lastError}`);
+      if (state.reconnectAttempts >= DEFAULT_RECONNECT_POLICY.maxAttempts) {
+        console.error(
+          `[signal-cli-bridge] SSE reconnect attempts exhausted (${DEFAULT_RECONNECT_POLICY.maxAttempts}); ` +
+          "giving up until this bridge process is restarted.",
+        );
+        return;
+      }
+      const delayMs = computeReconnectDelay(state.reconnectAttempts, DEFAULT_RECONNECT_POLICY);
+      state.reconnectAttempts += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 export async function startSignalCliBridge(options: SignalCliBridgeOptions): Promise<SignalCliBridge> {
   const host = options.host || "127.0.0.1";
   const signalCliBaseUrl = normalizeSignalCliBaseUrl(options.signalCliRpcUrl);
@@ -423,6 +516,9 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
   // inbound dataMessage.quote.id — see MapSignalCliReceiveOptions and the
   // /messages POST handler below (where this is populated).
   const sentMessageIds = new Set<string>();
+  // See SignalSseState's doc comment -- tracks the live health of the SSE
+  // subscription itself, independent of signal-cli daemon reachability.
+  const sseState: SignalSseState = { connected: false, reconnectAttempts: 0 };
 
   const enqueue = (event: BridgeEvent): void => {
     const items = eventsByChannel.get(SIGNAL_CHANNEL_KEY) || [];
@@ -431,7 +527,7 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
   };
 
   if (options.connectEvents !== false) {
-    void connectSignalCliEvents(signalCliBaseUrl, enqueue, eventController, { account, sentMessageIds }).catch(() => undefined);
+    void runSignalCliEventLoop(signalCliBaseUrl, enqueue, eventController, { account, sentMessageIds }, sseState);
   }
 
   const server = http.createServer(async (request, response) => {
@@ -442,6 +538,12 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
       }
       const url = new URL(request.url || "/", `http://${host}`);
       if (request.method === "GET" && url.pathname === "/health") {
+        // sseIssue reflects THIS bridge's own event subscription, which
+        // /api/v1/check below can never see -- the daemon can happily answer
+        // /check while this bridge's SSE stream is mid-backoff after a drop
+        // (see SignalSseState's doc comment). Folded into every response
+        // branch below so a dropped stream is never silently invisible.
+        const sseIssue = sseState.connected ? [] : ["signal_cli_sse_disconnected"];
         try {
           const check = await fetch(`${signalCliBaseUrl}/api/v1/check`);
           sendJson(response, check.ok ? 200 : 503, {
@@ -450,7 +552,10 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
             provider: SIGNAL_PROVIDER,
             channel_keys: [SIGNAL_CHANNEL_KEY],
             account_configured: Boolean(account),
-            issues: check.ok ? [] : ["signal_cli_check_failed"],
+            sse_connected: sseState.connected,
+            reconnect_attempts: sseState.reconnectAttempts,
+            ...(sseState.lastError ? { sse_last_error: sseState.lastError } : {}),
+            issues: [...(check.ok ? [] : ["signal_cli_check_failed"]), ...sseIssue],
           });
         } catch (error) {
           sendJson(response, 503, {
@@ -460,7 +565,10 @@ export async function startSignalCliBridge(options: SignalCliBridgeOptions): Pro
             channel_keys: [SIGNAL_CHANNEL_KEY],
             account_configured: Boolean(account),
             last_error: error instanceof Error ? error.message : String(error),
-            issues: ["signal_cli_unavailable"],
+            sse_connected: sseState.connected,
+            reconnect_attempts: sseState.reconnectAttempts,
+            ...(sseState.lastError ? { sse_last_error: sseState.lastError } : {}),
+            issues: ["signal_cli_unavailable", ...sseIssue],
           });
         }
         return;

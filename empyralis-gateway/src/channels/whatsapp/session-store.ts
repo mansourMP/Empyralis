@@ -18,7 +18,13 @@ export interface WhatsAppSessionSnapshot {
     | "connecting"
     | "connected"
     | "disconnected"
-    | "logged_out";
+    | "logged_out"
+    // Another device/session is actively using this same linked WhatsApp
+    // account right now (Baileys' DisconnectReason.connectionReplaced,
+    // HTTP-analog 440) -- distinct from an ordinary "disconnected" so the
+    // owner can tell "another device is connected" apart from a plain
+    // transient drop. See reconnect.ts's WhatsAppDisconnectState.status doc.
+    | "conflict";
   qrCode?: string;
   loginHint?: string;
   pairingCode?: string;

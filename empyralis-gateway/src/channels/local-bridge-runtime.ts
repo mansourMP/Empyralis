@@ -313,13 +313,23 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
       });
       const connected = response.connected !== false;
       this.lastError = undefined;
+      // Bridges that maintain their own live connection out to a
+      // third-party service (signal-cli's SSE stream today -- see
+      // signal-cli-bridge.ts's SignalSseState/runSignalCliEventLoop) report
+      // their own in-progress reconnect count via reconnect_attempts on
+      // /health. Previously hardcoded to 0 regardless -- a bridge stuck
+      // mid-backoff after a drop looked identical to one that had never
+      // dropped at all. Bridges that don't track this (BlueBubbles/WeChat
+      // today) simply omit the field, so this falls back to 0 exactly as
+      // before.
+      const reconnectAttempts = Number(response.reconnect_attempts);
       return {
         channelKey: this.config.channelKey,
         provider: this.config.provider,
         status: typeof response.status === "string" ? response.status : connected ? "connected" : "disconnected",
         running: this.started,
         connected,
-        reconnectAttempts: 0,
+        reconnectAttempts: Number.isFinite(reconnectAttempts) && reconnectAttempts >= 0 ? reconnectAttempts : 0,
         lastEventAt: this.lastEventAt,
         issues: Array.isArray(response.issues) ? response.issues.map(String) : [],
       };
