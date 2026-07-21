@@ -1020,24 +1020,20 @@ export function WorkTab({
         spendToday={spendToday}
       />
 
-      {threads.length === 0 ? (
-        <div className="fleet-work-empty">
-          <div className="fleet-empty-icon">
-            <InboxIcon size={20} strokeWidth={1.75} />
-          </div>
-          <div className="fleet-work-empty-title">No conversations yet</div>
-          <div className="fleet-work-empty-desc">
-            When {agentName} handles end-customer conversations, they’ll show up here — every channel, in
-            one place.
-          </div>
-        </div>
-      ) : (
-        <div className="fleet-work-split">
+      <div className="fleet-work-split">
           <div className="fleet-work-list">
             <div className="fleet-work-stream-header">
               Work stream
-              <span className="fleet-work-stream-header-count">· {threads.length}</span>
+              {threads.length > 0 ? <span className="fleet-work-stream-header-count">· {threads.length}</span> : null}
             </div>
+            {threads.length === 0 ? (
+              <div className="fleet-work-list-empty">
+                <div className="fleet-work-list-empty-title">No conversations yet</div>
+                <div className="fleet-work-list-empty-desc">
+                  When {agentName} handles conversations, they’ll appear here — every channel, in one place.
+                </div>
+              </div>
+            ) : null}
             {unreadCount > 0 && (
               <div className="fleet-work-list-live" aria-live="polite">
                 <span className="fleet-work-conv-dot" /> {unreadCount} new
@@ -1123,11 +1119,14 @@ export function WorkTab({
                 <ActivityTimeline rows={activityRows} />
               </>
             ) : (
-              <div className="fleet-page-state-body" style={{ padding: 20 }}>Select a conversation to see its activity.</div>
+              <div className="fleet-page-state-body" style={{ padding: 20 }}>
+                {threads.length === 0
+                  ? "When this agent handles a conversation, you’ll watch what it does here — step by step."
+                  : "Select a conversation to see its activity."}
+              </div>
             )}
           </div>
         </div>
-      )}
     </div>
   );
 }

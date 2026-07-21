@@ -248,24 +248,6 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
     );
   }
 
-  if (conversations.length === 0) {
-    return (
-      <main className="fleet-content">
-        <div className="fleet-work-empty">
-          <div className="fleet-empty-icon">
-            <MessagesSquare size={20} strokeWidth={1.75} />
-          </div>
-          <div className="fleet-work-empty-title">No conversations yet</div>
-          <div className="fleet-work-empty-desc">
-            When any of your agents talk with someone — over Telegram, WhatsApp, or any other connected channel,
-            including your own messages to Ask AI — every conversation shows up here, tagged by agent, channel, and
-            who it’s with.
-          </div>
-        </div>
-      </main>
-    );
-  }
-
   const selectedTurns = detail?.turns || [];
   const selectedWho = detail ? prettySender(detail.sender) : selected ? prettySender(selected.sender) : "";
   const selectedAgentLabel = selected ? agentLabel(selected.agent_id) : "";
@@ -275,6 +257,14 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
     <main className="fleet-content fleet-content--split">
       <div className="fleet-work-split">
         <div className="fleet-work-list">
+          {conversations.length === 0 ? (
+            <div className="fleet-work-list-empty">
+              <div className="fleet-work-list-empty-title">No conversations yet</div>
+              <div className="fleet-work-list-empty-desc">
+                When your agents talk with someone over any connected channel, every conversation shows up here — tagged by agent, channel, and who it’s with.
+              </div>
+            </div>
+          ) : null}
           {unreadCount > 0 && (
             <div className="fleet-work-list-live" aria-live="polite">
               <span className="fleet-work-conv-dot" /> {unreadCount} new
