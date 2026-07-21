@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
@@ -176,6 +177,80 @@ def _quoted(value: Any) -> str:
     return urlparse.quote(str(value or "").strip(), safe="")
 
 
+# ── Outbound 429 rate-limit retry ───────────────────────────────────────────
+# Discord surfaces a rate limit on the SAME HTTP 429 response two ways: the
+# standard `Retry-After` header (whole seconds) and a JSON body field
+# `retry_after` (fractional seconds, e.g. 0.482) plus a `global` flag telling
+# us whether the whole bot — not just this route — is throttled; see
+# https://discord.com/developers/docs/topics/rate-limits. `retry_after`
+# already reflects whichever scope applies (global vs per-route), so no
+# separate branch is needed for the two cases — waiting the reported amount
+# and retrying in place is correct either way.
+#
+# Previously `_discord_api_call` raised immediately on ANY non-2xx, 429
+# included, so a single burst of outbound sends (an agent replying across
+# several channels close together, for example) could hard-fail sends that
+# would have gone through a fraction of a second later. Bounded so a
+# pathological Retry-After from Discord can never turn into an effectively
+# unbounded wait — never a tight loop, always a capped sleep + a capped
+# attempt/total-wait budget.
+_DISCORD_RATE_LIMIT_MAX_ATTEMPTS = 4  # 1 initial try + up to 3 retries
+_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS = 10.0  # cap on any single wait
+_DISCORD_RATE_LIMIT_MAX_TOTAL_SLEEP_SECONDS = 20.0  # cumulative wait budget per call
+
+
+def _discord_retry_after_seconds(response: Dict[str, Any]) -> float:
+    """Best-effort seconds to wait before retrying a Discord HTTP 429.
+
+    Prefers the JSON body's ``retry_after`` (Discord's documented sub-second
+    precision value) and falls back to the coarser ``Retry-After`` header via
+    the shared downstream-resilience helper, then a conservative 1s default.
+    """
+    body = response.get("json") if isinstance(response.get("json"), dict) else {}
+    raw = body.get("retry_after")
+    if raw is not None:
+        try:
+            return max(float(raw), 0.0)
+        except (TypeError, ValueError):
+            pass
+    from server_modules.downstream_resilience_service import retry_after_seconds_from_headers
+
+    header_seconds = retry_after_seconds_from_headers(response.get("headers"))
+    if header_seconds is not None:
+        return float(header_seconds)
+    return 1.0
+
+
+def _call_discord_http_with_rate_limit_retry(
+    perform: Callable[[], Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Run one outbound Discord HTTP attempt, retrying in place on HTTP 429.
+
+    ``perform`` executes exactly one HTTP round-trip and returns the raw
+    response dict (``status``/``json``/``text``/``headers``, never raises on
+    HTTP error status — see ``_http_json_request``/``_multipart_request``).
+    On a 429, sleeps for Discord's reported ``retry_after`` (capped) and
+    retries, up to ``_DISCORD_RATE_LIMIT_MAX_ATTEMPTS`` attempts and
+    ``_DISCORD_RATE_LIMIT_MAX_TOTAL_SLEEP_SECONDS`` of cumulative sleep.
+    Whatever response comes back last (429 or not) is returned as-is; the
+    caller's existing status handling decides success/failure.
+    """
+    response: Dict[str, Any] = {}
+    total_slept = 0.0
+    for attempt in range(_DISCORD_RATE_LIMIT_MAX_ATTEMPTS):
+        response = perform()
+        if int(response.get("status") or 0) != 429:
+            return response
+        if attempt >= _DISCORD_RATE_LIMIT_MAX_ATTEMPTS - 1:
+            return response
+        wait_seconds = min(_discord_retry_after_seconds(response), _DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS)
+        if total_slept + wait_seconds > _DISCORD_RATE_LIMIT_MAX_TOTAL_SLEEP_SECONDS:
+            return response
+        time.sleep(wait_seconds)
+        total_slept += wait_seconds
+    return response
+
+
 def _discord_api_call(
     path: str,
     *,
@@ -186,14 +261,16 @@ def _discord_api_call(
     http_json_request: Optional[DiscordHttpRequest] = None,
 ) -> Dict[str, Any]:
     request_fn = http_json_request or _http_json_request
-    response = request_fn(
-        f"{DISCORD_API_BASE}{path}",
-        method=method,
-        headers={
-            "Authorization": f"Bot {token}",
-            "Content-Type": "application/json",
-        },
-        payload=payload,
+    response = _call_discord_http_with_rate_limit_retry(
+        lambda: request_fn(
+            f"{DISCORD_API_BASE}{path}",
+            method=method,
+            headers={
+                "Authorization": f"Bot {token}",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+        )
     )
     allowed = set(expected_statuses or {200})
     status = int(response.get("status") or 0)
@@ -336,11 +413,13 @@ def send_message(
             http_json_request=http_json_request,
         )
 
-    response = _multipart_request(
-        f"{DISCORD_API_BASE}/channels/{_quoted(normalized_channel)}/messages",
-        headers={"Authorization": f"Bot {token}"},
-        payload_json=payload,
-        files=normalized_files,
+    response = _call_discord_http_with_rate_limit_retry(
+        lambda: _multipart_request(
+            f"{DISCORD_API_BASE}/channels/{_quoted(normalized_channel)}/messages",
+            headers={"Authorization": f"Bot {token}"},
+            payload_json=payload,
+            files=normalized_files,
+        )
     )
     status = int(response.get("status") or 0)
     if status in {200, 201}:
