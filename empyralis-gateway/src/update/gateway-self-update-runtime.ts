@@ -18,6 +18,7 @@ import {
   spawnGatewayRestartHandoff,
   type GatewaySupervisorMode,
 } from "./gateway-restart-handoff";
+import { writePendingGatewayRestartMarker } from "./gateway-restart-pending";
 
 /**
  * Platform-triggered gateway self-update. The one `gateway.self_update`
@@ -50,6 +51,21 @@ import {
  *      confirmed spawned, the symlink swap is rolled back and the invoke
  *      fails with the process still fully running the OLD build in memory —
  *      never a silent half-updated state.
+ *
+ * HEALTH GATING (gap-hardware-gateway.md Part 1 item 1): this invoke's
+ * result can only ever report `health_check: "pending"` — the new build
+ * doesn't exist as a running process yet at the point this function returns
+ * (its response has to reach the backend over THIS process's cloud WS
+ * before this process exits, and the exit is what lets the new build even
+ * start). The real answer — did the new process actually come back up and
+ * reconnect, via the SAME in-gateway doctor gateway.doctor.run uses
+ * (health/gateway-doctor.ts runHealthCheck()), not just "a PID existed for
+ * 8 seconds" (gateway-restart-handoff.ts's HANDOFF_SCRIPT grace check) — is
+ * computed by the NEW process right after it reconnects and reported back
+ * via a fresh `gateway.state.update` call (index.ts's afterConnected
+ * wiring, keyed off the marker written just below by
+ * writePendingGatewayRestartMarker). See gateway-restart-pending.ts's
+ * module doc comment for the full reasoning.
  *
  * BOOTSTRAP NOTE for an existing 0.1.0 gateway (see final report for the
  * full explanation): this only takes effect once something actually
@@ -178,6 +194,13 @@ export class GatewaySelfUpdateRuntime {
       // Restart=always (or the launchd equivalent, once one is configured)
       // relaunches through the same launcher, which re-resolves `current` —
       // already swapped above. Nothing else to do; just let shutdown happen.
+      await writePendingGatewayRestartMarker(this.options.stateDir, {
+        trigger: "self_update",
+        previousVersion: this.currentVersion,
+        targetVersion,
+        restartMode: "supervised",
+        triggeredAt: new Date().toISOString(),
+      });
       this.scheduleShutdown();
       return {
         updated: true,
@@ -187,6 +210,10 @@ export class GatewaySelfUpdateRuntime {
         restart_mode: "supervised",
         supervisor: supervisorMode,
         checksum_verified: checksumVerified,
+        // See this class's doc comment ("HEALTH GATING") for why this can
+        // only ever be "pending" here — the real pass/fail lands later via
+        // gateway.state.update once the new process reconnects.
+        health_check: "pending",
       };
     }
 
@@ -223,6 +250,13 @@ export class GatewaySelfUpdateRuntime {
       );
     }
 
+    await writePendingGatewayRestartMarker(this.options.stateDir, {
+      trigger: "self_update",
+      previousVersion: this.currentVersion,
+      targetVersion,
+      restartMode: "handoff",
+      triggeredAt: new Date().toISOString(),
+    });
     this.scheduleShutdown();
     return {
       updated: true,
@@ -233,6 +267,12 @@ export class GatewaySelfUpdateRuntime {
       handoff_pid: handoff.pid,
       handoff_log_path: handoff.logPath,
       checksum_verified: checksumVerified,
+      // See this class's doc comment ("HEALTH GATING") for why this can
+      // only ever be "pending" here — the handoff script's own grace check
+      // (gateway-restart-handoff.ts) proves the new PID stayed alive 8s,
+      // not that it reconnected; the real pass/fail is reported later via
+      // gateway.state.update once the new process actually does.
+      health_check: "pending",
     };
   }
 

@@ -30,7 +30,9 @@ import { GatewayShellRuntime } from "./shell/runtime";
 import { GatewayLLMRuntime } from "./llm/runtime";
 import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
-import { GatewayDoctorRuntime } from "./health/gateway-doctor";
+import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
+import { readAndClearPendingGatewayRestartMarker } from "./update/gateway-restart-pending";
+import { GatewayDoctorRuntime, type GatewayDoctorRunResult } from "./health/gateway-doctor";
 import { collectPassiveInventorySnapshot } from "./health/service-inventory";
 import { setCliSetupLocallyEnabled } from "./runtime/desktop-permissions";
 
@@ -226,6 +228,14 @@ function buildLocalBridgeChannelRuntime(
 
 async function main(): Promise<void> {
   const config = loadGatewayConfig();
+  // Single-use hand-off from whichever process (gateway.self_update or
+  // gateway.restart) triggered THIS boot, if any — see update/gateway-
+  // restart-pending.ts's module doc comment for why the post-restart health
+  // check has to happen here, in the new process, rather than in the old
+  // one's capability-invoke response. Read (and deleted) unconditionally,
+  // before anything else touches stateDir, so a normal boot with no pending
+  // marker costs nothing extra below.
+  const pendingRestart = await readAndClearPendingGatewayRestartMarker(config.stateDir);
   const releaseLock = await acquireGatewayProcessLock(config.stateDir);
   const db = new GatewayStateDb(config.stateDir);
   const journal = new GatewayJournal(db);
@@ -293,6 +303,15 @@ async function main(): Promise<void> {
     stateDir: config.stateDir,
     requestShutdown: () => triggerShutdown("gateway.self_update"),
   });
+  // gateway.restart (gap-hardware-gateway.md Part 1 item 2): same
+  // triggerShutdown indirection as self-update just above — both funnel
+  // into the one real SIGINT/SIGTERM shutdown path, never a second exit
+  // code path.
+  const restartRuntime = new GatewayRestartRuntime({
+    currentVersion: GATEWAY_VERSION,
+    stateDir: config.stateDir,
+    requestShutdown: () => triggerShutdown("gateway.restart"),
+  });
   // Same indirection as triggerShutdown just above: the doctor's capability-
   // readiness check needs the fixed capability list capabilityRouter.
   // supportedCapabilities() will produce, but doctorRuntime has to exist
@@ -316,6 +335,7 @@ async function main(): Promise<void> {
     cliSetupRuntime,
     selfUpdateRuntime,
     doctorRuntime,
+    restartRuntime,
   );
   getDoctorRequestedCapabilities = () => capabilityRouter.supportedCapabilities();
   const identity = await resolveDeviceIdentity(db, {
@@ -379,6 +399,45 @@ async function main(): Promise<void> {
   installSignalHandler("SIGINT");
   installSignalHandler("SIGTERM");
 
+  // Post-restart health gate (gap-hardware-gateway.md Part 1 item 1): runs
+  // ONLY when this boot was preceded by a gateway.self_update or
+  // gateway.restart invoke (pendingRestart non-null — a plain reboot costs
+  // nothing here). Fires from afterConnected below, i.e. right after
+  // checkpoints.currentHealthState() has already been set to "online"
+  // (GatewayWsClient.connect()'s markRecovered() call, awaited before
+  // afterConnected runs) — so the doctor's cloud_connection check reads the
+  // real, live state instead of the "offline" default a check run any
+  // earlier would see. Never throws: doctorRuntime.runHealthCheck() itself
+  // never throws (every check is wrapped, see gateway-doctor.ts's
+  // safeDetect()), and the caller below wraps this whole function in its
+  // own catch — a failure here must never affect startup, personal-channel
+  // start, or the heartbeat/reconnect loop.
+  const reportPostRestartHealthCheck = async (
+    marker: NonNullable<typeof pendingRestart>,
+  ): Promise<void> => {
+    const run: GatewayDoctorRunResult = await doctorRuntime.runHealthCheck();
+    const healthCheck: "pass" | "fail" = run.results.some((result) => result.status === "fail")
+      ? "fail"
+      : "pass";
+    const report = {
+      trigger: marker.trigger,
+      previous_version: marker.previousVersion,
+      target_version: marker.targetVersion,
+      restart_mode: marker.restartMode,
+      triggered_at: marker.triggeredAt,
+      checked_at: run.checked_at,
+      health_check: healthCheck,
+      summary: run.summary,
+    };
+    await journal.append("system", "gateway.restart.health_check", report);
+    // gateway.state.update merges its whole payload into this registration's
+    // stored metadata (server_modules/gateway_protocol_service.py's
+    // "gateway.state.update" handler), which the Hardware page already
+    // reads wholesale via gateway_registration_public_payload()'s `metadata`
+    // field — no new backend route needed for this to reach the UI.
+    await client.publishStateUpdate({ gateway_restart_health_check: report });
+  };
+
   try {
     const existingTokens: GatewayTokenState = await tokenStore.load();
     if (shouldAttemptPairing(config.pairingToken, existingTokens.gatewayToken)) {
@@ -406,6 +465,14 @@ async function main(): Promise<void> {
             error: message,
           });
         });
+        if (pendingRestart) {
+          void reportPostRestartHealthCheck(pendingRestart).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            void journal.append("system", "gateway.restart.health_check_failed", {
+              error: message,
+            });
+          });
+        }
       },
     });
   } finally {

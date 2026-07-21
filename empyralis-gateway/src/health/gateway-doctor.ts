@@ -581,4 +581,17 @@ export class GatewayDoctorRuntime {
     const run = await runGatewayDoctor(this.checks, this.ctx, { repair });
     return { capability_id: GATEWAY_DOCTOR_CAPABILITY, ...run };
   }
+
+  /** Runs the exact same detect/repair(=false)/re-validate pass as the
+   *  gateway.doctor.run capability, without going through a capability-
+   *  invoke frame — used by index.ts to gate a post-restart health check
+   *  (gateway.self_update / gateway.restart, see update/gateway-restart-
+   *  pending.ts) at the moment the cloud WS first reconnects, well before
+   *  the backend would ever have a tool.invoke in flight to answer. Always
+   *  report-only (repair is never implied by "is this box healthy right
+   *  now") — a health-check gate should observe, not mutate, the
+   *  freshly-restarted process. */
+  async runHealthCheck(): Promise<GatewayDoctorRunResult> {
+    return runGatewayDoctor(this.checks, this.ctx, { repair: false });
+  }
 }

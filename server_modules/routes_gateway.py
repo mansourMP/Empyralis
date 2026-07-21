@@ -64,6 +64,7 @@ from server_modules import (
     gateway_pairing_service,
     gateway_protocol_service,
     gateway_registry_service,
+    gateway_restart_service,
     gateway_self_update_service,
     gateway_state_repository,
     hardware_activity_event_service,
@@ -960,6 +961,10 @@ class GatewaySelfUpdateRequest(BaseModel):
     # Explicit values let an operator target a specific rollback/pinned build.
     target_version: Optional[str] = None
     artifact_url: Optional[str] = None
+
+
+class GatewayRestartRequest(BaseModel):
+    workspace_id: Optional[str] = None
 
 
 class GatewayDoctorRunRequest(BaseModel):
@@ -2871,6 +2876,36 @@ async def self_update_gateway(
             actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
         )
     except gateway_self_update_service.GatewaySelfUpdateError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post("/gateway/registrations/{gateway_id}/restart")
+async def restart_gateway(
+    gateway_id: str,
+    body: GatewayRestartRequest,
+    current_user=Depends(require_api_key),
+):
+    """In-product "restart the gateway" — one button, no SSH, no VPS
+    destroy+recreate. See gateway_restart_service.trigger_gateway_restart()
+    for the dispatch (same tool-invoke transport as self-update/doctor just
+    above) and empyralis-gateway/src/update/gateway-restart-runtime.ts for
+    why this needs no target_version/artifact_url: it re-execs the exact
+    build already on disk, nothing is downloaded or swapped.
+    "member" (not "viewer") because this interrupts anything currently
+    running on the box — same gate self-update/doctor-run use."""
+    _registration, resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        workspace_id=body.workspace_id,
+        minimum_role="member",
+    )
+    try:
+        return await gateway_restart_service.trigger_gateway_restart(
+            gateway_id=gateway_id,
+            workspace_id=resolved_workspace_id,
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+    except gateway_restart_service.GatewayRestartError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
