@@ -1,3 +1,6 @@
+import os from "os";
+import path from "path";
+
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 import type { GatewayCheckpoints, GatewayHealthState } from "../state/checkpoints";
 import type { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
@@ -7,6 +10,12 @@ import {
   type PassiveInventorySnapshot,
 } from "./service-inventory";
 import { detectGatewaySupervisor, type GatewaySupervisorMode } from "../update/gateway-restart-handoff";
+import {
+  auditAndRepairGatewaySupervisorInstall,
+  createLaunchdJobRegistrar,
+  createSystemdJobRegistrar,
+  type GatewaySupervisorInstallOutcome,
+} from "../update/gateway-supervisor-install";
 
 /**
  * In-gateway "doctor": detect -> (safe) repair -> re-validate, exposed as the
@@ -83,6 +92,14 @@ export interface GatewayDoctorContext {
   collectPassiveInventory: typeof collectPassiveInventorySnapshot;
   invalidatePassiveInventoryCache: typeof invalidatePassiveInventoryCache;
   detectSupervisor: (env: NodeJS.ProcessEnv, platform: NodeJS.Platform) => GatewaySupervisorMode;
+  /** Audits (and, when `attemptRepair` is true, conservatively installs or
+   *  repairs) the on-disk launchd plist / systemd unit — see update/gateway-
+   *  supervisor-install.ts for the full safety contract. Distinct from
+   *  detectSupervisor() above, which only ever answers "is THIS live
+   *  process currently running under a supervisor" via env hints; this
+   *  answers "does a unit/plist exist on disk at all, and does it match
+   *  what we'd want" and can act on the answer. */
+  auditSupervisorInstall: (attemptRepair: boolean) => Promise<GatewaySupervisorInstallOutcome>;
 }
 
 export interface GatewayDoctorCheck {
@@ -316,10 +333,42 @@ const PERSONAL_CHANNEL_IMESSAGE_CHECK: GatewayDoctorCheck = {
 };
 
 // ---------------------------------------------------------------------------
-// Check 5: supervisor presence. Reuses detectGatewaySupervisor() unchanged —
-// the same function gateway-self-update-runtime.ts already calls to decide
-// whether a self-update can rely on Restart=always or must spawn its own
-// restart handoff (see update/gateway-restart-handoff.ts).
+// Check 5: supervisor presence. detect() first asks detectGatewaySupervisor()
+// (unchanged — the same function gateway-self-update-runtime.ts already
+// calls to decide whether a self-update can rely on Restart=always or must
+// spawn its own restart handoff, see update/gateway-restart-handoff.ts)
+// whether THIS live process is already confirmed-supervised via env hints.
+// If not, it falls back to auditing whether a unit/plist is at least
+// installed on disk (update/gateway-supervisor-install.ts) before reporting
+// the worse "nothing at all" finding. repair() installs a missing unit or
+// repairs a drifted one — conservative and idempotent, see that module's
+// doc comment for the full safety contract (never touches an already-loaded
+// job, never throws, reports plainly when it lacks permission).
+function supervisorAuditDetail(audit: GatewaySupervisorInstallOutcome): GatewayDoctorDetectOutcome {
+  if (!audit.supported) {
+    return {
+      status: "warn",
+      detail: "Automatic restart isn't available on this computer's operating system yet.",
+    };
+  }
+  if (audit.fileState === "present_matching") {
+    return {
+      status: "warn",
+      detail: "Automatic restart is installed on this computer but isn't active for this run yet — it will take effect the next time this computer starts.",
+    };
+  }
+  if (audit.fileState === "present_drifted") {
+    return {
+      status: "warn",
+      detail: "Automatic restart is installed on this computer but is out of date.",
+    };
+  }
+  return {
+    status: "warn",
+    detail: "This computer has no automatic restart set up — if it crashes, it stays down until someone starts it again.",
+  };
+}
+
 const SUPERVISOR_PRESENCE_CHECK: GatewayDoctorCheck = {
   id: "supervisor_presence",
   label: "Automatic restart",
@@ -331,15 +380,23 @@ const SUPERVISOR_PRESENCE_CHECK: GatewayDoctorCheck = {
         detail: `This computer will automatically restart itself if it crashes (managed by ${mode}).`,
       };
     }
-    return {
-      status: "warn",
-      detail: "This computer has no automatic restart set up — if it crashes, it stays down until someone starts it again.",
-    };
+    const audit = await ctx.auditSupervisorInstall(false);
+    return supervisorAuditDetail(audit);
   },
-  // No repair: installing/enabling a systemd unit or launchd job needs root
-  // and a re-run of the installer script (scripts/install-agent-computer.sh)
-  // — not something an unprivileged capability invoke inside the already-
-  // running gateway process can safely do to itself.
+  async repair(ctx) {
+    const mode = ctx.detectSupervisor(ctx.env, ctx.platform);
+    if (mode === "systemd" || mode === "launchd") {
+      return { detail: "This computer is already supervised — nothing to repair." };
+    }
+    const audit = await ctx.auditSupervisorInstall(true);
+    if (!audit.supported) {
+      return { detail: "Automatic restart isn't available on this computer's operating system yet." };
+    }
+    if (!audit.repair) {
+      return { detail: "Nothing to repair." };
+    }
+    return { detail: audit.repair.detail };
+  },
 };
 
 export function buildDefaultGatewayDoctorChecks(): GatewayDoctorCheck[] {
@@ -446,11 +503,40 @@ export interface GatewayDoctorRuntimeOptions {
   personalChannelRuntimes?: GatewayDoctorPersonalChannelRegistry;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
+  /** Where this gateway's own on-disk state lives (config.stateDir) — used
+   *  only to derive a default log path for a freshly-installed launchd
+   *  plist's StandardOutPath/StandardErrorPath. Optional because tests that
+   *  never exercise supervisor install/repair don't need it. */
+  stateDir?: string;
   /** Injectable for tests. */
   collectPassiveInventory?: typeof collectPassiveInventorySnapshot;
   invalidatePassiveInventoryCache?: typeof invalidatePassiveInventoryCache;
   detectSupervisor?: (env: NodeJS.ProcessEnv, platform: NodeJS.Platform) => GatewaySupervisorMode;
+  auditSupervisorInstall?: (attemptRepair: boolean) => Promise<GatewaySupervisorInstallOutcome>;
   checks?: GatewayDoctorCheck[];
+}
+
+function defaultEntryPath(): string {
+  return require.main?.filename || process.argv[1] || process.execPath;
+}
+
+function defaultAuditSupervisorInstall(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  stateDir: string | undefined,
+): (attemptRepair: boolean) => Promise<GatewaySupervisorInstallOutcome> {
+  const entryPath = defaultEntryPath();
+  const logDir = stateDir ? path.join(stateDir, "logs") : os.tmpdir();
+  const registerJob = platform === "darwin"
+    ? createLaunchdJobRegistrar(typeof process.getuid === "function" ? process.getuid() : 0)
+    : platform === "linux"
+      ? createSystemdJobRegistrar()
+      : undefined;
+  return (attemptRepair: boolean) =>
+    auditAndRepairGatewaySupervisorInstall(
+      { env, platform, entryPath, logDir, registerJob },
+      attemptRepair,
+    );
 }
 
 export class GatewayDoctorRuntime {
@@ -459,15 +545,19 @@ export class GatewayDoctorRuntime {
 
   constructor(options: GatewayDoctorRuntimeOptions) {
     this.checks = options.checks ?? buildDefaultGatewayDoctorChecks();
+    const env = options.env ?? process.env;
+    const platform = options.platform ?? process.platform;
     this.ctx = {
       getHealthState: () => options.checkpoints.currentHealthState(),
       getRequestedCapabilities: options.getRequestedCapabilities,
       personalChannelRuntimes: options.personalChannelRuntimes,
-      env: options.env ?? process.env,
-      platform: options.platform ?? process.platform,
+      env,
+      platform,
       collectPassiveInventory: options.collectPassiveInventory ?? collectPassiveInventorySnapshot,
       invalidatePassiveInventoryCache: options.invalidatePassiveInventoryCache ?? invalidatePassiveInventoryCache,
       detectSupervisor: options.detectSupervisor ?? detectGatewaySupervisor,
+      auditSupervisorInstall:
+        options.auditSupervisorInstall ?? defaultAuditSupervisorInstall(env, platform, options.stateDir),
     };
   }
 

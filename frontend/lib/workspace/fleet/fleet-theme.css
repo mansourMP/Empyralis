@@ -1649,6 +1649,64 @@ a.fleet-breadcrumb:hover {
 .fleet-panel-row-value--muted { color: var(--text-muted); font-weight: var(--weight-medium); }
 .fleet-panel-row-value--accent { color: var(--accent); }
 
+/* The Model row's value is a real trigger (opens AgentModelPickerRow's
+   popover in FleetAgentDetail.tsx), not static text — needs `overflow:
+   visible` so the popover isn't clipped by the plain value span's own
+   ellipsis/overflow:hidden (every other row in this section is single-line
+   read-only text, where that clipping is exactly what's wanted). */
+.fleet-panel-row-value--interactive {
+  overflow: visible;
+}
+
+.fleet-model-picker {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+}
+
+.fleet-model-picker-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
+}
+
+.fleet-model-picker-trigger:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border);
+}
+
+.fleet-model-picker-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-model-picker-trigger svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* Wider than the generic .fleet-toolbar-popover default (220px) — this one
+   carries real form fields (provider/model selects, an API key input),
+   which need the extra room to stay legible. Left-aligned regardless of the
+   right-aligned property row it's anchored under. */
+.fleet-model-picker-popover {
+  width: 264px;
+  text-align: left;
+}
+
 /* ── Shared indicators (dots / chips / tinted tiles) ─────────────────────── */
 
 /* Status as a living signal (U3-B, revised U3-C): fill carries meaning,

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   Brain,
   Check,
+  ChevronDown,
   ChevronRight,
   Clock,
   Cpu,
@@ -416,7 +417,25 @@ export function FleetAgentDetail({
           hint="Everyone who messages this agent is a customer at support-tier — they can request, not command. You, the owner, keep full access."
         />
       )}
-      <PanelRow label="Model" value={resolvedModel} />
+      {/* Not a plain PanelRow: the value is a real picker trigger (opens
+          AgentModelPickerRow's popover), which needs `overflow: visible` on
+          its wrapper to avoid getting clipped by the generic value span's
+          ellipsis styling — see fleet-panel-row-value--interactive in
+          fleet-theme.css. */}
+      <div className="fleet-panel-row">
+        <span className="fleet-panel-row-label">
+          <span>Model</span>
+        </span>
+        <span className="fleet-panel-row-value fleet-panel-row-value--interactive">
+          <AgentModelPickerRow
+            workspaceId={workspaceId}
+            agentId={agentId}
+            agent={agent}
+            resolvedModel={resolvedModel}
+            onSaved={onRenamed}
+          />
+        </span>
+      </div>
       <UsageStat
         label="Cost today"
         total={costToday ?? 0}
@@ -2597,7 +2616,25 @@ function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: strin
     let cancelled = false;
     fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (!cancelled && d?.totals) setCost(Number(d.totals.usd_cost || 0)); })
+      .then((d) => {
+        if (cancelled || !d) return;
+        // Same bug, same fix as the Properties panel's identical "Cost
+        // today" stat (see FleetAgentDetail's own usage-fetch effect above):
+        // `totals` isn't date-filtered by the backend (summarize_usage only
+        // date_trunc's `buckets`), so it's an all-time sum — using it here
+        // silently mislabels all-time spend as "today's". Match the bucket
+        // whose UTC day is actually today instead.
+        if (Array.isArray(d.buckets)) {
+          const now = new Date();
+          const todayKey = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+            .toISOString()
+            .slice(0, 10);
+          const todayBucket = d.buckets.find((b: UsageBucket) => String(b.bucket || "").slice(0, 10) === todayKey);
+          setCost(Number(todayBucket?.usd_cost ?? 0));
+        } else {
+          setCost(0);
+        }
+      })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [workspaceId, agentId]);
@@ -2720,6 +2757,407 @@ function cliSubscriptionHint(gateways: FleetGateway[]): string {
   return anyReady ? "A paired computer has a CLI ready" : "No paired computer has Claude Code or Codex ready";
 }
 
+/** A pending (unsaved) edit to an agent's model_config — the shape both the
+ *  Model tab's own editor and the Properties panel's compact picker collect
+ *  locally before handing off to the single shared save path below. */
+type ModelConfigDraft = {
+  mode: ProviderMode;
+  provider: string;
+  selectedModel: string;
+  apiKey: string;
+  gatewayBinding: string;
+  reasoningEffort: string;
+};
+
+/** The ONE save path for an agent's model_config — used by both the Model
+ *  tab's own editor (ModelTab.save(), below) and the Properties panel's
+ *  compact picker (AgentModelPickerRow, above), so the two surfaces can
+ *  never independently drift the way resolveAgentModelSummary's doc
+ *  comment already warns about for the read side. Validates the draft
+ *  (throws a user-facing Error on failure — callers own their own
+ *  try/catch + saving/error state), writes a new BYOK vault credential
+ *  first when a fresh API key is entered exactly like the previous
+ *  ModelTab-only version did, then PATCHes model_config. */
+async function saveAgentModelConfig(
+  workspaceId: string,
+  agentId: string,
+  currentConfig: Record<string, any>,
+  agentLabel: string | undefined,
+  draft: ModelConfigDraft,
+): Promise<void> {
+  const { mode, provider, selectedModel, apiKey, gatewayBinding, reasoningEffort } = draft;
+  if (COMING_SOON_MODES.has(mode)) {
+    throw new Error(`${COMING_SOON_NOTE}. This option can’t be saved yet.`);
+  }
+  if (mode === "local" && !gatewayBinding.trim()) {
+    throw new Error("Pick a computer (with Ollama) to run this agent’s local model.");
+  }
+  if (mode === "cli_subscription" && !gatewayBinding.trim()) {
+    throw new Error("Pick a computer to run this agent’s subscription CLI.");
+  }
+  // A blank key is only safe to save when THIS provider already has a
+  // credential in the vault — i.e. byok_api was already persisted for this
+  // exact provider. Otherwise there is no known credential, and patching
+  // mode=byok_api anyway would silently persist a broken config.
+  const hasExistingCredentialForProvider = currentConfig.mode === "byok_api" && currentConfig.provider === provider;
+  if (mode === "byok_api" && !apiKey.trim() && !hasExistingCredentialForProvider) {
+    throw new Error("Enter your API key for this provider — none is saved yet.");
+  }
+  const reasoningEffortSupported = REASONING_EFFORT_SUPPORTED_MODES.has(mode);
+  const canSaveReasoningEffort = reasoningEffortSupported || mode === "cli_subscription";
+
+  async function patchModelConfig(): Promise<void> {
+    const patch: Record<string, any> = { mode };
+    if (mode === "byok_api" || mode === "cli_subscription" || mode === "local") {
+      patch.provider = provider;
+    }
+    if ((mode === "byok_api" || mode === "local") && selectedModel.trim()) {
+      patch.model = selectedModel.trim();
+    }
+    // BYO-brain Phase 0: forward-wire which box + runtime.
+    if (mode === "cli_subscription" || mode === "local") {
+      if (gatewayBinding) patch.gateway_binding = gatewayBinding;
+      const rt = runtimeForProvider(provider);
+      if (rt) patch.runtime = rt;
+    }
+    // Only for the modes that actually consume it at turn time — this patch
+    // REPLACES model_config wholesale (fleet_tools.py's fleet_configure_agent
+    // does `meta["model_config"] = dict(patch)`, not a merge), so switching
+    // to local and saving correctly drops any previously-set
+    // reasoning_effort instead of leaving a stale, inert value behind.
+    if (canSaveReasoningEffort && reasoningEffort) {
+      patch.reasoning_effort = reasoningEffort;
+    }
+    const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+      body: JSON.stringify({ patch: { model_config: patch } }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+  }
+
+  if (mode === "byok_api") {
+    if (!apiKey.trim()) {
+      // Reusing existing vault key (hasExistingCredentialForProvider
+      // guaranteed true above) — only patch config.
+      await patchModelConfig();
+    } else {
+      // See the identical comment in FleetCreateAgentWizard.tsx's
+      // submitBrain(): /credentials/vault stores + validates the secret
+      // against the real provider adapter and returns a credential_id;
+      // /providers/profiles is the separate routing layer that makes it
+      // discoverable at turn time. /api/connectors/vault (used here
+      // previously) is the unrelated third-party-app connector vault and
+      // 400s "Unsupported connector" for every LLM provider.
+      const label = `${providerLabel(provider)} — ${agentLabel || "agent"}`;
+      const credRes = await fetch("/api/credentials/vault", {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          provider,
+          label,
+          mode: "byok",
+          credentials: { api_key: apiKey.trim() },
+        }),
+      });
+      const credData = await credRes.json().catch(() => ({}));
+      if (!credRes.ok) throw new Error(credData?.detail || credData?.error || `HTTP ${credRes.status}`);
+
+      const profileRes = await fetch("/api/providers/profiles", {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          provider,
+          label,
+          credential_id: credData?.id,
+          enabled: true,
+        }),
+      });
+      const profileData = await profileRes.json().catch(() => ({}));
+      if (!profileRes.ok) throw new Error(profileData?.detail || profileData?.error || `HTTP ${profileRes.status}`);
+      await patchModelConfig();
+    }
+  } else {
+    await patchModelConfig();
+  }
+}
+
+/** Properties panel's compact Model picker — clicking the "Model" row opens
+ *  a small popover (same anchored-popover pattern as FleetToolbar's
+ *  filter/sort popover: .fleet-toolbar-popover, click-outside + Escape to
+ *  dismiss) that lets the owner pick provider + model from the FULL
+ *  catalogue (all BYOK_PROVIDERS, including xai/Grok) without leaving the
+ *  panel, or switch mode entirely (platform credits / own key / own
+ *  subscription / local). Saves through the exact same saveAgentModelConfig
+ *  path as the Model tab — no separate PATCH logic here. Kept intentionally
+ *  smaller than the full ModelTab editor (no "Current state" block, no
+ *  capability-preset/context-policy section) since this is a quick-switch
+ *  surface, not a replacement for the Model tab. */
+function AgentModelPickerRow({
+  workspaceId, agentId, agent, resolvedModel, onSaved,
+}: {
+  workspaceId: string;
+  agentId: string;
+  agent: FleetAgent | null;
+  /** Pre-formatted "{provider} · {model}" summary — same value already
+   *  shown elsewhere, so the closed-state trigger never drifts from it. */
+  resolvedModel: string;
+  onSaved?: () => void;
+}) {
+  const config = agent?.model_config || {};
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
+  const [provider, setProvider] = useState<string>(config.provider || "");
+  const [selectedModel, setSelectedModel] = useState<string>(config.model || "");
+  const [apiKey, setApiKey] = useState("");
+  const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
+  const [reasoningEffort, setReasoningEffort] = useState<string>(config.reasoning_effort || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { gateways: cliGateways } = useWorkspaceGateways(workspaceId);
+  const cliRuntime = runtimeForProvider(provider) === "codex" ? "codex" : "claude_code";
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  // Re-seed the draft from the agent's real current config every time the
+  // popover opens — mirrors ModelTab's own hydration guard in spirit, but
+  // simpler: this popover fully unmounts its edits on close (no "unsaved
+  // draft survives a close" concern), so a fresh open is always the source
+  // of truth rather than whatever was left over from a previous open.
+  useEffect(() => {
+    if (!open) return;
+    const fresh = agent?.model_config || {};
+    setMode(resolveDisplayMode(fresh));
+    setProvider(fresh.provider || "");
+    setSelectedModel(fresh.model || "");
+    setApiKey("");
+    setGatewayBinding(fresh.gateway_binding || "");
+    setReasoningEffort(fresh.reasoning_effort || "");
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Click-outside + Escape to dismiss — identical pattern to
+  // FleetToolbar.tsx's own popover so this behaves exactly like every other
+  // anchored popover in Fleet.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  function onModeChange(next: ProviderMode) {
+    setMode(next);
+    setError(null);
+    if (next === "byok_api") setProvider(provider || "anthropic");
+    else if (next === "cli_subscription") setProvider(provider || "claude_code_cli");
+    else if (next === "local") setProvider(provider || "ollama");
+  }
+
+  function onProviderChange(next: string) {
+    setProvider(next);
+    setError(null);
+    if (mode === "byok_api") {
+      setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(next) ? "" : defaultModelForProvider(next));
+    } else if (mode === "local") {
+      setSelectedModel(defaultModelForProvider(next || "ollama"));
+    }
+  }
+
+  const reasoningEffortSupported = REASONING_EFFORT_SUPPORTED_MODES.has(mode);
+  const localNeedsBox = mode === "local" && !gatewayBinding.trim();
+  const cliSubscriptionNeedsBox = mode === "cli_subscription" && !gatewayBinding.trim();
+
+  async function handleSave() {
+    setSaving(true);
+    setError(null);
+    try {
+      await saveAgentModelConfig(workspaceId, agentId, config, agent?.label, {
+        mode, provider, selectedModel, apiKey, gatewayBinding, reasoningEffort,
+      });
+      setOpen(false);
+      onSaved?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fleet-model-picker" ref={ref}>
+      <button
+        type="button"
+        className="fleet-model-picker-trigger"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title="Change this agent's model"
+      >
+        <span>{resolvedModel}</span>
+        <ChevronDown size={13} strokeWidth={2} />
+      </button>
+      {open && (
+        <div className="fleet-toolbar-popover fleet-model-picker-popover" role="dialog" aria-label="Change model">
+          <div className="fleet-toolbar-popover-group">
+            <div className="fleet-toolbar-popover-label">Payment</div>
+            <select
+              className="fleet-wizard-input"
+              value={mode}
+              onChange={(e) => onModeChange(e.currentTarget.value as ProviderMode)}
+            >
+              {(["platform_credits", "byok_api", "cli_subscription", "local"] as ProviderMode[]).map((m) => (
+                <option key={m} value={m}>{MODE_LABELS[m]}</option>
+              ))}
+            </select>
+          </div>
+
+          {mode === "platform_credits" && (
+            <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>
+              DeepSeek, on the platform. Empyralis pays — nothing to pick here.
+            </p>
+          )}
+
+          {mode === "byok_api" && (
+            <div className="fleet-toolbar-popover-group">
+              <div className="fleet-toolbar-popover-label">Provider</div>
+              <select
+                className="fleet-wizard-input"
+                value={provider}
+                onChange={(e) => onProviderChange(e.currentTarget.value)}
+              >
+                {BYOK_PROVIDERS.map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </select>
+              {FREEFORM_MODEL_PROVIDERS.has(provider) ? (
+                <input
+                  className="fleet-wizard-input"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
+                  placeholder={provider === "azure_openai" ? "e.g. my-gpt4-deployment" : "e.g. llama-3-70b"}
+                />
+              ) : (
+                <select
+                  className="fleet-wizard-input"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
+                >
+                  {modelsForProvider(provider).map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              )}
+              <input
+                className="fleet-wizard-input"
+                type="password"
+                autoComplete="off"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.currentTarget.value)}
+                placeholder={
+                  config.mode === "byok_api" && config.provider === provider
+                    ? "API key (leave blank to keep existing)"
+                    : "API key — required for this provider"
+                }
+              />
+            </div>
+          )}
+
+          {mode === "cli_subscription" && (
+            <div className="fleet-toolbar-popover-group">
+              <div className="fleet-toolbar-popover-label">Subscription</div>
+              <select
+                className="fleet-wizard-input"
+                value={provider}
+                onChange={(e) => onProviderChange(e.currentTarget.value)}
+              >
+                {SUBSCRIPTION_PROVIDERS.map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </select>
+              <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>{cliSubscriptionHint(cliGateways)}</p>
+              <GatewayBoxPicker
+                workspaceId={workspaceId}
+                value={gatewayBinding}
+                onChange={setGatewayBinding}
+                requireRuntime={cliRuntime}
+              />
+            </div>
+          )}
+
+          {mode === "local" && (
+            <div className="fleet-toolbar-popover-group">
+              <div className="fleet-toolbar-popover-label">Ollama model</div>
+              <select
+                className="fleet-wizard-input"
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.currentTarget.value)}
+              >
+                {modelsForProvider("ollama").map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <GatewayBoxPicker
+                workspaceId={workspaceId}
+                value={gatewayBinding}
+                onChange={setGatewayBinding}
+                requireLocalModel
+              />
+            </div>
+          )}
+
+          {reasoningEffortSupported && (
+            <div className="fleet-toolbar-popover-group">
+              <div className="fleet-toolbar-popover-label">Reasoning effort</div>
+              <select
+                className="fleet-wizard-input"
+                value={reasoningEffort}
+                onChange={(e) => setReasoningEffort(e.currentTarget.value)}
+              >
+                {REASONING_EFFORT_OPTIONS.map((o) => (
+                  <option key={o.value || "unset"} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {error && <p className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</p>}
+
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button type="button" className="fleet-btn" onClick={() => setOpen(false)} disabled={saving}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="fleet-btn fleet-btn--accent"
+              onClick={handleSave}
+              disabled={saving || localNeedsBox || cliSubscriptionNeedsBox}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+          <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>
+            Full editor, including context policy, lives on the{" "}
+            <strong>Model</strong> tab.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ModelTab({
   workspaceId, agentId, agent, onSaved,
 }: {
@@ -2817,86 +3255,13 @@ function ModelTab({
   const isPlatformDefault = modelSummary.isPlatformDefault;
 
   async function save() {
-    if (COMING_SOON_MODES.has(mode)) {
-      setError(`${COMING_SOON_NOTE}. This option can’t be saved yet.`);
-      return;
-    }
-    if (mode === "local" && !gatewayBinding.trim()) {
-      setError("Pick a computer (with Ollama) to run this agent’s local model.");
-      return;
-    }
-    if (mode === "cli_subscription" && !gatewayBinding.trim()) {
-      setError("Pick a computer to run this agent’s subscription CLI.");
-      return;
-    }
-    // A blank key is only safe to save when THIS provider already has a
-    // credential in the vault — i.e. byok_api was already persisted for
-    // this exact provider. Otherwise (switching into byok_api for the
-    // first time, or switching to a different provider than the one
-    // that's actually saved) there is no known credential, and patching
-    // mode=byok_api anyway would silently persist a broken config: the
-    // Properties panel and this tab's own "Current state" block would both
-    // read back "Ready" with no way to actually run a turn.
-    const hasExistingCredentialForProvider = config.mode === "byok_api" && config.provider === provider;
-    if (mode === "byok_api" && !apiKey.trim() && !hasExistingCredentialForProvider) {
-      setError("Enter your API key for this provider — none is saved yet.");
-      return;
-    }
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
-      if (mode === "byok_api") {
-        if (!apiKey.trim()) {
-          // Reusing existing vault key (hasExistingCredentialForProvider
-          // guaranteed true above) — only patch config
-          await patchModelConfig();
-        } else {
-          // See the identical comment in FleetCreateAgentWizard.tsx's
-          // submitBrain(): /credentials/vault stores + validates the secret
-          // against the real provider adapter and returns a credential_id;
-          // /providers/profiles is the separate routing layer that makes it
-          // discoverable at turn time. /api/connectors/vault (used here
-          // previously) is the unrelated third-party-app connector vault and
-          // 400s "Unsupported connector" for every LLM provider.
-          const label = `${providerLabel(provider)} — ${agent?.label || "agent"}`;
-          const credRes = await fetch("/api/credentials/vault", {
-            method: "POST",
-            credentials: "include",
-            headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-            body: JSON.stringify({
-              workspace_id: workspaceId,
-              provider,
-              label,
-              mode: "byok",
-              credentials: { api_key: apiKey.trim() },
-            }),
-          });
-          const credData = await credRes.json().catch(() => ({}));
-          if (!credRes.ok) throw new Error(credData?.detail || credData?.error || `HTTP ${credRes.status}`);
-
-          const profileRes = await fetch("/api/providers/profiles", {
-            method: "POST",
-            credentials: "include",
-            headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-            body: JSON.stringify({
-              workspace_id: workspaceId,
-              provider,
-              label,
-              credential_id: credData?.id,
-              enabled: true,
-            }),
-          });
-          const profileData = await profileRes.json().catch(() => ({}));
-          if (!profileRes.ok) throw new Error(profileData?.detail || profileData?.error || `HTTP ${profileRes.status}`);
-          await patchModelConfig();
-        }
-      } else if (mode === "cli_subscription" || mode === "local") {
-        await patchModelConfig();
-      } else {
-        // platform_credits
-        await patchModelConfig();
-      }
+      await saveAgentModelConfig(workspaceId, agentId, config, agent?.label, {
+        mode, provider, selectedModel, apiKey, gatewayBinding, reasoningEffort,
+      });
       setSaved(true);
       onSaved?.();
     } catch (e) {
@@ -2904,40 +3269,6 @@ function ModelTab({
     } finally {
       setSaving(false);
     }
-  }
-
-  async function patchModelConfig() {
-    const patch: Record<string, any> = { mode };
-    if (mode === "byok_api" || mode === "cli_subscription" || mode === "local") {
-      patch.provider = provider;
-    }
-    if ((mode === "byok_api" || mode === "local") && selectedModel.trim()) {
-      patch.model = selectedModel.trim();
-    }
-    // BYO-brain Phase 0: forward-wire which box + runtime. (Save is blocked for
-    // these modes today; this keeps the persisted shape correct once it opens.)
-    if (mode === "cli_subscription" || mode === "local") {
-      if (gatewayBinding) patch.gateway_binding = gatewayBinding;
-      const rt = runtimeForProvider(provider);
-      if (rt) patch.runtime = rt;
-    }
-    // Only for the modes that actually consume it at turn time (see
-    // canSaveReasoningEffort) — this patch REPLACES model_config wholesale
-    // (fleet_tools.py's fleet_configure_agent does `meta["model_config"] =
-    // dict(patch)`, not a merge), so switching to local and saving
-    // correctly drops any previously-set reasoning_effort instead of
-    // leaving a stale, inert value behind.
-    if (canSaveReasoningEffort && reasoningEffort) {
-      patch.reasoning_effort = reasoningEffort;
-    }
-    const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
-      method: "PATCH",
-      credentials: "include",
-      headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
-      body: JSON.stringify({ patch: { model_config: patch } }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
   }
 
   // Shared between the platform_credits and byok_api blocks below (the two

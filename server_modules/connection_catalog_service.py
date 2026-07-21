@@ -326,9 +326,12 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         # Official Account / WeChat Work (WeCom) integration instead — see
         # empyralis-gateway/src/channels/wechat/ for the protocol
         # implementation (signature verification, inbound XML callback
-        # mapping, access_token management, outbound send) and the
-        # wechat_work catalog entry below for the currently-supported
-        # outbound path. setup_available/runtime_usable were True here with
+        # mapping, access_token management, outbound send), the
+        # "wechat_official" entry below for the ported cloud-side version of
+        # that same protocol (server_modules/wechat_official_service.py,
+        # partially wired — see its own honesty notes), and the
+        # "wechat_work" catalog entry below for the separate, currently-live
+        # outbound-only group-robot webhook path. setup_available/runtime_usable were True here with
         # zero gateway implementation behind them (no transport, no
         # pairing, no bridge) — see docs/design/reliability-audit-2-channels.md
         # — flipped False below so this entry stops claiming a working
@@ -1976,15 +1979,16 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         # push one-way notifications) — outbound-only by design, not the
         # appid/secret/token-based Official Account / WeCom app bot flow
         # (auth + inbound message callback + access_token-authenticated
-        # replies). That bidirectional flow is prototyped in
-        # empyralis-gateway/src/channels/wechat/ (see its module doc) but
-        # is not wired to a production endpoint yet, so it is not
-        # represented as a separate catalog entry here — see
-        # docs/design/reliability-audit-2-channels.md for why adding one
-        # without the rest of the plumbing (vault storage, validators,
-        # connector manifest — none of which this pass touches) would
-        # just be a new instance of the same "catalog claims more than is
-        # wired" problem this fix is closing for wechat_personal above.
+        # replies). That bidirectional flow's wire protocol was first
+        # prototyped in empyralis-gateway/src/channels/wechat/ (see its
+        # module doc) and has since been ported into the cloud control
+        # plane — see the separate "wechat_official" catalog entry below
+        # and server_modules/wechat_official_service.py's module doc for
+        # the real (partially-wired, see that entry's own honesty notes)
+        # bidirectional channel. Kept as its own entry rather than folded
+        # into this one because the two are genuinely different setup
+        # flows (a single webhook URL vs. an appid/corpid+secret pair) —
+        # see docs/design/reliability-audit-2-channels.md.
         description="Connect WeChat Work's incoming group-robot webhook for approved outbound workspace messages (push notifications only — no inbound replies).",
         supports_outbound=True,
         media_support=_media(text=True),
@@ -1996,6 +2000,50 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         connector_id="wechat_work",
         account_provider="wechat_work",
         vault_provider="wechat_work",
+    ),
+    _item(
+        connection_id="wechat_official",
+        display_name="WeChat / WeCom (Official)",
+        lane=LANE_STUDIO_BUSINESS_CHANNEL,
+        surfaces=("sage", "studio"),
+        setup_kind="app_credential_pair",
+        # PARTIAL, not LIVE_WHEN_CONFIGURED: this is the real bidirectional
+        # official-WeChat channel — appid/secret (Official Account) or
+        # corpid/corpsecret/AgentId (WeCom) credentials, signature-verified
+        # inbound XML callback, access-token-managed outbound send. The
+        # protocol itself is faithfully ported from
+        # empyralis-gateway/src/channels/wechat/ into
+        # server_modules/wechat_official_service.py (signature, XML
+        # parsing, token fetch/refresh, outbound send — see that module's
+        # doc for the exact source-file mapping) and the per-agent inbound
+        # webhook route exists at server_modules/routes_wechat_official.py.
+        # Two things still make this NOT genuinely usable end-to-end today,
+        # which is why setup_available/runtime_usable are False below
+        # rather than the copy-pasted True this exact self-contradiction
+        # class was flagged for on wechat_personal/web_chat elsewhere in
+        # this file (docs/design/reliability-audit-2-channels.md):
+        #   1. routes_wechat_official.py's router is not yet registered in
+        #      server.py (app.include_router) — the webhook path is not
+        #      reachable by Tencent yet.
+        #   2. No UI/route exposes wechat_official_service.assign_wechat_official
+        #      (credential entry + webhook-URL display) — there is no way
+        #      for a workspace owner to actually bind an agent to a WeChat/
+        #      WeCom app yet, only the service-layer function to do so.
+        # Flip both flags to True only once both are closed for real.
+        launch_status=LAUNCH_PARTIAL,
+        description="Bidirectional Official Account / WeCom bot channel (appid+secret or corpid+corpsecret+AgentId credentials). Backend protocol and inbound webhook route are implemented but not yet reachable end-to-end — see wechat_official_service.py.",
+        supports_inbound=True,
+        supports_outbound=True,
+        media_support=_media(text=True),
+        approval_policy="channel_policy",
+        health_check="credential_health",
+        provider="wechat_official_api",
+        runtime_provider="wechat_official_api",
+        connector_id="wechat_official",
+        account_provider="wechat_official",
+        vault_provider="wechat_official",
+        setup_available=False,
+        runtime_usable=False,
     ),
     _item(
         connection_id="instagram_business",

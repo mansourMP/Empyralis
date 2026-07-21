@@ -47,6 +47,7 @@ function makeContext(overrides: Partial<GatewayDoctorContext> = {}): GatewayDoct
     collectPassiveInventory: (async () => makeEmptyInventory()) as GatewayDoctorContext["collectPassiveInventory"],
     invalidatePassiveInventoryCache: () => undefined,
     detectSupervisor: () => "none",
+    auditSupervisorInstall: async () => ({ supported: false, definition: null, fileState: "not_applicable" }),
     ...overrides,
   };
 }
@@ -416,9 +417,123 @@ test("default checks: supervisor_presence passes under systemd/launchd, warns wh
   const supervised = await check.detect(makeContext({ detectSupervisor: () => "systemd" }));
   assert.equal(supervised.status, "pass");
 
-  const unsupervised = await check.detect(makeContext({ detectSupervisor: () => "none" }));
+  const unsupervised = await check.detect(
+    makeContext({
+      detectSupervisor: () => "none",
+      auditSupervisorInstall: async () => ({ supported: true, definition: null, fileState: "missing" }),
+    }),
+  );
   assert.equal(unsupervised.status, "warn");
   assert.match(unsupervised.detail, /no automatic restart/);
+});
+
+test("default checks: supervisor_presence distinguishes missing / installed-but-inactive / drifted / unsupported when not currently supervised", async () => {
+  const checks = buildDefaultGatewayDoctorChecks();
+  const check = checks.find((c) => c.id === "supervisor_presence")!;
+
+  const missing = await check.detect(
+    makeContext({
+      detectSupervisor: () => "none",
+      auditSupervisorInstall: async () => ({ supported: true, definition: null, fileState: "missing" }),
+    }),
+  );
+  assert.equal(missing.status, "warn");
+  assert.match(missing.detail, /no automatic restart/);
+
+  const installedInactive = await check.detect(
+    makeContext({
+      detectSupervisor: () => "none",
+      auditSupervisorInstall: async () => ({ supported: true, definition: null, fileState: "present_matching" }),
+    }),
+  );
+  assert.equal(installedInactive.status, "warn");
+  assert.match(installedInactive.detail, /take effect the next time/);
+
+  const drifted = await check.detect(
+    makeContext({
+      detectSupervisor: () => "none",
+      auditSupervisorInstall: async () => ({ supported: true, definition: null, fileState: "present_drifted" }),
+    }),
+  );
+  assert.equal(drifted.status, "warn");
+  assert.match(drifted.detail, /out of date/);
+
+  const unsupported = await check.detect(
+    makeContext({
+      detectSupervisor: () => "none",
+      auditSupervisorInstall: async () => ({ supported: false, definition: null, fileState: "not_applicable" }),
+    }),
+  );
+  assert.equal(unsupported.status, "warn");
+  assert.match(unsupported.detail, /isn't available on this computer's operating system/);
+});
+
+test("default checks: supervisor_presence repair skips entirely when already supervised", async () => {
+  const checks = buildDefaultGatewayDoctorChecks();
+  const check = checks.find((c) => c.id === "supervisor_presence")!;
+  let auditCalls = 0;
+  const result = await check.repair!(
+    makeContext({
+      detectSupervisor: () => "launchd",
+      auditSupervisorInstall: async () => {
+        auditCalls += 1;
+        return { supported: true, definition: null, fileState: "present_matching" };
+      },
+    }),
+  );
+  assert.equal(auditCalls, 0, "must not even audit the on-disk unit when this process is already confirmed-supervised");
+  assert.match(result.detail!, /already supervised/);
+});
+
+test("default checks: supervisor_presence repair installs a missing unit and reports the outcome", async () => {
+  const checks = buildDefaultGatewayDoctorChecks();
+  const check = checks.find((c) => c.id === "supervisor_presence")!;
+  let repairRequested = false;
+  const result = await check.repair!(
+    makeContext({
+      detectSupervisor: () => "none",
+      auditSupervisorInstall: async (attemptRepair: boolean) => {
+        repairRequested = attemptRepair;
+        return {
+          supported: true,
+          definition: null,
+          fileState: "missing",
+          repair: {
+            action: "wrote_new_unit",
+            changed: true,
+            permissionDenied: false,
+            requiresManualReload: false,
+            detail: "Installed the launch agent so this computer restarts itself automatically going forward.",
+          },
+        };
+      },
+    }),
+  );
+  assert.equal(repairRequested, true);
+  assert.match(result.detail!, /Installed the launch agent/);
+});
+
+test("default checks: supervisor_presence repair surfaces a permission-denied outcome honestly", async () => {
+  const checks = buildDefaultGatewayDoctorChecks();
+  const check = checks.find((c) => c.id === "supervisor_presence")!;
+  const result = await check.repair!(
+    makeContext({
+      detectSupervisor: () => "none",
+      auditSupervisorInstall: async () => ({
+        supported: true,
+        definition: null,
+        fileState: "missing",
+        repair: {
+          action: "permission_denied",
+          changed: false,
+          permissionDenied: true,
+          requiresManualReload: false,
+          detail: "Could not write the unit — this computer needs elevated permissions (for example, sudo) to install automatic restart here.",
+        },
+      }),
+    }),
+  );
+  assert.match(result.detail!, /elevated permissions/);
 });
 
 // ---------------------------------------------------------------------------

@@ -85,6 +85,20 @@ interface GatewayRunOptions {
   afterConnected?: () => Promise<void>;
 }
 
+/** Order-insensitive equality for the capability id lists advertised by
+ *  GatewayCapabilityRouter.supportedCapabilities() — used by
+ *  syncRequestedCapabilities() below to decide whether the set actually
+ *  changed since the last heartbeat tick before mutating the shared
+ *  runtimeMetadata object and journaling an update. */
+function capabilityListsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((value, index) => value === sortedB[index]);
+}
+
 function compactGatewayResponsePayload(payload?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!payload || payload.capability_id !== "screenshot.capture") {
     return payload;
@@ -420,7 +434,53 @@ export class GatewayWsClient {
     }
   }
 
+  /**
+   * Gap fix (reliability audit §5, docs/design/reliability-audit-1-gateway-
+   * health.md): capabilities used to be computed exactly once at startup
+   * (index.ts's buildRuntimeMetadata() call, before client.run() is ever
+   * invoked) and never recomputed — a capability that only became available
+   * after the process started (Docker installed, Ollama started, a CLI
+   * signed in) stayed invisible to the backend until a full process
+   * restart, because GatewayCapabilityRouter.supportedCapabilities() was
+   * simply never called again.
+   *
+   * supportedCapabilities() itself was ALWAYS safe to call repeatedly — it
+   * re-reads the same passive-inventory-driven desktop-permission flags
+   * (runtime/desktop-permissions.ts's shellSandboxDockerReady/
+   * llmRuntimeOllamaReady/llmRuntimeClaudeCodeReady/llmRuntimeCodexReady)
+   * that refreshPassiveInventorySnapshot() below already keeps fresh on
+   * every heartbeat tick. The gap was purely that nothing called it again
+   * after the one-time buildRuntimeMetadata(). This re-evaluates it on
+   * every heartbeat tick — the same periodic cadence that already
+   * re-evaluates ready/blocked within the (previously fixed) list — and,
+   * when the SET of advertised capabilities changed, mutates the shared
+   * runtimeMetadata object in place. Every consumer (this very heartbeat's
+   * payload just below, via buildGatewayHeartbeatPayload()'s
+   * capability_readiness.requested field — already persisted server-side
+   * on every gateway.heartbeat frame, see gateway_protocol_service.py's
+   * heartbeat handler — and the next gateway.connect on reconnect) reads
+   * runtimeMetadata.requestedCapabilities live off this one shared object,
+   * so no restart and no extra registration round trip is needed to pick
+   * the change up.
+   */
+  private syncRequestedCapabilities(runtimeMetadata: GatewayRuntimeMetadata): void {
+    const next = this.capabilityRouter.supportedCapabilities();
+    const previous = runtimeMetadata.requestedCapabilities;
+    if (capabilityListsEqual(previous, next)) {
+      return;
+    }
+    const added = next.filter((capability) => !previous.includes(capability));
+    const removed = previous.filter((capability) => !next.includes(capability));
+    runtimeMetadata.requestedCapabilities = next;
+    void this.journal.append("system", "gateway.capabilities.updated", {
+      added,
+      removed,
+      total: next.length,
+    });
+  }
+
   async sendHeartbeat(scope: GatewayScope, runtimeMetadata: GatewayRuntimeMetadata): Promise<void> {
+    this.syncRequestedCapabilities(runtimeMetadata);
     const checkpoints = await this.checkpoints.load();
     const outboxSummary = await this.outbox.summarize();
     const localRunnerReady = await this.checkLocalRunnerHealth();
