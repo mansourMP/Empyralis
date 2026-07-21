@@ -5587,6 +5587,41 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-work-activity-note {
   margin: 0 var(--space-5) var(--space-2); font-size: var(--text-xs); color: var(--text-muted); font-style: italic;
 }
+
+/* Plan section — the agent's live task list (from plan.updated trace
+   events, see WorkTab.tsx's latestPlanTasks), shown above Activity for a
+   complex request: created tasks and their active→done progress, watched
+   live like Claude Code's own todo list. Same "sticky uppercase caption +
+   hairline-divided rows" shape as Activity's own label/list below it, and
+   reuses its row-mount animation (fleet-activity-row-in) so a freshly
+   created task appears the same way a fresh activity row does. Renders
+   only when a plan exists (see the tasks.length guard at the call site) —
+   no empty "Plan · 0/0" box for conversations with no plan. */
+.fleet-work-plan { flex-shrink: 0; border-bottom: 1px solid var(--border); }
+.fleet-work-plan-header {
+  padding: var(--space-3) var(--space-5) var(--space-2);
+  font-size: var(--text-2xs); font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--text-muted);
+}
+.fleet-work-plan-header-count { color: var(--text-muted); font-weight: var(--weight-regular); text-transform: none; letter-spacing: normal; }
+.fleet-work-plan-list { display: flex; flex-direction: column; max-height: 240px; overflow-y: auto; padding-bottom: var(--space-2); }
+.fleet-work-plan-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 5px var(--space-5);
+  animation: fleet-activity-row-in 0.22s ease-out both;
+}
+.fleet-work-plan-mark {
+  flex-shrink: 0; width: 15px; height: 15px;
+  display: flex; align-items: center; justify-content: center; color: var(--text-muted);
+}
+.fleet-work-plan-mark--active { color: var(--accent); }
+.fleet-work-plan-title {
+  flex: 1; min-width: 0; font-size: var(--text-sm); color: var(--text-primary); line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fleet-work-plan-row--active .fleet-work-plan-title { font-weight: var(--weight-medium); }
+.fleet-work-plan-row--done .fleet-work-plan-title { color: var(--text-muted); }
+.fleet-work-plan-row--skipped { opacity: 0.55; }
 .fleet-work-activity-list { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: var(--space-4); }
 
 @keyframes fleet-activity-row-in {

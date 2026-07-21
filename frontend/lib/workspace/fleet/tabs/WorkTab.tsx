@@ -25,6 +25,9 @@ import {
   Video as VideoIcon,
   MessageSquare,
   TriangleAlert,
+  Check,
+  Circle,
+  Minus,
   type LucideIcon,
 } from "lucide-react";
 
@@ -265,14 +268,17 @@ type ActivityRow = {
 
 // Internal-only plumbing event types never rendered as their own row —
 // trace.started/routed carry routing metadata, not user-facing activity;
-// plan.item.updated/replanned are noisy mid-plan churn; assistant.message.*
-// and trace.completed/failed are handled separately (replied/error/trailing
+// plan.item.updated/replanned are noisy mid-plan churn; plan.updated is the
+// live plan snapshot consumed by PlanSection (see latestPlanTasks) rather
+// than the step-by-step timeline; assistant.message.* and
+// trace.completed/failed are handled separately (replied/error/trailing
 // rows) so they aren't double-rendered here.
 const SKIPPED_EVENT_TYPES = new Set([
   "trace.started",
   "trace.routed",
   "plan.item.updated",
   "plan.replanned",
+  "plan.updated",
   "assistant.message.completed",
   "assistant.message.delta",
   "reasoning.summary.delta",
@@ -280,6 +286,41 @@ const SKIPPED_EVENT_TYPES = new Set([
   "trace.completed",
   "browser.screenshot", // no thumbnail rendering in this pass — honest omission
 ]);
+
+// ── Plan (task list) model ──────────────────────────────────────────────
+// Contract (backend agent, rides the same trace stream as everything else
+// in this file): a "plan.updated" trace event whose data is
+// { tasks: [{ id, title, status: "pending"|"active"|"done"|"skipped" }] } —
+// the agent's CURRENT task list, sent whole each time it changes (created,
+// reordered, or a task's status flips). Only the latest such event in the
+// stream matters; earlier ones are superseded snapshots, not a log to
+// replay, so we scan back-to-front and take the first hit.
+type PlanTaskStatus = "pending" | "active" | "done" | "skipped";
+type PlanTask = { id: string; title: string; status: PlanTaskStatus };
+
+const PLAN_TASK_STATUSES: ReadonlySet<string> = new Set(["pending", "active", "done", "skipped"]);
+
+function latestPlanTasks(events: TraceEvent[]): PlanTask[] | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if ((e.event_type || "").toLowerCase() !== "plan.updated") continue;
+    const raw = e.data?.tasks;
+    if (!Array.isArray(raw)) return null;
+    const tasks: PlanTask[] = [];
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const o = item as Record<string, unknown>;
+      const id = String(o.id ?? "").trim();
+      const title = String(o.title ?? "").trim();
+      if (!id && !title) continue;
+      const statusRaw = String(o.status ?? "pending").trim().toLowerCase();
+      const status = (PLAN_TASK_STATUSES.has(statusRaw) ? statusRaw : "pending") as PlanTaskStatus;
+      tasks.push({ id: id || title, title: title || id, status });
+    }
+    return tasks;
+  }
+  return null;
+}
 
 /** Folds a trace's raw persisted events into display rows, correlating a
  *  tool/search/delegation/approval's start + result into ONE row (updated
@@ -746,6 +787,60 @@ function ActivityRowView({ row, delaySeconds }: { row: ActivityRow; delaySeconds
   );
 }
 
+// ── Plan (task list) rendering ───────────────────────────────────────────
+
+function PlanTaskMark({ status }: { status: PlanTaskStatus }) {
+  if (status === "done") return <Check size={13} strokeWidth={2.25} />;
+  if (status === "active") return <Loader2 size={13} strokeWidth={2.25} className="fleet-work-activity-spin" />;
+  if (status === "skipped") return <Minus size={13} strokeWidth={2.25} />;
+  return <Circle size={13} strokeWidth={1.75} />;
+}
+
+/** The agent's live task list — rendered above Activity so a complex
+ *  request's plan (created via plan.updated trace events, see
+ *  latestPlanTasks) is visible before its step-by-step execution log.
+ *  Mirrors ActivityTimeline's cascade-stagger-on-first-paint + per-row
+ *  mount animation so a freshly created task appears the same way a fresh
+ *  activity row does — one motion language across both lists. */
+function PlanSection({ tasks }: { tasks: PlanTask[] }) {
+  const done = tasks.filter((t) => t.status === "done").length;
+
+  const staggeredIdsRef = useRef<Set<string>>(new Set());
+  const orderRef = useRef<string[]>([]);
+  for (const t of tasks) {
+    if (!staggeredIdsRef.current.has(t.id)) {
+      staggeredIdsRef.current.add(t.id);
+      orderRef.current.push(t.id);
+    }
+  }
+
+  return (
+    <div className="fleet-work-plan">
+      <div className="fleet-work-plan-header">
+        Plan<span className="fleet-work-plan-header-count"> · {done}/{tasks.length}</span>
+      </div>
+      <div className="fleet-work-plan-list">
+        {tasks.map((t) => {
+          const order = orderRef.current.indexOf(t.id);
+          const delaySeconds = order >= 0 && order < 24 ? order * 0.08 : null;
+          return (
+            <div
+              key={t.id}
+              className={`fleet-work-plan-row fleet-work-plan-row--${t.status}`}
+              style={delaySeconds !== null ? { animationDelay: `${delaySeconds}s` } : undefined}
+            >
+              <span className={`fleet-work-plan-mark fleet-work-plan-mark--${t.status}`}>
+                <PlanTaskMark status={t.status} />
+              </span>
+              <span className="fleet-work-plan-title">{t.title}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ActivityTimeline({ rows }: { rows: ActivityRow[] }) {
   // Cascade-stagger the initial paint of a given selection (a live trace's
   // rows arrive one at a time for free; a completed one is fetched as one
@@ -900,6 +995,14 @@ export function WorkTab({
   const receivedTurn = traceRef && selectedThread?.turns ? findPrecedingCustomerTurn(selectedThread.turns, traceRef.assistantIndex) : undefined;
 
   const middleRows = useMemo(() => buildActivityRows(effectiveEvents), [effectiveEvents]);
+  // Latest plan.updated snapshot for the selected conversation's trace — see
+  // latestPlanTasks. Recomputes as effectiveEvents grows (live SSE while the
+  // trace is still running, or the fetched batch once it's finished), which
+  // is what makes the Plan section update live as the agent creates tasks
+  // and flips them active → done. null (not []) when no plan.updated has
+  // ever been seen on this trace, so the section can render nothing rather
+  // than an empty "Plan · 0/0" box.
+  const planTasks = useMemo(() => latestPlanTasks(effectiveEvents), [effectiveEvents]);
 
   const activityRows: ActivityRow[] = useMemo(() => {
     if (!selectedThread) return [];
@@ -1110,6 +1213,7 @@ export function WorkTab({
                     </div>
                   )}
                 </div>
+                {planTasks && planTasks.length > 0 && <PlanSection tasks={planTasks} />}
                 <div className="fleet-work-activity-label">Activity</div>
                 {!hasResolvedTrace && (
                   <p className="fleet-work-activity-note">
