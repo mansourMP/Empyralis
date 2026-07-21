@@ -139,6 +139,73 @@ def is_configured() -> bool:
     return bool(_bot_token())
 
 
+# ── 401 circuit breaker (dead/revoked hosted bot token) ──
+#
+# Telegram returns HTTP 401 with {"ok": false, "error_code": 401} when the
+# bot token has been revoked or is otherwise invalid. That is a *permanent*
+# auth failure — unlike 429 (rate limit) or 5xx/network errors, which are
+# transient and should keep retrying at the normal cadence. Without this
+# breaker, the 2s background poll loop (_background_polling_loop) and the 4s
+# typing-indicator loop (_typing_loop) would hammer Telegram's API forever
+# against a dead token.
+#
+# On a 401 we suspend the hosted bot: the poll loop backs off from
+# _BG_POLL_INTERVAL (2s) to _SUSPENDED_POLL_INTERVAL_SECONDS (5min), and the
+# typing loop stops calling the API entirely while suspended. Each slow-
+# cadence poll doubles as a reauth probe — one successful call clears the
+# suspension automatically (no restart required once the token is fixed).
+# State is in-memory/per-process by design: a process restart (e.g. after an
+# operator rotates the env var) also clears it.
+_SUSPENDED_POLL_INTERVAL_SECONDS = 300  # 5 min probe cadence while suspended
+
+
+class TelegramUnauthorizedError(RuntimeError):
+    """Raised when Telegram returns 401 — the bot token is invalid/revoked."""
+
+
+_HOSTED_BOT_AUTH_STATE: Dict[str, Any] = {
+    "suspended": False,
+    "reason": None,
+    "suspended_at": None,  # epoch seconds
+    "consecutive_401s": 0,
+}
+
+
+def _trip_circuit_breaker(reason: str) -> None:
+    """Mark the hosted bot suspended after a 401. Idempotent — safe to call
+    on every subsequent 401 while already suspended (refreshes the reason)."""
+    _HOSTED_BOT_AUTH_STATE["suspended"] = True
+    _HOSTED_BOT_AUTH_STATE["reason"] = reason
+    _HOSTED_BOT_AUTH_STATE["suspended_at"] = time.time()
+    _HOSTED_BOT_AUTH_STATE["consecutive_401s"] = int(_HOSTED_BOT_AUTH_STATE.get("consecutive_401s") or 0) + 1
+    LOGGER.error(
+        "Sage Telegram hosted bot SUSPENDED (401 Unauthorized — token revoked/invalid): %s. "
+        "Polling/typing back off to a %ss probe cadence; re-enter a valid "
+        "EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN to recover.",
+        reason, _SUSPENDED_POLL_INTERVAL_SECONDS,
+    )
+
+
+def _clear_circuit_breaker() -> None:
+    """Clear the suspended state after any call succeeds. No-op (cheap) when
+    already clear."""
+    if _HOSTED_BOT_AUTH_STATE.get("suspended"):
+        LOGGER.info(
+            "Sage Telegram hosted bot: token accepted again — clearing 401 "
+            "suspension, resuming normal polling cadence."
+        )
+    _HOSTED_BOT_AUTH_STATE["suspended"] = False
+    _HOSTED_BOT_AUTH_STATE["reason"] = None
+    _HOSTED_BOT_AUTH_STATE["suspended_at"] = None
+    _HOSTED_BOT_AUTH_STATE["consecutive_401s"] = 0
+
+
+def hosted_bot_auth_status() -> Dict[str, Any]:
+    """Public snapshot of the 401 circuit-breaker state, for surfacing to
+    operators (e.g. GET /sage/telegram-hosted/info)."""
+    return dict(_HOSTED_BOT_AUTH_STATE)
+
+
 # --- Pairing ---
 
 def generate_pairing_code(*, workspace_id: str) -> str:
@@ -292,9 +359,23 @@ async def _telegram_api(method: str, body: dict) -> dict:
     url = f"{TELEGRAM_API_BASE}/bot{token}/{method}"
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
         resp = await client.post(url, json=body)
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        # 401 (Unauthorized) is Telegram's signal that the bot token itself
+        # is invalid/revoked — a permanent auth failure, never fixed by
+        # retrying. Distinguish it from transient 429/5xx/network errors
+        # (those fall through to the `not data.get("ok")` warning below and
+        # keep retrying at the normal cadence via the callers' own loops).
+        if resp.status_code == 401 or data.get("error_code") == 401:
+            reason = str(data.get("description") or f"HTTP {resp.status_code}").strip()
+            _trip_circuit_breaker(reason)
+            raise TelegramUnauthorizedError(reason)
         if not data.get("ok"):
             LOGGER.warning("Telegram API error: %s %s", method, data.get("description", "unknown"))
+        else:
+            _clear_circuit_breaker()
         return data
 
 
@@ -528,6 +609,12 @@ async def send_sage_reply(chat_id: str, text: str, *, reply_to_message_id: Optio
 async def _typing_loop(chat_id: str) -> None:
     """Re-send typing action every _TYPING_REFRESH_SECONDS until cancelled."""
     while True:
+        if _HOSTED_BOT_AUTH_STATE.get("suspended"):
+            # Token is dead (401) — don't hammer sendChatAction every 4s.
+            # The background poller's slow-cadence probe will clear the
+            # breaker once the token is fixed; wait for that cadence here too.
+            await asyncio.sleep(_SUSPENDED_POLL_INTERVAL_SECONDS)
+            continue
         try:
             await send_chat_action(chat_id, "typing")
         except Exception:
@@ -1437,6 +1524,7 @@ async def _background_polling_loop() -> None:
     global _last_update_id
     LOGGER.info("Sage Telegram hosted: background polling started")
     while True:
+        sleep_seconds = _BG_POLL_INTERVAL
         try:
             if not _SAGE_HOSTED_PAIRS:
                 await asyncio.sleep(_BG_POLL_INTERVAL)
@@ -1494,9 +1582,20 @@ async def _background_polling_loop() -> None:
                         if parsed and str(parsed.get("text") or "").strip():
                             await _process_update(u)
                             break
+        except TelegramUnauthorizedError as exc:
+            # Permanent auth failure (401) — the token is dead. Stop hammering
+            # getUpdates every _BG_POLL_INTERVAL seconds; back off hard, and
+            # let this slow cadence double as the next reauth probe (the
+            # circuit breaker self-clears the moment a call succeeds again).
+            LOGGER.warning(
+                "Sage Telegram hosted: polling suspended pending token fix (%s) — "
+                "next probe in %ss", exc, _SUSPENDED_POLL_INTERVAL_SECONDS,
+            )
+            sleep_seconds = _SUSPENDED_POLL_INTERVAL_SECONDS
         except Exception as exc:
+            # Transient (network/429/5xx/etc.) — keep the normal retry cadence.
             LOGGER.warning("Sage Telegram hosted: polling loop error: %s", exc)
-        await asyncio.sleep(_BG_POLL_INTERVAL)
+        await asyncio.sleep(sleep_seconds)
 
 
 def start_background_polling() -> None:

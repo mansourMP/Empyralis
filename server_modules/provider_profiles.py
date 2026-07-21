@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote, quote_plus
 
 from server_modules import platform_config_schema, pricing_registry_service, secrets_broker, usage_accounting_service
+from server_modules import credential_rotation_service
 
 # ---------------------------------------------------------------------------
 # Imports from server.py globals – these must be supplied by the caller or
@@ -88,6 +89,14 @@ def resolve_vault_credential(credential_id, workspace_id=None, **scope):
 def resolve_default_vault_credential(provider, workspace_id=None, **scope):
     _init()
     return _server.resolve_default_vault_credential(provider, workspace_id, **scope)
+
+
+def list_vault_credentials(workspace_id=None):
+    """Redacted (no secret) list of AI-provider vault credentials visible to
+    `workspace_id` -- used by `_build_provider_credential_candidates` to find
+    the BYOK key-rotation pool for a (workspace, provider) pair."""
+    _init()
+    return _server.list_vault_credentials(workspace_id)
 
 
 def _validation_message(provider_label: str, response: Dict[str, Any]) -> str:
@@ -3154,6 +3163,79 @@ def openai_compatible_provider_config_error(
     return ""
 
 
+def _rotation_pool_candidates(
+    canonical_provider: str,
+    workspace_id: str,
+    primary_credential_id: str,
+    tenant_id: Optional[str],
+    run_id: Optional[str],
+    seen_labels: Set[str],
+) -> List[Dict[str, Any]]:
+    """Gap 1.5 -- API key rotation on rate-limit.
+
+    Sibling BYOK vault credentials for the same (workspace, provider) as the
+    agent's primary `credential_id`, resolved as extra failover candidates so
+    a 429 on the primary can rotate to a second/third registered key for that
+    provider. `vault_credentials` has never enforced one-row-per-provider (see
+    `credential_rotation_service` module docstring) -- a workspace can already
+    register a second key today via the same `/api/connectors/vault` POST
+    used for the first one; this is what makes that pool usable at the LLM
+    call site instead of only the first-registered row ever being resolved.
+
+    A workspace with exactly one credential for this provider gets an empty
+    list back here, so the single-key path is byte-for-byte unchanged.
+    Credentials currently cooling down from a recent 429
+    (`credential_rotation_service.is_cooling_down`) are skipped.
+    """
+    pool: List[Dict[str, Any]] = []
+    primary_id = str(primary_credential_id or "").strip()
+    try:
+        entries = list_vault_credentials(workspace_id)
+    except Exception:
+        return pool
+    if not isinstance(entries, list):
+        return pool
+    siblings = [
+        entry for entry in entries
+        if isinstance(entry, dict)
+        and str(entry.get("provider") or "").strip().lower() == canonical_provider
+        and str(entry.get("id") or "").strip()
+        and str(entry.get("id") or "").strip() != primary_id
+    ]
+    siblings.sort(key=lambda e: str(e.get("created_at") or ""))
+    for sibling in siblings:
+        sid = str(sibling.get("id") or "").strip()
+        label = f"rotation:{sid}"
+        if label in seen_labels or credential_rotation_service.is_cooling_down(sid):
+            continue
+        try:
+            credentials = resolve_vault_credential(
+                sid,
+                workspace_id,
+                tenant_id=tenant_id,
+                provider=canonical_provider,
+                tool_name="provider_candidate_resolution",
+                run_id=run_id,
+                purpose="provider_rotation_resolution",
+                actor_type="provider_profile",
+            )
+        except Exception:
+            continue
+        if openai_compatible_provider_config_error(canonical_provider, credentials):
+            continue
+        pool.append(
+            {
+                "source": "rotation",
+                "credentials": credentials,
+                "credential_id": sid,
+                "profile_id": None,
+                "label": label,
+            }
+        )
+        seen_labels.add(label)
+    return pool
+
+
 def _build_provider_credential_candidates(context: Dict[str, Any], metadata: Dict[str, Any], provider: str) -> List[Dict[str, Any]]:
     _init()
     workspace_id = str(context.get("workspace_id") or metadata.get("workspace_id") or "default").strip() or "default"
@@ -3187,11 +3269,19 @@ def _build_provider_credential_candidates(context: Dict[str, Any], metadata: Dic
             {
                 "source": "credential_id",
                 "credentials": credentials,
+                "credential_id": str(credential_id),
                 "profile_id": None,
                 "label": f"credential:{credential_id}",
             }
         )
         seen_labels.add(f"credential:{credential_id}")
+        # Gap 1.5 -- rotate to a sibling BYOK key registered for the same
+        # (workspace, provider) if the primary one is unavailable/rate-limited.
+        candidates.extend(
+            _rotation_pool_candidates(
+                canonical_provider, workspace_id, str(credential_id), tenant_id, run_id, seen_labels,
+            )
+        )
 
     if isinstance(metadata.get("credentials"), dict) and metadata.get("credentials"):
         config_error = openai_compatible_provider_config_error(
@@ -3481,7 +3571,16 @@ def _build_provider_credential_candidates(context: Dict[str, Any], metadata: Dic
         )
         seen_labels.add("local-ollama")
 
-    return candidates
+    # Gap 1.5 -- drop any candidate whose credential is presently cooling
+    # down from a recent 429 (see credential_rotation_service), UNLESS that
+    # would empty the list entirely. A single-key workspace's one candidate
+    # is never dropped this way -- it has nowhere to fail over to, so it
+    # must keep being offered exactly like before this change.
+    cooled = [
+        c for c in candidates
+        if not credential_rotation_service.is_cooling_down(c.get("credential_id"))
+    ]
+    return cooled or candidates
 
 
 def _workspace_user_facing_auth_modes(provider_id: str, catalog_entry: Dict[str, Any]) -> List[Dict[str, Any]]:

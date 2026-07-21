@@ -2,6 +2,7 @@ from server_modules import runtime_config as config
 from server_modules import run_service
 from server_modules import shared as shared
 from server_modules import runtime_common as common
+from server_modules import credential_rotation_service
 # Phase 3 stubs: approval system removed — these were from runs_history
 def _approval_correlation_id(approval_id: str, run_id: str | None = None, event_id: str | None = None) -> str:
     return f"corr-{approval_id or run_id or event_id or 'unknown'}"
@@ -119,6 +120,7 @@ def generate_with_candidate_failover(
             continue
         initial_model = str(candidate.get("model") or default_model).strip() or default_model
         profile_id = str(candidate.get("profile_id") or "").strip() or None
+        credential_id = str(candidate.get("credential_id") or "").strip() or None
         source = str(candidate.get("source") or "unknown").strip()
         fallback_models = candidate.get("fallback_models")
         if not isinstance(fallback_models, list):
@@ -142,6 +144,8 @@ def generate_with_candidate_failover(
                 text = adapter.generate(system_prompt, user_input, model, credentials)
                 if profile_id:
                     _mark_profile_success(profile_id)
+                if credential_id:
+                    credential_rotation_service.mark_success(credential_id)
                 state["active_candidate_index"] = idx
                 state["active_profile_id"] = profile_id
                 state["active_model"] = model
@@ -175,8 +179,14 @@ def generate_with_candidate_failover(
             except Exception as exc:
                 last_error = exc
                 candidate_error = exc
+                is_rate_limited = _is_rate_limit_runtime_error(exc)
+                if is_rate_limited and credential_id:
+                    # Gap 1.5 -- rotate away from this key: it won't be
+                    # offered again as a candidate (this run or future ones)
+                    # until its cooldown elapses.
+                    credential_rotation_service.mark_rate_limited(credential_id)
                 if (
-                    _is_rate_limit_runtime_error(exc)
+                    is_rate_limited
                     and model_attempt_index + 1 < len(model_attempts)
                 ):
                     next_model = model_attempts[model_attempt_index + 1]

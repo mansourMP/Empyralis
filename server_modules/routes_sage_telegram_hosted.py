@@ -106,16 +106,39 @@ async def pairing_status(
     )
     pending_code = hosted.pairing_code_for_workspace(workspace_id)
     already_paired = hosted.is_workspace_paired(workspace_id)
+    # The hosted bot is a single shared token across every paired workspace,
+    # so a 401-tripped circuit breaker (dead/revoked token) affects everyone
+    # paired to it — surface it here too, not just on the admin info route,
+    # so a paired workspace owner can see why replies have stopped.
+    auth_status = hosted.hosted_bot_auth_status()
     return {
         "configured": hosted.is_configured(),
         "has_pending_code": pending_code is not None,
         "paired": already_paired,
+        "suspended": bool(auth_status.get("suspended")),
+        "needs_reauth": bool(auth_status.get("suspended")),
     }
 
 @router.get("/sage/telegram-hosted/info")
 async def bot_info() -> dict:
     if not hosted.is_configured():
         return {"configured": False, "username": None}
+    # If the 401 circuit breaker already tripped (background poller found a
+    # dead token), don't spend another live call proving it again — report
+    # the cached suspended state so this status endpoint can't itself become
+    # another hammer source if the frontend polls it. The next slow-cadence
+    # probe from the background poller (or a subsequent call to this route
+    # once fixed) is what clears it.
+    auth_status = hosted.hosted_bot_auth_status()
+    if auth_status.get("suspended"):
+        return {
+            "configured": True,
+            "username": hosted._bot_username() or None,
+            "suspended": True,
+            "needs_reauth": True,
+            "suspended_reason": auth_status.get("reason"),
+            "suspended_at": auth_status.get("suspended_at"),
+        }
     try:
         info = await hosted.get_bot_info()
         bot_data = info.get("result", {}) if isinstance(info.get("result"), dict) else {}
@@ -123,9 +146,18 @@ async def bot_info() -> dict:
             "configured": True,
             "username": bot_data.get("username", ""),
             "name": bot_data.get("first_name", ""),
+            "suspended": False,
+        }
+    except hosted.TelegramUnauthorizedError as exc:
+        return {
+            "configured": True,
+            "username": hosted._bot_username() or None,
+            "suspended": True,
+            "needs_reauth": True,
+            "suspended_reason": str(exc),
         }
     except Exception:
-        return {"configured": True, "username": hosted._bot_username() or None}
+        return {"configured": True, "username": hosted._bot_username() or None, "suspended": False}
 
 
 @router.post("/sage/telegram-hosted/webhook")
