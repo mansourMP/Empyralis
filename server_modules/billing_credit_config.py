@@ -106,7 +106,7 @@ HOSTED_SAGE_AI_CREDITS_PER_USD = int(
     round(
         _env_non_negative_float(
             "EMPYRALIS_DISPLAY_CREDITS_PER_USD",
-            2_000,
+            100,
         )
     )
 )
@@ -123,10 +123,12 @@ DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = _env_non_negative_float(
 
 # ── 3. Free allowance ───────────────────────────────────────────────────
 # One-time (new workspaces) / floor top-up (pre-existing workspaces) grant
-# in USD. At the default rate this is 5.00 * 2,000 = 10,000 credits.
+# in USD. At the default rate (100 credits/$) this is 1.00 * 100 = 100 credits
+# — a lean, non-inflated free allowance (~one message per credit), in the
+# spirit of a small starter grant rather than a giant credit pile.
 NEW_ACCOUNT_SIGNUP_CREDIT_USD = _env_non_negative_float(
     "EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD",
-    5.00,
+    1.00,
 )
 
 # Kept distinct from NEW_ACCOUNT_SIGNUP_CREDIT_USD (own env var) even
