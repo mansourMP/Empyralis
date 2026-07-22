@@ -350,6 +350,7 @@ def _compact_conversation_messages_in_place(
     thread_id: str,
     provider: Optional[str],
     model: Optional[str],
+    trace_context: Optional[Any] = None,
 ) -> bool:
     """Summarize the older portion of ``conversation_messages`` and replace it
     with a compaction summary, keeping the most recent turns raw. Mutates the
@@ -404,6 +405,20 @@ def _compact_conversation_messages_in_place(
                 # mismatched tenant_id here can never break this turn.
                 tenant_id="default",
                 thread_id=thread_id,
+                # Thread the turn's own provider/model through (already
+                # resolved by both callers below via actual_provider/
+                # actual_model, and already used two lines above for
+                # resolve_context_window) so compaction summarizes on the
+                # model this turn is actually running on instead of falling
+                # through to compact_turns' silent platform-wide "deepseek"
+                # default.
+                provider=provider,
+                model=model,
+                # So a silent no-op (unset/unreachable provider key) surfaces
+                # as a real "compaction.skipped" trace event on this turn's
+                # own trace, not just the server-side WARNING log compact_
+                # turns now always emits for that case.
+                trace_context=trace_context,
             )
         )
         if not summary:
@@ -875,6 +890,41 @@ def _finish_trace(trace_context: Optional[Any], *, outcome: str, final_message_i
     )
 
 
+def _persist_assigned_task_plan(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    plan: List[Dict[str, Any]],
+) -> None:
+    """Tier C's persist side (docs/design/tasks-to-agents-research.md Section
+    4.4): when this turn was working an assigned task (task_id present in
+    turn/trace metadata -- see the current_plan seed near the top of
+    stream_provider_backed_direct_chat), write update_plan's current_plan
+    back onto the task row at turn end, so it survives past this turn/run
+    instead of dying with it the way an ordinary (no task in play) turn's
+    plan still does. Called once per outcome branch, right alongside
+    _finish_trace -- every terminal path of the turn, not just the success
+    one, since the plan reflects whatever state it was actually left in.
+    A no-op when task_id/tenant_id is blank (every ordinary turn) and
+    best-effort otherwise: a persistence failure must never fail the turn."""
+    if not task_id or not tenant_id:
+        return
+    try:
+        from server_modules import project_tasks_service
+
+        run_async_tool_call(
+            project_tasks_service.set_task_plan(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                plan=plan,
+            )
+        )
+    except Exception:
+        pass
+
+
 def _public_generation_error_code(llm_error: str) -> str:
     detail = str(llm_error or "").strip()
     if detail.startswith("max_tool_iterations_reached:"):
@@ -1210,6 +1260,41 @@ def stream_provider_backed_direct_chat(
     # round, never a standing bypass.
     _plan_completion_needs_wrapup_round = False
 
+    # Tier C "plans as durable artifacts" (docs/design/tasks-to-agents-
+    # research.md Section 4.4): when this turn was woken to work an assigned
+    # task -- task_id present in turn/trace metadata, stamped by
+    # runtime_heartbeat_service.build_heartbeat_turn_request for a
+    # task_assigned wakeup (bounded_scheduler_service.
+    # schedule_task_assigned_wakeup) -- seed current_plan from that task's
+    # own persisted plan instead of starting empty, so the checklist
+    # survives the wakeup -> turn -> wakeup gap. A no-op (current_plan stays
+    # [], _assigned_task_id stays "") for every ordinary turn -- every turn
+    # that never carries a task_id here -- so existing per-turn behavior is
+    # unchanged. _assigned_task_id/_assigned_task_tenant_id are also read at
+    # turn end (see _persist_assigned_task_plan calls below) to persist the
+    # plan back onto the task row.
+    _turn_metadata_for_task = {
+        **_turn_metadata_from_session(session_ctx),
+        **(metadata if isinstance(metadata, dict) else {}),
+    }
+    _assigned_task_id = str(_turn_metadata_for_task.get("task_id") or "").strip()
+    _assigned_task_tenant_id = str(_turn_metadata_for_task.get("tenant_id") or "").strip()
+    if _assigned_task_id and _assigned_task_tenant_id:
+        try:
+            from server_modules import project_tasks_service
+
+            _seeded_plan = run_async_tool_call(
+                project_tasks_service.get_task_plan(
+                    tenant_id=_assigned_task_tenant_id,
+                    workspace_id=normalized_workspace_id,
+                    task_id=_assigned_task_id,
+                )
+            )
+            if isinstance(_seeded_plan, list) and _seeded_plan:
+                current_plan = _seeded_plan
+        except Exception:
+            pass
+
     # --- Attachment context injection ---
     attachment_context = ""
     _attachments = []
@@ -1365,6 +1450,12 @@ def stream_provider_backed_direct_chat(
         )
         if trace_completed is not None:
             yield trace_completed
+        _persist_assigned_task_plan(
+            tenant_id=_assigned_task_tenant_id,
+            workspace_id=normalized_workspace_id,
+            task_id=_assigned_task_id,
+            plan=current_plan,
+        )
         _finish_trace(trace_context, outcome="success", final_message_id=assistant_message_id)
         yield {
             "type": "final",
@@ -1497,6 +1588,7 @@ def stream_provider_backed_direct_chat(
                     thread_id=normalized_thread_id,
                     provider=str(actual_provider or context.get("provider") or "").strip() or None,
                     model=str(actual_model or "").strip() or None,
+                    trace_context=trace_context,
                 )
 
         messages = conversation_messages or []
@@ -1613,6 +1705,12 @@ def stream_provider_backed_direct_chat(
                         )
                         if trace_failed is not None:
                             yield trace_failed
+                        _persist_assigned_task_plan(
+                            tenant_id=_assigned_task_tenant_id,
+                            workspace_id=normalized_workspace_id,
+                            task_id=_assigned_task_id,
+                            plan=current_plan,
+                        )
                         _finish_trace(trace_context, outcome="partial", final_message_id=None)
                         yield {
                             "type": "final",
@@ -1708,6 +1806,12 @@ def stream_provider_backed_direct_chat(
                         )
                         if trace_completed is not None:
                             yield trace_completed
+                        _persist_assigned_task_plan(
+                            tenant_id=_assigned_task_tenant_id,
+                            workspace_id=normalized_workspace_id,
+                            task_id=_assigned_task_id,
+                            plan=current_plan,
+                        )
                         _finish_trace(trace_context, outcome="needs_input", final_message_id=None)
                         yield {
                             "type": "final",
@@ -2188,20 +2292,25 @@ def stream_provider_backed_direct_chat(
                                 step_id=step_id,
                                 status="done",
                             )
+                            # Same 4,000-char bound for every provider, codex_cli included —
+                            # codex_cli tool results (shell/file/apply_patch output routed
+                            # through direct_tool_followup_message) have no structural reason
+                            # to be longer than any other provider's tool result, so this
+                            # re-uses the exact cap/format below rather than re-injecting raw.
+                            _tool_content = tool_result_for_context
+                            if len(_tool_content) > 4000:
+                                _tool_content = _tool_content[:3800] + f"\n...[truncated {len(_tool_content) - 3800} chars]"
                             if effective_iteration_provider == "codex_cli":
                                 conversation_messages.append(
                                     {
                                         "role": "user",
                                         "content": services.direct_tool_followup_message(
                                             str(tool_call.get("name") or f"{connector_id}__{action_id}"),
-                                            tool_result_for_context,
+                                            _tool_content,
                                         ),
                                     }
                                 )
                             else:
-                                _tool_content = tool_result_for_context
-                                if len(_tool_content) > 4000:
-                                    _tool_content = _tool_content[:3800] + f"\n...[truncated {len(_tool_content) - 3800} chars]"
                                 conversation_messages.append(
                                     {
                                         "role": "tool",
@@ -2322,6 +2431,12 @@ def stream_provider_backed_direct_chat(
                         )
                         if trace_failed is not None:
                             yield trace_failed
+                        _persist_assigned_task_plan(
+                            tenant_id=_assigned_task_tenant_id,
+                            workspace_id=normalized_workspace_id,
+                            task_id=_assigned_task_id,
+                            plan=current_plan,
+                        )
                         _finish_trace(trace_context, outcome="partial", final_message_id=None)
                         yield {
                             "type": "final",
@@ -2473,6 +2588,12 @@ def stream_provider_backed_direct_chat(
                 )
                 if trace_completed is not None:
                     yield trace_completed
+                _persist_assigned_task_plan(
+                    tenant_id=_assigned_task_tenant_id,
+                    workspace_id=normalized_workspace_id,
+                    task_id=_assigned_task_id,
+                    plan=current_plan,
+                )
                 _finish_trace(trace_context, outcome="success", final_message_id=assistant_message_id)
                 effective_provider = str(actual_provider or context.get("provider") or "").strip() or None
                 effective_model = str(actual_model or "").strip() or None
@@ -2612,6 +2733,7 @@ def stream_provider_backed_direct_chat(
                         thread_id=normalized_thread_id,
                         provider=str(actual_provider or context.get("provider") or "").strip() or None,
                         model=str(actual_model or "").strip() or None,
+                        trace_context=trace_context,
                     )
                     if _retry_compacted:
                         llm_error = ""
@@ -2745,6 +2867,12 @@ def stream_provider_backed_direct_chat(
             "type": "final",
             "payload": _mask_platform_paid_final_payload(final_response_payload, platform_paid_identity),
         }
+        _persist_assigned_task_plan(
+            tenant_id=_assigned_task_tenant_id,
+            workspace_id=normalized_workspace_id,
+            task_id=_assigned_task_id,
+            plan=current_plan,
+        )
         _finish_trace(trace_context, outcome="success", final_message_id=assistant_message_id)
         try:
             services.persist_direct_chat_memory_best_effort(
@@ -2823,6 +2951,12 @@ def stream_provider_backed_direct_chat(
     )
     if trace_failed is not None:
         yield trace_failed
+    _persist_assigned_task_plan(
+        tenant_id=_assigned_task_tenant_id,
+        workspace_id=normalized_workspace_id,
+        task_id=_assigned_task_id,
+        plan=current_plan,
+    )
     _finish_trace(trace_context, outcome="partial", final_message_id=None)
     platform_paid_identity = _platform_paid_ai_identity(
         availability_payload=availability_payload,

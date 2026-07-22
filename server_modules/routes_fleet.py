@@ -233,6 +233,154 @@ async def fleet_patch_project(
         return {"ok": False, "error": str(exc)}
 
 
+# ── Tasks -> Agents backend foundation (docs/design/tasks-to-agents-
+# research.md Section 4.6, steps 1-3): a first-class task object inside a
+# Project that can be assigned to an agent. Same auth/response conventions
+# as the Projects CRUD directly above -- viewer for reads, owner for any
+# mutation, {"ok": ..., ...} on every branch, never a raised HTTPException
+# for a business-logic failure. ──────────────────────────────────────────
+
+@router.get("/api/w/{workspace_id}/fleet/tasks")
+async def fleet_list_tasks(
+    request: Request,
+    workspace_id: str,
+    project_id: Optional[str] = Query(None, description="Filter to one project"),
+    assignee_agent_id: Optional[str] = Query(None, description="Filter to one assignee"),
+    status: Optional[str] = Query(None, description="open | in_progress | blocked | awaiting_input | done"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """List tasks in the workspace, optionally filtered to a project,
+    assignee, and/or status."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        rows = await tasks.list_tasks(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            project_id=project_id,
+            assignee_agent_id=assignee_agent_id,
+            status=status,
+        )
+        return {"ok": True, "tasks": rows}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "tasks": []}
+
+
+class FleetCreateTaskRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    description: str = ""
+    due_at: Optional[str] = None
+
+
+@router.post("/api/w/{workspace_id}/fleet/tasks")
+async def fleet_create_task(
+    request: Request,
+    workspace_id: str,
+    body: FleetCreateTaskRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Create a task inside a project. Unassigned (backlog) until assign_task
+    is called separately -- creation and assignment are deliberately two
+    steps, matching every product docs/design/tasks-to-agents-research.md
+    §2 surveyed (an issue can exist before anyone owns it)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        task = await tasks.create_task(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            project_id=body.project_id,
+            title=body.title,
+            description=body.description,
+            created_by=str((current_user or {}).get("user_id") or "").strip() or None,
+            due_at=body.due_at,
+        )
+        return {"ok": True, "task": task}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+class FleetPatchTaskRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    due_at: Optional[str] = None
+    clear_due_at: bool = False
+
+
+@router.patch("/api/w/{workspace_id}/fleet/tasks/{task_id}")
+async def fleet_patch_task(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    body: FleetPatchTaskRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Edit a task's title/description/status/due_at. Status transitions are
+    plain field updates here -- open/in_progress/blocked/awaiting_input/done
+    are all reachable through this one endpoint; a "done" review gate is a
+    later step (docs/design/tasks-to-agents-research.md §4.6 step 6), not
+    this one. Assignment is NOT patchable here -- see /assign below, the one
+    shared code path for setting assignee_agent_id."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        task = await tasks.update_task(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            task_id=task_id,
+            title=body.title,
+            description=body.description,
+            status=body.status,
+            due_at=body.due_at,
+            clear_due_at=body.clear_due_at,
+        )
+        if task is None:
+            return {"ok": False, "error": "Task not found."}
+        return {"ok": True, "task": task}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+class FleetAssignTaskRequest(BaseModel):
+    agent_id: str = Field(min_length=1)
+
+
+@router.post("/api/w/{workspace_id}/fleet/tasks/{task_id}/assign")
+async def fleet_assign_task(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    body: FleetAssignTaskRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Assign a task to an agent -- calls project_tasks_service.assign_task,
+    the ONE code path a future @-mention resolver must also call (docs/
+    design/tasks-to-agents-research.md §2 pitfall #2: assignment and mention
+    must never fork into two different code paths). Schedules the
+    task_assigned wakeup as a side effect; a scheduler failure is reported
+    in the response without undoing the assignment itself (see assign_task's
+    own docstring)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        result = await tasks.assign_task(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            task_id=task_id,
+            agent_id=body.agent_id,
+            triggered_by=str((current_user or {}).get("user_id") or "").strip() or "owner",
+        )
+        return {"ok": True, **result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 class FleetCreateAgentRequest(BaseModel):
     name: str = ""  # optional — server assigns a pool name when absent (see agent_name_pool.py)
     instructions: str = ""

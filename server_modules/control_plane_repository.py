@@ -653,6 +653,29 @@ CREATE TABLE IF NOT EXISTS workspace_agent_installs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Tasks -> Agents backend foundation (docs/design/tasks-to-agents-research.md
+-- Section 4.6, steps 1-3): a first-class task object inside a Project that
+-- can be assigned to an agent. `plan` persists update_plan's per-turn
+-- current_plan across the wakeup -> turn -> wakeup gap (Section 4.4); no RLS
+-- policy, scoped like `projects` itself (see project_tasks_service.py).
+CREATE TABLE IF NOT EXISTS project_tasks (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'in_progress', 'blocked', 'awaiting_input', 'done')),
+    assignee_agent_id TEXT NULL REFERENCES workspace_agent_installs(id) ON DELETE SET NULL,
+    created_by TEXT NULL,
+    due_at TIMESTAMPTZ NULL,
+    plan JSONB NOT NULL DEFAULT '[]'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS workspace_inventory_items (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -1423,6 +1446,8 @@ CREATE INDEX IF NOT EXISTS idx_workspace_agent_installs_compiled_workflow ON wor
 CREATE INDEX IF NOT EXISTS idx_workspace_inventory_items_scope ON workspace_inventory_items(tenant_id, workspace_id, category);
 CREATE INDEX IF NOT EXISTS idx_workspace_inventory_items_vehicle ON workspace_inventory_items(tenant_id, workspace_id, make, model, year_start, year_end);
 CREATE INDEX IF NOT EXISTS idx_workspace_inventory_items_product_name ON workspace_inventory_items(tenant_id, workspace_id, product_name);
+CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(tenant_id, workspace_id, project_id, status);
+CREATE INDEX IF NOT EXISTS idx_project_tasks_assignee ON project_tasks(tenant_id, workspace_id, assignee_agent_id) WHERE assignee_agent_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_agent_manifests_scope ON agent_manifests(tenant_id, workspace_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_bible_versions_install_number ON agent_bible_versions(tenant_id, workspace_id, agent_install_id, version_number DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_skill_bindings_install ON agent_skill_bindings(tenant_id, workspace_id, agent_install_id, enabled);

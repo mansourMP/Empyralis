@@ -632,6 +632,86 @@ async def maybe_schedule_event_trigger(
     return record
 
 
+async def schedule_task_assigned_wakeup(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    task_id: str,
+    title: str,
+    description: str = "",
+    triggered_by: str = "owner",
+) -> Dict[str, Any]:
+    """docs/design/tasks-to-agents-research.md Section 4.6 step 3: a new
+    trigger reason ("task_assigned"), not a new execution engine. Called by
+    project_tasks_service.assign_task (the ONE code path shared by the
+    assignment API and a future @-mention resolver) whenever a task's
+    assignee_agent_id is set. Reuses maybe_schedule_event_trigger's exact
+    persist shape above (_persist_wakeup) -- same claim_due_wake_requests /
+    finalize_wake_requests machinery picks this row up on the next scan,
+    same as every other wake request kind.
+
+    payload carries `agent_id` (the same field list_wake_requests_for_agent/
+    cancel_wake_request already filter on) plus `task_id`/`task_title`/
+    `task_description`, so runtime_heartbeat_service.build_heartbeat_turn_
+    request can thread task_id into the resulting turn's trace metadata --
+    that's the seam direct_chat_generation_service reads at turn start/end
+    to seed and persist update_plan's current_plan per-task (Section 4.4).
+
+    Near-immediate, not instant: still runs through the same quiet-hours/
+    battery/network device-state gate every other trigger kind respects
+    (_apply_policy_to_due_at) -- an assignment made at 3am does not wake a
+    quiet-hours-respecting device early just because a human clicked
+    "assign". No approval gate here (unlike propose_self_wakeup's privileged-
+    runtime branch): assigning a task is itself the explicit human action,
+    matching the hard constraint that this feature adds no approval system
+    beyond what the scheduler already has natively."""
+    resolved_agent_id = str(agent_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+    resolved_title = str(title or "").strip()
+    if not resolved_agent_id or not resolved_task_id or not resolved_title:
+        raise SchedulerPolicyError(
+            "agent_id, task_id, and title are required to schedule a task-assigned wakeup."
+        )
+    workspace, master_install, policy = await _load_scheduler_scope(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    due_at, due_reason = _apply_policy_to_due_at(
+        due_at=_utc_now(),
+        policy=policy,
+        device_state=_device_state({}, workspace, master_install),
+    )
+    metadata: Dict[str, Any] = {"agent_id": resolved_agent_id, "task_id": resolved_task_id}
+    if due_reason:
+        metadata["policy_delay_reason"] = due_reason
+    record = await _persist_wakeup(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        master_install=master_install,
+        trigger_kind="task_assigned",
+        source="project_tasks",
+        requested_by=str(triggered_by or "owner").strip().lower() or "owner",
+        reason="task_assigned",
+        summary=f"Task assigned: {resolved_title}",
+        payload={
+            "agent_id": resolved_agent_id,
+            "task_id": resolved_task_id,
+            "task_title": resolved_title,
+            "task_description": str(description or "").strip(),
+        },
+        policy=policy,
+        due_at=due_at,
+        approval_required=False,
+        status="pending",
+        denial_reason=None,
+        metadata=metadata,
+    )
+    if due_at <= _utc_now() + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
+        _trigger_ambient_monitor(workspace_id)
+    return record
+
+
 async def propose_self_wakeup(
     *,
     tenant_id: str,
