@@ -165,6 +165,39 @@ function conversationWho(t: Thread): string {
   return "";
 }
 
+// Surfaces that are the OWNER operating the product itself (the in-app console /
+// Ask-AI / workstation) — NOT an external customer on a messaging channel. A
+// turn stamped with one of these (via the per-turn channel/source envelope
+// agent_turn.py records) is the owner talking, and must never read as a channel
+// "customer" just because the THREAD's single dominant channel happens to be
+// Telegram. Empty counts as console: a thread with no channel is a console chat.
+const CONSOLE_CHANNELS = new Set(["web", "mobile", "desktop", "api", "console", "workstation", ""]);
+const CONSOLE_SOURCES = new Set(["fleet_agent_chat", "sage", "web", "console", "workstation", "ask_ai"]);
+
+// True when THIS human turn came from the product console, not an external
+// channel. Prefers the turn's own stamped source/channel (canonical envelope);
+// falls back to the thread's dominant channel only for turns that predate the
+// stamp. So an owner typing in the console reads as the owner even inside a
+// thread whose dominant channel is Telegram.
+function turnIsConsole(turn: Turn | undefined, thread: Thread): boolean {
+  const md = (turn?.metadata || {}) as Record<string, unknown>;
+  const src = String((md.source ?? "") || "").toLowerCase();
+  if (src) return CONSOLE_SOURCES.has(src);
+  const ch = String((md.channel ?? md.surface ?? "") || "").toLowerCase();
+  if (ch) return CONSOLE_CHANNELS.has(ch);
+  return CONSOLE_CHANNELS.has(String(thread.channel || "").toLowerCase());
+}
+
+// The most recent human (customer-side) turn — the one that drove the current
+// reply, and whose surface decides how this conversation is attributed.
+function latestHumanTurn(t: Thread): Turn | undefined {
+  const turns = t.turns || [];
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (isCustomerRole(turns[i].role || "")) return turns[i];
+  }
+  return undefined;
+}
+
 function conversationTitle(t: Thread, who: string): string {
   const title = (t.title || "").trim();
   if (title) return title;
@@ -983,7 +1016,16 @@ export function WorkTab({
   const isAgentSideLocal = (role: string) => isAgentSide(role);
 
   const selectedThread = threads.find((t) => t.id === selected);
-  const selectedWho = selectedThread ? conversationWho(selectedThread) : "";
+  // Surface-aware attribution: is the latest human turn the owner in the
+  // console, or a real channel customer? Everything below labels + icons off
+  // this, so a console chat never reads as a Telegram "customer".
+  const selectedIsConsole = selectedThread
+    ? turnIsConsole(latestHumanTurn(selectedThread), selectedThread)
+    : false;
+  const selectedWho = selectedIsConsole ? "you" : (selectedThread ? conversationWho(selectedThread) : "");
+  const selectedChannelIconUrl = selectedThread && !selectedIsConsole
+    ? resolveChannelIconUrl(selectedThread.channel)
+    : undefined;
   const selectedEntry = selected ? traceMap[selected] : undefined;
   const stillRunning = !!selectedEntry?.trace && !selectedEntry.trace.finished_at;
   const live = useLiveTraceEvents(workspaceId, stillRunning ? selectedEntry!.traceId : null);
@@ -1013,7 +1055,6 @@ export function WorkTab({
     // rendering an empty or fabricated timeline.
     if (!hasResolvedTrace) {
       const rows: ActivityRow[] = [];
-      const channelIconUrl = resolveChannelIconUrl(selectedThread.channel);
       for (const t of selectedThread.turns || []) {
         if (isAgentSideLocal(t.role || "")) {
           rows.push({
@@ -1025,13 +1066,16 @@ export function WorkTab({
             detail: stripMarkdownPreview(t.content || "").slice(0, 140) || undefined,
           });
         } else if (isCustomerRole(t.role || "")) {
+          // Attribute this specific turn by ITS surface, not the thread's.
+          const fromConsole = turnIsConsole(t, selectedThread);
+          const iconUrl = fromConsole ? undefined : resolveChannelIconUrl(selectedThread.channel);
           rows.push({
             id: `t-${t.created_at || rows.length}-u`,
             ts: t.created_at || null,
             tone: "muted",
-            icon: channelIconUrl ? undefined : MessageSquare,
-            channelIconUrl,
-            text: `Received message from ${selectedWho || "customer"}`,
+            icon: iconUrl ? undefined : MessageSquare,
+            channelIconUrl: iconUrl,
+            text: fromConsole ? "You sent a message" : `Received message from ${(t.actor?.display_name || "").trim() || "customer"}`,
             detail: stripMarkdownPreview(t.content || "").slice(0, 140) || undefined,
           });
         }
@@ -1040,7 +1084,7 @@ export function WorkTab({
     }
 
     const out: ActivityRow[] = [];
-    const channelIconUrl = resolveChannelIconUrl(selectedThread.channel);
+    const channelIconUrl = selectedChannelIconUrl;
     if (receivedTurn) {
       out.push({
         id: `recv-${receivedTurn.created_at || "x"}`,
@@ -1048,7 +1092,7 @@ export function WorkTab({
         tone: "muted",
         icon: channelIconUrl ? undefined : MessageSquare,
         channelIconUrl,
-        text: `Received message from ${selectedWho || "customer"}`,
+        text: selectedIsConsole ? "You sent a message" : `Received message from ${selectedWho || "customer"}`,
         detail: stripMarkdownPreview(receivedTurn.content || "").slice(0, 140) || undefined,
       });
     }
@@ -1073,11 +1117,11 @@ export function WorkTab({
       }
       const status = classifyThreadStatus(selectedEntry);
       if (status === "done") {
-        out.push({ id: "__waiting__", ts: null, tone: "muted", pulseDot: true, text: `Waiting for ${selectedWho ? `${selectedWho}’s` : "their"} reply` });
+        out.push({ id: "__waiting__", ts: null, tone: "muted", pulseDot: true, text: `Waiting for ${selectedIsConsole ? "your" : selectedWho ? `${selectedWho}’s` : "their"} reply` });
       }
     }
     return out;
-  }, [selectedThread, hasResolvedTrace, receivedTurn, middleRows, stillRunning, effectiveEvents, assistantTurn, selectedWho, selectedEntry, isAgentSideLocal]);
+  }, [selectedThread, hasResolvedTrace, receivedTurn, middleRows, stillRunning, effectiveEvents, assistantTurn, selectedWho, selectedIsConsole, selectedChannelIconUrl, selectedEntry, isAgentSideLocal]);
 
   if (loading) {
     return (
@@ -1143,13 +1187,14 @@ export function WorkTab({
               </div>
             )}
             {threads.map((t) => {
-              const who = conversationWho(t);
+              const rowIsConsole = turnIsConsole(latestHumanTurn(t), t);
+              const who = rowIsConsole ? "You" : conversationWho(t);
               const unread = isUnread(t);
               const when = t.last_turn_at || t.updated_at || "";
               const entry = traceMap[t.id];
               const status = classifyThreadStatus(entry);
               const dotTone = status === "working" ? "working" : status === "waiting" ? "degraded" : "unknown";
-              const channelIconUrl = resolveChannelIconUrl(t.channel);
+              const channelIconUrl = rowIsConsole ? undefined : resolveChannelIconUrl(t.channel);
               return (
                 <button
                   key={t.id}
