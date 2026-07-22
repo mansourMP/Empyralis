@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -206,28 +207,40 @@ def microsoft_365_probe_capabilities(credentials: Dict[str, Any], http_json_requ
     }
 
 
+def _microsoft_365_cc_recipients(cc_email: str) -> List[Dict[str, Any]]:
+    """Split a comma/semicolon-separated cc_email string into Graph API
+    emailAddress recipient objects. Empty/blank addresses are dropped."""
+    addresses = [addr.strip() for addr in re.split(r"[,;]", cc_email or "") if addr.strip()]
+    return [{"emailAddress": {"address": addr}} for addr in addresses]
+
+
 def microsoft_365_send_message(
     credentials: Dict[str, Any],
     http_json_request: HttpJsonRequest,
     to_email: str,
     subject: str,
     body_text: str,
+    cc_email: str = "",
 ) -> Dict[str, Any]:
-    payload = {
-        "message": {
-            "subject": subject,
-            "body": {
-                "contentType": "Text",
-                "content": body_text,
-            },
-            "toRecipients": [
-                {
-                    "emailAddress": {
-                        "address": to_email,
-                    }
-                }
-            ],
+    message: Dict[str, Any] = {
+        "subject": subject,
+        "body": {
+            "contentType": "Text",
+            "content": body_text,
         },
+        "toRecipients": [
+            {
+                "emailAddress": {
+                    "address": to_email,
+                }
+            }
+        ],
+    }
+    cc_recipients = _microsoft_365_cc_recipients(cc_email)
+    if cc_recipients:
+        message["ccRecipients"] = cc_recipients
+    payload = {
+        "message": message,
         "saveToSentItems": True,
     }
     return microsoft_graph_request(
@@ -246,8 +259,9 @@ def microsoft_365_create_draft(
     to_email: str,
     subject: str,
     body_text: str,
+    cc_email: str = "",
 ) -> Dict[str, Any]:
-    payload = {
+    payload: Dict[str, Any] = {
         "subject": subject,
         "body": {
             "contentType": "Text",
@@ -261,6 +275,9 @@ def microsoft_365_create_draft(
             }
         ],
     }
+    cc_recipients = _microsoft_365_cc_recipients(cc_email)
+    if cc_recipients:
+        payload["ccRecipients"] = cc_recipients
     return microsoft_graph_request(
         http_json_request,
         credentials,
