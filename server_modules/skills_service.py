@@ -1442,6 +1442,112 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             audience_safe=False,
             audience_note="Operator-only: schedules future work for an agent. Owner/operator access.",
         ),
+        # ── Skills: Level-2 progressive disclosure (docs/design/audit-skills.md §3.4) ──
+        # The unified skill catalog (skill_registry.list_skill_definitions,
+        # rendered into the system prompt as name+description-only entries by
+        # sage_skills_api._skill_capability_records) is Level 1. This tool is
+        # the single Level-2 entry point every one of those entries points
+        # at: the model never gets a per-skill tool, it gets one dispatcher
+        # that loads/executes the named skill on demand — mirroring Claude
+        # Code's "cat SKILL.md when the description matches" mechanic, just
+        # implemented as a tool call instead of a filesystem read.
+        ToolDescriptor(
+            tool_name="skill_invoke",
+            label="Invoke skill",
+            connector_id="skill",
+            action_id="invoke",
+            description=(
+                "Run a registered skill by id — the Level-2 step after the skill catalog's "
+                "name+description listing (see the Callable Tools section for available "
+                "skill_id values, e.g. 'memory-manager', 'code-runner', 'file-manager', "
+                "'telegram-bot', 'vision-monitor', 'inventory-tool'). Loads that skill's full "
+                "procedure and executes it; for a documentation-only skill with no live "
+                "executor, returns its instructions as context instead of a fabricated result."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "skill_id": {
+                        "type": "string",
+                        "description": (
+                            "The id of the skill to run, exactly as shown in the skill "
+                            "catalog listing (e.g. 'memory-manager', 'code-runner')."
+                        ),
+                    },
+                    "args": {
+                        "anyOf": [{"type": "string"}, {"type": "object"}],
+                        "description": (
+                            "Optional arguments for the skill: either a free-text goal string "
+                            "describing what to do, or an object with a 'goal' key. Omit for "
+                            "skills that don't need input (e.g. a memory snapshot)."
+                        ),
+                    },
+                },
+                "required": ["skill_id"],
+            },
+            risk_level="high",
+            audience_safe=False,
+            audience_note="Blocked: skills can read/write files, run shell commands, or message people. Owner-only.",
+        ),
+        ToolDescriptor(
+            tool_name="skill_write",
+            label="Author skill",
+            connector_id="skill",
+            action_id="write",
+            description=(
+                "Author or update a workspace skill from a name, description, and Markdown "
+                "procedure body. Use when the user asks you to save a repeated procedure as a "
+                "reusable skill, or to codify a pattern you just used. The skill is security-"
+                "scanned and installed for real, but starts DISABLED, pending the workspace "
+                "owner's review — it will not appear in the skill catalog or be callable via "
+                "skill_invoke until the owner reviews and enables it. Do not tell the user the "
+                "skill is 'ready' or 'active' — say it is saved and awaiting their review."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable skill name; becomes the skill id (lowercased, hyphenated).",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Third-person description of what the skill does and when to use "
+                            "it. This is the only text shown to the agent before the skill is "
+                            "invoked (Level 1) — be specific."
+                        ),
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "The Markdown procedure body: what this skill does, the numbered "
+                            "steps to follow when it's invoked, when NOT to use it, and any "
+                            "safety notes."
+                        ),
+                    },
+                    "skill_class": {
+                        "type": "string",
+                        "enum": ["business", "specialist_local"],
+                        "description": "Defaults to 'business'. Use 'specialist_local' for a skill scoped to one specialist agent.",
+                    },
+                    "connector_scopes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional connector ids this skill touches (e.g. 'crm', 'email').",
+                    },
+                    "trigger_terms": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional trigger phrases that suggest this skill applies.",
+                    },
+                },
+                "required": ["name", "description", "body"],
+            },
+            risk_level="medium",
+            audience_safe=False,
+            audience_note="Blocked: authors persistent workspace skill files. Owner-only.",
+        ),
     ]
 
 
@@ -4690,6 +4796,105 @@ def execute_single_direct_tool_call(
             f"Queued {media_item['kind']} to send with your reply: {raw_target}"
             + (f" (caption: {caption})" if caption else "")
         )
+    if connector_id == "skill" and action_id == "invoke":
+        # Level-2 dispatch: the model gets a skill_id (and optional args)
+        # from the Level-1 catalog listing in the system prompt
+        # (sage_skills_api._skill_capability_records, unified from
+        # skill_registry.list_skill_definitions) and this is the ONE call
+        # site that turns it into a real execution — mirrors memory_search's
+        # pattern immediately above rather than inventing a new dispatch
+        # shape. skill_registry.execute_skill already does the right thing
+        # (executor -> handler subprocess -> MCP tool -> bundled-tool
+        # dispatch -> SKILL.md body-injection fallback); this branch's only
+        # job is argument plumbing and turning its structured result into a
+        # tool-result string.
+        skill_id = str(argument_payload.get("skill_id") or argument_payload.get("id") or "").strip()
+        if not skill_id:
+            raise RuntimeError("Tool 'skill_invoke' requires a skill_id.")
+        raw_skill_args = argument_payload.get("args")
+        if isinstance(raw_skill_args, dict):
+            skill_goal = str(raw_skill_args.get("goal") or raw_skill_args.get("input") or "").strip()
+            if not skill_goal and raw_skill_args:
+                skill_goal = json.dumps(raw_skill_args, ensure_ascii=False)
+        elif raw_skill_args is not None and str(raw_skill_args).strip():
+            skill_goal = str(raw_skill_args).strip()
+        else:
+            skill_goal = str(argument_payload.get("goal") or "").strip()
+        from server_modules import skill_registry
+
+        skill_result = callbacks.run_async_tool_call(
+            skill_registry.execute_skill(
+                skill_id=skill_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                goal=skill_goal,
+                agent_label=str(
+                    session_metadata.get("sage_agent_id")
+                    or session_metadata.get("agent_scope")
+                    or "Agent"
+                ).strip()
+                or "Agent",
+                hard_context="",
+                operational_policy="",
+                agent_id=str(session_metadata.get("agent_id") or "").strip(),
+                agent_install_id=str(
+                    session_metadata.get("agent_install_id")
+                    or session_metadata.get("active_agent_install_id")
+                    or ""
+                ).strip(),
+            )
+        )
+        if not isinstance(skill_result, dict):
+            return str(skill_result or "").strip() or f"Skill '{skill_id}' returned no output."
+        reply_text = str(skill_result.get("reply") or "").strip()
+        artifact = skill_result.get("artifact") if isinstance(skill_result.get("artifact"), dict) else None
+        result_parts = [reply_text] if reply_text else []
+        if artifact:
+            # This is the actual progressive-disclosure payoff: a
+            # SKILL.md-backed skill's body only ever reaches context here,
+            # on invoke — never as part of the Level-1 listing.
+            preview = str(artifact.get("preview_content") or "").strip()
+            if preview:
+                artifact_label = str(artifact.get("label") or "Skill content").strip()
+                result_parts.append(f"\n--- {artifact_label} ---\n{preview}")
+        combined_reply = "\n".join(result_parts).strip()
+        return combined_reply or f"Skill '{skill_id}' completed with status {skill_result.get('status')}."
+    if connector_id == "skill" and action_id == "write":
+        # Human-reviewed self-authoring (docs/design/audit-skills.md §1.4,
+        # §3 item 9): reuses the existing, previously agent-unreachable
+        # marketplace pipeline (skills_registry.install_marketplace_skill +
+        # skill_scanner, already wired for the admin HTTP routes) rather
+        # than a new bespoke write path, then immediately downgrades the
+        # freshly installed skill to disabled/pending — see
+        # skills_registry.author_pending_skill for why this is not silent
+        # autonomy.
+        skill_name = str(argument_payload.get("name") or "").strip()
+        skill_description = str(argument_payload.get("description") or "").strip()
+        skill_body = str(argument_payload.get("body") or "").strip()
+        if not skill_name:
+            raise RuntimeError("Tool 'skill_write' requires a name.")
+        if not skill_description:
+            raise RuntimeError("Tool 'skill_write' requires a description.")
+        if not skill_body:
+            raise RuntimeError("Tool 'skill_write' requires a body (the procedure).")
+        from server_modules import skills_registry as skills_marketplace_registry
+
+        authoring_agent = str(
+            session_metadata.get("sage_agent_id")
+            or session_metadata.get("agent_scope")
+            or session_metadata.get("agent_id")
+            or "agent"
+        ).strip() or "agent"
+        write_result = skills_marketplace_registry.author_pending_skill(
+            name=skill_name,
+            description=skill_description,
+            body=skill_body,
+            author=f"agent:{authoring_agent}",
+            skill_class=str(argument_payload.get("skill_class") or "business").strip() or "business",
+            connector_scopes=argument_payload.get("connector_scopes"),
+            trigger_terms=argument_payload.get("trigger_terms"),
+        )
+        return json.dumps(write_result, ensure_ascii=False)
     if connector_id == "browser":
         browser = _resolve_direct_tool_browser_adapter(session_ctx)
         if action_id == "navigate":

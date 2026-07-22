@@ -52,6 +52,16 @@ SAGE_RETRIEVED_MEMORY_CHAR_LIMIT = 3_000
 SAGE_PROFILE_CONTEXT_CHAR_LIMIT = 1_500
 SAGE_HEARTBEAT_CONTEXT_CHAR_LIMIT = 900
 CAPABILITY_MANIFEST_MAX_ITEMS = 16
+# Skills share this budget with the (larger) builtin-tool list, which lists
+# first in build_sage_capabilities_payload. Verified empirically while
+# wiring the unified skill catalog (docs/design/audit-skills.md §3 item 3):
+# ~36 builtin tool records alone already exhaust CAPABILITY_MANIFEST_MAX_ITEMS,
+# so skills would be silently crowded out of the rendered prompt text 100%
+# of the time regardless of catalog correctness. This reserves a small slice
+# so the skill catalog is never fully starved — a narrower, non-dynamic
+# version of the cap-sizing follow-up audit item 6 calls for; that broader
+# "scale with context window like Claude Code" redesign is still open.
+CAPABILITY_MANIFEST_SKILL_RESERVED_ITEMS = 6
 CAPABILITY_DESCRIPTION_CHAR_LIMIT = 140
 MEMORY_MANIFEST_LIMIT = 60
 MODEL_HIDDEN_LEGACY_TOOLS = {"memory_update"}
@@ -419,7 +429,23 @@ def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) 
         "## Callable Tools",
         "Only these tools are callable in this turn. Do not mention or invent unavailable tools.",
     ]
-    shown_items = list(capability_manifest)[:CAPABILITY_MANIFEST_MAX_ITEMS]
+    all_items = list(capability_manifest)
+    skill_items = [item for item in all_items if _coerce_text(item.get("type")) == "skill"]
+    other_items = [item for item in all_items if _coerce_text(item.get("type")) != "skill"]
+    # Within the reserved skill slice, workspace/global/bundled-filesystem
+    # skills (source != "built_in") outrank the ~20 hardcoded
+    # skill_registry._BUILT_IN_SKILLS entries (stable sort keeps each
+    # group's incoming — alphabetical — order otherwise). Those built-ins
+    # mostly duplicate capabilities already visible elsewhere in this same
+    # manifest as concrete native tools (browser, memory, code execution,
+    # ...); an operator-installed or agent-authored custom skill is the one
+    # actually worth spending the small reserved Level-1 budget on, and a
+    # blind alphabetical cut was starving every custom skill whose id
+    # happened to sort after the ~20 built-ins' labels.
+    skill_items = sorted(skill_items, key=lambda item: _coerce_text(item.get("source")) == "built_in")
+    skill_budget = min(len(skill_items), CAPABILITY_MANIFEST_SKILL_RESERVED_ITEMS, CAPABILITY_MANIFEST_MAX_ITEMS)
+    other_budget = CAPABILITY_MANIFEST_MAX_ITEMS - skill_budget
+    shown_items = other_items[:other_budget] + skill_items[:skill_budget]
     for item in shown_items:
         label = _coerce_text(item.get("label")) or _coerce_text(item.get("tool"))
         tool = _coerce_text(item.get("tool"))

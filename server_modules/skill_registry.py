@@ -1038,23 +1038,24 @@ def _definition_from_installed_skill(item: dict[str, Any]) -> SkillDefinition | 
     runtime_metadata = dict(item.get("runtime_metadata") or {}) if isinstance(item.get("runtime_metadata"), dict) else {}
     execution_adapter = str(runtime_metadata.get("execution_adapter") or "").strip().lower()
     has_query_handler = bool(item.get("has_query_handler"))
-    # Allow bundled skills through even without an execution adapter — they
-    # get their executor from _BUILT_IN_SKILLS (which now covers all bundled
-    # skills: memory-manager, code-runner, file-manager, telegram-bot,
-    # vision-monitor, etc.).
     source = str(item.get("source") or "").strip().lower()
     is_bundled = source == "bundled"
     has_builtin = skill_id in {d.id for d in _BUILT_IN_SKILLS}
-    if not execution_adapter and not has_query_handler and not is_bundled and not has_builtin:
-        return None
+    # Every item here already passed installed_skills.list_installed_skills()'s
+    # on-disk existence check + security scan (docs/design/audit-skills.md
+    # §3 item 3: "one unified catalog" — no second, stricter gate here that
+    # would make the Tools tab and the model's manifest disagree again).
+    # A skill with no executor/handler/mcp adapter is still real and
+    # dischargeable: skill_registry.execute_skill's final fallback
+    # (SKILL.md-body-injection, below) handles exactly this case. So this
+    # function no longer rejects adapter-less skills — it only resolves
+    # WHICH dispatch path execute_skill should use.
     executor: SkillExecutor | None = _ADAPTER_EXECUTORS.get(execution_adapter) if execution_adapter else None
     # Resolve executor from _BUILT_IN_SKILLS for bundled skills
     if executor is None and has_builtin:
         builtin = {d.id: d for d in _BUILT_IN_SKILLS}.get(skill_id)
         if builtin is not None and builtin.executor is not None:
             executor = builtin.executor
-    if executor is None and execution_adapter not in {"", "handler"} and not has_query_handler and not has_builtin:
-        return None
     if executor is None and (execution_adapter == "handler" or has_query_handler):
         execution_adapter = "handler"
     label = str(item.get("name") or skill_id).strip() or skill_id
