@@ -209,12 +209,43 @@ async def compact_turns(
     trace_context: Any = None,
 ) -> str:
     """Summarize turns and persist as a CompactionEntry in agent_turns.
-    Returns the summary text.
+    Returns the summary text, or "" if compaction was skipped.
+
+    2026-07-23 founder ruling ("no model fallback chains" — if the user's
+    model fails, it fails visibly; the owner changes their model): this
+    used to fall back to a platform-wide DeepSeek key/model
+    (`provider or "deepseek"`) whenever the caller didn't resolve the
+    turn's own provider. That fallback is REMOVED — there is no substitute
+    model. If the turn's own provider can't be determined, compaction is
+    skipped outright (never silently run on a model the user never chose
+    and isn't paying for). Compaction is best-effort context management,
+    not a guarantee — the caller always falls through to raw truncation —
+    but a skip must never be invisible, so the same WARNING log +
+    compaction.skipped trace event fire here as they do for an in-flight
+    provider failure below.
     """
     from server_modules import control_plane_repository
 
-    resolved_provider = str(provider or "deepseek").strip() or "deepseek"
+    resolved_provider = str(provider or "").strip().lower()
     resolved_model = str(model or "").strip()
+
+    if not resolved_provider:
+        reason = "model_unavailable_no_fallback"
+        LOGGER.warning(
+            "compact_turns: no summary produced (provider=%s, model=%s, reason=%s) — "
+            "compaction is a no-op for this call; caller falls back to raw truncation",
+            "(none)", resolved_model or "(none)", reason,
+        )
+        if trace_context is not None:
+            try:
+                from server_modules import agent_trace_service
+
+                await agent_trace_service.emit_compaction_skipped(
+                    trace_context, reason, resolved_provider, resolved_model,
+                )
+            except Exception:
+                pass  # observability must never break the calling turn
+        return ""
 
     text = serialize_turns_for_compaction(turns)
 
@@ -234,11 +265,10 @@ async def compact_turns(
     summary = (text or "").strip()
 
     if not summary:
-        # Previously silent (returned "" with no signal anywhere) whenever the
-        # resolved provider had no usable key/route — e.g. the platform-wide
-        # DeepSeek key this falls back to being unset. Compaction fails safe
-        # (the turn falls through to raw-truncation elsewhere), but that must
-        # never be invisible.
+        # Not the no-fallback skip above — a real provider/model was
+        # resolved but the call itself came back empty (missing key,
+        # rate-limited, empty response, etc). Fails safe (the turn falls
+        # through to raw-truncation elsewhere), but must never be invisible.
         reason = str(error or "empty_summary").strip() or "empty_summary"
         LOGGER.warning(
             "compact_turns: no summary produced (provider=%s, model=%s, reason=%s) — "

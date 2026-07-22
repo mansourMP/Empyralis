@@ -668,21 +668,6 @@ class CompactTurnsObservabilityTests(unittest.TestCase):
     to is unset on the server) — no log, no trace event, nothing. Both must
     now fire."""
 
-    def test_logs_warning_when_no_summary_produced(self) -> None:
-        turns = [{"role": "user", "content": "hello"}]
-        with patch(
-            "server_modules.compaction_service.openai_chat_text",
-            return_value=("", None, "", "missing API key for provider deepseek"),
-        ), self.assertLogs("server_modules.compaction_service", level="WARNING") as log_ctx:
-            summary = _run(
-                compaction_service.compact_turns(
-                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
-                )
-            )
-        self.assertEqual(summary, "")
-        self.assertTrue(any("no summary produced" in message for message in log_ctx.output))
-        self.assertTrue(any("deepseek" in message for message in log_ctx.output))
-
     def test_emits_compaction_skipped_trace_event_when_trace_context_given(self) -> None:
         turns = [{"role": "user", "content": "hello"}]
         emit_mock = AsyncMock(return_value="tevent_123")
@@ -708,7 +693,9 @@ class CompactTurnsObservabilityTests(unittest.TestCase):
     def test_no_trace_event_emitted_when_trace_context_is_none(self) -> None:
         # Every pre-existing call site omits trace_context (it defaults to
         # None) — must keep working exactly as before, with only the log
-        # (asserted above) as the observability signal.
+        # (asserted above) as the observability signal. Exercises the
+        # no-provider-resolved skip path (see class below) since no
+        # provider/model is passed here either.
         turns = [{"role": "user", "content": "hello"}]
         emit_mock = AsyncMock(return_value=None)
         with patch(
@@ -741,6 +728,94 @@ class CompactTurnsObservabilityTests(unittest.TestCase):
                 )
             )
         self.assertEqual(summary, "A real summary.")
+
+
+# ── 2026-07-23 founder ruling: no model-fallback chains ────────────────────
+
+class CompactTurnsNoPlatformFallbackTests(unittest.TestCase):
+    """The platform-wide DeepSeek default (`provider or "deepseek"`) is
+    removed. If the turn's own provider can't be resolved, compact_turns
+    must skip outright — never silently run compaction on a model the user
+    never chose. 'If the user's model fails, it fails visibly; the owner
+    changes their model' — no substitute model, ever."""
+
+    def test_no_provider_resolved_skips_without_calling_the_llm_at_all(self) -> None:
+        # The key assertion: openai_chat_text must NEVER be invoked when no
+        # provider was resolved for this turn — proves there is no hidden
+        # default (not "deepseek", not openai_chat_text's own "openai"
+        # keyword default either) sneaking the call through.
+        turns = [{"role": "user", "content": "hello"}]
+        with patch("server_modules.compaction_service.openai_chat_text") as llm_mock, \
+             self.assertLogs("server_modules.compaction_service", level="WARNING") as log_ctx:
+            summary = _run(
+                compaction_service.compact_turns(
+                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                )
+            )
+        self.assertEqual(summary, "")
+        llm_mock.assert_not_called()
+        self.assertTrue(any("no summary produced" in message for message in log_ctx.output))
+        self.assertTrue(
+            any("model_unavailable_no_fallback" in message for message in log_ctx.output)
+        )
+
+    def test_no_provider_resolved_still_emits_trace_event_with_new_reason(self) -> None:
+        turns = [{"role": "user", "content": "hello"}]
+        emit_mock = AsyncMock(return_value="tevent_456")
+        with patch("server_modules.compaction_service.openai_chat_text") as llm_mock, \
+             patch("server_modules.agent_trace_service.emit_compaction_skipped", new=emit_mock):
+            summary = _run(
+                compaction_service.compact_turns(
+                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                    trace_context="fake-trace-context",
+                )
+            )
+        self.assertEqual(summary, "")
+        llm_mock.assert_not_called()
+        emit_mock.assert_called_once()
+        call_args = emit_mock.call_args.args
+        self.assertEqual(call_args[0], "fake-trace-context")
+        self.assertEqual(call_args[1], "model_unavailable_no_fallback")
+
+    def test_blank_provider_string_also_skips_not_just_missing_kwarg(self) -> None:
+        # Callers pass `provider=_ws_provider or None` etc. — an empty
+        # string must be treated identically to omitting the kwarg.
+        turns = [{"role": "user", "content": "hello"}]
+        with patch("server_modules.compaction_service.openai_chat_text") as llm_mock:
+            summary = _run(
+                compaction_service.compact_turns(
+                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                    provider="", model="",
+                )
+            )
+        self.assertEqual(summary, "")
+        llm_mock.assert_not_called()
+
+    def test_explicit_provider_that_fails_is_unaffected_by_this_change(self) -> None:
+        # When the turn DOES have its own resolved provider/model, this
+        # ruling does not change behavior at all — a genuine failure from
+        # that provider still surfaces via the pre-existing reason/error
+        # path, not the new "model_unavailable_no_fallback" reason (that
+        # string is reserved for "no provider was ever resolved").
+        turns = [{"role": "user", "content": "hello"}]
+        with patch(
+            "server_modules.compaction_service.openai_chat_text",
+            return_value=("", None, "", "http_402: Payment Required"),
+        ) as llm_mock, self.assertLogs(
+            "server_modules.compaction_service", level="WARNING"
+        ) as log_ctx:
+            summary = _run(
+                compaction_service.compact_turns(
+                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                    provider="anthropic", model="claude-haiku-4-5-20251001",
+                )
+            )
+        self.assertEqual(summary, "")
+        llm_mock.assert_called_once()
+        self.assertTrue(any("http_402" in message for message in log_ctx.output))
+        self.assertFalse(
+            any("model_unavailable_no_fallback" in message for message in log_ctx.output)
+        )
 
 
 if __name__ == "__main__":
