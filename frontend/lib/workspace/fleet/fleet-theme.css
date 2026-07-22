@@ -5468,6 +5468,16 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-detail-body:has(> .fleet-work-root) {
   padding: 0;
 }
+/* ...and opt the two-pane OUT of the `.fleet-detail-body > *` reading-column
+   cap (max-width var(--content-max) + margin-inline auto). That cap is right
+   for text tabs (Overview/Model/…), but it was centering the Work split to
+   820px inside a ~1050px body — leaving the big left+right gaps that made it
+   read nothing like the flush Inbox. The two-pane wants the FULL width. */
+.fleet-detail-body > .fleet-work-root {
+  max-width: none;
+  margin-inline: 0;
+  width: 100%;
+}
 
 /* Control bar: sigil + name + status line (left), Pause/Stop (right). */
 .fleet-work-controlbar {

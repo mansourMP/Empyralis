@@ -959,7 +959,6 @@ export function WorkTab({
               const entry = traceMap[t.id];
               const status = classifyThreadStatus(entry);
               const dotTone = status === "working" ? "working" : status === "waiting" ? "degraded" : "unknown";
-              const channelIconUrl = rowIsConsole ? undefined : resolveChannelIconUrl(t.channel);
               return (
                 <button
                   key={t.id}
@@ -967,13 +966,15 @@ export function WorkTab({
                   className={`fleet-work-item${selected === t.id ? " fleet-work-item--active" : ""}${status === "done" ? " fleet-work-item--done" : ""}`}
                   onClick={() => setSelected(t.id)}
                 >
+                  {/* No channel icon on the LEFT row: one thread's history can
+                      carry messages from several channels (one agent = one
+                      history across all channels), so a single per-thread
+                      channel badge here would be a lie. The channel is shown
+                      per-message on the RIGHT (the activity rows + detail
+                      header). Left row stays clean — dot + title + time, like
+                      the Inbox. */}
                   <div className="fleet-work-item-top">
                     <StatusDot tone={dotTone as any} size={7} />
-                    {channelIconUrl ? (
-                      <img className="fleet-work-item-channel-icon" src={channelIconUrl} alt="" />
-                    ) : (
-                      <MessageSquare size={13} strokeWidth={1.75} className="fleet-work-item-channel-icon" style={{ color: "var(--text-muted)" }} />
-                    )}
                     <span className="fleet-work-item-title">
                       {unread && <span className="fleet-work-conv-dot" aria-label="new" />}
                       {conversationTitle(t, who)}
