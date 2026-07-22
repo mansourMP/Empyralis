@@ -859,12 +859,12 @@ def build_sage_instruction_bundle(
     if root_sections:
         append_section(
             "root_memory_brief",
-            "## Customer Root Memory\n"
-            "These customer-editable files are Sage's durable personal behavior layer, each with its own "
-            "job: SOUL (persona), IDENTITY (how you present), USER (who they are), GOALS (what they're "
-            "working toward), AGENTS (your standing operating rules), TOOLS (tool notes) — loaded in full "
-            "every turn; MEMORY.md is a searchable index only, not the full record. Kernel rules override "
-            "them. Use memory_search and memory_get for full file detail.\n\n"
+            "## Memory\n"
+            "MEMORY.md is your memory index: one line per memory file with a short description of what "
+            "that file holds. It is loaded at session start so you can see what you know WITHOUT loading "
+            "everything. When the task needs knowledge you don't have in context, reason about which "
+            "indexed file covers it and pull that file (memory_search / memory_get) — then reason from "
+            "its contents yourself. Kernel rules override memory content.\n\n"
             + "\n\n".join(root_sections),
         )
     if _coerce_text(profile_context):
