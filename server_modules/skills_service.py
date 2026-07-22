@@ -790,7 +790,11 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "Write or append content to a file in the agent's memory directory. "
                 "Use path='MEMORY.md' to save to the main memory file. "
                 "Use mode='append' to add to existing content, or mode='overwrite' to replace. "
-                "MUST call this tool to persist facts — text replies alone do not save anything."
+                "MUST call this tool to persist facts — text replies alone do not save anything. "
+                "If this fact came from someone other than your owner (or you could not verify "
+                "they are the owner), you MUST also set attribution_reason explaining why it's "
+                "worth remembering — the saved line will be visibly marked as non-owner-sourced "
+                "and is never treated as owner-grade fact."
             ),
             parameters={
                 "type": "object",
@@ -798,6 +802,14 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "path": {"type": "string", "description": "File path within memory directory (e.g., 'MEMORY.md')."},
                     "content": {"type": "string", "description": "Text content to write or append."},
                     "mode": {"type": "string", "enum": ["append", "overwrite"], "description": "Write mode: 'append' (default) or 'overwrite'."},
+                    "attribution_reason": {
+                        "type": "string",
+                        "description": (
+                            "Required only when this fact came from a non-owner or unverified "
+                            "sender: a short explanation of why it's worth saving. Omit entirely "
+                            "for facts the owner told you directly."
+                        ),
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -846,13 +858,21 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             description=(
                 "Update one workspace memory context file. Use only when the user explicitly asks Sage to "
                 "remember, correct, or update durable memory. Read the current file first with memory_get, then "
-                "write the complete revised file content."
+                "write the complete revised file content. If any of the content you're incorporating came from "
+                "someone other than your owner (or an unverified sender), you MUST also set attribution_reason."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "filename": {"type": "string", "description": "Allowed context filename such as MEMORY.md, USER.md, IDENTITY.md, SOUL.md, GOALS.md, PROCEDURES.md, or REFLECTION.md."},
                     "content": {"type": "string", "description": "Complete revised Markdown content for the file."},
+                    "attribution_reason": {
+                        "type": "string",
+                        "description": (
+                            "Required only when incorporating a non-owner or unverified sender's "
+                            "content into this file: a short explanation of why it's worth keeping."
+                        ),
+                    },
                 },
                 "required": ["filename", "content"],
             },
@@ -913,12 +933,21 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "Append one durable note to today's daily memory file only. "
                 "Use for stable facts, decisions, preferences, or project context. "
                 "A usefulness gate and dedupe filter are enforced. Do not include secrets, "
-                "full chat transcripts, or temporary noise."
+                "full chat transcripts, or temporary noise. If this note came from someone "
+                "other than your owner (or you could not verify they are the owner), you MUST "
+                "also set attribution_reason — the saved note will be visibly marked."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "note": {"type": "string", "description": "Durable note text to append to today's daily memory note file."},
+                    "attribution_reason": {
+                        "type": "string",
+                        "description": (
+                            "Required only when this note came from a non-owner or unverified "
+                            "sender: a short explanation of why it's worth saving."
+                        ),
+                    },
                 },
                 "required": ["note"],
             },
@@ -4971,6 +5000,13 @@ def execute_single_direct_tool_call(
             reason="memory_update",
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
             audit_metadata={"source": "direct_tool"},
+            # Attribution seam: same session_metadata["envelope"] snapshot
+            # memory_write already threads through (see that branch below) --
+            # a non-owner/unverified turn calling memory_update on a root
+            # file (including MEMORY.md) is subject to the same write filter
+            # as every other memory-writing tool, not a silent bypass.
+            source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
+            attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
         )
         return json.dumps(
             {
@@ -5025,6 +5061,12 @@ def execute_single_direct_tool_call(
             # InboundEnvelope object itself. None for any caller that
             # doesn't set it (unchanged behavior).
             source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
+            # Write filter (context-engineering-plan.md item 6): required
+            # whenever the envelope above resolves to a non-owner/unverified
+            # trust tier -- the model must state, in its own tool call, why
+            # this non-owner content is worth saving. Optional/ignored
+            # otherwise (see agent_memory.requires_attribution_reason).
+            attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
         )
         return json.dumps(
             {"ok": True, "file": saved.get("file"), "chars_written": saved.get("chars_written"), "mode": saved.get("mode")},
@@ -5117,6 +5159,14 @@ def execute_single_direct_tool_call(
             agent_install_id=session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id") or None,
             actor=actor,
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
+            # Attribution seam: same session_metadata["envelope"] snapshot
+            # memory_write threads through -- daily notes are consolidated
+            # into MEMORY.md/GOALS.md/etc later (consolidate_daily_memory_
+            # notes), so an unattributed daily note was a real gap: a non-
+            # owner's statement could reach a root file with no attribution
+            # trail at all. Fixed by threading the same seam here.
+            source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
+            attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
         )
         return json.dumps(
             {

@@ -128,8 +128,30 @@ def _daily_entry_body(value: str) -> str:
     return line
 
 
+_DAILY_NOTE_TIMESTAMP_PREFIX_RE = re.compile(r"^(- \[[^\]]+\]\s*)(.*)$", re.DOTALL)
+
+
+def _insert_daily_note_marker(entry: str, marker: str) -> str:
+    """Splice a format_source_marker()-style attribution prefix into a
+    built daily-note line, right after the "- [HH:MM:SS UTC] " timestamp
+    and before the fact text -- same visible-attribution contract as
+    memory_write_file's MEMORY.md append path, applied to daily notes."""
+    if not marker:
+        return entry
+    match = _DAILY_NOTE_TIMESTAMP_PREFIX_RE.match(str(entry or ""))
+    if not match:
+        return f"{marker}{entry}"
+    prefix, body = match.group(1), match.group(2)
+    return f"{prefix}{marker}{body}"
+
+
 def _normalize_daily_similarity_text(value: str) -> str:
-    lowered = str(value or "").strip().lower()
+    # Strip any leading format_source_marker()-style attribution prefix
+    # first -- two different senders stating the same fact (or the same
+    # sender restating it) must compare on the underlying content, not on
+    # marker text that varies by who/where.
+    unmarked = _workspace_memory_store.strip_source_marker(value)
+    lowered = str(unmarked or "").strip().lower()
     cleaned = re.sub(r"[^a-z0-9\s]+", " ", lowered)
     return " ".join(cleaned.split())
 
@@ -556,12 +578,19 @@ def save_memory(
     sync_memory_md: bool = True,
     agent_install_id: str | None = None,
     source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
 ) -> None:
     """`source` is an optional attribution snapshot (platform/surface/sender_id/
     sender_name/sender_is_owner -- InboundEnvelope.to_metadata()'s shape, or
     inbound_attribution_recovery.build_attribution's recovered equivalent).
     None (the default) preserves prior behavior byte-for-byte: an unattributed
-    row, same as every row written before this parameter existed."""
+    row, same as every row written before this parameter existed.
+
+    `attribution_reason` is the agent's own stated reason for saving this
+    content -- required whenever `source` resolves to a non-owner or
+    unverified trust tier (agent_memory.requires_attribution_reason); raises
+    agent_memory.MemoryAttributionRequiredError otherwise. Never required
+    when `source` is absent or owner-attributed."""
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     _enforce_memory_state_decision(
         operation="upsert_workspace_memory",
@@ -579,6 +608,26 @@ def save_memory(
         sync_memory_md=sync_memory_md,
         agent_install_id=str(agent_install_id or "").strip() or None,
         source=source,
+        attribution_reason=attribution_reason,
+    )
+
+
+def list_memory_entry_history(
+    workspace_id: str,
+    key: str,
+    *,
+    agent_install_id: str | None = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Decision B's audit trail for the structured key/value memory store --
+    every create/update recorded for `key` (update-don't-duplicate means the
+    live row only ever holds the latest content; this is what changed and
+    why for a given entry over time)."""
+    return _workspace_memory_store._list_memory_entry_history(
+        _normalize_workspace_id(workspace_id),
+        key,
+        agent_install_id=str(agent_install_id or "").strip() or None,
+        limit=limit,
     )
 
 
@@ -696,10 +745,33 @@ def update_memory_context_file(
     reason: str = "memory_update",
     run_id: str | None = None,
     audit_metadata: Optional[Dict[str, Any]] = None,
+    source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
 ) -> Dict[str, Any]:
+    """`source`/`attribution_reason`: same write-filter contract as
+    memory_write_file -- required whenever `source` resolves to a non-owner
+    or unverified trust tier. This is a whole-file replace (the agent is
+    expected to compose the complete revised content itself, unlike the
+    single-line append path), so no marker is auto-spliced into `content`;
+    the filter plus the audit-trail metadata below are the protection here.
+
+    When `normalized_filename == "MEMORY.md"` and `reason` is not
+    "memory_tree_write" (the owner's own manual Memory-tab editor,
+    agent_memory_tree_service.write_file), this path is also subject to the
+    same 200-line/25KB index cap memory_write_file enforces -- otherwise a
+    model-driven memory_update call could silently replace MEMORY.md with
+    content of unbounded size, bypassing the cap entirely."""
+    _require_attribution_reason_or_raise(
+        source=source,
+        attribution_reason=attribution_reason,
+        what=f"update memory file '{filename}'",
+    )
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or "").strip() or None
     normalized_filename = normalize_workspace_context_filename(filename)
+    normalized_reason = str(reason or "").strip()
+    if normalized_filename == "MEMORY.md" and normalized_reason != "memory_tree_write":
+        _reject_over_index_cap(str(content or ""))
     old_content = read_workspace_context_file(
         normalized_filename,
         workspace_id=normalized_workspace_id,
@@ -722,6 +794,9 @@ def update_memory_context_file(
         workspace_id=normalized_workspace_id,
         agent_install_id=normalized_agent_install_id,
     )
+    merged_metadata: Dict[str, Any] = dict(audit_metadata or {})
+    merged_metadata.setdefault("source", _workspace_memory_store._normalize_source(source) if source else None)
+    merged_metadata.setdefault("attribution_reason", str(attribution_reason or "").strip() or None)
     version_record = _append_memory_file_version_record(
         normalized_workspace_id,
         agent_install_id=normalized_agent_install_id,
@@ -731,7 +806,7 @@ def update_memory_context_file(
         new_content=str(saved.get("content") or ""),
         reason=reason,
         run_id=run_id,
-        metadata=audit_metadata,
+        metadata=merged_metadata,
     )
     return {
         "workspace_id": normalized_workspace_id,
@@ -788,14 +863,30 @@ def memory_read_file(
 # curated rewrite) or to mode=="replace" (a deliberate whole-file rewrite, e.g.
 # after consolidation, is exempt by construction).
 _MEMORY_MD_LIVE_APPEND_REASON = "memory_write"
-# On-disk soft cap for MEMORY.md -- comfortably above what actually gets
-# injected per turn (ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT=4_800 in
-# sage_instruction_compiler_service.py) so ordinary use never hits it, but
-# tight enough that an agent that never curates gets stopped and told to,
-# rather than silently growing into an unusable wall of text or (the
-# audit's flagged failure mode) getting silently truncated on read with no
-# warning.
-MEMORY_MD_SELF_CURATION_CAP_CHARS = 8_000
+# Founder decision (context-engineering-plan.md item 7): adopt Claude Code's
+# own published MEMORY.md discipline exactly -- "the first 200 lines, or the
+# first 25KB, whichever comes first" -- rather than an Empyralis-invented
+# number. Whichever threshold a write would cross first triggers the same
+# explicit "shorten this" error; nothing past either limit is ever silently
+# dropped, here or on read (this file only owns the write side -- see
+# MEMORY_MD_SELF_CURATION_CAP_CHARS's docstring below for the read-side note).
+MEMORY_MD_INDEX_MAX_LINES = 200
+MEMORY_MD_INDEX_MAX_BYTES = 25_000
+# Backward-compatible alias -- kept so existing callers/tests that reference
+# MEMORY_MD_SELF_CURATION_CAP_CHARS by name (it predates the exact-numbers
+# decision, when this was an Empyralis-invented 8,000-char placeholder) keep
+# working unchanged; the *value* now matches the 25KB figure above.
+#
+# NOTE ON SCOPE: this constant governs the WRITE-time guard in
+# memory_write_file/update_memory_context_file only. The audit's other named
+# failure mode -- sage_instruction_compiler_service.py silently truncating
+# MEMORY.md on *read* against the shared ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT
+# (4,800 chars, shared across every root file, not a dedicated MEMORY.md
+# allowance) -- is NOT fixed here. That file was locked for concurrent edits
+# at the time this was built; carving MEMORY.md its own dedicated 200-line/
+# 25KB read-time allowance, separate from the other root files' shared
+# budget, is the follow-up work item.
+MEMORY_MD_SELF_CURATION_CAP_CHARS = MEMORY_MD_INDEX_MAX_BYTES
 
 
 def _reject_multi_paragraph_memory_write(content: str) -> None:
@@ -814,6 +905,49 @@ def _reject_multi_paragraph_memory_write(content: str) -> None:
         )
 
 
+def _reject_over_index_cap(final_content: str) -> None:
+    """The 200-line/25KB index cap, whichever hits first -- an explicit
+    error, never a silent truncation (that failure mode is exactly what this
+    replaces: Claude Code's own docs describe the pre-error version of this
+    as 'everything past the limit is dropped on the next load')."""
+    byte_count = len(final_content.encode("utf-8"))
+    line_count = final_content.count("\n") + (1 if final_content and not final_content.endswith("\n") else 0)
+    if byte_count <= MEMORY_MD_INDEX_MAX_BYTES and line_count <= MEMORY_MD_INDEX_MAX_LINES:
+        return
+    raise ValueError(
+        f"MEMORY.md has grown past its {MEMORY_MD_INDEX_MAX_LINES}-line / "
+        f"{MEMORY_MD_INDEX_MAX_BYTES}-char self-curation cap "
+        f"(now {line_count} lines, {byte_count} chars). This write was NOT saved. "
+        "MEMORY.md must stay a compact index -- consolidate or move older/less-active "
+        "facts to a memory/*.md topic file (memory_stage_consolidation, or memory_write "
+        "with a memory/*.md path) before writing more."
+    )
+
+
+def _require_attribution_reason_or_raise(
+    *,
+    source: Dict[str, Any] | None,
+    attribution_reason: str | None,
+    what: str,
+) -> None:
+    """Write filter (context-engineering-plan.md item 6): content attributed
+    to a named non-owner sender, or a sender whose ownership could not be
+    verified, may still be saved -- but never without the agent stating WHY.
+    An explicit error, never a silent save and never a pending/approval
+    state. No-op when `source` is absent or owner-attributed, so every
+    caller that predates attribution stays byte-for-byte unaffected."""
+    if not _workspace_memory_store.requires_attribution_reason(source):
+        return
+    if str(attribution_reason or "").strip():
+        return
+    tier = _workspace_memory_store.derive_trust_tier(source)
+    raise ValueError(
+        f"Cannot {what}: content attributed to a {tier.replace('_', ' ')} requires an "
+        "explicit attribution_reason explaining why it is worth saving. This was NOT "
+        "saved -- retry with attribution_reason set."
+    )
+
+
 def memory_write_file(
     workspace_id: str,
     filename: str,
@@ -825,6 +959,7 @@ def memory_write_file(
     reason: str = 'memory_write',
     run_id: str | None = None,
     source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
 ) -> Dict[str, Any]:
     """Write to a memory file. Used by Sage to update MEMORY.md (append new facts)
     or edit bootstrap files (SOUL.md, AGENTS.md, TOOLS.md, IDENTITY.md) via replace.
@@ -841,11 +976,21 @@ def memory_write_file(
     silently stored as an unmarked owner-level fact. None (the default, or
     an owner source) leaves the line exactly as clean as before this
     parameter existed.
+
+    `attribution_reason`: required (raises ValueError otherwise) whenever
+    `source` resolves to a non-owner or unverified trust tier -- the write
+    filter half of the same decision. Never required for an owner source or
+    no source at all.
     """
     from server_modules.workspace_context import (
         read_workspace_context_file,
         write_workspace_context_file,
         normalize_workspace_context_filename,
+    )
+    _require_attribution_reason_or_raise(
+        source=source,
+        attribution_reason=attribution_reason,
+        what=f"write to memory file '{filename}'",
     )
     normalized_filename = normalize_workspace_context_filename(filename)
     normalized_mode = str(mode or 'replace').strip().lower() or 'replace'
@@ -869,16 +1014,15 @@ def memory_write_file(
         )
         combined = str(existing or '').rstrip() + '\n' + stamped_content
         final_content = combined.strip()
-        if _is_live_memory_md_append and len(final_content.encode('utf-8')) > MEMORY_MD_SELF_CURATION_CAP_CHARS:
-            raise ValueError(
-                f"MEMORY.md has grown past its {MEMORY_MD_SELF_CURATION_CAP_CHARS}-char "
-                "self-curation cap. This fact was NOT saved. MEMORY.md must stay a "
-                "compact index -- consolidate or move older/less-active facts to a "
-                "memory/*.md topic file (memory_stage_consolidation, or memory_write "
-                "with a memory/*.md path) before appending more."
-            )
+        if _is_live_memory_md_append:
+            _reject_over_index_cap(final_content)
     else:
         final_content = str(content or '')
+        if normalized_filename == "MEMORY.md" and str(reason or '').strip() != "memory_tree_write":
+            # Whole-file replace of MEMORY.md via this path (as opposed to
+            # the owner's manual memory_tree_write editor) must not be a
+            # backdoor around the same index cap the append path enforces.
+            _reject_over_index_cap(final_content)
 
     _enforce_memory_state_decision(
         operation='update_workspace_context_file',
@@ -906,7 +1050,11 @@ def memory_write_file(
         new_content=str(saved.get('content') or ''),
         reason=reason,
         run_id=run_id,
-        metadata={'mode': normalized_mode},
+        metadata={
+            'mode': normalized_mode,
+            'source': _workspace_memory_store._normalize_source(source) if source else None,
+            'attribution_reason': str(attribution_reason or '').strip() or None,
+        },
     )
     return {
         'file': saved.get('filename'),
@@ -921,7 +1069,20 @@ def memory_append_daily_note(
     agent_install_id: str | None = None,
     actor: str = _MEMORY_DEFAULT_ACTOR,
     run_id: str | None = None,
+    source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
 ) -> Dict[str, Any]:
+    """`source`/`attribution_reason`: same attribution contract as
+    memory_write_file -- a non-owner/unverified source gets a visible
+    "[who via where — status] " prefix spliced into the persisted daily-note
+    line (see _insert_daily_note_marker), and requires attribution_reason or
+    the write is refused with an explicit error. None (the default) leaves
+    behavior exactly as it was before these parameters existed."""
+    _require_attribution_reason_or_raise(
+        source=source,
+        attribution_reason=attribution_reason,
+        what="append a daily memory note",
+    )
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or "").strip() or None
     note_date = str(_append_note_now() or "").strip()
@@ -929,7 +1090,8 @@ def memory_append_daily_note(
     if note_date != expected_today:
         raise ValueError("Daily memory note writes are restricted to today's UTC note file.")
     filename = f"memory/{note_date}.md"
-    entry = _build_daily_note_entry(note)
+    marker = _workspace_memory_store.format_source_marker(source)
+    entry = _insert_daily_note_marker(_build_daily_note_entry(note), marker)
     existing = read_workspace_context_file(
         filename,
         workspace_id=normalized_workspace_id,
@@ -990,7 +1152,11 @@ def memory_append_daily_note(
         new_content=str(saved.get("content") or ""),
         reason="memory_append_daily_note",
         run_id=run_id,
-        metadata={"usefulness": usefulness_reason},
+        metadata={
+            "usefulness": usefulness_reason,
+            "source": _workspace_memory_store._normalize_source(source) if source else None,
+            "attribution_reason": str(attribution_reason or "").strip() or None,
+        },
     )
     return {
         "workspace_id": normalized_workspace_id,
