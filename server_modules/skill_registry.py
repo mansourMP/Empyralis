@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import subprocess
@@ -491,6 +492,236 @@ async def _live_memory_skill(
             skill_id="memory-manager", goal=goal, agent_label=agent_label,
             tenant_id=tenant_id, workspace_id=workspace_id, **kwargs,
         )
+
+
+# ── Phase N: per-agent memory tools (memory-read/write/list) ───────────────
+# Distinct from memory-manager above: memory-manager returns the legacy
+# shared workspace memory-facts snapshot (memory_service.get_memory);
+# these three operate on each agent's OWN per-agent memory directory
+# (agent_memory_tools.py / workspace_context.agent_workspace_context_dir).
+# tool_broker.execute_skill already special-cases these three ids ahead of
+# its own executor check and dispatches to agent_memory_tools directly
+# (see tool_broker._dispatch_memory_tool) — the executors below give this
+# registry's OWN execute_skill (used by skills_service.py's generic
+# "skill_invoke" tool dispatch) the same real behavior instead of falling
+# through to the SKILL.md/manual-stub fallback, and mirror the same
+# goal-parsing so both dispatch paths behave identically.
+
+
+def _extract_memory_path_from_goal(goal: str) -> str:
+    """Extract a memory file path from free-text goal input.
+
+    Mirrors tool_broker._extract_memory_path so a memory-read/memory-write
+    invocation behaves the same whether it arrives via the capability-broker
+    dispatch (tool_broker.execute_skill) or this registry's generic
+    skill_invoke dispatch.
+    """
+    text = str(goal or "")
+
+    # Quoted path: "SOUL.md" or 'memory/notes.md'
+    m = re.search(r"""["']([^"']+\.[a-z]{1,10})["']""", text)
+    if m:
+        return m.group(1).strip()
+
+    # Bare .md filename: SOUL.md, memory/notes.md
+    m = re.search(r"(\S+\.md)\b", text)
+    if m:
+        return m.group(1).strip()
+
+    # Look for "path:", "file:", "read:" prefixes
+    for prefix in ("path:", "file:", "read:", "write to ", "write ", "read "):
+        if prefix in text.lower():
+            after = text.lower().split(prefix, 1)[-1].strip()
+            qm = re.search(r"""["']([^"']+)["']""", after)
+            if qm:
+                return qm.group(1).strip()
+            word = after.split()[0] if after.split() else ""
+            return word.strip().rstrip(",.;:")
+
+    return ""
+
+
+def _extract_memory_content_from_goal(goal: str) -> str:
+    """Extract write content from free-text goal input.
+
+    Mirrors tool_broker._extract_memory_content — see note above.
+    """
+    text = str(goal or "")
+    text = re.sub(r"(?i)memory[_ ]?write\b[:\s]*", "", text)
+
+    m = re.search(r"""["']([^"']+\.[a-z]{1,10})["']\s*[:：]\s*(.+)""", text, re.DOTALL)
+    if m:
+        return m.group(2).strip()
+
+    m = re.search(r"(\S+\.md)\s*[:：]\s*(.+)", text, re.DOTALL)
+    if m:
+        return m.group(2).strip()
+
+    if ": " in text:
+        parts = text.split(": ", 1)
+        if ".md" in parts[0] or len(parts[0].split()) <= 2:
+            return parts[-1].strip()
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    if len(sentences) > 1:
+        return " ".join(sentences[1:]).strip()
+
+    return text.strip()
+
+
+async def _live_memory_read_skill(
+    *,
+    workspace_id: str,
+    goal: str,
+    agent_label: str,
+    agent_id: str = "",
+    agent_install_id: str = "",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for memory-read — reads a file from the CALLING agent's own
+    per-agent memory directory (Phase N; see agent_memory_tools.py)."""
+    del kwargs
+    from server_modules import agent_memory_tools
+
+    # SECURITY: an empty agent scope must never silently fall through to
+    # the workspace root's memory (that is exactly how a prior cross-agent
+    # memory leak happened — see docs/PLATFORM-MAP.md's memory security
+    # audit and workspace_context.agent_workspace_context_dir's docstring).
+    # Fail closed instead.
+    resolved_agent = str(agent_install_id or agent_id or "").strip()
+    if not resolved_agent:
+        return {
+            "status": "error",
+            "reply": "Memory tools need a resolved agent identity and none was available for this call.",
+            "artifact": None,
+            "steps": [{"label": "Reading memory", "detail": "No agent identity resolved", "status": "error", "kind": "thinking"}],
+        }
+
+    path = _extract_memory_path_from_goal(goal)
+    if not path:
+        return {
+            "status": "error",
+            "reply": "I need a file path to read from memory, e.g. SOUL.md or memory/notes.md.",
+            "artifact": None,
+            "steps": [{"label": "Reading memory", "detail": "No path found in request", "status": "error", "kind": "thinking"}],
+        }
+
+    result = await agent_memory_tools.memory_read(
+        workspace_id=workspace_id,
+        agent_install_id=resolved_agent,
+        agent_id=agent_id,
+        path=path,
+    )
+    ok = bool(result.get("ok"))
+    return {
+        "status": "ok" if ok else "error",
+        "reply": (
+            str(result.get("content") or "")
+            if ok
+            else f"Could not read {path}: {result.get('error', 'unknown error')}"
+        ),
+        "artifact": result if ok else None,
+        "steps": [{"label": "Reading memory", "detail": path, "status": "done" if ok else "error", "kind": "thinking"}],
+    }
+
+
+async def _live_memory_write_skill(
+    *,
+    workspace_id: str,
+    goal: str,
+    agent_label: str,
+    agent_id: str = "",
+    agent_install_id: str = "",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for memory-write — writes/appends to a file in the CALLING
+    agent's own per-agent memory directory (Phase N; see agent_memory_tools.py)."""
+    del kwargs
+    from server_modules import agent_memory_tools
+
+    resolved_agent = str(agent_install_id or agent_id or "").strip()
+    if not resolved_agent:
+        return {
+            "status": "error",
+            "reply": "Memory tools need a resolved agent identity and none was available for this call.",
+            "artifact": None,
+            "steps": [{"label": "Writing memory", "detail": "No agent identity resolved", "status": "error", "kind": "thinking"}],
+        }
+
+    path = _extract_memory_path_from_goal(goal)
+    content = _extract_memory_content_from_goal(goal)
+    if not path:
+        return {
+            "status": "error",
+            "reply": "I need a file path to write to memory, e.g. SOUL.md or memory/notes.md.",
+            "artifact": None,
+            "steps": [{"label": "Writing memory", "detail": "No path found in request", "status": "error", "kind": "thinking"}],
+        }
+    if not content:
+        return {
+            "status": "error",
+            "reply": "I need content to write to memory.",
+            "artifact": None,
+            "steps": [{"label": "Writing memory", "detail": "No content found in request", "status": "error", "kind": "thinking"}],
+        }
+
+    result = await agent_memory_tools.memory_write(
+        workspace_id=workspace_id,
+        agent_install_id=resolved_agent,
+        agent_id=agent_id,
+        path=path,
+        content=content,
+    )
+    ok = bool(result.get("ok"))
+    return {
+        "status": "ok" if ok else "error",
+        "reply": (
+            f"Saved to {path} ({result.get('byte_count', 0)} bytes)."
+            if ok
+            else f"Could not write {path}: {result.get('error', 'unknown error')}"
+        ),
+        "artifact": result if ok else None,
+        "steps": [{"label": "Writing memory", "detail": path, "status": "done" if ok else "error", "kind": "thinking"}],
+    }
+
+
+async def _live_memory_list_skill(
+    *,
+    workspace_id: str,
+    goal: str,
+    agent_label: str,
+    agent_id: str = "",
+    agent_install_id: str = "",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Executor for memory-list — lists files in the CALLING agent's own
+    per-agent memory directory (Phase N; see agent_memory_tools.py)."""
+    del kwargs, goal
+    from server_modules import agent_memory_tools
+
+    resolved_agent = str(agent_install_id or agent_id or "").strip()
+    if not resolved_agent:
+        return {
+            "status": "error",
+            "reply": "Memory tools need a resolved agent identity and none was available for this call.",
+            "artifact": None,
+            "steps": [{"label": "Listing memory", "detail": "No agent identity resolved", "status": "error", "kind": "thinking"}],
+        }
+
+    result = await agent_memory_tools.memory_list(
+        workspace_id=workspace_id,
+        agent_install_id=resolved_agent,
+        agent_id=agent_id,
+    )
+    ok = bool(result.get("ok"))
+    files = result.get("files", []) if ok else []
+    summary = "\n".join(f"- {f.get('path')} ({f.get('size', 0)}B)" for f in files) or "(no memory files yet)"
+    return {
+        "status": "ok" if ok else "error",
+        "reply": summary if ok else f"Could not list memory files: {result.get('error', 'unknown error')}",
+        "artifact": result,
+        "steps": [{"label": "Listing memory", "detail": f"{len(files)} found", "status": "done" if ok else "error", "kind": "thinking"}],
+    }
 
 
 async def _live_code_runner_skill(
@@ -1004,6 +1235,7 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         action_class="read",
         connector_scopes=(),
         trigger_terms=("remember", "recall", "memory", "read memory"),
+        executor=_live_memory_read_skill,
         skill_class="system",
     ),
     SkillDefinition(
@@ -1015,6 +1247,7 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         action_class="write",
         connector_scopes=(),
         trigger_terms=("remember this", "save to memory", "write to memory", "note this"),
+        executor=_live_memory_write_skill,
         skill_class="system",
     ),
     SkillDefinition(
@@ -1026,6 +1259,7 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         action_class="read",
         connector_scopes=(),
         trigger_terms=("list memory", "memory files", "what do i remember"),
+        executor=_live_memory_list_skill,
         skill_class="system",
     ),
 )
@@ -1233,14 +1467,33 @@ async def execute_skill(
         }
 
     if definition.executor is not None:
-        return await definition.executor(
-            tenant_id=tenant_id,
-            workspace_id=workspace_id,
-            goal=goal,
-            agent_label=agent_label,
-            hard_context=hard_context,
-            operational_policy=operational_policy,
-        )
+        executor_kwargs: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "workspace_id": workspace_id,
+            "goal": goal,
+            "agent_label": agent_label,
+            "hard_context": hard_context,
+            "operational_policy": operational_policy,
+        }
+        # Forward agent_id/agent_install_id only to executors that can
+        # actually accept them (declared explicitly, or via a **kwargs
+        # catch-all — every built-in executor except inventory_skill's has
+        # one). Older/narrower executor signatures (e.g. execute_inventory_skill,
+        # which takes exactly the six kwargs above and nothing else) must be
+        # left untouched rather than made to error on an unexpected kwarg.
+        try:
+            executor_params = inspect.signature(definition.executor).parameters
+            accepts_var_keyword = any(
+                param.kind is inspect.Parameter.VAR_KEYWORD
+                for param in executor_params.values()
+            )
+            if accepts_var_keyword or "agent_id" in executor_params:
+                executor_kwargs["agent_id"] = agent_id
+            if accepts_var_keyword or "agent_install_id" in executor_params:
+                executor_kwargs["agent_install_id"] = agent_install_id
+        except (TypeError, ValueError):
+            pass
+        return await definition.executor(**executor_kwargs)
 
     if definition.execution_adapter == "handler":
         return await _execute_handler_skill(
