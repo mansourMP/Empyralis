@@ -316,12 +316,19 @@ memory correctness) × (smallness/safety of the change). Surgical fixes first, s
   executes it correctly.
 
 ### 13. Untrusted-content quarantine
+- **⚠️ FOUNDER RULING 2026-07-23 — hard boundary on what "quarantine" may mean here:** every single
+  owner message goes to the reasoning model, absolutely, unfiltered — there will NEVER be an
+  input-side filter that flags/withholds/rewrites an owner message ("includes a deletion request →
+  don't deliver it" is explicitly banned). Quarantine = TAGGING third-party/fetched content as
+  data-not-command. All content still reaches the model; the model's own reasoning decides.
+  Safety against destructive requests lives at the capability layer only (item #14: the tool doesn't
+  exist) — never at the message-delivery layer. The "screening pass on high-risk sources" idea below
+  is accordingly DROPPED unless it is tag-and-deliver, never block.
 - **What:** tag any inbound content the agent didn't get directly from the owner's own instruction —
   fetched web pages, connector API responses, inbound messages from non-owner senders — by
   provenance, the same structural way the attribution envelope already tags sender identity (and the
   same tagging built for #6). State explicitly in the system prompt that tool/fetch/connector content
-  is data, not command. JSON-encode it so it can't typographically break out. Consider a screening
-  pass on high-risk sources.
+  is data, not command. JSON-encode it so it can't typographically break out.
 - **Why:** the industry's direct answer to "a polluted context window causes a bad action." Today
   nothing in our stack addresses "what is a fetched web page / connector response allowed to make the
   agent do" — the Authority Mandate solves *who is speaking*, not *what fetched content is allowed to
@@ -398,7 +405,7 @@ memory correctness) × (smallness/safety of the change). Surgical fixes first, s
 > **ALL FOUR DECIDED by the founder, 2026-07-23, on the recommendations:**
 > **A** → (2)+(3): structural compensations as permanent architecture + owner-alert extension (informational, never a gate). Trade-off documented deliberately.
 > **B** → update-don't-duplicate, paired with the provenance audit trail (#6).
-> **C** → compaction matches the user's active provider/model by default; platform DeepSeek key is true last-resort fallback only.
+> **C** → compaction matches the user's active provider/model. **AMENDED by founder ruling 2026-07-23: NO model fallback chains anywhere on the platform** — if the user's model can't run (compaction included), the operation fails VISIBLY (warning + trace event) and the owner changes their model; the platform key is not a fallback. "If it doesn't work it just doesn't work."
 > **D** → per-process OS sandbox (bubblewrap-equivalent) now, as the containment floor; container/VM-per-agent re-evaluated after observing (2)'s gaps.
 
 Note: the catastrophic/destructive-infrastructure question is **not** listed here — it's decided
