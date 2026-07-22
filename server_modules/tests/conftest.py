@@ -39,13 +39,33 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
     # does not block business-logic test paths.
     def _mock_run_runtime_kernel(command: str, payload, timeout_seconds: int = 5):
         import copy
+        normalized_payload = payload if isinstance(payload, dict) else {}
+
+        # The real kernel's runtime-state-store-decision command derives
+        # `next_action` from the requested `operation` on an "allow"
+        # decision (empyralis-runtime-kernel/src/runtime_state_store.rs
+        # next_action(), lines 1106-1216): for every state-store operation
+        # gated this way (e.g. "save_installed_skill_registry" ->
+        # "save_installed_skill_registry", see line 1143;
+        # "write_skills_registry_file" -> itself, line 1172;
+        # "save_mcp_server_registry" -> itself, line 1142) that mapping is
+        # the identity function. Callers such as
+        # server_modules/installed_skills.py:134-136 and
+        # server_modules/skills_registry.py:83 require next_action to
+        # equal the operation they asked for before they'll persist state,
+        # so the mock must echo it back rather than leaving it blank.
+        next_action = ""
+        if command == "runtime-state-store-decision":
+            next_action = str(normalized_payload.get("operation") or "").strip()
+
         return {
             "ok": True,
             "decision": "allow",
             "command": command,
             "decision_id": "rkd_mock_non_kernel_test",
             "reason": "mock allow (non-kernel test fixture)",
-            "payload": copy.deepcopy(payload) if isinstance(payload, dict) else {},
+            "next_action": next_action,
+            "payload": copy.deepcopy(normalized_payload),
         }
 
     try:
