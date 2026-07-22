@@ -206,6 +206,29 @@ def build_registry_entries(
         seen.add(name)
         entries.append(_build_registry_entry_from_tool_payload(tool))
 
+    # 4. Workspace-connected MCP tools (Phase A wiring —
+    # docs/design/mcp-applications-plan.md). This function intentionally has
+    # no workspace_id parameter (see the call site comment in
+    # sage_agent_runtime_service.py's _direct_tool_bundle(), which is where
+    # workspace_id is actually in scope) — the MCP tool payloads are instead
+    # injected by the caller into availability_payload["mcp_tools"], already
+    # shaped exactly like the app_tools payloads above
+    # (name/description/connector_id/parameters), pre-namespaced
+    # mcp__<server_id>__<tool_name> and pre-filtered to enabled servers +
+    # enabled+approved tools by mcp_registry_service.
+    # list_workspace_mcp_direct_tool_payloads(). Absent key or the MCP kill
+    # switch (EMPYRALIS_MCP_TOOLS_ENABLED) off => this is simply a no-op.
+    mcp_tools = availability_payload.get("mcp_tools") if isinstance(availability_payload, dict) else None
+    if isinstance(mcp_tools, list):
+        for tool in mcp_tools:
+            if not isinstance(tool, dict):
+                continue
+            name = str(tool.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            entries.append(_build_registry_entry_from_tool_payload(tool))
+
     return entries
 
 

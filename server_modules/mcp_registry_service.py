@@ -930,6 +930,492 @@ def mcp_skill_id(server_id: str, tool_name: str) -> str:
     return f"mcp:{_normalize_server_id(server_id)}:{_normalize_tool_name(tool_name)}"
 
 
+# ── Phase A wiring: live tool-calling loop integration ────────────────────────
+# docs/design/mcp-applications-plan.md (Phase A) / docs/design/mcp-current-state.md.
+# Everything below this banner (mcp_tools_enabled, mcp_tool_name /
+# parse_mcp_tool_name, list_workspace_mcp_direct_tool_payloads,
+# invoke_workspace_mcp_tool{,_async}, format_mcp_tool_result) exists to wire
+# this already-built MCP client engine into the live, structured
+# tool-calling loop so a model can discover and call a workspace's connected
+# MCP tools via ordinary function-calling — as opposed to mcp_skill_id() /
+# invoke_workspace_mcp_skill{,_async}() above, which is the older
+# natural-language "goal" based skill-invocation abstraction (still used by
+# the /skills mcp:server:tool slash command and skill_registry.py) and is
+# left untouched.
+
+
+def mcp_tools_enabled() -> bool:
+    """Kill switch for MCP tool discovery + dispatch in the live tool-calling
+    loop. Default ON. Mirrors the EMPYRALIS_CONTINUOUS_WORK_ENABLED pattern in
+    direct_chat_generation_service._continuous_work_enabled(). Flag OFF means
+    zero behavior change: no MCP registry entries are built and no MCP
+    dispatch branch fires anywhere in the tool-calling loop.
+    """
+    return str(os.environ.get("EMPYRALIS_MCP_TOOLS_ENABLED", "1")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def mcp_tool_name(server_id: str, tool_name: str) -> str:
+    """Model-facing namespaced tool name for direct structured tool-calling.
+
+    Distinct from mcp_skill_id() (colon-delimited, e.g. "mcp:server:tool")
+    which addresses the goal-based skill abstraction — this is
+    double-underscore delimited ("mcp__server__tool") to match every other
+    connector's "<connector_id>__<action_id>" naming convention, so
+    direct_chat_operator_binding_service.parse_tool_name() — which splits on
+    the FIRST "__" only — parses it for free into
+    connector_id="mcp", action_id="<server_id>__<tool_name>".
+    """
+    return f"mcp__{_normalize_server_id(server_id)}__{_normalize_tool_name(tool_name)}"
+
+
+def parse_mcp_tool_name(tool_name: str) -> Optional[Dict[str, str]]:
+    """Reverse of mcp_tool_name(): "mcp__<server_id>__<tool_name>" -> dict.
+
+    Splits on the FIRST "__" after the "mcp__" prefix. A server_id
+    containing "__" would break this — server ids are short admin-chosen
+    slugs (see _normalize_server_id), so this is an accepted edge case, not
+    a general-purpose parser.
+    """
+    raw = str(tool_name or "").strip()
+    if not raw.startswith("mcp__"):
+        return None
+    remainder = raw[len("mcp__"):]
+    if "__" not in remainder:
+        return None
+    server_id, tool = remainder.split("__", 1)
+    normalized_server_id = _normalize_server_id(server_id)
+    normalized_tool_name = _normalize_tool_name(tool)
+    if not normalized_server_id or not normalized_tool_name:
+        return None
+    return {"server_id": normalized_server_id, "tool_name": normalized_tool_name}
+
+
+def list_workspace_mcp_direct_tool_payloads(workspace_id: str) -> List[Dict[str, Any]]:
+    """Build Tier-2 tool-registry payloads for a workspace's connected MCP
+    tools.
+
+    Consumed by server_modules/tool_registry_service.build_registry_entries()
+    as its 4th source (see the call site in sage_agent_runtime_service.py's
+    _direct_tool_bundle(), which injects this list into the availability
+    payload under the "mcp_tools" key rather than adding a new parameter to
+    build_registry_entries() — see the comment there for why). Each payload
+    is already shaped like tool_registry_service._build_registry_entry_from_
+    tool_payload() expects: name/description/connector_id/parameters.
+
+    Only ENABLED servers and ENABLED+APPROVED tools are included — an agent
+    can never discover (let alone call) an MCP tool that hasn't been
+    explicitly approved for this workspace. The model-facing "name" is
+    mcp_tool_name(server_id, tool_name); the server label and tool label are
+    folded into "description" so tool_registry_service's keyword extractor
+    (which only reads name/description/connector_id) picks them up too.
+    """
+    if not mcp_tools_enabled():
+        return []
+    payloads: List[Dict[str, Any]] = []
+    for server in list_workspace_mcp_servers(workspace_id):
+        if not bool(server.get("enabled", True)):
+            continue
+        server_id = str(server.get("id") or "").strip()
+        if not server_id:
+            continue
+        server_label = str(server.get("label") or server_id).strip() or server_id
+        raw_tools = server.get("tools") if isinstance(server.get("tools"), list) else []
+        for raw_tool in raw_tools:
+            if not isinstance(raw_tool, dict):
+                continue
+            if not bool(raw_tool.get("enabled", True)) or not bool(raw_tool.get("approved", False)):
+                continue
+            tool_name = _normalize_tool_name(raw_tool.get("name"))
+            if not tool_name:
+                continue
+            tool_label = str(raw_tool.get("label") or tool_name).strip() or tool_name
+            tool_description = str(raw_tool.get("description") or "").strip()
+            combined_description = (
+                f"[{server_label}] {tool_label}: {tool_description}"
+                if tool_description
+                else f"[{server_label}] {tool_label}"
+            ).strip()
+            payloads.append(
+                {
+                    "name": mcp_tool_name(server_id, tool_name),
+                    "description": combined_description[:500],
+                    "label": f"{server_label}: {tool_label}"[:160],
+                    "connector_id": "mcp",
+                    "parameters": _normalize_input_schema(raw_tool.get("input_schema")),
+                    # Round-trip fields — not read by tool_registry_service,
+                    # only by our own callers/tests.
+                    "mcp_server_id": server_id,
+                    "mcp_tool_name": tool_name,
+                }
+            )
+    return payloads
+
+
+def format_mcp_tool_result(result: Any) -> str:
+    """Format an invoke_workspace_mcp_tool{,_async}() return dict as the same
+    plain tool-result string shape every other direct-chat tool call
+    returns (skills_service.execute_single_direct_tool_call{,_async}
+    branches, direct_chat_operator_binding_service.execute_single_direct_
+    tool_call's custom-connector branch, etc. all return `str`).
+    """
+    if not isinstance(result, dict):
+        return str(result or "").strip()
+    reply = str(result.get("reply") or "").strip()
+    mcp_block = result.get("mcp") if isinstance(result.get("mcp"), dict) else {}
+    payload = mcp_block.get("payload")
+    if payload not in (None, {}, []):
+        try:
+            return json.dumps({"reply": reply, "result": payload}, ensure_ascii=False, indent=2)[:8000]
+        except Exception:
+            pass
+    return reply or "MCP tool executed successfully."
+
+
+async def invoke_workspace_mcp_tool_async(
+    *,
+    workspace_id: str,
+    server_id: str,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    agent_label: str = "Agent",
+    tenant_id: str = "default",
+    surface: str = "sage",
+    source_surface: str = "mcp_tool_call",
+    user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    app_id: Optional[str] = None,
+    client_session_cls: Any = ClientSession,
+    streamable_http_client_fn: Any = streamable_http_client,
+) -> Dict[str, Any]:
+    """Invoke an MCP tool with structured JSON *arguments* supplied directly
+    by the calling model — the entrypoint used by the direct tool-calling
+    loop when the model calls an mcp__<server>__<tool> function, as opposed
+    to invoke_workspace_mcp_skill_async() above which accepts a
+    natural-language *goal* string and infers arguments from it via
+    _parse_goal_arguments(). Mirrors invoke_workspace_mcp_skill_async()'s
+    structure exactly, minus the goal-parsing step.
+    """
+    normalized_server_id = _normalize_server_id(server_id)
+    normalized_tool_name = _normalize_tool_name(tool_name)
+    skill_id = mcp_skill_id(normalized_server_id, normalized_tool_name)
+    server = get_workspace_mcp_server(workspace_id, normalized_server_id)
+    if server is None:
+        raise FileNotFoundError(f"MCP server '{normalized_server_id}' is not registered for this workspace.")
+    if not bool(server.get("enabled", True)):
+        raise RuntimeError(f"MCP server '{normalized_server_id}' is disabled for this workspace.")
+    tool_payload = _tool_from_server(server, normalized_tool_name)
+    if tool_payload is None or not bool(tool_payload.get("enabled", True)):
+        raise FileNotFoundError(f"MCP tool '{normalized_tool_name}' is not available on server '{normalized_server_id}'.")
+    execution_call_id = run_id or thread_id or f"mcp_{uuid.uuid4().hex}"
+    input_arguments = arguments if isinstance(arguments, dict) else {}
+    input_summary = json.dumps(input_arguments, ensure_ascii=False)[:2000] if input_arguments else ""
+    source_event_id = agent_action_metering_service.build_source_event_id(
+        source_surface=source_surface,
+        run_id=run_id,
+        thread_id=thread_id,
+        tool_call_id=execution_call_id,
+        action_name=normalized_tool_name,
+    )
+    try:
+        _assert_tool_approved_for_execution(
+            tool_payload,
+            server_id=normalized_server_id,
+            tool_name=normalized_tool_name,
+        )
+    except Exception as exc:
+        await agent_action_metering_service.record_blocked(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            surface=surface,
+            source_surface=source_surface,
+            action_domain="mcp",
+            action_type=_normalize_action_class(tool_payload.get("action_class")),
+            action_name=normalized_tool_name,
+            tool_kind="mcp_tool",
+            mcp_server_id=normalized_server_id,
+            mcp_tool_id=normalized_tool_name,
+            connector_id=f"mcp:{normalized_server_id}",
+            skill_id=skill_id,
+            risk_level=str(tool_payload.get("risk_level") or "").strip() or None,
+            policy_decision="blocked",
+            error_code=type(exc).__name__,
+            payer="platform_credits",
+            billing_mode="none",
+            user_id=user_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            input_summary=input_summary,
+            output_summary=str(exc),
+            source_table="mcp_tool_calls",
+            source_event_id=source_event_id,
+        )
+        raise
+    validated_arguments = _validate_mcp_arguments(
+        input_arguments,
+        tool_payload.get("input_schema"),
+        tool_name=normalized_tool_name,
+    )
+    credential = _resolve_mcp_credential(server, workspace_id)
+    mcp_http_client = _build_mcp_http_client(credential)
+    common_event = {
+        "tenant_id": tenant_id,
+        "workspace_id": workspace_id,
+        "surface": surface,
+        "source_surface": source_surface,
+        "action_domain": "mcp",
+        "action_type": _normalize_action_class(tool_payload.get("action_class")),
+        "action_name": normalized_tool_name,
+        "tool_kind": "mcp_tool",
+        "mcp_server_id": normalized_server_id,
+        "mcp_tool_id": normalized_tool_name,
+        "connector_id": f"mcp:{normalized_server_id}",
+        "skill_id": skill_id,
+        "risk_level": str(tool_payload.get("risk_level") or "").strip() or None,
+        "policy_decision": "allowed",
+        "payer": "platform_credits",
+        "billing_mode": "transparency",
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "agent_id": agent_id,
+        "app_id": app_id,
+        "input_summary": input_summary,
+        "source_table": "mcp_tool_calls",
+        "source_event_id": source_event_id,
+        "metadata": {"server_label": server.get("label"), "argument_keys": sorted(validated_arguments.keys())},
+    }
+    await agent_action_metering_service.record_started(**common_event)
+    try:
+        result = await _call_streamable_http_tool_async(
+            endpoint=str(server.get("endpoint") or "").strip(),
+            tool_name=normalized_tool_name,
+            arguments=validated_arguments,
+            http_client=mcp_http_client,
+            client_session_cls=client_session_cls,
+            streamable_http_client_fn=streamable_http_client_fn,
+        )
+    except Exception as exc:
+        await agent_action_metering_service.record_failed(
+            **common_event,
+            error_code=type(exc).__name__,
+            output_summary=str(exc),
+        )
+        raise
+    payload = _mcp_result_payload(result)
+    await agent_action_metering_service.record_completed(
+        **common_event,
+        output_summary=_mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name),
+    )
+    return {
+        "status": "ok",
+        "reply": _mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name),
+        "artifact": {
+            "label": str(tool_payload.get("label") or normalized_tool_name).strip() or normalized_tool_name,
+            "kind": _tool_kind(tool_payload),
+            "summary": f"MCP tool {normalized_tool_name} on server {server.get('label') or normalized_server_id}",
+            "media_type": "application/json",
+            "preview_content": json.dumps(
+                {
+                    "server_id": normalized_server_id,
+                    "tool_name": normalized_tool_name,
+                    "arguments": validated_arguments,
+                    "payload": payload,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )[:12000],
+        },
+        "steps": [
+            {"label": "Resolving MCP server", "detail": str(server.get("label") or normalized_server_id).strip() or normalized_server_id, "status": "done", "kind": "thinking"},
+            {"label": "Invoking MCP tool", "detail": normalized_tool_name, "status": "done", "kind": "connector"},
+        ],
+        "mcp": {
+            "server_id": normalized_server_id,
+            "tool_name": normalized_tool_name,
+            "arguments": validated_arguments,
+            "payload": payload,
+        },
+    }
+
+
+def invoke_workspace_mcp_tool(
+    *,
+    workspace_id: str,
+    server_id: str,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    agent_label: str = "Agent",
+    tenant_id: str = "default",
+    surface: str = "sage",
+    source_surface: str = "mcp_tool_call",
+    user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    app_id: Optional[str] = None,
+    client_session_cls: Any = ClientSession,
+    streamable_http_client_fn: Any = streamable_http_client,
+) -> Dict[str, Any]:
+    """Sync twin of invoke_workspace_mcp_tool_async() — for dispatch call
+    sites that run inside a plain worker thread with no asyncio event loop of
+    their own (e.g. direct_chat_operator_binding_service.execute_single_
+    direct_tool_call, which is invoked via a bare ThreadPoolExecutor, the
+    same shape invoke_workspace_mcp_skill() (sync) already mirrors
+    invoke_workspace_mcp_skill_async()).
+    """
+    normalized_server_id = _normalize_server_id(server_id)
+    normalized_tool_name = _normalize_tool_name(tool_name)
+    skill_id = mcp_skill_id(normalized_server_id, normalized_tool_name)
+    server = get_workspace_mcp_server(workspace_id, normalized_server_id)
+    if server is None:
+        raise FileNotFoundError(f"MCP server '{normalized_server_id}' is not registered for this workspace.")
+    if not bool(server.get("enabled", True)):
+        raise RuntimeError(f"MCP server '{normalized_server_id}' is disabled for this workspace.")
+    tool_payload = _tool_from_server(server, normalized_tool_name)
+    if tool_payload is None or not bool(tool_payload.get("enabled", True)):
+        raise FileNotFoundError(f"MCP tool '{normalized_tool_name}' is not available on server '{normalized_server_id}'.")
+    execution_call_id = run_id or thread_id or f"mcp_{uuid.uuid4().hex}"
+    input_arguments = arguments if isinstance(arguments, dict) else {}
+    input_summary = json.dumps(input_arguments, ensure_ascii=False)[:2000] if input_arguments else ""
+    source_event_id = agent_action_metering_service.build_source_event_id(
+        source_surface=source_surface,
+        run_id=run_id,
+        thread_id=thread_id,
+        tool_call_id=execution_call_id,
+        action_name=normalized_tool_name,
+    )
+    try:
+        _assert_tool_approved_for_execution(
+            tool_payload,
+            server_id=normalized_server_id,
+            tool_name=normalized_tool_name,
+        )
+    except Exception as exc:
+        agent_action_metering_service.record_blocked_sync(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            surface=surface,
+            source_surface=source_surface,
+            action_domain="mcp",
+            action_type=_normalize_action_class(tool_payload.get("action_class")),
+            action_name=normalized_tool_name,
+            tool_kind="mcp_tool",
+            mcp_server_id=normalized_server_id,
+            mcp_tool_id=normalized_tool_name,
+            connector_id=f"mcp:{normalized_server_id}",
+            skill_id=skill_id,
+            risk_level=str(tool_payload.get("risk_level") or "").strip() or None,
+            policy_decision="blocked",
+            error_code=type(exc).__name__,
+            payer="platform_credits",
+            billing_mode="none",
+            user_id=user_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            input_summary=input_summary,
+            output_summary=str(exc),
+            source_table="mcp_tool_calls",
+            source_event_id=source_event_id,
+        )
+        raise
+    validated_arguments = _validate_mcp_arguments(
+        input_arguments,
+        tool_payload.get("input_schema"),
+        tool_name=normalized_tool_name,
+    )
+    credential = _resolve_mcp_credential(server, workspace_id)
+    mcp_http_client = _build_mcp_http_client(credential)
+    common_event = {
+        "tenant_id": tenant_id,
+        "workspace_id": workspace_id,
+        "surface": surface,
+        "source_surface": source_surface,
+        "action_domain": "mcp",
+        "action_type": _normalize_action_class(tool_payload.get("action_class")),
+        "action_name": normalized_tool_name,
+        "tool_kind": "mcp_tool",
+        "mcp_server_id": normalized_server_id,
+        "mcp_tool_id": normalized_tool_name,
+        "connector_id": f"mcp:{normalized_server_id}",
+        "skill_id": skill_id,
+        "risk_level": str(tool_payload.get("risk_level") or "").strip() or None,
+        "policy_decision": "allowed",
+        "payer": "platform_credits",
+        "billing_mode": "transparency",
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "agent_id": agent_id,
+        "app_id": app_id,
+        "input_summary": input_summary,
+        "source_table": "mcp_tool_calls",
+        "source_event_id": source_event_id,
+        "metadata": {"server_label": server.get("label"), "argument_keys": sorted(validated_arguments.keys())},
+    }
+    agent_action_metering_service.record_started_sync(**common_event)
+    try:
+        result = asyncio.run(
+            _call_streamable_http_tool_async(
+                endpoint=str(server.get("endpoint") or "").strip(),
+                tool_name=normalized_tool_name,
+                arguments=validated_arguments,
+                http_client=mcp_http_client,
+                client_session_cls=client_session_cls,
+                streamable_http_client_fn=streamable_http_client_fn,
+            )
+        )
+    except Exception as exc:
+        agent_action_metering_service.record_failed_sync(
+            **common_event,
+            error_code=type(exc).__name__,
+            output_summary=str(exc),
+        )
+        raise
+    payload = _mcp_result_payload(result)
+    agent_action_metering_service.record_completed_sync(
+        **common_event,
+        output_summary=_mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name),
+    )
+    return {
+        "status": "ok",
+        "reply": _mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name),
+        "artifact": {
+            "label": str(tool_payload.get("label") or normalized_tool_name).strip() or normalized_tool_name,
+            "kind": _tool_kind(tool_payload),
+            "summary": f"MCP tool {normalized_tool_name} on server {server.get('label') or normalized_server_id}",
+            "media_type": "application/json",
+            "preview_content": json.dumps(
+                {
+                    "server_id": normalized_server_id,
+                    "tool_name": normalized_tool_name,
+                    "arguments": validated_arguments,
+                    "payload": payload,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )[:12000],
+        },
+        "steps": [
+            {"label": "Resolving MCP server", "detail": str(server.get("label") or normalized_server_id).strip() or normalized_server_id, "status": "done", "kind": "thinking"},
+            {"label": "Invoking MCP tool", "detail": normalized_tool_name, "status": "done", "kind": "connector"},
+        ],
+        "mcp": {
+            "server_id": normalized_server_id,
+            "tool_name": normalized_tool_name,
+            "arguments": validated_arguments,
+            "payload": payload,
+        },
+    }
+
+
 def parse_mcp_skill_id(skill_id: str) -> Optional[Dict[str, str]]:
     raw = str(skill_id or "").strip()
     if not raw.startswith("mcp:"):

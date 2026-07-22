@@ -3457,6 +3457,12 @@ def _tool_timeout_seconds(connector_id: str, action_id: str = "") -> float:
         return 60.0
     if cid == "hardware":
         return 120.0
+    if cid == "mcp":
+        # mcp_registry_service._call_streamable_http_tool_async() already
+        # retries transient failures up to 3x with a 60s-per-attempt inner
+        # timeout — give this outer wrapper enough room for at least one
+        # retry to land instead of racing it.
+        return 90.0
     return 30.0
 
 
@@ -3547,6 +3553,51 @@ async def execute_single_direct_tool_call_async(
     timeout = _tool_timeout_seconds(connector_id, action_id)
 
     import asyncio as _asyncio
+
+    # MCP-namespaced tool calls (mcp__<server_id>__<tool_name>) — Phase A
+    # wiring (docs/design/mcp-applications-plan.md). This intercepts BEFORE
+    # the builtin/custom-connector branching below, because "mcp" is not in
+    # _BUILTIN_DIRECT_TOOL_IDS and would otherwise silently fall into the
+    # custom-OAuth-connector branch (_execute_custom_connector_tool_call_sync
+    # -> runs_execution._workflow_execute_connector_action), which has no
+    # notion of MCP servers/endpoints. The authority-mandate gate above
+    # already ran for this call (mandate_allowed check, lines above) — this
+    # branch only adds the MCP-specific approval gate on top, enforced
+    # inside invoke_workspace_mcp_tool_async() itself
+    # (_assert_tool_approved_for_execution), never bypassed here.
+    if connector_id == "mcp":
+        from server_modules import mcp_registry_service
+
+        if not mcp_registry_service.mcp_tools_enabled():
+            raise RuntimeError("MCP tools are disabled for this deployment.")
+        parsed_mcp = mcp_registry_service.parse_mcp_tool_name(str(tool_call.get("name") or ""))
+        if parsed_mcp is None:
+            raise RuntimeError(f"Malformed MCP tool name '{tool_call.get('name')}'.")
+        mcp_arguments = callbacks.tool_arguments_payload(tool_call.get("arguments"))
+        session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
+        metadata = _direct_tool_session_metadata(session_ctx)
+        try:
+            mcp_result = await _asyncio.wait_for(
+                mcp_registry_service.invoke_workspace_mcp_tool_async(
+                    workspace_id=workspace_id,
+                    server_id=parsed_mcp["server_id"],
+                    tool_name=parsed_mcp["tool_name"],
+                    arguments=mcp_arguments if isinstance(mcp_arguments, dict) else {},
+                    agent_label=str(metadata.get("sage_agent_id") or metadata.get("agent_scope") or "Agent"),
+                    tenant_id=_tenant_id_from_direct_tool_context(session_ctx),
+                    thread_id=str(thread_id or "").strip() or None,
+                    run_id=_request_id_from_direct_tool_context(session_ctx) or None,
+                    user_id=str(session_metadata.get("sender_id") or "").strip() or None,
+                    agent_id=str(session_metadata.get("agent_id") or metadata.get("agent_id") or "").strip() or None,
+                ),
+                timeout=timeout,
+            )
+        except _asyncio.TimeoutError:
+            return _timeout_tool_result(
+                tool_name=str(tool_call.get("name") or f"{connector_id}__{action_id}"),
+                timeout=timeout,
+            )
+        return mcp_registry_service.format_mcp_tool_result(mcp_result)
 
     # Hardware-bound connectors: async path (handled below)
     if connector_id not in {"hardware", "file", "shell", "screenshot", "computer"}:

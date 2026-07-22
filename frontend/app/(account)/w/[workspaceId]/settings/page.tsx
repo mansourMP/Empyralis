@@ -8,6 +8,7 @@ import { CreditCard, Copy, Check, Trash2, Plus, Play, Square, TriangleAlert } fr
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { resumeFleetWorkspace, stopFleetWorkspace, useFleetWorkspace } from "@/lib/workspace/fleet/fleet-data";
 import { timeAgo, formatDate } from "@/lib/workspace/fleet/fleet-presentation";
+import { McpServersSection } from "@/lib/workspace/fleet/McpServersSection";
 
 type McpKey = {
   key_id: string;
@@ -208,10 +209,14 @@ export default function SettingsPage() {
         <span className="fleet-list-row-meta">Open →</span>
       </Link>
 
-      {/* MCP API keys */}
+      {/* Outbound: this workspace's agents connecting OUT to remote MCP servers/tools. */}
+      <McpServersSection workspaceId={workspaceId} />
+
+      {/* Inbound: external MCP clients (Claude Desktop, etc.) connecting IN to this workspace. */}
       <div className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>MCP API keys</div>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Give external MCP clients scoped access to this workspace. Keys are shown once at creation.
+        The other direction — give external MCP clients (Claude Desktop, etc.) scoped access to this workspace.
+        Keys are shown once at creation.
       </p>
 
       {error ? <div className="fleet-page-state-body" role="alert" style={{ color: "var(--offline-text)" }}>{error}</div> : null}

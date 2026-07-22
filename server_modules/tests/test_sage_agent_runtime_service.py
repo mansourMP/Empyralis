@@ -1247,6 +1247,23 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
         self.assertFalse(mock_generate.called)
 
     def test_main_sage_chat_invokes_matching_mcp_skill(self):
+        """Phase A wiring (docs/design/mcp-applications-plan.md) removed the
+        keyword-matched NL routing (_matching_mcp_skill + the dead
+        _run_sage_action_loop_v2's skill_registry.execute_skill dispatch)
+        this test used to exercise — that function had zero live callers
+        (handle_sage_chat only ever calls _run_sage_action_loop_v3, which
+        computed the same match and discarded it). MCP tools are now real,
+        structurally-callable tools invoked by name
+        (mcp__<server>__<tool>) through ordinary model tool-calling, not a
+        keyword match against the raw user message. This test is adapted to
+        simulate that: it mocks stream_provider_backed_direct_chat directly
+        to emit the tool.started/tool.result/final trace events the real
+        dispatch layer produces once a model-issued call to an
+        mcp-namespaced tool completes (same pattern as
+        server_modules/tests/test_sage_mcp_bridge_v1.py's
+        TestApprovedMCPToolExecutes). See test_mcp_tool_calling_wiring.py
+        for coverage of the actual dispatch-routing logic.
+        """
         mcp_skill = SimpleNamespace(
             id="mcp:inventory-feed:lookup_stock",
             label="Inventory Lookup",
@@ -1260,6 +1277,25 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             trigger_terms=("inventory", "stock"),
             connector_scopes=("mcp", "mcp:inventory-feed"),
         )
+        stream_events = [
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "tool.started",
+                    "tool_call_id": "call-1",
+                    "data": {"tool_name": "mcp__inventory-feed__lookup_stock", "args_preview": {}},
+                },
+            },
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "tool.result",
+                    "tool_call_id": "call-1",
+                    "data": {"status": "ok", "summary": "Inventory says 12 units."},
+                },
+            },
+            {"type": "final", "payload": {"reply": "Inventory says 12 units.", "actions": [], "error": ""}},
+        ]
         with (
             patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
             patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
@@ -1270,7 +1306,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
-            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock(return_value={"status": "ok", "reply": "Inventory says 12 units."})) as mock_skill,
+            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -1281,10 +1318,12 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             ))
 
         self.assertEqual(result["action_execution_mode"], "tools_executed")
-        self.assertEqual(result["tool_calls"][0]["name"], "mcp:inventory-feed:lookup_stock")
+        self.assertEqual(result["tool_calls"][0]["name"], "mcp__inventory-feed__lookup_stock")
         self.assertEqual(result["message"], "Inventory says 12 units.")
         self.assertFalse(mock_generate.called)
-        self.assertTrue(mock_skill.called)
+        # The old keyword-matched skill_registry.execute_skill bridge must
+        # never fire from the live v3 loop.
+        self.assertFalse(mock_skill.called)
 
     def test_main_sage_chat_reports_operator_loop_budget_exhaustion(self):
         stream_events = [

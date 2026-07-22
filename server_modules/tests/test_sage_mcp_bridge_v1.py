@@ -59,7 +59,27 @@ def _make_mcp_skill(
 
 
 class TestApprovedMCPToolExecutes(unittest.TestCase):
-    """Test that an approved MCP tool matching a user message executes successfully."""
+    """Test that an approved MCP tool the model chooses to call executes
+    successfully and surfaces in the Sage turn result.
+
+    Phase A wiring (docs/design/mcp-applications-plan.md) removed the
+    keyword-matched NL routing (_matching_mcp_skill + the dead
+    _run_sage_action_loop_v2's skill_registry.execute_skill dispatch) this
+    test used to exercise — it lived in a function with zero live callers.
+    MCP tools are now real, structurally-callable tools the model invokes by
+    name (mcp__<server>__<tool>) through ordinary function-calling, exactly
+    like any other connector — see skills_service.execute_single_direct_
+    tool_call_async and direct_chat_operator_binding_service.execute_single_
+    direct_tool_call's connector_id=="mcp" branches. This test now simulates
+    that: it mocks stream_provider_backed_direct_chat directly (as its
+    sibling TestDisabledMCPToolDoesNotExecute already did) to emit the same
+    tool.started/tool.result/final trace events the real dispatch layer
+    would produce once a model-issued tool call for an mcp-namespaced tool
+    completes, then asserts Sage's turn-result assembly (message, tool_calls,
+    action_execution_mode) is correct — the real dispatch-routing logic
+    itself (name parsing, server/tool resolution, structured arguments) is
+    covered by test_mcp_tool_calling_wiring.py's dispatch-level tests.
+    """
 
     def test_approved_mcp_tool_executes(self):
         mcp_skill = _make_mcp_skill(
@@ -68,6 +88,25 @@ class TestApprovedMCPToolExecutes(unittest.TestCase):
             description="Look up stock levels for inventory items",
             trigger_terms=("stock", "inventory"),
         )
+        stream_events = [
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "tool.started",
+                    "tool_call_id": "call-1",
+                    "data": {"tool_name": "mcp__test-server__lookup_stock", "args_preview": {}},
+                },
+            },
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "tool.result",
+                    "tool_call_id": "call-1",
+                    "data": {"status": "ok", "summary": "Stock level: 42 units."},
+                },
+            },
+            {"type": "final", "payload": {"reply": "Stock level: 42 units.", "actions": [], "error": ""}},
+        ]
         with (
             patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
             patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
@@ -78,7 +117,8 @@ class TestApprovedMCPToolExecutes(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
-            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock(return_value={"status": "ok", "reply": "Stock level: 42 units."})) as mock_skill,
+            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -90,10 +130,15 @@ class TestApprovedMCPToolExecutes(unittest.TestCase):
 
         self.assertEqual(result["action_execution_mode"], "tools_executed")
         self.assertEqual(len(result["tool_calls"]), 1)
-        self.assertEqual(result["tool_calls"][0]["name"], "mcp:test-server:lookup_stock")
+        self.assertEqual(result["tool_calls"][0]["name"], "mcp__test-server__lookup_stock")
         self.assertEqual(result["tool_calls"][0]["status"], "completed")
         self.assertIn("Stock level: 42 units.", result["message"])
         self.assertIn("mcp_tools", result["used_context"])
+        # The old keyword-matched skill_registry.execute_skill bridge must
+        # never fire from the live v3 loop — dispatch now goes through the
+        # structured tool-calling path (skills_service/operator_binding),
+        # not this dead-code mechanism.
+        self.assertFalse(mock_skill.called)
 
 
 class TestDisabledMCPToolDoesNotExecute(unittest.TestCase):
@@ -134,13 +179,49 @@ class TestDisabledMCPToolDoesNotExecute(unittest.TestCase):
 
 
 class TestMCPFailureReturnsControlledError(unittest.TestCase):
-    """Test that an MCP execution failure produces a controlled error, not a raw exception."""
+    """Test that an MCP execution failure produces a controlled error, not a
+    raw exception/traceback, in the Sage turn result.
+
+    Adapted for the same reason as TestApprovedMCPToolExecutes above: the
+    dead v2 loop's bespoke "friendly error message" translation (mapping
+    PermissionError -> "not approved yet", connection errors -> "could not
+    reach the MCP server", etc.) is gone along with the rest of v2 — under
+    the live v3 loop, a failed tool call surfaces exactly like any other
+    connector's failure does (a tool_calls entry with status="failed" and
+    the underlying error text), not a special-cased "blocked_tools" entry
+    (v3's blocked_tools is reserved for policy-level blocks — trace.failed /
+    plan.item.updated — not a tool that ran and failed). This test now
+    asserts that v3-accurate contract: the failure reason is still clean,
+    readable text (not approved), it's just carried on the tool_calls entry.
+    """
 
     def test_mcp_failure_returns_controlled_error(self):
         mcp_skill = _make_mcp_skill(
             skill_id="mcp:test-server:lookup_stock",
             trigger_terms=("stock", "inventory"),
         )
+        stream_events = [
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "tool.started",
+                    "tool_call_id": "call-1",
+                    "data": {"tool_name": "mcp__test-server__lookup_stock", "args_preview": {}},
+                },
+            },
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "tool.result",
+                    "tool_call_id": "call-1",
+                    "data": {
+                        "status": "error",
+                        "summary": "MCP tool 'lookup_stock' on server 'test-server' is not approved for execution.",
+                    },
+                },
+            },
+            {"type": "final", "payload": {"reply": "", "actions": [], "error": ""}},
+        ]
         with (
             patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
             patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
@@ -151,7 +232,8 @@ class TestMCPFailureReturnsControlledError(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
-            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock(side_effect=PermissionError("not approved"))) as mock_skill,
+            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -161,20 +243,22 @@ class TestMCPFailureReturnsControlledError(unittest.TestCase):
                 message="use mcp inventory please",
             ))
 
-        self.assertGreater(len(result["blocked_tools"]), 0)
-        blocked = result["blocked_tools"][0]
-        self.assertEqual(blocked["name"], "mcp:test-server:lookup_stock")
-        self.assertEqual(blocked["status"], "blocked")
-        # Error message should be user-friendly, not a raw PermissionError dump
-        self.assertIn("approved", blocked["reason"].lower())
-        # Tool call recorded as failed
+        # Tool call recorded as failed, with a clean (non-traceback) reason
         self.assertEqual(len(result["tool_calls"]), 1)
+        self.assertEqual(result["tool_calls"][0]["name"], "mcp__test-server__lookup_stock")
         self.assertEqual(result["tool_calls"][0]["status"], "failed")
         self.assertIn("approved", result["tool_calls"][0]["error"].lower())
+        self.assertNotIn("Traceback", result["tool_calls"][0]["error"])
+        self.assertFalse(mock_skill.called)
 
 
 class TestMCPToolResultIncludedInFinalResponse(unittest.TestCase):
-    """Test that MCP tool execution output appears in the Sage final response."""
+    """Test that MCP tool execution output appears in the Sage final response.
+
+    See TestApprovedMCPToolExecutes above for why this is adapted to mock
+    stream_provider_backed_direct_chat directly instead of the dead v2
+    keyword-matched skill_registry.execute_skill bridge.
+    """
 
     def test_mcp_tool_result_included_in_sage_final_response(self):
         mcp_skill = _make_mcp_skill(
@@ -183,6 +267,25 @@ class TestMCPToolResultIncludedInFinalResponse(unittest.TestCase):
             description="Check stock levels in the warehouse system",
             trigger_terms=("warehouse", "stock count"),
         )
+        stream_events = [
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "tool.started",
+                    "tool_call_id": "call-1",
+                    "data": {"tool_name": "mcp__warehouse__check_stock", "args_preview": {}},
+                },
+            },
+            {
+                "type": "trace",
+                "payload": {
+                    "event_type": "tool.result",
+                    "tool_call_id": "call-1",
+                    "data": {"status": "ok", "summary": "Warehouse stock: 150 units available."},
+                },
+            },
+            {"type": "final", "payload": {"reply": "Warehouse stock: 150 units available.", "actions": [], "error": ""}},
+        ]
         with (
             patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
             patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
@@ -193,7 +296,8 @@ class TestMCPToolResultIncludedInFinalResponse(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
-            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock(return_value={"status": "ok", "reply": "Warehouse stock: 150 units available."})) as mock_skill,
+            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -205,10 +309,11 @@ class TestMCPToolResultIncludedInFinalResponse(unittest.TestCase):
 
         self.assertEqual(len(result["tool_calls"]), 1)
         tool_call = result["tool_calls"][0]
-        self.assertEqual(tool_call["name"], "mcp:warehouse:check_stock")
+        self.assertEqual(tool_call["name"], "mcp__warehouse__check_stock")
         self.assertEqual(tool_call["status"], "completed")
         self.assertIn("150 units", tool_call["output"])
         self.assertIn("150 units", result["message"])
+        self.assertFalse(mock_skill.called)
 
 
 class TestStudioAgentsDoNotInheritSageMCPPermissions(unittest.TestCase):
