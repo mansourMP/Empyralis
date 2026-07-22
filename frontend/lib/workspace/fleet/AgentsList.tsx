@@ -8,12 +8,13 @@ import { Play, Square, Trash2 } from "lucide-react";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
 import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
-import { deriveStatus, timeAgo, tintForAgent, TINTS } from "./fleet-presentation";
+import { timeAgo, tintForAgent, TINTS } from "./fleet-presentation";
 import { StatusChip, StatusDot, AgentSigil } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
 import { CHANNEL_ICONS, CHANNEL_LABELS } from "./fleet-icons";
 import {
   type FleetGateway,
+  deriveAgentStatus,
   gatewayId,
   hardwarePlacementIsBrainBound,
   resolveHardwarePlacement,
@@ -136,14 +137,14 @@ function ChannelCell({ channel }: { channel: string }) {
 function resolvePlacementBadge(
   agent: FleetAgent,
   gateways: FleetGateway[],
-): { short: "Cloud" | "VPS" | "Device"; full: string } {
+): { short: "Cloud" | "VPS" | "Device"; display: string; full: string } {
   const placement = resolveHardwarePlacement(
     agent.hardware_access,
     agent.preferred_gateway_id,
     gateways,
     agent.model_config,
   );
-  if (placement.tone === "cloud") return { short: "Cloud", full: placement.label };
+  if (placement.tone === "cloud") return { short: "Cloud", display: "Cloud", full: placement.label };
   let short: "VPS" | "Device" = "Device";
   if (hardwarePlacementIsBrainBound(agent.model_config)) {
     const brainGatewayId = String(agent.model_config?.gateway_binding || "").trim();
@@ -152,7 +153,15 @@ function resolvePlacementBadge(
   } else {
     short = (agent.hardware_access || "").toLowerCase() === "vps" ? "VPS" : "Device";
   }
-  return { short, full: placement.label };
+  // The chip shows the machine's OWN name ("Compass"), not the opaque category
+  // word "Device" — that's what a person recognizes and what answers "where
+  // does this run". placement.label is the real gateway display_name (or a
+  // "(disconnected)"/"unpaired" explainer); truncate for the narrow column and
+  // keep the full string as the hover title. Falls back to the category word
+  // for the odd case where label somehow came back empty.
+  const name = (placement.label || short).trim();
+  const display = name.length > 18 ? `${name.slice(0, 17)}…` : name;
+  return { short, display, full: placement.label };
 }
 
 // "2m", "3h", "5d" — the compact tail from fleet-presentation's timeAgo,
@@ -530,7 +539,10 @@ function AgentRow({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const stopped = Boolean(agent.stopped?.active);
-  const st = deriveStatus(agent.hardware_status || "unknown", stopped, Boolean(agent.current_run_id));
+  // deriveAgentStatus (not bare deriveStatus): folds in the brain's real
+  // runnability so a cli_subscription agent whose CLI isn't signed in reads
+  // "Needs sign-in", never a false "Ready".
+  const st = deriveAgentStatus(agent, gateways);
   // Sentence case ("customer facing" -> "Customer facing"), not Title Case —
   // the badge used to rely on CSS text-transform:capitalize for this, which
   // (a) title-cases every word, not just the first, and (b) silently never
@@ -654,7 +666,7 @@ function AgentRow({
       </span>
 
       <span className="fleet-agent-cell-placement fleet-col-placement">
-        <span className="fleet-channel-chip" title={placement.full}>{placement.short}</span>
+        <span className="fleet-channel-chip" title={placement.full}>{placement.display}</span>
       </span>
 
       <span className="fleet-agent-cell-channels fleet-col-channels">

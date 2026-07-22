@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
-import type { AgentStatusTone } from "./fleet-presentation";
+import { deriveStatus, type AgentStatusTone } from "./fleet-presentation";
 
 /** Per-box AI-runtime detection (BYO-brain Phase 1), surfaced so users don't
  *  pick a box that can't run the brain. */
@@ -239,6 +239,56 @@ export function resolveHardwarePlacement(
   }
   if (gateways.length === 0) return { label: "No computer paired yet", tone: "unpaired" };
   return { label: "Any paired computer", tone: gateways.some(gatewayIsOnline) ? "online" : "offline" };
+}
+
+type AgentBrainStatusFields = {
+  hardware_status?: string | null;
+  stopped?: { active?: boolean } | null;
+  current_run_id?: string | null;
+  model_config?: Record<string, any> | null;
+};
+
+/** The agent's HONEST status — deriveStatus() folded together with whether the
+ *  agent's BRAIN can actually run a turn. deriveStatus() alone reports "Ready"
+ *  whenever the bound gateway's heartbeat is alive, but a cli_subscription
+ *  agent whose CLI isn't signed in — or a local agent whose model isn't loaded —
+ *  cannot produce a single completion, so "Ready" there is a lie the user only
+ *  discovers when a message silently fails (exactly the "run claude login"
+ *  dead-end). For a brain-bound agent, the brain IS where it runs, so its status
+ *  is computed from the bound box's live runtime state, not the runtime_profile
+ *  heartbeat (which real Fleet agents never update — see resolveHardwarePlacement).
+ *  Every surface (list row + detail header) calls THIS so a brain-blocked agent
+ *  never reads green anywhere. Owner-stopped always wins. */
+export function deriveAgentStatus(
+  agent: AgentBrainStatusFields,
+  gateways: FleetGateway[],
+): { tone: AgentStatusTone; label: string } {
+  if (agent.stopped?.active) return { tone: "stopped", label: "Stopped" };
+  const working = Boolean(agent.current_run_id);
+  const mode = agent.model_config?.mode;
+
+  if (mode === "cli_subscription" || mode === "local") {
+    const boundId = String(agent.model_config?.gateway_binding || "").trim();
+    if (!boundId) return { tone: "degraded", label: "No computer bound" };
+    const gw = gateways.find((g) => gatewayId(g) === boundId);
+    if (!gw) return { tone: "offline", label: "Computer disconnected" };
+    if (`${gw.connection_status || gw.status || ""}`.toLowerCase() !== "online") {
+      return { tone: "offline", label: "Computer offline" };
+    }
+    if (mode === "local" && !gatewayLocalModelReady(gw)) {
+      return { tone: "degraded", label: "Model not loaded" };
+    }
+    if (mode === "cli_subscription") {
+      const runtime = agent.model_config?.runtime === "codex" ? "codex" : "claude_code";
+      const rs = gatewayRuntimeState(gw, runtime);
+      if (rs === "missing") return { tone: "degraded", label: "CLI not installed" };
+      if (rs === "unauthenticated") return { tone: "degraded", label: "Needs sign-in" };
+    }
+    return working ? { tone: "working", label: "Working" } : { tone: "ready", label: "Ready" };
+  }
+
+  // Cloud / API-provider agents: the heartbeat-derived status is honest.
+  return deriveStatus(agent.hardware_status || "unknown", agent.stopped?.active, working);
 }
 
 /** Fetches the workspace's paired Gateway boxes — the same endpoint the

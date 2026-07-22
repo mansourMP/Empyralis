@@ -469,7 +469,7 @@ export function FleetCreateAgentWizard({
                   1:1 onto HardwareTab.tsx's ACCESS_OPTIONS values. */}
               <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Where does it work?</div>
               <div className="fleet-wizard-options">
-                <button type="button" className={`fleet-wizard-option${placement === "cloud" ? " is-selected" : ""}`} onClick={() => setPlacement("cloud")}>
+                <button type="button" className={`fleet-wizard-option${placement === "cloud" ? " is-selected" : ""}`} onClick={() => { setPlacement("cloud"); if (providerMode === "subscription" || providerMode === "local") setProviderMode("platform"); }}>
                   <span className="fleet-wizard-option-label">Cloud only <span className="fleet-wizard-option-tag">Recommended</span></span>
                   <span className="fleet-wizard-option-body">No hardware. Runs entirely on Empyralis’ infrastructure.</span>
                 </button>
@@ -611,15 +611,30 @@ export function FleetCreateAgentWizard({
                   <span className="fleet-wizard-option-label">Your own API key</span>
                   <span className="fleet-wizard-option-body">Use your key for any provider. You pay them directly.</span>
                 </button>
-                <button type="button" className={`fleet-wizard-option${providerMode === "subscription" ? " is-selected" : ""}`} onClick={() => setProviderMode("subscription")}>
-                  <span className="fleet-wizard-option-label">Your subscription {recommendedModelConfig && <span className="fleet-wizard-option-tag">Recommended</span>}</span>
-                  <span className="fleet-wizard-option-body">Route through your Claude Code or Codex plan. Needs the Gateway.</span>
-                </button>
-                <button type="button" className={`fleet-wizard-option${providerMode === "local" ? " is-selected" : ""}`} onClick={() => setProviderMode("local")}>
-                  <span className="fleet-wizard-option-label">Run locally</span>
-                  <span className="fleet-wizard-option-body">Ollama on your own machine, via the Gateway.</span>
-                </button>
+                {/* "Your subscription" and "Run locally" both route the brain
+                    through a Gateway on a real machine — impossible for a
+                    Cloud-only agent, which has none. Offering them on cloud is
+                    the exact dead-end that surfaces later as an unrunnable
+                    "Needs sign-in" agent, so they only appear once a computer
+                    or VPS is the placement. */}
+                {placement !== "cloud" && (
+                  <>
+                    <button type="button" className={`fleet-wizard-option${providerMode === "subscription" ? " is-selected" : ""}`} onClick={() => setProviderMode("subscription")}>
+                      <span className="fleet-wizard-option-label">Your subscription {recommendedModelConfig && <span className="fleet-wizard-option-tag">Recommended</span>}</span>
+                      <span className="fleet-wizard-option-body">Route through your Claude Code or Codex plan. Needs the Gateway.</span>
+                    </button>
+                    <button type="button" className={`fleet-wizard-option${providerMode === "local" ? " is-selected" : ""}`} onClick={() => setProviderMode("local")}>
+                      <span className="fleet-wizard-option-label">Run locally</span>
+                      <span className="fleet-wizard-option-body">Ollama on your own machine, via the Gateway.</span>
+                    </button>
+                  </>
+                )}
               </div>
+              {placement === "cloud" && (
+                <p className="fleet-wizard-hint" style={{ marginTop: 6 }}>
+                  Want to run on your own Claude/Codex subscription or a local model? Put this agent on a paired computer or a VPS in step 1 — those need a machine to run on.
+                </p>
+              )}
               {providerMode === "platform" && (
                 <div className="fleet-channel-expand">
                   <label className="fleet-wizard-label">Provider</label>
