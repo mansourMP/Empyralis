@@ -1001,6 +1001,50 @@ def register_agent_registry_routes(app) -> None:
             _raise_mcp_registry_error(error)
         return {"server_id": server_id, "tools": tools}
 
+    @app.post("/agent-registry/mcp/servers/{server_id}/tools/approve", dependencies=[Depends(member_dependency)])
+    async def approve_mcp_server_tool(
+        server_id: str,
+        body: McpToolApproveRequest,
+        current_user=Depends(member_dependency),
+    ):
+        _refresh_server_exports()
+        resolved_workspace_id = enforce_workspace_access(
+            current_user,
+            _workspace_id_from_query_or_body(query_workspace_id=None, body_workspace_id=body.workspace_id),
+            minimum_role="owner",
+        )
+        try:
+            record = mcp_registry_service.approve_mcp_tool(
+                workspace_id=resolved_workspace_id,
+                server_id=server_id,
+                tool_name=body.tool_name,
+            )
+        except Exception as error:
+            _raise_mcp_registry_error(error)
+        return {"advanced_only": True, **record}
+
+    @app.post("/agent-registry/mcp/servers/{server_id}/tools/deny", dependencies=[Depends(member_dependency)])
+    async def deny_mcp_server_tool(
+        server_id: str,
+        body: McpToolApproveRequest,
+        current_user=Depends(member_dependency),
+    ):
+        _refresh_server_exports()
+        resolved_workspace_id = enforce_workspace_access(
+            current_user,
+            _workspace_id_from_query_or_body(query_workspace_id=None, body_workspace_id=body.workspace_id),
+            minimum_role="owner",
+        )
+        try:
+            record = mcp_registry_service.deny_mcp_tool(
+                workspace_id=resolved_workspace_id,
+                server_id=server_id,
+                tool_name=body.tool_name,
+            )
+        except Exception as error:
+            _raise_mcp_registry_error(error)
+        return {"advanced_only": True, **record}
+
     @app.delete("/agent-registry/mcp/servers/{server_id}", dependencies=[Depends(member_dependency)])
     async def delete_mcp_server(
         server_id: str,

@@ -611,6 +611,7 @@ export type WorkstationClientPaths = {
   mcpServer: (serverId: string) => string;
   mcpServerRefresh: (serverId: string) => string;
   mcpToolApprove: (serverId: string) => string;
+  mcpToolDeny: (serverId: string) => string;
   providers: string;
   providersCatalog: string;
   workspaceAiRoute: string;
@@ -828,6 +829,7 @@ export type WorkstationClient = {
   }) => Promise<Record<string, unknown> | null>;
   refreshMcpServer: (options: { serverId: string }) => Promise<Record<string, unknown> | null>;
   approveMcpTool: (options: { serverId: string; toolName: string }) => Promise<Record<string, unknown> | null>;
+  denyMcpTool: (options: { serverId: string; toolName: string }) => Promise<Record<string, unknown> | null>;
   deleteMcpServer: (options: { serverId: string }) => Promise<Record<string, unknown> | null>;
   listProviders: () => Promise<Record<string, unknown>>;
   listProviderCatalog: () => Promise<Record<string, unknown>>;
@@ -1188,6 +1190,8 @@ export function buildWorkstationApiPaths(workspaceId: string): WorkstationClient
       `/agent-registry/mcp/servers/${encodeURIComponent(serverId)}/refresh`,
     mcpToolApprove: (serverId: string) =>
       `/agent-registry/mcp/servers/${encodeURIComponent(serverId)}/tools/approve`,
+    mcpToolDeny: (serverId: string) =>
+      `/agent-registry/mcp/servers/${encodeURIComponent(serverId)}/tools/deny`,
     providers: `/api/providers${buildQueryString({ workspace_id: workspaceId })}`,
     providersCatalog: `/api/providers/catalog${buildQueryString({ workspace_id: workspaceId })}`,
     workspaceAiRoute: `/api/workspaces/${encodeURIComponent(workspaceId)}/ai-route`,
@@ -2576,6 +2580,19 @@ export function createWorkstationClient(
     approveMcpTool: ({ serverId, toolName }) =>
       requestJson<Record<string, unknown>>({
         path: paths.mcpToolApprove(serverId),
+        init: {
+          method: 'POST',
+          headers: mergeJsonHeaders(),
+          body: JSON.stringify({
+            workspace_id: scope.workspaceId,
+            tool_name: toolName,
+          }),
+        },
+        policy: WRITE_REQUEST_POLICY,
+      }),
+    denyMcpTool: ({ serverId, toolName }) =>
+      requestJson<Record<string, unknown>>({
+        path: paths.mcpToolDeny(serverId),
         init: {
           method: 'POST',
           headers: mergeJsonHeaders(),
