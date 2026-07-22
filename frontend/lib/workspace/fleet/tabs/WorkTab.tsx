@@ -4,9 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Inbox as InboxIcon,
   AlertCircle,
-  Pause,
-  Play,
-  Square,
   Loader2,
   Search,
   Database,
@@ -32,9 +29,8 @@ import {
 } from "lucide-react";
 
 import type { FleetAgent } from "../fleet-data";
-import { stopFleetAgent, resumeFleetAgent, useFleetAgentChannels } from "../fleet-data";
-import { timeAgo, deriveStatus } from "../fleet-presentation";
-import { AgentSigil, TintTile, StatusDot } from "../fleet-indicators";
+import { timeAgo } from "../fleet-presentation";
+import { StatusDot } from "../fleet-indicators";
 import { CHANNEL_ICONS, CONNECTOR_ICONS } from "../fleet-icons";
 
 /**
@@ -251,13 +247,6 @@ function formatDuration(ms: number): string {
   const s = totalSeconds % 60;
   if (m === 0) return `${s}s`;
   return `${m}m ${s}s`;
-}
-
-function isSameLocalDay(iso: string | null | undefined, ref: Date): boolean {
-  if (!iso) return false;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return false;
-  return d.getFullYear() === ref.getFullYear() && d.getMonth() === ref.getMonth() && d.getDate() === ref.getDate();
 }
 
 function extractPreviewText(obj: unknown): string {
@@ -617,182 +606,6 @@ function subLineFor(status: WorkStatus, entry: TraceMapEntry | null | undefined)
   return `${stepWord} · done`;
 }
 
-// ── Control bar ─────────────────────────────────────────────────────────
-
-/** Pause and Stop both drive the one real per-agent execution control that
- *  exists — stopFleetAgent/resumeFleetAgent (kill_switch_gate.py), the exact
- *  same call FleetAgentDetail's own header-level "Stop agent" button makes.
- *  There is no separate backend concept of a lighter "pause" distinct from
- *  the owner kill-switch (the closest relative, runtime_run_control_service
- *  .pause_run_for_takeover, is scoped to one in-progress hardware/browser
- *  run for manual takeover, not an agent-level control) — so rather than
- *  fabricate a second action that silently does nothing extra, both buttons
- *  call the one real, fully-working stop. "Stop" opens the existing
- *  confirm-first treatment (matching StopAgentControl elsewhere in
- *  FleetAgentDetail.tsx, since this is a disruptive, every-channel action);
- *  "Pause" is the same call without the confirm step, for the case where a
- *  quick one-click pause is exactly what's wanted. Once stopped, both
- *  collapse into a single Resume control. */
-function WorkControlBar({
-  workspaceId,
-  agentId,
-  agent,
-  channelLabels,
-  onAgentChanged,
-}: {
-  workspaceId: string;
-  agentId: string;
-  agent: FleetAgent | null;
-  channelLabels: string[];
-  onAgentChanged?: () => void;
-}) {
-  const status = deriveStatus(agent?.hardware_status || "unknown", Boolean(agent?.stopped?.active), Boolean(agent?.current_run_id));
-  const [busy, setBusy] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const stopped = agent?.stopped?.active;
-
-  async function doStop() {
-    setBusy(true);
-    setError(null);
-    const r = await stopFleetAgent(workspaceId, agentId);
-    setBusy(false);
-    if (r.ok) {
-      setConfirmOpen(false);
-      onAgentChanged?.();
-    } else {
-      setError(r.error || "Could not stop this agent.");
-    }
-  }
-
-  async function doResume() {
-    setBusy(true);
-    setError(null);
-    const r = await resumeFleetAgent(workspaceId, agentId);
-    setBusy(false);
-    if (r.ok) onAgentChanged?.();
-    else setError(r.error || "Could not resume this agent.");
-  }
-
-  const statusLine = channelLabels.length > 0 ? `${status.label} · ${channelLabels.join(", ")}` : status.label;
-
-  return (
-    <div className="fleet-work-controlbar">
-      <div className="fleet-work-controlbar-identity">
-        <TintTile accent size={32}>
-          <AgentSigil seed={agentId} size={18} />
-        </TintTile>
-        <div className="fleet-work-controlbar-text">
-          <span className="fleet-work-controlbar-name">{agent?.label || "This agent"}</span>
-          <span className="fleet-work-controlbar-status">
-            <StatusDot tone={status.tone} size={7} />
-            {statusLine}
-          </span>
-        </div>
-      </div>
-
-      <div className="fleet-work-controlbar-actions">
-        {stopped ? (
-          <button type="button" className="fleet-btn" disabled={busy} onClick={() => void doResume()}>
-            {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={14} strokeWidth={1.75} />}
-            Resume
-          </button>
-        ) : (
-          <>
-            <button
-              type="button"
-              className="fleet-btn"
-              disabled={busy}
-              title="Pause this agent"
-              onClick={() => void doStop()}
-            >
-              <Pause size={14} strokeWidth={1.75} />
-              Pause
-            </button>
-            <button
-              type="button"
-              className="fleet-btn fleet-btn--danger-outline"
-              disabled={busy}
-              onClick={() => { setError(null); setConfirmOpen(true); }}
-            >
-              <Square size={14} strokeWidth={1.75} />
-              Stop
-            </button>
-          </>
-        )}
-        {error && <span className="fleet-work-controlbar-error">{error}</span>}
-      </div>
-
-      {confirmOpen && (
-        <div className="fleet-detail-backdrop" onClick={() => { if (!busy) setConfirmOpen(false); }}>
-          <div
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="fleet-work-stop-title"
-            className="fleet-small-dialog"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="fleet-small-dialog-header">
-              <span id="fleet-work-stop-title" className="fleet-title">Stop agent</span>
-            </div>
-            <div className="fleet-small-dialog-body">
-              <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
-                Are you sure you want to stop <strong>{agent?.label || "this agent"}</strong>? It stops
-                responding on every channel until you resume it.
-              </p>
-              {error && <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>}
-            </div>
-            <div className="fleet-small-dialog-footer">
-              <button type="button" className="fleet-btn" onClick={() => setConfirmOpen(false)} disabled={busy}>
-                Cancel
-              </button>
-              <button type="button" className="fleet-btn fleet-btn--danger" onClick={() => void doStop()} disabled={busy}>
-                {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Square size={14} strokeWidth={1.75} />}
-                {busy ? "Stopping…" : "Stop agent"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Metrics strip ────────────────────────────────────────────────────────
-
-function WorkMetricsStrip({
-  conversationsToday,
-  actionsToday,
-  activeMinutesToday,
-  spendToday,
-}: {
-  conversationsToday: number;
-  actionsToday: number;
-  activeMinutesToday: number;
-  spendToday: number | null;
-}) {
-  return (
-    <div className="fleet-work-metrics">
-      <div className="fleet-work-metric">
-        <div className="fleet-work-metric-label">Conversations today</div>
-        <div className="fleet-work-metric-value">{conversationsToday}</div>
-      </div>
-      <div className="fleet-work-metric">
-        <div className="fleet-work-metric-label">Actions taken</div>
-        <div className="fleet-work-metric-value">{actionsToday}</div>
-      </div>
-      <div className="fleet-work-metric">
-        <div className="fleet-work-metric-label">Active time</div>
-        <div className="fleet-work-metric-value">{activeMinutesToday}m</div>
-      </div>
-      <div className="fleet-work-metric">
-        <div className="fleet-work-metric-label">Spend today</div>
-        <div className="fleet-work-metric-value">{spendToday === null ? "…" : `$${spendToday.toFixed(4)}`}</div>
-      </div>
-    </div>
-  );
-}
-
 // ── Activity row rendering ───────────────────────────────────────────────
 
 function ActivityRowView({ row, delaySeconds }: { row: ActivityRow; delaySeconds: number | null }) {
@@ -930,19 +743,6 @@ export function WorkTab({
   const [seen, setSeen] = useState<Record<string, string>>({});
   const firstLoadRef = useRef(true);
 
-  const { channels } = useFleetAgentChannels(workspaceId, agentId);
-  const connectedChannelLabels = useMemo(() => channels.filter((c) => c.connected).map((c) => c.label), [channels]);
-
-  const [spendToday, setSpendToday] = useState<number | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
-      .then((r) => r.json())
-      .then((d) => { if (!cancelled) setSpendToday(Number(d?.totals?.usd_cost) || 0); })
-      .catch(() => { if (!cancelled) setSpendToday(0); });
-    return () => { cancelled = true; };
-  }, [workspaceId, agentId]);
-
   const loadThreads = useCallback(async () => {
     try {
       const r = await fetch(url, { credentials: "include" });
@@ -991,27 +791,6 @@ export function WorkTab({
   const unreadCount = threads.reduce((n, t) => n + (isUnread(t) ? 1 : 0), 0);
 
   const traceMap = useThreadTraceMap(workspaceId, threads, selected);
-
-  // ── Today's metrics (conversations / actions / active minutes) ─────────
-  const today = useMemo(() => new Date(), [threads]); // eslint-disable-line react-hooks/exhaustive-deps
-  const conversationsToday = useMemo(
-    () => threads.filter((t) => isSameLocalDay(t.last_turn_at || t.updated_at, today)).length,
-    [threads, today],
-  );
-  const { actionsToday, activeMinutesToday } = useMemo(() => {
-    let actions = 0;
-    let activeMs = 0;
-    const now = Date.now();
-    for (const entry of Object.values(traceMap)) {
-      if (!entry || !entry.trace.started_at) continue;
-      if (!isSameLocalDay(entry.trace.started_at, today)) continue;
-      actions += buildActivityRows(entry.events).length;
-      const startedMs = new Date(entry.trace.started_at).getTime();
-      const endedMs = entry.trace.finished_at ? new Date(entry.trace.finished_at).getTime() : now;
-      if (Number.isFinite(startedMs) && Number.isFinite(endedMs) && endedMs > startedMs) activeMs += endedMs - startedMs;
-    }
-    return { actionsToday: actions, activeMinutesToday: Math.round(activeMs / 60000) };
-  }, [traceMap, today]);
 
   const isAgentSideLocal = (role: string) => isAgentSide(role);
 
@@ -1153,20 +932,6 @@ export function WorkTab({
 
   return (
     <div className="fleet-work-root">
-      <WorkControlBar
-        workspaceId={workspaceId}
-        agentId={agentId}
-        agent={agent}
-        channelLabels={connectedChannelLabels}
-        onAgentChanged={onAgentChanged}
-      />
-      <WorkMetricsStrip
-        conversationsToday={conversationsToday}
-        actionsToday={actionsToday}
-        activeMinutesToday={activeMinutesToday}
-        spendToday={spendToday}
-      />
-
       <div className="fleet-work-split">
           <div className="fleet-work-list">
             <div className="fleet-work-stream-header">

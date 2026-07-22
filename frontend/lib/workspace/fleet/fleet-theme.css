@@ -5461,6 +5461,14 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   min-height: 0;
 }
 
+/* The Work tab is a flush two-pane like the Inbox — no 28px body inset, so the
+   list ↔ activity split runs edge-to-edge under the tab bar. The agent controls
+   (Stop / Chat) live in the top header (HeaderAction), not inside the content,
+   so there is nothing above the split to reserve room for. */
+.fleet-detail-body:has(> .fleet-work-root) {
+  padding: 0;
+}
+
 /* Control bar: sigil + name + status line (left), Pause/Stop (right). */
 .fleet-work-controlbar {
   flex-shrink: 0;

@@ -592,7 +592,7 @@ export function FleetAgentDetail({
 
   return (
     <>
-      {activeTab === "overview" && (
+      {(activeTab === "overview" || activeTab === "work") && (
         <HeaderAction>
           <StopAgentControl workspaceId={workspaceId} agentId={agentId} agent={agent} onChanged={onRenamed} />
           <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => onChat(agentId)}>
