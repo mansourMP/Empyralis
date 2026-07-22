@@ -1281,7 +1281,12 @@ const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
   { label: "WeChat / WeCom", id: "wechat_official" },
 ];
 
-type ChannelDoor = { key: string; label: string; body: string; real: boolean };
+// `requiresHardware` doors bind to THIS agent's own gateway (a paired
+// computer / VPS) — a "full account" login runs a real client process on that
+// box, which a cloud-only agent has nowhere to run. When the agent has no
+// gateway, the door renders disabled + "Hardware required" (never a pickable
+// door that would fail once opened), so the customer understands up front.
+type ChannelDoor = { key: string; label: string; body: string; real: boolean; requiresHardware?: boolean };
 
 // Each channel shows only the connection MODES that are real, safe, and built
 // today for that platform — never a door that fails, and never a second mode
@@ -1294,7 +1299,7 @@ type ChannelDoor = { key: string; label: string; body: string; real: boolean };
 const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   sage_telegram_hosted: [
     { key: "byo_bot", label: "Chatbot", body: "Agent replies as a separate bot — paste the token BotFather gave you. No control of your own account.", real: true },
-    { key: "full_account", label: "Full account", body: "This agent's own Telegram number — phone, code, and 2FA if enabled — running on this agent's own gateway.", real: true },
+    { key: "full_account", label: "Full account", body: "This agent's own Telegram number — phone, code, and 2FA if enabled — running on this agent's own gateway.", real: true, requiresHardware: true },
   ],
   slack: [
     { key: "oauth", label: "App", body: "Connect a Slack workspace — signed mentions and DMs route to your AI.", real: true },
@@ -1303,13 +1308,13 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
     { key: "byo_bot", label: "Bot", body: "Give this agent its own Discord bot — paste the token from Discord's developer portal. Discord's Terms forbid automating a real user account, so this is the only path.", real: true },
   ],
   whatsapp_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number — scan a QR code or use a pairing code — running on this agent's own gateway. There is no chatbot/business-API mode.", real: true },
+    { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number — scan a QR code or use a pairing code — running on this agent's own gateway. There is no chatbot/business-API mode.", real: true, requiresHardware: true },
   ],
   signal_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own Signal, via a signal-cli bridge running on hardware you control as this agent's gateway. Requires a real signal-cli install — there is no cloud path for Signal.", real: true },
+    { key: "full_account", label: "Full account", body: "This agent's own Signal, via a signal-cli bridge running on hardware you control as this agent's gateway. Requires a real signal-cli install — there is no cloud path for Signal.", real: true, requiresHardware: true },
   ],
   imessage_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own iMessage, via imsg — a small CLI that talks to Messages.app directly on a Mac running as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage. Setup (installing imsg, checking Full Disk Access) happens right here, no terminal required.", real: true },
+    { key: "full_account", label: "Full account", body: "This agent's own iMessage, via imsg — a small CLI that talks to Messages.app directly on a Mac running as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage. Setup (installing imsg, checking Full Disk Access) happens right here, no terminal required.", real: true, requiresHardware: true },
   ],
   wechat_official: [
     { key: "app_credential_pair", label: "Official Account / WeCom", body: "This agent's own WeChat Official Account or WeChat Work (WeCom) bot — paste the AppID/AppSecret (or CorpID/CorpSecret/AgentId) from your own WeChat/WeCom admin console. Bidirectional: inbound messages route to this agent, replies send as this bot.", real: true },
@@ -1818,6 +1823,20 @@ export function ChannelsTab({
                           <span className="fleet-wizard-option-label">{door.label}</span>
                           <span className="fleet-wizard-option-body">{door.body}</span>
                           <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> Coming soon</span>
+                        </button>
+                      );
+                    }
+                    // A full-account login runs a real client process on THIS
+                    // agent's own gateway. No gateway (a cloud-only agent) → the
+                    // door is inert + colorless, labeled "Hardware required", so
+                    // the customer sees up front they must connect a computer —
+                    // never a door that only fails once opened.
+                    if (door.requiresHardware && !agentGatewayId && !doorConnected) {
+                      return (
+                        <button key={door.key} type="button" disabled className="fleet-wizard-option fleet-wizard-option--soon">
+                          <span className="fleet-wizard-option-label">{door.label}</span>
+                          <span className="fleet-wizard-option-body">{door.body}</span>
+                          <span className="fleet-wizard-option-note"><Cpu size={11} strokeWidth={2} /> Hardware required — connect a computer for this agent first</span>
                         </button>
                       );
                     }
