@@ -4262,18 +4262,20 @@ def _workflow_execute_connector_action(
             raise RuntimeError(f"Connector action '{action_id}' requires a valid recipient email.")
         subject = str(config.get("subject") or f"Empyralist workflow: {context.get('workflow_name') or context.get('workflow_id') or 'Untitled'}").strip()
         body_text = _workflow_tool_text_input(config, current_text)
+        cc_email = str(config.get("cc_email") or config.get("cc") or "").strip()
         def _perform_mail_write() -> Dict[str, Any]:
             if connector_id == "google_workspace":
                 if google_workspace_uses_local_cli(secret):
                     result = (
-                        google_workspace_local_create_draft(secret, to_email, subject, body_text)
+                        google_workspace_local_create_draft(secret, to_email, subject, body_text, cc_email=cc_email)
                         if action_id == "draft_email"
-                        else google_workspace_local_send_message(secret, to_email, subject, body_text)
+                        else google_workspace_local_send_message(secret, to_email, subject, body_text, cc_email=cc_email)
                     )
                 else:
                     message = (
                         f"To: {to_email}\r\n"
-                        f"Subject: {subject}\r\n"
+                        + (f"Cc: {cc_email}\r\n" if cc_email else "")
+                        + f"Subject: {subject}\r\n"
                         "Content-Type: text/plain; charset=UTF-8\r\n"
                         "\r\n"
                         f"{body_text}\r\n"
@@ -4298,9 +4300,9 @@ def _workflow_execute_connector_action(
                     result = response.get("json") if isinstance(response.get("json"), dict) else response
             else:
                 result = (
-                    microsoft_365_create_draft(secret, http_json_request, to_email, subject, body_text)
+                    microsoft_365_create_draft(secret, http_json_request, to_email, subject, body_text, cc_email=cc_email)
                     if action_id == "draft_email"
-                    else microsoft_365_send_message(secret, http_json_request, to_email, subject, body_text)
+                    else microsoft_365_send_message(secret, http_json_request, to_email, subject, body_text, cc_email=cc_email)
                 )
             return {
                 "summary": f"Connector action completed: {connector_id}.{action_id}.",
@@ -4339,6 +4341,11 @@ def _workflow_execute_connector_action(
                 raise RuntimeError("create_calendar_event requires payload or start/end values.")
             title = str(config.get("title") or "Empyralist workflow event").strip() or "Empyralist workflow event"
             description = str(config.get("description") or current_text or "").strip()
+            attendee_emails = [
+                str(addr or "").strip()
+                for addr in (config.get("attendees") or [])
+                if str(addr or "").strip()
+            ]
             if connector_id == "microsoft_365":
                 payload = {
                     "subject": title,
@@ -4346,6 +4353,11 @@ def _workflow_execute_connector_action(
                     "start": {"dateTime": start, "timeZone": event_timezone},
                     "end": {"dateTime": end, "timeZone": event_timezone},
                 }
+                if attendee_emails:
+                    payload["attendees"] = [
+                        {"emailAddress": {"address": addr}, "type": "required"}
+                        for addr in attendee_emails
+                    ]
             else:
                 payload = {
                     "summary": title,
@@ -4353,6 +4365,8 @@ def _workflow_execute_connector_action(
                     "start": {"dateTime": start, "timeZone": event_timezone},
                     "end": {"dateTime": end, "timeZone": event_timezone},
                 }
+                if attendee_emails:
+                    payload["attendees"] = [{"email": addr} for addr in attendee_emails]
         calendar_id = str(config.get("calendar_id") or "primary").strip() or "primary"
 
         def _perform_calendar_write() -> Dict[str, Any]:

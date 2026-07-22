@@ -297,6 +297,14 @@ OVERFLOW_KEYWORDS = (
     "context window",
     "token limit",
     "too many tokens",
+    # Anthropic's actual Messages API error text for an overflowing prompt is
+    # "prompt is too long: N tokens > M maximum" — it does not contain any of
+    # the OpenAI-shaped phrases above (docs/design/audit-context-currency.md
+    # fix #1/#2: "find how overflow surfaces per provider"). Verified against
+    # _anthropic_response_error() in scripts/orion_local_worker_llm.py, which
+    # returns the raw `error.message` string from Anthropic's response body
+    # untouched — none of the prior keywords would have matched it.
+    "prompt is too long",
 )
 
 

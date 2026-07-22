@@ -68,17 +68,55 @@ def _normalize_projection_text(text: str) -> str:
     return normalized.strip(" -:;,.")
 
 
+def format_source_marker(source: Dict[str, Any] | None) -> str:
+    """Visible "[name via X in a group — not owner] " prefix for a fact whose
+    source is NOT the verified owner. Never fabricates a marker for an
+    owner-attributed or unattributed (no source recorded at all) fact --
+    those stay exactly as clean as they were before attribution existed.
+    This is the save-rules guard's structural half: a non-owner's statement
+    can still be saved (no filter blocks the write), but it can never
+    masquerade as an unmarked owner-level fact once it is.
+
+    Accepts either shape: a stored `memory_entries` row (source_platform,
+    source_surface, source_sender_id, source_sender_name, source_is_owner --
+    see _row_to_entry) or a raw source/attribution mapping (InboundEnvelope.
+    to_metadata() / inbound_attribution_recovery.build_attribution's keys) --
+    normalized via _normalize_source either way, so callers never need to
+    know which shape they have.
+    """
+    normalized = _normalize_source(source)
+    is_owner = normalized["source_is_owner"]
+    if is_owner is True:
+        return ""
+    platform = str(normalized["source_platform"] or "").strip()
+    sender_name = str(normalized["source_sender_name"] or "").strip()
+    sender_id = str(normalized["source_sender_id"] or "").strip()
+    if not platform and not sender_name and not sender_id:
+        return ""  # no attribution recorded at all -- stay silent, not misleading
+    who = sender_name or sender_id or "someone"
+    where = f" via {platform}" if platform else ""
+    status = "unverified" if is_owner is None else "not owner"
+    surface = str(normalized["source_surface"] or "").strip()
+    room = " in a group" if surface in ("group", "broadcast_channel") else ""
+    return f"[{who}{where}{room} — {status}] "
+
+
+def _attribution_marker(entry: Dict[str, Any]) -> str:
+    return format_source_marker(entry)
+
+
 def _memory_projection_entry_text(entry: Dict[str, Any]) -> str:
     key = str(entry.get("key") or "").strip()
     content = re.sub(r"\s+", " ", str(entry.get("content") or "").strip())
     if not content:
         return ""
+    marker = _attribution_marker(entry)
     if _FACT_KEY_RE.fullmatch(key):
-        return content
+        return f"{marker}{content}"
     label = _humanize_memory_key(key)
     if label:
-        return f"{label}: {content}"
-    return content
+        return f"{marker}{label}: {content}"
+    return f"{marker}{content}"
 
 
 def _memory_projection_preference_terms(text: str) -> set[str]:
@@ -256,6 +294,81 @@ def _resolve_notebook_path(workspace_id: str, rel_path: str, agent_install_id: s
     return candidate
 
 
+# ── Attribution columns (additive migration) ────────────────────────────────
+#
+# Who told the agent this fact, from the turn's InboundEnvelope
+# (server_modules/inbound_envelope.py, frozen — these columns store a plain
+# snapshot of its fields, never a live reference). All nullable: every row
+# written before this migration has NULL in every one of these columns and
+# reads back exactly as it did before (source_is_owner is tri-state, same as
+# EnvelopeSender.is_owner — NULL means "no attribution recorded", which is
+# distinct from source_is_owner=0 ("verified NOT the owner")).
+_MEMORY_ENTRIES_SOURCE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("source_platform", "TEXT"),
+    ("source_surface", "TEXT"),
+    ("source_sender_id", "TEXT"),
+    ("source_sender_name", "TEXT"),
+    ("source_is_owner", "INTEGER"),
+)
+
+
+def _ensure_memory_entries_source_columns(connection: sqlite3.Connection) -> None:
+    """Idempotent ALTER TABLE for the attribution columns above. SQLite has
+    no `ADD COLUMN IF NOT EXISTS`, so this checks PRAGMA table_info first --
+    cheap (a handful of rows) and safe to run on every connection open."""
+    existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(memory_entries)").fetchall()}
+    for column_name, column_type in _MEMORY_ENTRIES_SOURCE_COLUMNS:
+        if column_name not in existing:
+            connection.execute(f"ALTER TABLE memory_entries ADD COLUMN {column_name} {column_type}")
+
+
+def _source_is_owner_to_sqlite(value: Any) -> Any:
+    """Tri-state bool -> SQLite INTEGER: True->1, False->0, None/absent->NULL."""
+    if value is True:
+        return 1
+    if value is False:
+        return 0
+    return None
+
+
+def _source_is_owner_from_sqlite(value: Any) -> Any:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _normalize_source(source: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Normalize an arbitrary source/attribution mapping (e.g.
+    InboundEnvelope.to_metadata() or inbound_attribution_recovery.build_attribution's
+    output) down to exactly the five stored fields. Missing/absent source ->
+    all-None (legacy-equivalent row)."""
+    payload = source if isinstance(source, dict) else {}
+    return {
+        "source_platform": (str(payload.get("source_platform") or payload.get("platform") or "").strip() or None),
+        "source_surface": (str(payload.get("source_surface") or payload.get("surface") or "").strip() or None),
+        "source_sender_id": (str(payload.get("source_sender_id") or payload.get("sender_id") or "").strip() or None),
+        "source_sender_name": (str(payload.get("source_sender_name") or payload.get("sender_name") or "").strip() or None),
+        "source_is_owner": payload.get("source_is_owner", payload.get("sender_is_owner")),
+    }
+
+
+def _row_to_entry(row: "sqlite3.Row") -> Dict[str, Any]:
+    keys = row.keys()
+    entry: Dict[str, Any] = {
+        "key": str(row["key"] or ""),
+        "content": str(row["content"] or ""),
+        "created_at": float(row["created_at"] or 0.0),
+        "updated_at": float(row["updated_at"] or 0.0),
+    }
+    for column_name, _ in _MEMORY_ENTRIES_SOURCE_COLUMNS:
+        if column_name in keys:
+            raw = row[column_name]
+            entry[column_name] = _source_is_owner_from_sqlite(raw) if column_name == "source_is_owner" else raw
+        else:
+            entry[column_name] = None
+    return entry
+
+
 @contextmanager
 def _connect_memory_db(workspace_id: str, agent_install_id: str | None = None):
     db_path = _memory_db_path(workspace_id, agent_install_id=agent_install_id)
@@ -273,6 +386,7 @@ def _connect_memory_db(workspace_id: str, agent_install_id: str | None = None):
             )
             """
         )
+        _ensure_memory_entries_source_columns(connection)
         yield connection
     finally:
         connection.close()
@@ -315,20 +429,14 @@ def _list_memory_entries(workspace_id: str, agent_install_id: str | None = None)
     with _connect_memory_db(workspace_id, agent_install_id=agent_install_id) as connection:
         rows = connection.execute(
             """
-            SELECT key, content, created_at, updated_at
+            SELECT key, content, created_at, updated_at,
+                   source_platform, source_surface, source_sender_id,
+                   source_sender_name, source_is_owner
             FROM memory_entries
             ORDER BY updated_at DESC, key ASC
             """
         ).fetchall()
-    return [
-        {
-            "key": str(row["key"] or ""),
-            "content": str(row["content"] or ""),
-            "created_at": float(row["created_at"] or 0.0),
-            "updated_at": float(row["updated_at"] or 0.0),
-        }
-        for row in rows
-    ]
+    return [_row_to_entry(row) for row in rows]
 
 
 def _save_memory(
@@ -338,22 +446,55 @@ def _save_memory(
     *,
     sync_memory_md: bool = True,
     agent_install_id: str | None = None,
+    source: Dict[str, Any] | None = None,
 ) -> None:
+    """Persist one structured memory fact.
+
+    `source` is an optional attribution snapshot -- the WHO/WHERE this fact
+    came from, per the InboundEnvelope shape (or the best-effort recovered
+    equivalent, see inbound_attribution_recovery.build_attribution). Absent
+    (None, the default) writes a row identical to pre-attribution behavior:
+    every source_* column stays NULL, same as a legacy row.
+    """
     normalized_key = str(key or "").strip()
     normalized_content = str(content or "").strip()
     if not normalized_key or not normalized_content:
         return
     now_ts = time.time()
+    normalized_source = _normalize_source(source)
     with _connect_memory_db(workspace_id, agent_install_id=agent_install_id) as connection:
         connection.execute(
             """
-            INSERT INTO memory_entries (key, content, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO memory_entries (
+                key, content, created_at, updated_at,
+                source_platform, source_surface, source_sender_id,
+                source_sender_name, source_is_owner
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 content = excluded.content,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                -- COALESCE: a re-save with no source info (e.g. a legacy
+                -- caller that never passed `source`) must not blank out
+                -- attribution a prior write already recorded. A real
+                -- source always wins and replaces the old one.
+                source_platform = COALESCE(excluded.source_platform, source_platform),
+                source_surface = COALESCE(excluded.source_surface, source_surface),
+                source_sender_id = COALESCE(excluded.source_sender_id, source_sender_id),
+                source_sender_name = COALESCE(excluded.source_sender_name, source_sender_name),
+                source_is_owner = COALESCE(excluded.source_is_owner, source_is_owner)
             """,
-            (normalized_key, normalized_content, now_ts, now_ts),
+            (
+                normalized_key,
+                normalized_content,
+                now_ts,
+                now_ts,
+                normalized_source["source_platform"],
+                normalized_source["source_surface"],
+                normalized_source["source_sender_id"],
+                normalized_source["source_sender_name"],
+                _source_is_owner_to_sqlite(normalized_source["source_is_owner"]),
+            ),
         )
         connection.commit()
     if sync_memory_md:
@@ -368,7 +509,7 @@ def _get_memory(workspace_id: str, agent_install_id: str | None = None) -> str:
     if not entries:
         return ""
     return "\n".join(
-        f"- {entry['key']}: {entry['content']}"
+        f"- {_attribution_marker(entry)}{entry['key']}: {entry['content']}"
         for entry in entries
         if str(entry.get("content") or "").strip()
     ).strip()
@@ -382,22 +523,16 @@ def _search_memory(workspace_id: str, query: str, agent_install_id: str | None =
     with _connect_memory_db(workspace_id, agent_install_id=agent_install_id) as connection:
         rows = connection.execute(
             """
-            SELECT key, content, created_at, updated_at
+            SELECT key, content, created_at, updated_at,
+                   source_platform, source_surface, source_sender_id,
+                   source_sender_name, source_is_owner
             FROM memory_entries
             WHERE key LIKE ? OR content LIKE ?
             ORDER BY updated_at DESC, key ASC
             """,
             (pattern, pattern),
         ).fetchall()
-    return [
-        {
-            "key": str(row["key"] or ""),
-            "content": str(row["content"] or ""),
-            "created_at": float(row["created_at"] or 0.0),
-            "updated_at": float(row["updated_at"] or 0.0),
-        }
-        for row in rows
-    ]
+    return [_row_to_entry(row) for row in rows]
 
 
 def _semantic_search(

@@ -1,21 +1,29 @@
 """
-Dynamic tool registry with keyword search.
+Dynamic tool registry with BM25 search.
 
 Instead of injecting all 48+ tools into every inference request (~6k tokens),
-the agent receives 8 always-on tools plus ``query_tool_registry``. When the
-agent needs a capability it does not see, it calls ``query_tool_registry`` with
-a task description. The registry returns the 3-5 most relevant tools via
-keyword matching, and the generation loop injects them for subsequent
-iterations within the same turn.
+the agent receives the 12 always-on tools (ALWAYS_ON_TOOL_NAMES, below —
+includes ``query_tool_registry`` itself). When the agent needs a capability
+it does not see, it calls ``query_tool_registry`` with a task description.
+The registry returns the 3-5 most relevant tools via real BM25 ranking
+(Okapi BM25, term-frequency / inverse-document-frequency over the registry
+corpus, with name/label tokens weighted above description tokens) plus a
+small synonym-expansion layer for everyday chat vocabulary that doesn't
+share a word-stem with a tool's own name/description text (e.g. "mail" ->
+"email", "chat" -> "message"/"slack"). The generation loop injects the
+results for subsequent iterations within the same turn.
 
-Token savings: ~87% for simple Q&A turns, ~75% for typical tool-using turns.
+Token savings: ~87% for simple Q&A turns, ~75% for typical tool-using turns
+(estimated at the time the two-tier design was introduced; not re-measured
+since — see docs/design/audit-tool-reliability.md §3.5).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from server_modules import skills_service
 
@@ -39,6 +47,98 @@ ALWAYS_ON_TOOL_NAMES: frozenset = frozenset({
 })
 
 
+# ── Shared vocabulary ─────────────────────────────────────────────────────────
+# One stopword list and one tokenizer, used by BOTH keyword extraction
+# (indexing a tool) and query tokenization (searching for one). These used
+# to be two independently hand-maintained sets that had quietly drifted
+# apart — the query-side list was missing "via"/"use"/"can"/"will"/"when"/
+# "are"/"was"/"not"/"no"/"yes", so a token like "can" or "will" would score
+# as a real match on the query side but never on the indexed side (audit
+# docs/design/audit-tool-reliability.md §3.5). There is exactly one list now.
+_STOPWORDS: frozenset = frozenset({
+    "a", "an", "the", "to", "for", "of", "in", "on", "at", "by", "or",
+    "and", "is", "it", "its", "be", "as", "from", "with", "this", "that",
+    "via", "use", "can", "will", "when", "are", "was", "not", "no", "yes",
+    "me", "my", "you", "your", "i", "we", "us", "do", "does", "did", "if",
+})
+
+# Tokens under 3 chars are dropped unless they're a known meaningful
+# short-form (an acronym or protocol name that would otherwise be silently
+# discarded, e.g. "ocr", "api", "sms").
+_MEANINGFUL_SHORT_TOKENS: frozenset = frozenset({
+    "ai", "ui", "ux", "os", "db", "api", "url", "id", "ip",
+    "js", "css", "ocr", "pdf", "csv", "xml", "json", "ssh",
+    "sms", "mcp", "cli", "sdk", "vps",
+})
+
+# Small, hand-curated synonym layer for everyday chat vocabulary that has no
+# word-stem in common with a tool's own name/description text — this is the
+# exact gap that made plain keyword overlap return zero/wrong results for
+# realistic paraphrases like "let the team know on chat" or "notify the
+# customer by mail" (audit §3.1). Each query token is expanded to itself
+# plus these mapped terms before BM25 scoring. Intentionally small: this is
+# a targeted patch for the handful of paraphrases that come up in chat, not
+# a general-purpose thesaurus.
+_QUERY_SYNONYMS: Dict[str, List[str]] = {
+    "mail": ["email"],
+    "mails": ["email"],
+    "emails": ["email"],
+    "emailing": ["email"],
+    "chat": ["message", "slack"],
+    "chatting": ["message"],
+    "text": ["message"],
+    "texting": ["message"],
+    "msg": ["message"],
+    "messaging": ["message"],
+    "ping": ["message", "notify"],
+    "notify": ["message", "send"],
+    "know": ["notify", "tell"],
+    "tell": ["notify", "message"],
+    "remind": ["calendar", "reminder", "schedule"],
+    "reminder": ["calendar", "schedule"],
+    "meeting": ["calendar", "event", "schedule"],
+    "schedule": ["calendar", "event"],
+    "lookup": ["search"],
+    "look": ["search"],
+    "find": ["search"],
+    "team": ["slack", "channel"],
+    "invoice": ["billing", "payment"],
+    "customer": ["contact", "client"],
+    "client": ["customer", "contact"],
+    "see": ["view", "read"],
+    "display": ["screen"],
+    "screen": ["display"],
+    "picture": ["screenshot", "image"],
+    "photo": ["screenshot", "image"],
+}
+
+
+def _tokenize(text: str) -> List[str]:
+    """Normalize free text into search tokens: lowercase, split on
+    underscores/dots/hyphens *and* commas/semicolons/colons/slashes (the old
+    regex only handled the first group, so a description ending "...titles,
+    URLs, and snippets" produced un-matchable keywords "titles," / "urls,"
+    with the comma still attached — audit §3.8), drop stopwords, drop
+    tokens under 3 chars unless they're a known meaningful short acronym.
+    """
+    normalized = re.sub(r"[_.\-,;:/\\]+", " ", str(text or "").lower())
+    tokens = [t for t in normalized.split() if t]
+    return [
+        t for t in tokens
+        if t not in _STOPWORDS and (len(t) >= 3 or t in _MEANINGFUL_SHORT_TOKENS)
+    ]
+
+
+def _expand_query_tokens(tokens: List[str]) -> List[str]:
+    """Expand each query token with its chat-vocabulary synonyms (see
+    _QUERY_SYNONYMS above). Duplicates are fine — BM25 naturally weighs
+    repeated query terms more, which is the desired behavior here too."""
+    expanded = list(tokens)
+    for token in tokens:
+        expanded.extend(_QUERY_SYNONYMS.get(token, []))
+    return expanded
+
+
 # ── Registry entry ────────────────────────────────────────────────────────────
 
 @dataclass(slots=True)
@@ -50,25 +150,20 @@ class RegistryEntry:
     keywords: List[str] = field(default_factory=list)
     tool_definition: Dict[str, Any] = field(default_factory=dict)
     category: str = "other"  # communication, browser, computer, media, data, other
+    # BM25 fields, kept separate so name/label tokens can be weighted above
+    # description tokens (a lightweight BM25F-style field boost — see
+    # _bm25_term_frequency). Raw token streams (not deduped), because term
+    # frequency within a field is part of the score.
+    name_field_tokens: List[str] = field(default_factory=list)
+    desc_field_tokens: List[str] = field(default_factory=list)
 
 
 def _extract_keywords(name: str, description: str, connector_id: str) -> List[str]:
-    """Extract searchable keywords from a tool name and description."""
-    text = f"{name} {description} {connector_id}".lower()
-    # Normalize: replace underscores, hyphens, dots with spaces
-    text = re.sub(r"[_.\-]+", " ", text)
-    tokens = set(text.split())
-    # Remove very short/stop words
-    stop = {"a", "an", "the", "to", "for", "of", "in", "on", "at", "by", "or",
-            "and", "is", "it", "its", "be", "as", "from", "with", "this", "that",
-            "via", "use", "can", "will", "when", "are", "was", "not", "no", "yes"}
-    tokens -= stop
-    # Remove tokens shorter than 3 chars (unless they're meaningful acronyms)
-    meaningful_short = {"ai", "ui", "ux", "os", "db", "api", "url", "id", "ip",
-                        "js", "css", "ocr", "pdf", "csv", "xml", "json", "ssh",
-                        "sms", "mcp", "cli", "sdk", "vps"}
-    tokens = {t for t in tokens if len(t) >= 3 or t in meaningful_short}
-    return sorted(tokens)
+    """Deduped, sorted keyword set for a tool — used by the category
+    classifier and for external introspection. Search ranking itself uses
+    the field-weighted token lists (name_field_tokens/desc_field_tokens),
+    not this set."""
+    return sorted(set(_tokenize(f"{name} {description} {connector_id}")))
 
 
 def _categorize_tool(name: str, connector_id: str) -> str:
@@ -76,7 +171,7 @@ def _categorize_tool(name: str, connector_id: str) -> str:
     n = str(name or "").strip().lower()
     c = str(connector_id or "").strip().lower()
     comm_connectors = {"smtp", "telegram_bot", "slack", "discord_bot",
-                       "google_workspace", "microsoft_365", "whatsapp"}
+                       "google_workspace", "microsoft_365", "whatsapp", "whatsapp_twilio"}
     if c in comm_connectors or any(t in n for t in ("send_message", "send_email",
         "send_dm", "post_message", "create_email", "draft_email")):
         return "communication"
@@ -110,8 +205,11 @@ def _build_registry_entry_from_tool_payload(
     name = str(tool.get("name") or "").strip()
     description = str(tool.get("description") or "").strip()
     connector_id = str(tool.get("connector_id") or "").strip().lower()
+    label = str(tool.get("label") or "").strip()
     keywords = _extract_keywords(name, description, connector_id)
     category = _categorize_tool(name, connector_id)
+    name_field_tokens = _tokenize(f"{name} {label}")
+    desc_field_tokens = _tokenize(f"{description} {connector_id}")
 
     # Build OpenAI function-calling schema
     params = tool.get("parameters") if isinstance(tool.get("parameters"), dict) else {}
@@ -132,6 +230,8 @@ def _build_registry_entry_from_tool_payload(
             "function": function_def,
         },
         category=category,
+        name_field_tokens=name_field_tokens,
+        desc_field_tokens=desc_field_tokens,
     )
 
 
@@ -142,8 +242,11 @@ def _build_registry_entry_from_tool_descriptor(
     name = descriptor.tool_name
     description = descriptor.description
     connector_id = descriptor.connector_id
+    label = str(descriptor.label or "").strip()
     keywords = _extract_keywords(name, description, connector_id)
     category = _categorize_tool(name, connector_id)
+    name_field_tokens = _tokenize(f"{name} {label}")
+    desc_field_tokens = _tokenize(f"{description} {connector_id}")
 
     params = descriptor.parameters if isinstance(descriptor.parameters, dict) else {}
     function_def: Dict[str, Any] = {
@@ -158,6 +261,8 @@ def _build_registry_entry_from_tool_descriptor(
         description=description,
         connector_id=connector_id,
         keywords=keywords,
+        name_field_tokens=name_field_tokens,
+        desc_field_tokens=desc_field_tokens,
         tool_definition={
             "type": "function",
             "function": function_def,
@@ -232,6 +337,80 @@ def build_registry_entries(
     return entries
 
 
+# ── BM25 ranking ──────────────────────────────────────────────────────────────
+# Real Okapi BM25 over the registry corpus (replaces the old binary
+# token/substring-overlap scorer — audit §3.1: that scorer returned ZERO
+# results for 4 of 7 realistic user-intent paraphrases, e.g. "let the team
+# know on chat" and "schedule a meeting with the client", because none of
+# their words happened to be exact substrings of a tool's own name/
+# description text). Field weighting: matches in a tool's name/label count
+# 3x toward term frequency versus a match in its description/connector_id —
+# a lightweight BM25F-style boost (shared k1/b, not per-field tuning) so a
+# query that names the action directly ("slack", "send message") still beats
+# a tool that merely mentions the word once in a longer description.
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+_BM25_NAME_FIELD_WEIGHT = 3.0
+_BM25_DESC_FIELD_WEIGHT = 1.0
+
+
+def _bm25_term_frequency(term: str, entry: RegistryEntry) -> float:
+    return (
+        _BM25_NAME_FIELD_WEIGHT * entry.name_field_tokens.count(term)
+        + _BM25_DESC_FIELD_WEIGHT * entry.desc_field_tokens.count(term)
+    )
+
+
+def _bm25_document_length(entry: RegistryEntry) -> float:
+    return (
+        _BM25_NAME_FIELD_WEIGHT * len(entry.name_field_tokens)
+        + _BM25_DESC_FIELD_WEIGHT * len(entry.desc_field_tokens)
+    )
+
+
+def _bm25_rank(query_terms: List[str], registry: List[RegistryEntry]) -> List[Tuple[float, RegistryEntry]]:
+    """Score every registry entry against query_terms with Okapi BM25,
+    return (score, entry) pairs for entries that scored > 0, sorted
+    descending. query_terms should already be tokenized + synonym-expanded."""
+    n_docs = len(registry)
+    if n_docs == 0 or not query_terms:
+        return []
+
+    doc_lengths = [_bm25_document_length(entry) for entry in registry]
+    avg_doc_length = (sum(doc_lengths) / n_docs) if n_docs else 0.0
+
+    unique_terms = set(query_terms)
+    idf: Dict[str, float] = {}
+    for term in unique_terms:
+        doc_freq = sum(
+            1
+            for entry in registry
+            if term in entry.name_field_tokens or term in entry.desc_field_tokens
+        )
+        # Standard Okapi BM25 IDF, +1 inside the log so it never goes
+        # negative for a term that appears in most/all documents.
+        idf[term] = math.log(1.0 + (n_docs - doc_freq + 0.5) / (doc_freq + 0.5))
+
+    scored: List[Tuple[float, RegistryEntry]] = []
+    for entry, doc_length in zip(registry, doc_lengths):
+        score = 0.0
+        length_norm = doc_length / avg_doc_length if avg_doc_length > 0 else 0.0
+        denom_base = _BM25_K1 * (1 - _BM25_B + _BM25_B * length_norm)
+        for term in query_terms:
+            term_idf = idf.get(term, 0.0)
+            if term_idf <= 0.0:
+                continue
+            tf = _bm25_term_frequency(term, entry)
+            if tf <= 0.0:
+                continue
+            score += term_idf * (tf * (_BM25_K1 + 1)) / (tf + denom_base)
+        if score > 0.0:
+            scored.append((score, entry))
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return scored
+
+
 # ── Search ────────────────────────────────────────────────────────────────────
 
 def search_tool_registry(
@@ -241,10 +420,12 @@ def search_tool_registry(
     max_results: int = 5,
     availability_payload: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Search the registry by keyword matching against tool names and descriptions.
+    """Search the registry with real BM25 ranking (see _bm25_rank above),
+    after tokenizing the query and expanding it with the small chat-
+    vocabulary synonym layer (_QUERY_SYNONYMS).
 
     Returns the top *max_results* tool definitions (OpenAI function-calling
-    schema dicts), scored by keyword overlap.
+    schema dicts), best match first.
 
     If *availability_payload* is provided, each result includes a
     ``_credential_note`` key when the tool's connector is not authenticated.
@@ -252,29 +433,12 @@ def search_tool_registry(
     if not query.strip() or not registry:
         return []
 
-    query_tokens = set(query.lower().split())
-    # Remove stop words from query too
-    _stop = {"a", "an", "the", "to", "for", "of", "in", "on", "at", "by", "or",
-             "and", "is", "it", "its", "be", "as", "from", "with", "this", "that"}
-    query_tokens -= _stop
-
-    if not query_tokens:
+    base_tokens = _tokenize(query)
+    if not base_tokens:
         return []
+    query_terms = _expand_query_tokens(base_tokens)
 
-    scored: List[tuple] = []  # (score, entry)
-    for entry in registry:
-        score = 0
-        entry_kw_lower = {k.lower() for k in entry.keywords}
-        for token in query_tokens:
-            if token in entry_kw_lower:
-                score += 1
-            # Partial match: token is a substring of a keyword or vice versa
-            elif any(token in kw or kw in token for kw in entry_kw_lower):
-                score += 0.5
-        if score > 0:
-            scored.append((score, entry))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
+    scored = _bm25_rank(query_terms, registry)
 
     results: List[Dict[str, Any]] = []
     for _, entry in scored[:max_results]:
@@ -363,7 +527,14 @@ def _connector_label(connector_id: str, availability_payload: Dict[str, Any]) ->
 def build_always_on_tool_definitions() -> List[Dict[str, Any]]:
     """Return the always-on tool definitions in flat format.
 
-    These ~11 tools are injected into every inference request (~800 tokens).
+    Covers 11 of ALWAYS_ON_TOOL_NAMES's 12 entries — every one that is a
+    real ToolDescriptor in skills_service._builtin_tool_descriptors(). The
+    12th, "query_tool_registry", is hand-built (get_query_tool_registry_definition,
+    below) rather than a ToolDescriptor, since it isn't a connector/local
+    action — callers append it separately to get the full always-on set.
+    Together the two make up the 12 tools (~800 tokens, estimated — not
+    re-measured) injected into every inference request.
+
     The OpenAI {type: "function", function: {...}} wrapper is applied at the
     API call site (iter_openai_compatible_chat_events), not here. This keeps
     the format consistent for internal consumers (_dedupe_tools,

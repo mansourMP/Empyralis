@@ -7,6 +7,7 @@ All function signatures and behaviour are unchanged.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -21,6 +22,8 @@ from urllib.parse import quote, quote_plus
 
 from server_modules import platform_config_schema, pricing_registry_service, secrets_broker, usage_accounting_service
 from server_modules import credential_rotation_service
+
+_LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Imports from server.py globals – these must be supplied by the caller or
@@ -503,6 +506,12 @@ PROVIDER_CATALOG = {
         "default_auth_mode": "api_key",
         "default_model": "claude-sonnet-4-6",
         "models": [
+            # Current generation (verified live against platform.claude.com/docs
+            # /en/about-claude/models/overview, 2026-07-22 — see
+            # docs/design/audit-context-currency.md fix #3):
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-fable-5",
             "claude-opus-4-7",
             "claude-sonnet-4-6",
             "claude-haiku-4-5-20251001",
@@ -940,6 +949,36 @@ PROVIDER_MODEL_CATALOG = {
         },
     },
     "anthropic": {
+        # Current generation — context windows verified live against
+        # platform.claude.com/docs/en/about-claude/models/overview on
+        # 2026-07-22 (docs/design/audit-context-currency.md fix #3: the
+        # catalog was stale, so these models fell back to
+        # compaction_service.DEFAULT_CONTEXT_WINDOW = 128_000 instead of
+        # their real 1M-token windows).
+        "claude-opus-4-8": {
+            "label": "Claude Opus 4.8",
+            "context_window_tokens": 1000000,
+            "supports_tools": True,
+            "supports_vision": True,
+            "supports_reasoning": True,
+            "capability_labels": ["Highest quality", "Reasoning", "Tools", "Long context"],
+        },
+        "claude-sonnet-5": {
+            "label": "Claude Sonnet 5",
+            "context_window_tokens": 1000000,
+            "supports_tools": True,
+            "supports_vision": True,
+            "supports_reasoning": True,
+            "capability_labels": ["Balanced", "Reasoning", "Tools", "Long context"],
+        },
+        "claude-fable-5": {
+            "label": "Claude Fable 5",
+            "context_window_tokens": 1000000,
+            "supports_tools": True,
+            "supports_vision": True,
+            "supports_reasoning": True,
+            "capability_labels": ["Highest quality", "Long-running agents", "Reasoning", "Tools"],
+        },
         "claude-opus-4-7": {
             "label": "Claude Opus 4.7",
             "context_window_tokens": 1000000,
@@ -1810,6 +1849,19 @@ def context_window_for_model(provider: str | None, model: str | None) -> int | N
     model_catalog = PROVIDER_MODEL_CATALOG.get(provider_id, {})
     metadata = model_catalog.get(model_token) if isinstance(model_catalog, dict) else None
     if not isinstance(metadata, dict):
+        # docs/design/audit-context-currency.md fix #3: callers (notably
+        # compaction_service.resolve_context_window) fall back to a 128K
+        # assumption whenever this returns None — for a model that actually
+        # has e.g. a 1M window, that's the wrong direction (under-compacts
+        # too eagerly) rather than the safe one. Silent before this warning;
+        # now at least visible in logs so a stale catalog on a new model's
+        # release day gets noticed instead of quietly mis-sizing every turn.
+        _LOGGER.warning(
+            "provider_profiles.context_window_for_model: unrecognized model "
+            "%r for provider %r — caller will fall back to a default context "
+            "window instead of this model's real one; catalog may be stale",
+            model_token, provider_id,
+        )
         return None
     try:
         resolved = int(metadata.get("context_window_tokens") or 0)

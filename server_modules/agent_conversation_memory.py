@@ -156,10 +156,19 @@ def load_recent_turns(
     agent_id: str,
     conversation_key: str,
     limit: int = DEFAULT_RECENT_TURNS,
-) -> List[Dict[str, str]]:
-    """Return the last ``limit`` turns as ``[{"role","content"}, ...]`` in
-    chronological order. Empty list if this conversation has no history yet —
-    never raises (a broken/half-written line is skipped, not fatal)."""
+) -> List[Dict[str, Any]]:
+    """Return the last ``limit`` turns as ``[{"role","content"[,"metadata"]}, ...]``
+    in chronological order. Empty list if this conversation has no history yet —
+    never raises (a broken/half-written line is skipped, not fatal).
+
+    The "metadata" key is present ONLY for turns whose stored record actually
+    carries one (append_turn's optional `metadata` param, e.g. the inbound
+    turn's attribution — see personal_channel_sage_bridge_service.py's
+    append_turn call sites). A turn written before per-turn metadata existed,
+    or written without it, round-trips to exactly ``{"role", "content"}`` —
+    unchanged from before this key existed, so existing exact-equality
+    callers/tests over old data are unaffected.
+    """
     path = conversation_path(
         workspace_id=workspace_id, agent_id=agent_id, conversation_key=conversation_key
     )
@@ -170,7 +179,7 @@ def load_recent_turns(
     except Exception as exc:  # unreadable file must not break a live reply
         _logger.warning("conversation memory read failed for %s: %s", path, exc)
         return []
-    out: List[Dict[str, str]] = []
+    out: List[Dict[str, Any]] = []
     for line in raw_lines[-max(1, int(limit or 1)) * 2 :]:  # a little slack for skips
         line = line.strip()
         if not line:
@@ -182,7 +191,11 @@ def load_recent_turns(
         role = str(rec.get("role") or "").strip().lower()
         content = str(rec.get("content") or "")
         if role in ("user", "assistant", "system") and content:
-            out.append({"role": role, "content": content})
+            turn: Dict[str, Any] = {"role": role, "content": content}
+            metadata = rec.get("metadata")
+            if isinstance(metadata, dict) and metadata:
+                turn["metadata"] = metadata
+            out.append(turn)
     if limit and len(out) > int(limit):
         out = out[-int(limit) :]
     return out

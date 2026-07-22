@@ -789,6 +789,17 @@ async def _build_unified_sage_personal_reply_async(
             agent_conversation_memory.append_turn(
                 workspace_id=_mem_ws, agent_id=_mem_agent,
                 conversation_key=_mem_key, role="user", content=_mem_user_content,
+                # Per-turn provenance (audit Part 3 #1 — the cheapest unlock):
+                # thread the SAME canonical InboundEnvelope built above into
+                # append_turn's previously-unused `metadata` param, via its own
+                # to_metadata() serializer, so a recalled turn from
+                # load_recent_turns carries WHO sent it (platform/surface/
+                # sender/is_owner) instead of only the group-silo's hand-built
+                # "{push_name}: " text prefix. Only the inbound/user turn gets
+                # this — the assistant's own reply below isn't "said by" the
+                # channel's sender, so tagging it with the SAME envelope would
+                # misattribute the agent's own words as the sender's.
+                metadata=envelope.to_metadata(),
             )
             # A media-only turn (no text, but send_image/generate_image
             # queued an attachment — see `media` above) is still a real sent

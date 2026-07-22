@@ -2788,6 +2788,12 @@ async def _run_sage_action_loop_v3(
     # Empty (default) falls back to trace_id, preserving prior behavior for
     # any other caller of this function.
     credit_idempotency_key: str = "",
+    # Best-effort turn attribution (inbound_attribution_recovery.build_attribution),
+    # stamped onto session_ctx["metadata"]["envelope"] below so the memory_write
+    # tool dispatch (skills_service.py) can attach it to any fact this turn
+    # saves. None (default) = caller didn't resolve one; memory writes this
+    # turn stay unattributed, same as before this parameter existed.
+    attribution: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     # Phase 4B: when agent_install_id is set this turn runs as that specialist —
     # its tool whitelist, tool-call executor identity, and mid-turn memory
@@ -2971,6 +2977,13 @@ async def _run_sage_action_loop_v3(
             "sage_agent_id": SAGE_MAIN_AGENT_ID,
             "user_id": actor_user_id or None,
             "channel_origin": channel_origin or "sage",
+            # Attribution seam (task: attribution-aware memory): the memory_write
+            # tool dispatch (skills_service.py) reads this back out via
+            # session_metadata.get("envelope") to stamp WHO said the fact it's
+            # about to save. See handle_sage_chat's _turn_attribution build and
+            # inbound_attribution_recovery.build_attribution for how this is
+            # resolved. None when the caller didn't pass `attribution=`.
+            "envelope": attribution,
         },
         "sender_id": actor_user_id or "",
         # Outbound-media accumulator: send_image and generate_image's
@@ -3429,6 +3442,136 @@ async def _run_memory_flush_before_compaction(
     return False
 
 
+async def _action_loop_context_budget_preflight(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    thread_id: str,
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    prior_messages: list[dict[str, Any]],
+    channel_prior_messages: list | None,
+    ctx_policy_max: int,
+    ctx_policy_action: str,
+    used_context: list[str],
+) -> list[dict[str, Any]]:
+    """docs/design/audit-context-currency.md fix #3: a TOKEN-based preflight
+    ahead of the PRIMARY action loop (_run_sage_action_loop_v3), replacing
+    the fixed SAGE_THREAD_MAX_TURNS = 10 turn-COUNT cap as the only thing
+    bounding prior_messages before that call. Ten very long turns can
+    overflow a model's real context window without ever tripping the B2
+    preflight elsewhere in this file (~4739+), because B2 only runs in the
+    FALLBACK branch — reached only when the action loop itself returns None
+    (handle_sage_chat's `if not reply and not has_any_tool_activity: return
+    None` path). This runs before the call instead, so the action loop's
+    very first request already sees a right-sized context.
+
+    Reuses compaction_service's existing token-accounting helpers verbatim
+    (estimate_tokens, COMPACTION_RESERVE_TOKENS, resolve_context_window,
+    find_cut_point, compact_turns, build_context_from_compaction) — no new
+    estimation logic. Deliberately does NOT reuse B2's own thread_service-
+    reload-after-compact_turns dance for the non-channel case: list_agent_
+    turns has no pruning/limit shrink after a compaction write (verified —
+    control_plane_repository.list_agent_turns just re-reads everything,
+    ORDER BY created_at ASC, LIMIT 200), and reload filters to `role in
+    {"user","assistant"}` which drops the just-persisted `compaction_summary`
+    row entirely — so a reload-based approach here would not reliably shrink
+    what gets sent on the very next call. Operating on prior_messages
+    in-memory (cut -> summarize -> rebuild) sidesteps that; see the
+    equivalent, deliberately-parallel design in direct_chat_generation_
+    service._compact_conversation_messages_in_place.
+
+    Channel-origin turns (channel_prior_messages is not None) get plain
+    TRUNCATION instead of an LLM summary — same rationale as B2's identical
+    branch: a channel turn's real history lives in agent_conversation_memory,
+    not the control-plane thread store, and thread_id is frequently a
+    shared/unscoped value (e.g. "sage-main") that compact_turns' agent_turns
+    write must never be pointed at.
+
+    Skips entirely (returns prior_messages unchanged) when compaction is
+    flag-disabled (EMPYRALIS_PRIMARY_COMPACTION_ENABLED=0, same flag —
+    reused via direct_chat_generation_service._primary_compaction_enabled,
+    not redefined here) or when this install's context policy action is
+    "fresh_session" — that policy is B2's own Phase 5C mechanism and stays
+    exclusively there, not duplicated here.
+
+    Returns the (possibly compacted) prior_messages list; the caller should
+    use the return value from here on, including for the _run_sage_action_
+    loop_v3 call this exists to protect.
+    """
+    if not direct_chat_generation_service._primary_compaction_enabled():
+        return prior_messages
+    if ctx_policy_action == "fresh_session":
+        return prior_messages
+
+    from server_modules.compaction_service import (
+        estimate_tokens, COMPACTION_RESERVE_TOKENS, resolve_context_window,
+        compact_turns, find_cut_point, build_context_from_compaction,
+    )
+
+    window = resolve_context_window(provider, model or None)
+    if ctx_policy_max and ctx_policy_max > 0:
+        window = min(window, ctx_policy_max)
+
+    text = str(system_prompt or "") + str(user_message or "")
+    for _pm in (prior_messages or []):
+        if isinstance(_pm, dict):
+            text += str(_pm.get("content") or "")
+    estimated = estimate_tokens(text) + COMPACTION_RESERVE_TOKENS
+    if estimated <= window:
+        return prior_messages
+
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    _log.warning(
+        "sage_agent_runtime: action-loop token preflight triggered — "
+        "estimated %d tokens > window %d (provider=%s, model=%s)",
+        estimated, window, provider, model,
+    )
+
+    try:
+        flush_ok = await _run_memory_flush_before_compaction(
+            workspace_id=workspace_id, tenant_id=tenant_id, thread_id=thread_id,
+            provider=provider, model=model,
+        )
+        if not flush_ok:
+            _log.warning(
+                "sage_agent_runtime: action-loop preflight compaction skipped — "
+                "memory flush failed (facts preserved in raw turns)"
+            )
+            return prior_messages
+
+        source = list(prior_messages or [])
+        cut_idx = find_cut_point(source, context_window=window)
+        if cut_idx <= 0:
+            # Nothing old enough to be worth cutting.
+            return prior_messages
+
+        if channel_prior_messages is not None:
+            compacted = source[cut_idx:]
+            used_context.append("action_loop_prior_messages_compacted")
+            return compacted
+
+        summary = await compact_turns(
+            turns=source[:cut_idx],
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            thread_id=thread_id,
+        )
+        if not summary:
+            return prior_messages
+        used_context.append("action_loop_prior_messages_compacted")
+        return build_context_from_compaction(summary, source[cut_idx:])
+    except Exception as exc:
+        _log.warning(
+            "sage_agent_runtime: action-loop preflight compaction failed: %s — proceeding uncompacted",
+            exc,
+        )
+        return prior_messages
+
+
 def resolve_canonical_sender(
     identity_links: dict | None,
     channel_origin: str,
@@ -3713,6 +3856,32 @@ async def handle_sage_chat(
                 used_context.append("audience_session")
         except Exception:
             pass
+
+    # ── Attribution for memory-write stamping (task: attribution-aware
+    # memory) ────────────────────────────────────────────────────────────
+    # WHO is saying things this turn, best-effort recovered from the
+    # canonical InboundEnvelope's own rendered header
+    # (inbound_envelope.render_envelope_header, prepended to `message` at
+    # the execute_sage_turn chokepoint) with a fallback to the sender-class
+    # resolution just above when no header is present (console/unwired
+    # channels). See inbound_attribution_recovery.py's module docstring for
+    # why this is recovered from text rather than threaded as the live
+    # InboundEnvelope object (sage_turn_adapter.py's handle_sage_chat call
+    # doesn't forward one, and that file is out of scope for this change).
+    # Threaded into _run_sage_action_loop_v3's session_ctx below so
+    # memory_write can stamp it on any fact this turn saves.
+    try:
+        from server_modules import inbound_attribution_recovery as _attribution_recovery
+
+        _turn_attribution = _attribution_recovery.build_attribution(
+            message=normalized_message,
+            channel_origin=channel_origin,
+            sender_id=str(sender_id or "").strip(),
+            sender_name=str(sender_name or "").strip(),
+            sender_class=_sender_class,
+        )
+    except Exception:
+        _turn_attribution = None
 
     # --- Load context ---
     profile_context = _load_profile_context(workspace_id=normalized_workspace_id)
@@ -4350,6 +4519,25 @@ async def handle_sage_chat(
             "ai_setup_url": f"/w/{normalized_workspace_id}{_SAGE_AI_SETUP_PATH}",
         }
 
+    # Fix #3 (docs/design/audit-context-currency.md): token-based preflight
+    # ahead of the primary action loop — see _action_loop_context_budget_
+    # preflight's docstring. A no-op when nothing is over budget (the common
+    # case) or when EMPYRALIS_PRIMARY_COMPACTION_ENABLED=0.
+    prior_messages = await _action_loop_context_budget_preflight(
+        workspace_id=normalized_workspace_id,
+        tenant_id=effective_tenant_id,
+        thread_id=thread_id,
+        provider=provider,
+        model=requested_model,
+        system_prompt=envelope["system_prompt"],
+        user_message=envelope.get("user_message") or normalized_message,
+        prior_messages=prior_messages,
+        channel_prior_messages=channel_prior_messages,
+        ctx_policy_max=_ctx_policy_max,
+        ctx_policy_action=_ctx_policy_action,
+        used_context=used_context,
+    )
+
     action_loop_message = _normalized_sage_action_loop_message(normalized_message, prior_messages)
     # Always run the action loop — the LLM decides whether tools are needed.
     # A keyword heuristic gate would silently skip tools for messages that don't
@@ -4374,6 +4562,7 @@ async def handle_sage_chat(
         preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
         reasoning_effort=requested_reasoning_effort,
         credit_idempotency_key=turn_credit_idempotency_key,
+        attribution=_turn_attribution,
     )
     if action_result is not None:
         if "sage_action_loop" not in used_context:

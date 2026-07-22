@@ -320,6 +320,117 @@ def _continuous_work_budget_allows_more(
         return False
 
 
+# ── Primary-path compaction (docs/design/audit-context-currency.md fixes
+# #1 and #2) ──────────────────────────────────────────────────────────────
+# compaction_service.py implements real, LLM-summarized compaction
+# (proactive preflight + reactive overflow retry + memory-flush-before-
+# compact), but until this it only ran inside sage_agent_runtime_service.py's
+# handle_sage_chat FALLBACK branch — reached only when the primary tool loop
+# (_run_sage_action_loop_v3 -> stream_provider_backed_direct_chat, right
+# here) returns nothing. This is the primary path itself: nearly every real
+# turn runs through the while-loop below. A mid-loop overflow here used to
+# just fail the turn (event_type == "failure" -> iteration_failed = True)
+# with no attempt to trim the oversized context, so the same conversation
+# would overflow again on the very next turn.
+#
+# Reversible with zero code changes: EMPYRALIS_PRIMARY_COMPACTION_ENABLED=0
+# (mirrors _continuous_work_enabled()'s pattern above). Off means every code
+# path below this point behaves byte-for-byte as it did before this feature
+# existed.
+def _primary_compaction_enabled() -> bool:
+    return str(os.environ.get("EMPYRALIS_PRIMARY_COMPACTION_ENABLED", "1")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _compact_conversation_messages_in_place(
+    *,
+    conversation_messages: List[Dict[str, Any]],
+    workspace_id: str,
+    thread_id: str,
+    provider: Optional[str],
+    model: Optional[str],
+) -> bool:
+    """Summarize the older portion of ``conversation_messages`` and replace it
+    with a compaction summary, keeping the most recent turns raw. Mutates the
+    list IN PLACE (`[:] =`) so every existing reference/closure over it
+    (this generator's own `conversation_messages` local, and `messages` once
+    reassigned by the caller) sees the compacted content — nothing is
+    reassigned to a new list object.
+
+    Reuses compaction_service's existing machinery verbatim — find_cut_point
+    for the recent/older split, compact_turns for the actual LLM
+    summarization call (same prompt, same call shape sage_agent_runtime_
+    service.py's fallback branch already uses), build_context_from_
+    compaction to reassemble. No second summarizer.
+
+    compact_turns is `async def` (it awaits a best-effort DB persist of the
+    summary as a `compaction_summary` agent_turn); this generator function
+    is a plain sync generator that runs inside a ThreadPoolExecutor worker
+    thread with no event loop of its own (see the comment on session_ctx's
+    "pending_outbound_media" above for the same threading fact), so the
+    coroutine is bridged through run_async_tool_call — the SAME shared-loop
+    bridge (server_modules.sync_asyncio_bridge) every other async call in
+    this file already uses (see _emit_trace_event, _finish_trace above)
+    rather than a fresh per-call asyncio.run(), which is a known bad pattern
+    for this codebase's async DB pool (see direct_tool_config_service.
+    run_async_tool_call's own comment).
+
+    Returns True if compaction actually happened (summary produced and
+    swapped in), False otherwise (nothing old enough to cut, empty summary,
+    or any failure — always fails safe, never raises, never leaves the
+    caller worse off than before the call).
+    """
+    try:
+        window = compaction_service.resolve_context_window(provider, model)
+        cut_idx = compaction_service.find_cut_point(conversation_messages, context_window=window)
+        if cut_idx <= 0:
+            # Nothing old enough to be worth summarizing — either everything
+            # already fits inside the "keep recent" allowance, or find_cut_
+            # point found no split point at all.
+            return False
+        turns_to_summarize = conversation_messages[:cut_idx]
+        kept_turns = conversation_messages[cut_idx:]
+        summary = run_async_tool_call(
+            compaction_service.compact_turns(
+                turns=turns_to_summarize,
+                workspace_id=workspace_id,
+                # direct_chat has no tenant_id concept anywhere in this file
+                # (grepped — zero hits) — "default" matches the same
+                # single-tenant convention sage_agent_runtime_service.py
+                # falls back to (`effective_tenant_id = normalized_tenant_id
+                # or "default"`). Only used for compact_turns' best-effort
+                # summary persistence, wrapped in its own try/except, so a
+                # mismatched tenant_id here can never break this turn.
+                tenant_id="default",
+                thread_id=thread_id,
+            )
+        )
+        if not summary:
+            return False
+        compacted = compaction_service.build_context_from_compaction(summary, kept_turns)
+        conversation_messages[:] = compacted
+        return True
+    except Exception:
+        return False
+
+
+def _estimated_context_tokens(
+    *,
+    system_prompt: Optional[str],
+    current_prompt: str,
+    conversation_messages: List[Dict[str, Any]],
+) -> int:
+    text_parts = [str(system_prompt or ""), str(current_prompt or "")]
+    for message in conversation_messages or []:
+        if isinstance(message, dict):
+            text_parts.append(str(message.get("content") or ""))
+    return (
+        compaction_service.estimate_tokens("".join(text_parts))
+        + compaction_service.COMPACTION_RESERVE_TOKENS
+    )
+
+
 def _tool_result_context_is_local_private(provider: Any, credentials: Any) -> bool:
     provider_token = str(provider or "").strip().lower().replace("-", "_")
     if provider_token in _LOCAL_PRIVATE_TOOL_RESULT_PROVIDERS:
@@ -1288,6 +1399,10 @@ def stream_provider_backed_direct_chat(
         return
 
     iteration = 0
+    # Reactive compaction (fix #2): capped at ONE retry for the whole turn —
+    # never a loop. Set the first (and only) time an overflow is compacted
+    # away in the event_type == "failure" handling below.
+    _compaction_retry_used = False
     while True:
         if iteration >= max_iterations:
             # ── Continuous-work extension point ──
@@ -1348,6 +1463,41 @@ def stream_provider_backed_direct_chat(
         iteration_raw_reply = ""
         iteration_tool_calls: List[Dict[str, Any]] = []
         iteration_failed = False
+        # Set True below only by the reactive-overflow retry (fix #2) — tells
+        # the post-for-loop dispatch to `continue` the while loop instead of
+        # treating an empty iteration_tool_calls/iteration_failed as "done".
+        _compaction_retry_requested = False
+
+        # ── Proactive compaction (fix #1) ──────────────────────────────────
+        # Checked at the top of EVERY iteration, not just once before the
+        # loop starts — tool results accumulate into conversation_messages as
+        # the loop runs, so a turn that started well under budget can still
+        # grow past it mid-loop. Reuses the exact same estimate-tokens-vs-
+        # window primitives _continuous_work_budget_allows_more already uses
+        # above (compaction_service.estimate_tokens/COMPACTION_RESERVE_TOKENS/
+        # resolve_context_window) — no new estimation logic, just acting on
+        # the estimate instead of only gating a loop extension with it. Off
+        # (_primary_compaction_enabled() == False) or nothing over budget:
+        # falls through unchanged.
+        if _primary_compaction_enabled():
+            _proactive_estimated = _estimated_context_tokens(
+                system_prompt=system_prompt,
+                current_prompt=current_prompt,
+                conversation_messages=conversation_messages,
+            )
+            _proactive_window = compaction_service.resolve_context_window(
+                str(actual_provider or context.get("provider") or "").strip() or None,
+                str(actual_model or "").strip() or None,
+            )
+            if _proactive_estimated > _proactive_window:
+                print(f"[DG_PROACTIVE_COMPACTION] iteration={_loop_iteration} estimated={_proactive_estimated} window={_proactive_window} — compacting", flush=True)
+                _compact_conversation_messages_in_place(
+                    conversation_messages=conversation_messages,
+                    workspace_id=normalized_workspace_id,
+                    thread_id=normalized_thread_id,
+                    provider=str(actual_provider or context.get("provider") or "").strip() or None,
+                    model=str(actual_model or "").strip() or None,
+                )
 
         messages = conversation_messages or []
         for event in services.generate_chat_reply_stream_with_provider_fallback(
@@ -2431,6 +2581,43 @@ def stream_provider_backed_direct_chat(
                 attempted_providers = str(event.get("attempted_providers") or "").strip()
                 llm_error = str(event.get("error") or "").strip()
                 print(f"[DG_FAILURE] iteration={_loop_iteration} llm_error={llm_error!r} attempted_providers={attempted_providers!r}", flush=True)
+                # ── Reactive compaction retry (fix #2) ──────────────────────
+                # generate_chat_reply_stream_with_provider_fallback already
+                # exhausted every configured provider with the SAME oversized
+                # conversation_messages/prior_messages before yielding this
+                # "failure" event (scripts/orion_local_worker_llm.py's
+                # provider-fallback loop) — the proactive check above is the
+                # first line of defense but can still miss (estimate drift,
+                # a policy-forced smaller window, a turn that grew past
+                # budget within this single provider call). If the error
+                # shape matches a context-overflow (compaction_service.
+                # is_context_overflow_error — same keyword-shape detection
+                # sage_agent_runtime_service.py's existing reactive path
+                # uses), compact once and retry THIS iteration instead of
+                # failing the whole turn. current_prompt/final_reply were
+                # never appended to conversation_messages for this failed
+                # attempt (that only happens in the "result" branch above),
+                # so there is nothing to undo before retrying. Capped at one
+                # retry per turn via _compaction_retry_used — never a loop.
+                if (
+                    _primary_compaction_enabled()
+                    and not _compaction_retry_used
+                    and compaction_service.is_context_overflow_error(llm_error)
+                ):
+                    _compaction_retry_used = True
+                    print(f"[DG_COMPACTION_RETRY] iteration={_loop_iteration} llm_error={llm_error!r} — compacting and retrying once", flush=True)
+                    _retry_compacted = _compact_conversation_messages_in_place(
+                        conversation_messages=conversation_messages,
+                        workspace_id=normalized_workspace_id,
+                        thread_id=normalized_thread_id,
+                        provider=str(actual_provider or context.get("provider") or "").strip() or None,
+                        model=str(actual_model or "").strip() or None,
+                    )
+                    if _retry_compacted:
+                        llm_error = ""
+                        _compaction_retry_requested = True
+                        break
+                    print(f"[DG_COMPACTION_RETRY] iteration={_loop_iteration} compaction found nothing to cut — falling through to normal failure handling", flush=True)
                 is_platform_credits = _platform_paid_ai_identity(
                     availability_payload=availability_payload,
                     metadata=metadata,
@@ -2472,6 +2659,11 @@ def stream_provider_backed_direct_chat(
                 iteration_failed = True
                 break
 
+        if _compaction_retry_requested:
+            # This attempt doesn't count against max_iterations — it was our
+            # own internal retry, not a real step of the model's turn.
+            iteration -= 1
+            continue
         if iteration_failed:
             print(f"[DG_LOOP_END] broke with iteration_failed=True llm_error={llm_error!r} executed_any_tools={executed_any_tools}", flush=True)
             break

@@ -501,7 +501,13 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             label="Computer OCR",
             connector_id="computer",
             action_id="ocr",
-            description="Read visible text from the screen using OCR",
+            description=(
+                "Read the text currently visible on the screen/display via OCR (optical "
+                "character recognition). Use this when the user asks what's on their "
+                "screen, or to see/read text in an image or window that isn't otherwise "
+                "accessible as plain text. Optionally scope to a rectangular region; omit "
+                "it to OCR the entire screen."
+            ),
             capability_id="computer_control.ocr",
             requires_runtime=True,
             parameters={
@@ -509,11 +515,12 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
                 "properties": {
                     "region": {
                         "type": "object",
+                        "description": "Optional pixel region to limit OCR to. Omit to scan the whole screen.",
                         "properties": {
-                            "x": {"type": "integer"},
-                            "y": {"type": "integer"},
-                            "width": {"type": "integer"},
-                            "height": {"type": "integer"},
+                            "x": {"type": "integer", "description": "Left edge of the region, in pixels."},
+                            "y": {"type": "integer", "description": "Top edge of the region, in pixels."},
+                            "width": {"type": "integer", "description": "Region width, in pixels."},
+                            "height": {"type": "integer", "description": "Region height, in pixels."},
                         },
                     },
                 },
@@ -527,7 +534,14 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             description="Click on the screen by coordinates or visible text",
             capability_id="computer_control.click",
             requires_runtime=True,
-            parameters={"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "text": {"type": "string"}}},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X pixel coordinate to click. Provide with y, or use text instead."},
+                    "y": {"type": "integer", "description": "Y pixel coordinate to click. Provide with x, or use text instead."},
+                    "text": {"type": "string", "description": "Visible on-screen text to click, as an alternative to x/y coordinates."},
+                },
+            },
         ),
         ToolDescriptor(
             tool_name="computer__type",
@@ -537,7 +551,11 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             description="Type text into the active application",
             capability_id="computer_control.type",
             requires_runtime=True,
-            parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "The text to type into the currently focused field/application."}},
+                "required": ["text"],
+            },
         ),
         ToolDescriptor(
             tool_name="computer__applescript",
@@ -547,7 +565,11 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             description="Execute a system script on your computer",
             capability_id="computer_control.applescript",
             requires_runtime=True,
-            parameters={"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]},
+            parameters={
+                "type": "object",
+                "properties": {"script": {"type": "string", "description": "The AppleScript source code to execute."}},
+                "required": ["script"],
+            },
         ),
         ToolDescriptor(
             tool_name="computer__clipboard_read",
@@ -567,7 +589,11 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             description="Write text to the system clipboard",
             capability_id="computer_control.clipboard_write",
             requires_runtime=True,
-            parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "The text to write to the system clipboard."}},
+                "required": ["text"],
+            },
         ),
         ToolDescriptor(
             tool_name="computer__notify",
@@ -577,7 +603,14 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             description="Send a system notification",
             capability_id="computer_control.notify",
             requires_runtime=True,
-            parameters={"type": "object", "properties": {"title": {"type": "string"}, "message": {"type": "string"}}, "required": ["title", "message"]},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Notification title."},
+                    "message": {"type": "string", "description": "Notification body text."},
+                },
+                "required": ["title", "message"],
+            },
         ),
         ToolDescriptor(
             tool_name="computer__list_apps",
@@ -597,7 +630,11 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             description="Launch an application by name or path",
             capability_id="computer_control.launch_app",
             requires_runtime=True,
-            parameters={"type": "object", "properties": {"name_or_path": {"type": "string"}}, "required": ["name_or_path"]},
+            parameters={
+                "type": "object",
+                "properties": {"name_or_path": {"type": "string", "description": "Application name (e.g. 'Safari') or full path to launch."}},
+                "required": ["name_or_path"],
+            },
         ),
         ToolDescriptor(
             tool_name="computer__speak",
@@ -607,7 +644,14 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             description="Speak text aloud using the local system voice",
             capability_id="computer_control.speak",
             requires_runtime=True,
-            parameters={"type": "object", "properties": {"text": {"type": "string"}, "voice": {"type": "string"}}, "required": ["text"]},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The text to speak aloud."},
+                    "voice": {"type": "string", "description": "Optional system voice name to use. Omit to use the default voice."},
+                },
+                "required": ["text"],
+            },
         ),
     ]
 
@@ -1016,13 +1060,13 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             parameters={
                 "type": "object",
                 "properties": {
-                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP method to use for the request."},
                     "url": {"type": "string", "description": "The target URL."},
                     "headers": {"type": "object", "description": "Optional request headers."},
                     "body": {"description": "Optional request body as a string or JSON object."},
                     "params": {"type": "object", "description": "Optional query parameters."},
                     "timeout": {"type": "integer", "description": "Timeout in seconds."},
-                    "auth_type": {"type": "string", "enum": ["none", "bearer", "basic"]},
+                    "auth_type": {"type": "string", "enum": ["none", "bearer", "basic"], "description": "Authentication scheme to apply, if any. 'bearer' sends auth_value as a Bearer token; 'basic' sends auth_value as 'user:pass' Basic auth."},
                     "auth_value": {"type": "string", "description": "Token or user:pass credentials."},
                 },
                 "required": ["method", "url"],
@@ -1411,6 +1455,297 @@ def build_local_direct_chat_tools(
     return [_tool_payload_from_descriptor(item) for item in _local_tool_descriptors()]
 
 
+def _email_send_tool_parameters(*, with_cc: bool) -> Dict[str, Any]:
+    """Shared to/subject/body(/cc) schema for send_email/draft_email-shaped
+    actions. Field names match exactly what build_direct_tool_config /
+    runs_execution._workflow_execute_connector_action read off the resulting
+    config dict (to_email/to, subject, body/text) — see the connector_id ==
+    "google_workspace" / "microsoft_365" / "smtp" branches below and in
+    runs_execution.py's shared send_email/draft_email handler."""
+    properties: Dict[str, Any] = {
+        "to": {
+            "type": "string",
+            "description": "Recipient email address, e.g. 'jane@example.com'.",
+        },
+        "subject": {
+            "type": "string",
+            "description": "Email subject line.",
+        },
+        "body": {
+            "type": "string",
+            "description": "Plain-text email body.",
+        },
+    }
+    required = ["to", "subject", "body"]
+    if with_cc:
+        properties["cc"] = {
+            "type": "string",
+            "description": "Optional comma-separated list of additional email addresses to CC.",
+        }
+    return {"type": "object", "properties": properties, "required": required}
+
+
+def _calendar_event_tool_parameters() -> Dict[str, Any]:
+    """Field names match config keys read by build_direct_tool_config's
+    create_calendar_event branch and runs_execution.py's shared
+    {google_workspace, microsoft_365} create_calendar_event handler."""
+    return {
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Event title/summary.",
+            },
+            "start": {
+                "type": "string",
+                "description": (
+                    "Event start time as an ISO 8601 datetime, e.g. "
+                    "'2026-07-25T14:00:00-07:00'."
+                ),
+            },
+            "end": {
+                "type": "string",
+                "description": "Event end time, same ISO 8601 format as start.",
+            },
+            "attendees": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional list of attendee email addresses to invite.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional event description/notes.",
+            },
+            "timezone": {
+                "type": "string",
+                "description": (
+                    "IANA timezone for start/end, e.g. 'America/Los_Angeles'. "
+                    "Defaults to UTC if omitted."
+                ),
+            },
+            "calendar_id": {
+                "type": "string",
+                "description": "Which calendar to create the event on. Defaults to the primary calendar.",
+            },
+        },
+        "required": ["title", "start", "end"],
+    }
+
+
+# Real per-connector-action JSON schemas for the highest-traffic dynamically
+# generated connector tools (build_direct_chat_tools, below). Before this,
+# every one of these tools got one opaque `{"input": string}` param and a
+# description of `f"Execute {action} on {label}"` — the model had to guess a
+# free-text blob, and build_direct_tool_config's regex heuristics guessed
+# back at what it meant (only wired for 5 connectors). Connectors/actions not
+# in this map keep that legacy shape (build_direct_tool_config's tool_input
+# string-parsing path is kept as the fallback for exactly that reason).
+#
+# Field names were chosen by reading what build_direct_tool_config /
+# runs_execution._workflow_execute_connector_action actually consume for
+# each action — not invented — so the schema describes real executor inputs.
+def _structured_connector_tool_schema(
+    connector_id: str,
+    action_id: str,
+    label: str,
+) -> Optional[Dict[str, Any]]:
+    normalized_connector = str(connector_id or "").strip().lower()
+    normalized_action = str(action_id or "").strip()
+    display_label = str(label or normalized_connector).strip() or normalized_connector
+
+    if normalized_connector in {"google_workspace", "microsoft_365"} and normalized_action == "send_email":
+        return {
+            "description": (
+                f"Send an email immediately through the connected {display_label} account. "
+                "Use this when the user asks you to email someone right now — e.g. "
+                "'email Sarah the report' or 'send a note to support@acme.com'. Requires a "
+                "recipient (to), a subject, and a plain-text body; add cc for additional "
+                "recipients who should be copied. Use the draft_email action instead if the "
+                "user wants the message prepared for their own review before sending, and do "
+                "not use this to search or read existing mail."
+            ),
+            "parameters": _email_send_tool_parameters(with_cc=True),
+        }
+    if normalized_connector in {"google_workspace", "microsoft_365"} and normalized_action == "draft_email":
+        return {
+            "description": (
+                f"Create a draft email in the connected {display_label} account without "
+                "sending it. Use this when the user wants an email prepared for their own "
+                "review and later send — e.g. 'draft a reply to this' or 'write up an email "
+                "but don't send it yet'. Takes the same to/subject/body/cc fields as the "
+                "send_email action, but the message is only saved as a draft, never "
+                "delivered. Use send_email instead if the user actually wants it sent now."
+            ),
+            "parameters": _email_send_tool_parameters(with_cc=True),
+        }
+    if normalized_connector in {"google_workspace", "microsoft_365"} and normalized_action == "create_calendar_event":
+        return {
+            "description": (
+                f"Create a new event on the connected {display_label} calendar. Use this "
+                "when the user asks to schedule a meeting, block time, or add something to "
+                "their calendar — e.g. 'schedule a call with the client tomorrow at 2pm' or "
+                "'put a reminder on my calendar for Friday'. Requires a title and ISO 8601 "
+                "start/end times; optionally add attendees (their emails, to send them an "
+                "invite), a description, a timezone (defaults to UTC), and a calendar_id "
+                "(defaults to the primary calendar). This only creates events — it does not "
+                "check what's already scheduled."
+            ),
+            "parameters": _calendar_event_tool_parameters(),
+        }
+    if normalized_connector == "smtp" and normalized_action == "send_email":
+        return {
+            "description": (
+                "Send an email through the connected SMTP mail account. Use this for "
+                "workspaces where email is configured via raw SMTP credentials rather than "
+                "Google Workspace or Microsoft 365 — e.g. 'email the customer at their "
+                "support address' or 'notify them by email'. Requires a recipient (to), a "
+                "subject, and a plain-text body. If a Google Workspace or Microsoft 365 "
+                "connector is also available, prefer whichever one the user's account is "
+                "actually set up on."
+            ),
+            "parameters": _email_send_tool_parameters(with_cc=False),
+        }
+    if normalized_connector == "slack" and normalized_action == "send_message":
+        return {
+            "description": (
+                "Post a message to a Slack channel through the connected Slack workspace. "
+                "Use this when the user asks you to tell the team, post an update, or notify "
+                "a channel — e.g. 'let the team know on Slack' or 'post this in #general'. "
+                "Requires the target channel (an ID like 'C0123456789' or a name like "
+                "'#general') and the message text. Use send_dm instead if the message is for "
+                "one specific person rather than a channel."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": (
+                            "Slack channel to post to — a channel ID (e.g. 'C0123456789') or "
+                            "name (e.g. '#general' or 'general')."
+                        ),
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message text to post.",
+                    },
+                },
+                "required": ["channel", "text"],
+            },
+        }
+    if normalized_connector == "slack" and normalized_action == "send_dm":
+        return {
+            "description": (
+                "Send a direct message to a single Slack user through the connected Slack "
+                "workspace. Use this when the user asks you to message someone privately on "
+                "Slack rather than post to a channel — e.g. 'DM Alex about the deadline'. "
+                "Requires the recipient's Slack user_id (e.g. 'U0123456789') and the message "
+                "text. Use send_message instead if the message should go to a channel "
+                "multiple people can see."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "Slack user ID of the DM recipient, e.g. 'U0123456789'.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message text to send.",
+                    },
+                },
+                "required": ["user_id", "text"],
+            },
+        }
+    if normalized_connector == "telegram_bot" and normalized_action == "send_message":
+        return {
+            "description": (
+                "Send a message through the connected Telegram bot. Use this when the user "
+                "asks you to message someone on Telegram or reply in a Telegram conversation "
+                "— e.g. 'tell them on Telegram' or 'send a Telegram reminder'. Requires the "
+                "message text; chat_id is optional and only needed to target a specific chat "
+                "other than the one this conversation is already bound to. Use the matching "
+                "connector's send_message tool instead for Slack, Discord, or email."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": (
+                            "Telegram chat ID to send to. Optional — omit to reply in the "
+                            "chat this conversation is already bound to."
+                        ),
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message text to send.",
+                    },
+                },
+                "required": ["text"],
+            },
+        }
+    if normalized_connector == "discord_bot" and normalized_action == "send_message":
+        return {
+            "description": (
+                "Post a message to a Discord channel through the connected Discord bot. Use "
+                "this when the user asks you to post an update or notify people in a Discord "
+                "server — e.g. 'drop this in the #announcements channel'. Requires the "
+                "target channel_id (the numeric Discord channel ID, not a channel name) and "
+                "the message text. Use a different discord_bot action for DMs, embeds, or "
+                "reactions — this tool only sends plain channel messages."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {
+                        "type": "string",
+                        "description": (
+                            "Discord channel ID (snowflake) to post in, e.g. "
+                            "'123456789012345678'."
+                        ),
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message text to post.",
+                    },
+                },
+                "required": ["channel_id", "text"],
+            },
+        }
+    if normalized_connector == "whatsapp_twilio" and normalized_action == "send_message":
+        return {
+            "description": (
+                "Send a WhatsApp message through the connected Twilio WhatsApp number. Use "
+                "this when the user asks you to message someone on WhatsApp — e.g. 'text "
+                "them on WhatsApp about the delay'. Requires the message text; to_number "
+                "(E.164 format, e.g. '+14155551234') is optional only if this connector has "
+                "a single default recipient configured — otherwise supply it explicitly. Use "
+                "a different connector's send_message tool for SMS, Slack, or Telegram."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_number": {
+                        "type": "string",
+                        "description": (
+                            "Recipient WhatsApp phone number in E.164 format, e.g. "
+                            "'+14155551234'. Optional if this connector has a default "
+                            "recipient configured."
+                        ),
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message text to send.",
+                    },
+                },
+                "required": ["text"],
+            },
+        }
+    return None
+
+
 def build_direct_chat_tools(tool_capabilities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     tools: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -1452,10 +1787,24 @@ def build_direct_chat_tools(tool_capabilities: List[Dict[str, Any]]) -> List[Dic
                 requires_runtime=False,
                 contract=contract,
             )
+            structured_schema = _structured_connector_tool_schema(connector_id, action, label)
+            if structured_schema is not None:
+                description = structured_schema["description"]
+                parameters = structured_schema["parameters"]
+            else:
+                # Legacy fallback for actions not yet given a real schema —
+                # the model gets one opaque `input` string and
+                # build_direct_tool_config regex-guesses at its meaning.
+                description = f"Execute {action} on {label}"
+                parameters = {
+                    "type": "object",
+                    "properties": {"input": {"type": "string", "description": "The input for this action"}},
+                    "required": ["input"],
+                }
             tools.append(
                 {
                     "name": tool_name,
-                    "description": f"Execute {action} on {label}",
+                    "description": description,
                     "label": f"{label} {action.replace('_', ' ')}",
                     "connector_id": connector_id,
                     "action_id": action,
@@ -1467,11 +1816,7 @@ def build_direct_chat_tools(tool_capabilities: List[Dict[str, Any]]) -> List[Dic
                     "cost_class": permission_manifest["cost_class"],
                     "audit_event_type": permission_manifest["audit_event_type"],
                     "permission_manifest": permission_manifest,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"input": {"type": "string", "description": "The input for this action"}},
-                        "required": ["input"],
-                    },
+                    "parameters": parameters,
                 }
             )
     return tools
@@ -1831,18 +2176,65 @@ def approved_action_to_tool_call(
     }
 
 
+def _normalize_attendee_emails(value: Any) -> List[str]:
+    """Normalize a calendar event's `attendees` field into a flat list of
+    email strings. Accepts a list of email strings, a list of
+    {"email": ...} dicts (matching Google Calendar/Graph attendee objects),
+    or a single comma/semicolon-separated string — whatever shape a
+    structured tool call or a loosely-parsed input blob happens to supply."""
+    candidates: List[Any]
+    if isinstance(value, list):
+        candidates = value
+    elif isinstance(value, str):
+        candidates = re.split(r"[,;]", value)
+    else:
+        return []
+    emails: List[str] = []
+    for item in candidates:
+        if isinstance(item, dict):
+            email = str(item.get("email") or item.get("address") or "").strip()
+        else:
+            email = str(item or "").strip()
+        if email and email not in emails:
+            emails.append(email)
+    return emails
+
+
 def build_direct_tool_config(
     connector_id: str,
     action_id: str,
     tool_input: str,
     *,
     parse_json_object_loose: Any,
+    structured_args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Build the executor-facing config dict for a connector-action tool call.
+
+    `tool_input` is the legacy free-text/JSON-blob path: a single string the
+    model put everything into, which gets loosely parsed and then
+    regex-guessed apart (extract_first_email/extract_subject_text/
+    extract_body_text) when a field can't be found by name.
+
+    `structured_args`, when provided (non-empty dict), is the model's ACTUAL
+    named tool-call arguments from one of _structured_connector_tool_schema's
+    real per-connector-action schemas (build_direct_chat_tools, above) — e.g.
+    {"to": "...", "subject": "...", "body": "..."} instead of
+    {"input": "<blob the model had to compose>"}. When present it is used
+    DIRECTLY as parsed_input below, so every branch's `parsed_input.get(...)`
+    lookups resolve from the real structured fields first and the
+    tool_input-based regex fallbacks (extract_first_email et al.) never run
+    for these calls at all. Callers that still only pass a tool_input string
+    (unconverted actions, and the human-approval-confirmation path, which
+    only ever has a free-text "input") get identical behavior to before.
+    """
     config: Dict[str, Any] = {
         "connector": connector_id,
         "action_id": action_id,
     }
-    parsed_input = parse_json_object_loose(tool_input) or {}
+    if isinstance(structured_args, dict) and structured_args:
+        parsed_input = structured_args
+    else:
+        parsed_input = parse_json_object_loose(tool_input) or {}
 
     if connector_id == "telegram_bot":
         for key in ("chat_id", "session_key"):
@@ -1850,7 +2242,8 @@ def build_direct_tool_config(
             if value:
                 config[key] = value
         config["text"] = str(
-            parsed_input.get("body")
+            parsed_input.get("text")
+            or parsed_input.get("body")
             or parsed_input.get("message")
             or parsed_input.get("content")
             or tool_input
@@ -1864,7 +2257,8 @@ def build_direct_tool_config(
                 config[key] = value
         if action_id in {"send_message", "send_dm", "post_reply"}:
             config["text"] = str(
-                parsed_input.get("body")
+                parsed_input.get("text")
+                or parsed_input.get("body")
                 or parsed_input.get("message")
                 or parsed_input.get("content")
                 or tool_input
@@ -1890,7 +2284,8 @@ def build_direct_tool_config(
             config["embeds"] = embeds
         if action_id in {"send_message", "send_dm", "edit_message", "send_embed"}:
             config["text"] = str(
-                parsed_input.get("body")
+                parsed_input.get("text")
+                or parsed_input.get("body")
                 or parsed_input.get("message")
                 or parsed_input.get("content")
                 or tool_input
@@ -1901,6 +2296,27 @@ def build_direct_tool_config(
             except Exception:
                 limit = 20
             config["limit"] = max(1, min(limit, 100))
+        return config
+
+    if connector_id == "whatsapp_twilio" and action_id == "send_message":
+        to_number = str(
+            parsed_input.get("to_number")
+            or parsed_input.get("recipient")
+            or parsed_input.get("to")
+            or ""
+        ).strip()
+        if to_number:
+            config["to_number"] = to_number
+        from_number = str(parsed_input.get("from_number") or "").strip()
+        if from_number:
+            config["from_number"] = from_number
+        config["text"] = str(
+            parsed_input.get("text")
+            or parsed_input.get("body")
+            or parsed_input.get("message")
+            or parsed_input.get("content")
+            or tool_input
+        ).strip()
         return config
 
     if connector_id == "smtp" and action_id in {"send_email", "send_message"}:
@@ -1915,6 +2331,7 @@ def build_direct_tool_config(
         subject = str(parsed_input.get("subject") or extract_subject_text(tool_input) or "").strip()
         body_text = str(
             parsed_input.get("body")
+            or parsed_input.get("text")
             or parsed_input.get("message")
             or parsed_input.get("content")
             or extract_body_text(tool_input)
@@ -1940,7 +2357,15 @@ def build_direct_tool_config(
             config["unread_only"] = bool(parsed_input.get("unread_only"))
         return config
 
-    if connector_id == "google_workspace" and action_id in {"send_email", "send_message", "draft_email"}:
+    # google_workspace and microsoft_365 share one executor handler for
+    # send_email/draft_email and create_calendar_event
+    # (runs_execution._workflow_execute_connector_action checks
+    # `connector_id in {"google_workspace", "microsoft_365"}` for both) — mirror
+    # that here. Previously only google_workspace was handled and
+    # microsoft_365 fell through to the generic `config["text"] = tool_input`
+    # catch-all at the bottom of this function, which the shared executor
+    # handler can't extract a recipient/subject from at all.
+    if connector_id in {"google_workspace", "microsoft_365"} and action_id in {"send_email", "send_message", "draft_email"}:
         to_email = str(
             parsed_input.get("to_email")
             or parsed_input.get("to")
@@ -1952,17 +2377,21 @@ def build_direct_tool_config(
         subject = str(parsed_input.get("subject") or extract_subject_text(tool_input) or "").strip()
         body_text = str(
             parsed_input.get("body")
+            or parsed_input.get("text")
             or parsed_input.get("message")
             or parsed_input.get("content")
             or extract_body_text(tool_input)
             or ""
         ).strip()
+        cc_email = str(parsed_input.get("cc_email") or parsed_input.get("cc") or "").strip()
         if to_email:
             config["to_email"] = to_email
         if subject:
             config["subject"] = subject
         if body_text:
             config["text"] = body_text
+        if cc_email:
+            config["cc_email"] = cc_email
         return config
 
     if connector_id == "google_workspace" and action_id == "fetch_emails":
@@ -1998,7 +2427,7 @@ def build_direct_tool_config(
         config["path"] = path
         return config
 
-    if connector_id == "google_workspace" and action_id == "create_calendar_event":
+    if connector_id in {"google_workspace", "microsoft_365"} and action_id == "create_calendar_event":
         payload = parsed_input.get("payload") if isinstance(parsed_input.get("payload"), dict) else None
         if payload:
             config["payload"] = payload
@@ -2009,6 +2438,9 @@ def build_direct_tool_config(
             token = str(value).strip()
             if token:
                 config[key] = token
+        attendees = _normalize_attendee_emails(parsed_input.get("attendees"))
+        if attendees:
+            config["attendees"] = attendees
         if "description" not in config and tool_input.strip():
             config["description"] = tool_input.strip()
         return config
@@ -3366,9 +3798,22 @@ def _execute_custom_connector_tool_call_sync(
         callbacks = _get_cb()
 
     argument_payload = callbacks.tool_arguments_payload(tool_call.get("arguments"))
+    # Structured-schema tools (_structured_connector_tool_schema /
+    # build_direct_chat_tools, above) hand back real named fields — e.g.
+    # {"to": "...", "subject": "...", "body": "..."} — instead of the legacy
+    # single opaque {"input": "<blob>"}. When that's what we got,
+    # argument_payload itself already IS the structured data: pass it to
+    # build_direct_tool_config as structured_args so it's consumed directly,
+    # bypassing the tool_input regex-guessing path entirely for these calls.
+    # tool_input is still computed (as a JSON dump) so the legacy fallback
+    # branches inside build_direct_tool_config keep working unchanged for
+    # actions that haven't been converted to a real schema yet.
+    structured_args: Optional[Dict[str, Any]] = None
     if isinstance(argument_payload, dict):
         tool_input = str(argument_payload.get("input") or "").strip()
         if not tool_input:
+            if argument_payload:
+                structured_args = argument_payload
             try:
                 tool_input = _json.dumps(argument_payload, ensure_ascii=False)
             except Exception:
@@ -3376,10 +3821,19 @@ def _execute_custom_connector_tool_call_sync(
     else:
         tool_input = str(argument_payload or "").strip()
 
-    config = callbacks.build_direct_tool_config(
+    # Called directly (not via callbacks.build_direct_tool_config) because
+    # that callback closure has a fixed 3-positional-argument signature
+    # (direct_chat_operator_binding_service.build_direct_chat_tool_support_bindings)
+    # with no way to carry structured_args through. build_direct_tool_config
+    # lives in this same module, so this is just a normal sibling call.
+    from scripts.orion_local_worker_llm import parse_json_object_loose as _parse_json_object_loose
+
+    config = build_direct_tool_config(
         connector_id,
         action_id,
         tool_input,
+        parse_json_object_loose=_parse_json_object_loose,
+        structured_args=structured_args,
     )
     session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
     # Local dev: bypass gateway entirely, execute directly on this machine —
@@ -4358,6 +4812,14 @@ def execute_single_direct_tool_call(
             actor=actor,
             reason="memory_write",
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
+            # Attribution seam: session_metadata["envelope"] is stamped by
+            # sage_agent_runtime_service.handle_sage_chat (see
+            # inbound_attribution_recovery.build_attribution) -- the turn's
+            # WHO/WHERE, best-effort recovered since the frozen
+            # sage_turn_adapter chokepoint doesn't forward the canonical
+            # InboundEnvelope object itself. None for any caller that
+            # doesn't set it (unchanged behavior).
+            source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
         )
         return json.dumps(
             {"ok": True, "file": saved.get("file"), "chars_written": saved.get("chars_written"), "mode": saved.get("mode")},

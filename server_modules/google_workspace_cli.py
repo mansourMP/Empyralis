@@ -392,10 +392,17 @@ def google_workspace_local_list_recent_messages(
     return results
 
 
-def google_workspace_local_create_draft(credentials: Dict[str, Any], to_email: str, subject: str, body_text: str) -> Dict[str, Any]:
+def google_workspace_local_create_draft(
+    credentials: Dict[str, Any],
+    to_email: str,
+    subject: str,
+    body_text: str,
+    cc_email: str = "",
+) -> Dict[str, Any]:
     message = (
         f"To: {to_email}\r\n"
-        f"Subject: {subject}\r\n"
+        + (f"Cc: {cc_email}\r\n" if cc_email else "")
+        + f"Subject: {subject}\r\n"
         "Content-Type: text/plain; charset=UTF-8\r\n"
         "\r\n"
         f"{body_text}\r\n"
@@ -419,10 +426,17 @@ def google_workspace_local_create_draft(credentials: Dict[str, Any], to_email: s
         return payload
     raise RuntimeError("Google Workspace CLI Gmail draft response was invalid.")
 
-def google_workspace_local_send_message(credentials: Dict[str, Any], to_email: str, subject: str, body_text: str) -> Dict[str, Any]:
+def google_workspace_local_send_message(
+    credentials: Dict[str, Any],
+    to_email: str,
+    subject: str,
+    body_text: str,
+    cc_email: str = "",
+) -> Dict[str, Any]:
     message = (
         f"To: {to_email}\r\n"
-        f"Subject: {subject}\r\n"
+        + (f"Cc: {cc_email}\r\n" if cc_email else "")
+        + f"Subject: {subject}\r\n"
         "Content-Type: text/plain; charset=UTF-8\r\n"
         "\r\n"
         f"{body_text}\r\n"

@@ -555,7 +555,13 @@ def save_memory(
     *,
     sync_memory_md: bool = True,
     agent_install_id: str | None = None,
+    source: Dict[str, Any] | None = None,
 ) -> None:
+    """`source` is an optional attribution snapshot (platform/surface/sender_id/
+    sender_name/sender_is_owner -- InboundEnvelope.to_metadata()'s shape, or
+    inbound_attribution_recovery.build_attribution's recovered equivalent).
+    None (the default) preserves prior behavior byte-for-byte: an unattributed
+    row, same as every row written before this parameter existed."""
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     _enforce_memory_state_decision(
         operation="upsert_workspace_memory",
@@ -572,6 +578,7 @@ def save_memory(
         content,
         sync_memory_md=sync_memory_md,
         agent_install_id=str(agent_install_id or "").strip() or None,
+        source=source,
     )
 
 
@@ -767,6 +774,46 @@ def memory_read_file(
     }
 
 
+
+# Index-first discipline (task: agent memory like Claude Code's -- index +
+# pull-on-demand). MEMORY.md is the ONE file guaranteed to be injected into
+# every turn (sage_instruction_compiler_service.build_root_memory_brief_sections);
+# everything else is pulled on demand via memory_search/memory_get. That only
+# holds if MEMORY.md itself stays a compact, line-per-entry index instead of
+# growing into a prose dump. These two guards are scoped to reason=="memory_write"
+# -- the model's own live, autonomous fact-append tool call (skills_service.py's
+# memory_write dispatch) -- and deliberately do NOT apply to
+# reason=="memory_tree_write" (agent_memory_tree_service.write_file, the owner's
+# own manual Memory-tab file editor, which can legitimately paste in a full
+# curated rewrite) or to mode=="replace" (a deliberate whole-file rewrite, e.g.
+# after consolidation, is exempt by construction).
+_MEMORY_MD_LIVE_APPEND_REASON = "memory_write"
+# On-disk soft cap for MEMORY.md -- comfortably above what actually gets
+# injected per turn (ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT=4_800 in
+# sage_instruction_compiler_service.py) so ordinary use never hits it, but
+# tight enough that an agent that never curates gets stopped and told to,
+# rather than silently growing into an unusable wall of text or (the
+# audit's flagged failure mode) getting silently truncated on read with no
+# warning.
+MEMORY_MD_SELF_CURATION_CAP_CHARS = 8_000
+
+
+def _reject_multi_paragraph_memory_write(content: str) -> None:
+    """Index-first discipline, line-per-entry half: one memory_write call
+    to MEMORY.md must be one fact (one index line), not a multi-paragraph
+    blob. Blank-line-separated content is the one unambiguous, cheap-to-check
+    signal of "this is more than one entry" without banning legitimate
+    single-line markdown (a heading, a single long sentence, etc.)."""
+    if "\n\n" in str(content or "").strip():
+        raise ValueError(
+            "memory_write to MEMORY.md must be a single line-per-entry fact, not a "
+            "multi-paragraph block. Call memory_write once per fact, or use "
+            "memory_stage_consolidation / memory_write with a memory/*.md topic "
+            "path for longer notes -- MEMORY.md stays a compact index, pulled "
+            "detail lives in topic files."
+        )
+
+
 def memory_write_file(
     workspace_id: str,
     filename: str,
@@ -777,12 +824,23 @@ def memory_write_file(
     actor: str = _MEMORY_DEFAULT_ACTOR,
     reason: str = 'memory_write',
     run_id: str | None = None,
+    source: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Write to a memory file. Used by Sage to update MEMORY.md (append new facts)
     or edit bootstrap files (SOUL.md, AGENTS.md, TOOLS.md, IDENTITY.md) via replace.
 
     mode='append': adds content to end of file (for MEMORY.md facts)
     mode='replace': overwrites entire file (for bootstrap file edits)
+
+    `source`: optional attribution snapshot for THIS write (InboundEnvelope.
+    to_metadata() shape, or inbound_attribution_recovery.build_attribution's
+    recovered equivalent). When the append target is MEMORY.md and the
+    source is anything other than the verified owner, the appended line is
+    prefixed with a visible "[name via X — not owner] " marker (see
+    agent_memory.format_source_marker) -- a non-owner's statement is never
+    silently stored as an unmarked owner-level fact. None (the default, or
+    an owner source) leaves the line exactly as clean as before this
+    parameter existed.
     """
     from server_modules.workspace_context import (
         read_workspace_context_file,
@@ -791,15 +849,34 @@ def memory_write_file(
     )
     normalized_filename = normalize_workspace_context_filename(filename)
     normalized_mode = str(mode or 'replace').strip().lower() or 'replace'
+    _is_live_memory_md_append = (
+        normalized_filename == "MEMORY.md"
+        and normalized_mode == 'append'
+        and str(reason or '').strip() == _MEMORY_MD_LIVE_APPEND_REASON
+    )
 
     if normalized_mode == 'append':
+        stamped_content = str(content or '').strip()
+        if _is_live_memory_md_append:
+            _reject_multi_paragraph_memory_write(stamped_content)
+            marker = _workspace_memory_store.format_source_marker(source)
+            if marker and stamped_content:
+                stamped_content = f"{marker}{stamped_content}"
         existing = read_workspace_context_file(
             normalized_filename,
             workspace_id=_normalize_workspace_id(workspace_id),
             agent_install_id=str(agent_install_id or '').strip() or None,
         )
-        combined = str(existing or '').rstrip() + '\n' + str(content or '').strip()
+        combined = str(existing or '').rstrip() + '\n' + stamped_content
         final_content = combined.strip()
+        if _is_live_memory_md_append and len(final_content.encode('utf-8')) > MEMORY_MD_SELF_CURATION_CAP_CHARS:
+            raise ValueError(
+                f"MEMORY.md has grown past its {MEMORY_MD_SELF_CURATION_CAP_CHARS}-char "
+                "self-curation cap. This fact was NOT saved. MEMORY.md must stay a "
+                "compact index -- consolidate or move older/less-active facts to a "
+                "memory/*.md topic file (memory_stage_consolidation, or memory_write "
+                "with a memory/*.md path) before appending more."
+            )
     else:
         final_content = str(content or '')
 
