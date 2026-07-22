@@ -252,7 +252,44 @@ def _build_mcp_server() -> FastMCP | None:
                 oauth_provider = None
                 auth_kwargs = {}
 
-    return FastMCP(EMPYRALIST_MCP_NAME, **auth_kwargs)
+    # streamable_http_path="/": the SDK's default internal protocol path is
+    # ALSO "/mcp", and mount_empyralist_mcp() mounts the sub-app under
+    # EMPYRALIST_MCP_PATH ("/mcp") — so with the default, the only URL that
+    # answered was /mcp/mcp (the documented /mcp returned 307→404; the
+    # platform-MCP audit proved it empirically, broken since the first
+    # mount). Root the protocol INSIDE the sub-app so the public path is
+    # exactly EMPYRALIST_MCP_PATH.
+    #
+    # transport_security: the SDK's DNS-rebinding guard 421s any request
+    # whose Host header isn't allow-listed, and its defaults only admit
+    # localhost forms — nginx forwards `Host: empyralis.ai`, so every real
+    # public request would be rejected even with the path fixed (proved with
+    # an ASGI-transport handshake: 127.0.0.1 → 200, empyralis.ai → 421).
+    # Allow the public host(s) + local dev/test forms explicitly; the guard
+    # itself stays ON.
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    _public_host = ""
+    try:
+        from urllib.parse import urlparse
+        _public_host = urlparse(os.environ.get("EMPYRALIS_PUBLIC_BASE_URL", "")).netloc
+    except Exception:
+        _public_host = ""
+    _allowed_hosts = [h for h in {
+        "empyralis.ai", "www.empyralis.ai", _public_host,
+        "127.0.0.1:8001", "localhost:8001", "127.0.0.1", "localhost", "testserver",
+    } if h]
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_allowed_hosts,
+        allowed_origins=[f"https://{h}" for h in _allowed_hosts] + [f"http://{h}" for h in _allowed_hosts],
+    )
+    return FastMCP(
+        EMPYRALIST_MCP_NAME,
+        streamable_http_path="/",
+        transport_security=security,
+        **auth_kwargs,
+    )
 
 
 empyralist_mcp = _build_mcp_server()
