@@ -381,6 +381,12 @@ memory correctness) × (smallness/safety of the change). Surgical fixes first, s
 
 ## Decision points for the founder
 
+> **ALL FOUR DECIDED by the founder, 2026-07-23, on the recommendations:**
+> **A** → (2)+(3): structural compensations as permanent architecture + owner-alert extension (informational, never a gate). Trade-off documented deliberately.
+> **B** → update-don't-duplicate, paired with the provenance audit trail (#6).
+> **C** → compaction matches the user's active provider/model by default; platform DeepSeek key is true last-resort fallback only.
+> **D** → per-process OS sandbox (bubblewrap-equivalent) now, as the containment floor; container/VM-per-agent re-evaluated after observing (2)'s gaps.
+
 Note: the catastrophic/destructive-infrastructure question is **not** listed here — it's decided
 (see plan item #14, capability removal). The tension below is the narrower, still-open one: genuinely
 novel, irreversible, high-stakes *business-logic* actions that aren't infrastructure destruction (a
