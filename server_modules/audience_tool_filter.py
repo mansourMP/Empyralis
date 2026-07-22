@@ -5,7 +5,10 @@ ToolDescriptor.audience_safe in skills_service.py). This is the single source
 of truth — no hardcoded lists. The owner can override by marking tools as
 customer_facing.
 
-PRESETS (defined in agent_presets.py):
+PRESETS (defined in fleet_tools.py's _VALID_PURPOSE_PRESETS; the old
+agent_presets.py module was removed 2026-07-23 as orphaned — its
+triage_enabled config only ever fed the Phase P input-blocking gate, which
+was cut per founder ruling that day):
   - customer_facing: serve-only, 8-tool set (task_complete, memory_search,
     memory_read, memory_get, web__search, web__fetch, sage_service__list_state,
     memory_list_versions), audience instructions ON

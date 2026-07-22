@@ -204,6 +204,85 @@ class SageTurnAdapterParityTests(unittest.TestCase):
         self.assertIn(SAGE_MODE, memory_context_log)
 
 
+class TriageRulingTests(unittest.TestCase):
+    """Founder ruling (2026-07-23): "Every single message goes to the
+    reasoning model, absolutely. We are not going to have filters that flag
+    a message and don't deliver it. No hardcoded outputs — everything is
+    the agent's own reasoning." Phase P's input-blocking gate (formerly
+    invoked right here, between directive processing and the envelope
+    header) is gone; this proves an inbound message reaches handle_sage_chat
+    unmodified even when the workspace's master install still carries the
+    exact install_metadata.triage.enabled=True config that used to gate on
+    a Layer-1 "no" verdict."""
+
+    def _mock_sage_chat(self, **overrides):
+        base = {
+            "message": "This is the model's own real answer.",
+            "used_context": [],
+            "tool_calls": [],
+            "available_tools": [],
+            "blocked_tools": [],
+            "approvals_required": [],
+            "memory_updates": [],
+            "trace_id": "trace-1",
+        }
+        base.update(overrides)
+        return base
+
+    def test_triage_enabled_install_metadata_no_longer_blocks_the_turn(self):
+        """A message that would previously have earned a Layer-1 "no" verdict
+        (clearly out of a narrow "widget support" scope) and a workspace
+        whose master Sage install is configured with triage fully enabled —
+        the turn must still reach handle_sage_chat with the ORIGINAL
+        message, and the caller must get the model's real reply back, not a
+        canned decline/silence/escalation substitute."""
+        triage_enabled_install = {
+            "id": "agent-sage-1",
+            "install_metadata": {
+                "triage": {
+                    "enabled": True,
+                    "scope_description": "Widget support only",
+                    "out_of_scope_behavior": "polite_decline",
+                    "identity_rules": [
+                        {"match": "owner", "behavior": "full"},
+                        {"match": "audience", "behavior": "restricted"},
+                        {"match": "unknown", "behavior": "restricted"},
+                    ],
+                }
+            },
+        }
+        original_message = "I need legal advice about my divorce"
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+                new=AsyncMock(return_value=triage_enabled_install),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                new=AsyncMock(return_value=self._mock_sage_chat()),
+            ) as handle_mock,
+        ):
+            result = _run(execute_sage_turn(
+                workspace_id="ws-1",
+                message=original_message,
+            ))
+
+        handle_mock.assert_awaited_once()
+        self.assertEqual(handle_mock.call_args.kwargs["message"], original_message)
+        self.assertEqual(result.message, "This is the model's own real answer.")
+        self.assertNotIn("outside", result.message.lower())
+        self.assertNotIn("configured scope", result.message.lower())
+
+    def test_execute_triage_gate_no_longer_exists(self):
+        """Guards against the gate quietly coming back: the function this
+        ruling removed must not exist on the module at all."""
+        from server_modules import triage_service
+        self.assertFalse(hasattr(triage_service, "execute_triage_gate"))
+        self.assertFalse(hasattr(triage_service, "run_scope_check"))
+        self.assertFalse(hasattr(triage_service, "dispatch_out_of_scope"))
+        self.assertFalse(hasattr(triage_service, "resolve_triage_config"))
+
+
 class SageTurnAdapterAgentIdRoutingTests(unittest.TestCase):
     """Item 3: a personal-channel session bound to a specialist agent must
     run turns AS that agent, not always Sage — reusing the SAME

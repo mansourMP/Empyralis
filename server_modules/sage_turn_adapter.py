@@ -261,40 +261,17 @@ async def execute_sage_turn(
 
         _cleaned_msg = _remaining if _remaining else _msg
 
-    # ── Phase P: triage gate (scope + identity before LLM) ──────────
-    _triage_blocked = False
-    _triage_reply: Optional[str] = None
-    try:
-        from server_modules import triage_service as _ts
-        from server_modules import agent_registry_repository as _repo
-
-        _sage_install = await _repo.get_workspace_master_agent_install(
-            tenant_id=turn.tenant_id,
-            workspace_id=turn.workspace_id,
-        )
-        _sage_id = str((_sage_install or {}).get("id") or "").strip()
-        if _sage_id:
-            triage_result = await _ts.execute_triage_gate(
-                workspace_id=turn.workspace_id,
-                agent_install_id=_sage_id,
-                message=_cleaned_msg,
-                channel_origin=turn.channel_origin or "",
-                sender_id=turn.channel_sender_id or "",
-                sender_name=turn.channel_sender_name or "",
-                agent_label="Sage",
-            )
-            if triage_result.get("blocked"):
-                _triage_blocked = True
-                _triage_reply = triage_result.get("reply")
-    except Exception:
-        pass  # triage is best-effort; failures proceed to full loop
-
-    if _triage_blocked:
-        _ws_token = str(turn.workspace_id or "").strip()
-        return SageTurnResult(
-            message=_triage_reply or "",
-            ai_setup_url=f"/w/{_ws_token}{_SAGE_AI_SETUP_PATH}" if _ws_token else _SAGE_AI_SETUP_PATH,
-        )
+    # ── Phase P triage gate REMOVED (founder ruling, 2026-07-23) ─────────
+    # "Every single message goes to the reasoning model, absolutely. We are
+    # not going to have filters that flag a message and don't deliver it.
+    # No hardcoded outputs — everything is the agent's own reasoning."
+    # This used to run an LLM scope-classifier here and, on a "no" verdict,
+    # substitute a canned decline/silence/escalation instead of reaching the
+    # model (server_modules/triage_service.py's execute_triage_gate, plus
+    # the Layer-2 identity check that never exempted owners). Every inbound
+    # message now always reaches handle_sage_chat below; an agent choosing
+    # to stay silent via its own [SILENT] output is untouched — that is
+    # output-side reasoning, not an input-side block.
 
     # ── Envelope header injection (the ONE place it happens) ────────────
     # The model must SEE the attribution, not infer it: prepend the canonical

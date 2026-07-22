@@ -31,11 +31,11 @@ class NoAgentImpersonationTests(unittest.TestCase):
         return False
 
     def test_triage_polite_decline_is_platform_voice(self):
-        """The out-of-scope polite_decline reply uses platform voice."""
-        from server_modules import triage_service
-
-        # The polite_decline branch at execute_triage_gate returns a reply
-        # that should NOT use first-person agent markers
+        """Historical Phase P polite_decline reply string (execute_triage_gate
+        itself was removed per the 2026-07-23 founder ruling — see
+        server_modules/triage_service.py's module docstring — but the
+        platform-voice convention it established still applies to every
+        other hardcoded reply in the codebase, so the shape is pinned here)."""
         reply = (
             "Heads up: this request is outside the agent's configured scope. "
             "The workspace owner can adjust the scope settings if this is a mistake."
@@ -78,40 +78,6 @@ class NoAgentImpersonationTests(unittest.TestCase):
                 self._has_impersonation(text),
                 f"Skill registry reply contains agent impersonation: {text!r}",
             )
-
-    def test_triage_reply_no_my_scope(self):
-        """The triage polite_decline no longer says 'my scope' (agent voice)."""
-        from server_modules import triage_service
-        import asyncio
-        from unittest.mock import AsyncMock, patch
-
-        async def _run():
-            mock_scope = AsyncMock(return_value={"verdict": "no"})
-            with patch(
-                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
-                new=AsyncMock(return_value={
-                    "id": "agent-1",
-                    "install_metadata": {"triage": {
-                        "enabled": True,
-                        "scope_description": "Widget support",
-                        "out_of_scope_behavior": "polite_decline",
-                    }},
-                }),
-            ), patch(
-                "server_modules.triage_service.run_scope_check", new=mock_scope
-            ):
-                result = await triage_service.execute_triage_gate(
-                    workspace_id="ws-test",
-                    agent_install_id="agent-1",
-                    message="I need legal advice about my divorce",
-                )
-            return result
-
-        result = asyncio.run(_run())
-        reply = result.get("reply") or ""
-        self.assertNotIn("my ", reply.lower())
-        self.assertNotIn(" i ", f" {reply.lower()} ")
-        self.assertIn("Heads up:", reply)
 
 
 # ── (d) Unknown commands return platform-voiced error ─────────────────

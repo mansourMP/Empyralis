@@ -2,8 +2,12 @@
 
 A capability preset seeds an agent install's DEFAULTS along the capability axis
 (hardware, tools, model tier, subagents, context policy). This is distinct from
-the existing *purpose* presets in agent_presets.py (customer_facing /
-internal_assistant / operator), which shape instructions/audience.
+the existing *purpose* presets in fleet_tools.py's _VALID_PURPOSE_PRESETS
+(customer_facing / internal_assistant / operator), which shape
+instructions/audience. (The old agent_presets.py module — a separate,
+never-wired purpose-preset implementation whose only real payload was
+triage config — was removed 2026-07-23 as orphaned by the founder ruling
+that cut the Phase P input-blocking gate it fed.)
 
 Three capability presets:
   - knowledge: a read/answer agent. Hardware access DENIED at the policy level
