@@ -15,6 +15,12 @@ from server_modules.sage_agent_runtime_contract import (
 )
 from server_modules.sage_agent_runtime_service import handle_sage_chat
 from server_modules.channel_adapter import normalize_sage_inbound, filter_outbound_reply
+from server_modules.inbound_envelope import (
+    InboundEnvelope,
+    EnvelopeSender,
+    SurfaceKind,
+    prepend_envelope_header,
+)
 from server_modules.voice_notification_policy_service import execute_voice_sage_task
 from server_modules.schemas import SageChatRequest, SageVoiceTaskRequest, SageApprovalResolveRequest
 from server_modules.workspace_context import workspace_attachments_dir
@@ -160,10 +166,33 @@ def register_sage_chat_routes(app) -> None:
             # Resolve active thread (may be task thread if /new was used)
             from server_modules.sage_command_dispatcher import get_active_thread as _gat_web
             _active_thread_web = await _gat_web(turn.workspace_id, "web")
+
+            # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+            # This endpoint calls handle_sage_chat() directly rather than
+            # routing through sage_turn_adapter.execute_sage_turn — the one
+            # chokepoint that renders the envelope header — so the header is
+            # prepended here by hand, using the SAME rendering function
+            # execute_sage_turn calls, to stay byte-for-byte consistent with
+            # every other channel. The web console is always the
+            # authenticated account talking to its own agent — CONSOLE
+            # surface, verified owner.
+            _web_actor_id = (
+                str((current_user or {}).get("user_id") or "").strip()
+                or str((current_user or {}).get("email") or "").strip().lower()
+                or "anonymous"
+            )
+            _web_actor_name = str((current_user or {}).get("email") or "").strip() or _web_actor_id
+            _web_envelope = InboundEnvelope(
+                platform="console",
+                surface=SurfaceKind.CONSOLE,
+                sender=EnvelopeSender(id=_web_actor_id, display_name=_web_actor_name, is_owner=True),
+            )
+            _enveloped_message = prepend_envelope_header(turn.message, _web_envelope)
+
             result = await handle_sage_chat(
                 workspace_id=turn.workspace_id,
                 tenant_id=turn.tenant_id,
-                message=turn.message,
+                message=_enveloped_message,
                 surface=turn.surface,
                 mode=turn.mode,
                 attachments=turn.attachments,

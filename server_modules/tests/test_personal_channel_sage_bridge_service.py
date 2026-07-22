@@ -7,14 +7,27 @@ from unittest.mock import patch, AsyncMock
 
 from server_modules import personal_channel_sage_bridge_service
 from server_modules import personal_channels_service, personal_channels_repository
+from server_modules.inbound_envelope import SurfaceKind
+from server_modules.sage_agent_runtime_contract import SageTurnResult
+
+# NOTE on the mock seam used throughout this file: personal_channel_sage_
+# bridge_service now routes every unified-path turn through
+# _execute_channel_turn_with_envelope, which calls
+# sage_turn_adapter.execute_sage_turn directly — NOT
+# sage_turn_adapter.execute_sage_turn_for_channel, the seam every patch()
+# below used to target. See _execute_channel_turn_with_envelope's own
+# docstring for why (execute_sage_turn_for_channel is frozen and doesn't yet
+# accept `envelope=`). Every mocked return value below is therefore a
+# SageTurnResult now, not a plain dict — execute_sage_turn's real return
+# type, which _execute_channel_turn_with_envelope calls .as_dict() on.
 
 
 class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
     def test_whatsapp_personal_reply_uses_direct_chat_runtime_lane_without_studio_install_context(self) -> None:
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": ""}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="")),
             ),
             patch(
                 "server_modules.direct_chat_runtime_exports.collect_direct_operator_reply",
@@ -61,8 +74,8 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
     def test_telegram_personal_reply_wraps_prompt_injection_before_runtime(self) -> None:
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": ""}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="")),
             ),
             patch(
                 "server_modules.direct_chat_runtime_exports.collect_direct_operator_reply",
@@ -99,8 +112,8 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
 
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": ""}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="")),
             ),
             patch.object(
                 direct_chat_runtime_exports,
@@ -139,19 +152,12 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
     def test_async_telegram_reply_routes_unified_sage_with_trace(self) -> None:
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                "server_modules.sage_turn_adapter.execute_sage_turn",
                 new=AsyncMock(
-                    return_value={
-                        "message": "unified sage reply",
-                        "error": None,
-                        "used_context": [],
-                        "tool_calls": [],
-                        "available_tools": [],
-                        "blocked_tools": [],
-                        "approvals_required": [],
-                        "memory_updates": [],
-                        "trace_id": "trace-smoke-1",
-                    }
+                    return_value=SageTurnResult(
+                        message="unified sage reply",
+                        trace_id="trace-smoke-1",
+                    )
                 ),
             ):
                 return await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
@@ -175,7 +181,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         delivery call site treats as sendable)."""
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                "server_modules.sage_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=RuntimeError("HTTP 429 rate limit")),
             ):
                 return await personal_channel_sage_bridge_service.build_whatsapp_personal_reply_async(
@@ -197,7 +203,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         classified error string that a DM/channel send site could deliver."""
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                "server_modules.sage_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=RuntimeError("provider HTTP 401 unauthorized")),
             ):
                 return await personal_channel_sage_bridge_service.build_discord_personal_reply_async(
@@ -221,7 +227,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         classified error string forwarded for Gateway delivery."""
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                "server_modules.sage_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=ConnectionError("timeout unreachable")),
             ):
                 return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
@@ -258,8 +264,8 @@ class OutboundMediaPropagationTests(unittest.TestCase):
 
     def test_whatsapp_reply_carries_media_from_the_turn_result(self) -> None:
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-            new=AsyncMock(return_value={"message": "Here's the fox.", "media": [self._MEDIA_ITEM]}),
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(message="Here's the fox.", media=[self._MEDIA_ITEM])),
         ):
             result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
                 workspace_id="workspace-1",
@@ -277,8 +283,8 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         None the way a genuinely silent turn does -- _build_unified_sage_personal_reply_async
         gates on `reply or media`, not `reply` alone."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-            new=AsyncMock(return_value={"message": "", "media": [self._MEDIA_ITEM]}),
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(message="", media=[self._MEDIA_ITEM])),
         ):
             result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
                 workspace_id="workspace-1",
@@ -295,8 +301,8 @@ class OutboundMediaPropagationTests(unittest.TestCase):
     def test_genuinely_silent_turn_still_returns_none(self) -> None:
         """Unchanged behavior: no message AND no media is real silence."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-            new=AsyncMock(return_value={"message": ""}),
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(message="")),
         ):
             result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
                 workspace_id="workspace-1",
@@ -313,8 +319,8 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         case) has no "media" key at all in its raw result -- must not crash,
         must default to []."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-            new=AsyncMock(return_value={"message": "just chatting, no attachments"}),
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(message="just chatting, no attachments")),
         ):
             result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
                 workspace_id="workspace-1",
@@ -336,21 +342,35 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
     CONTENT>>> markers exactly like a stranger's — is_owner now lets the
     caller (personal_channels_service, via the existing, unchanged
     _is_owner_message/_enforce_dm_policy self-chat / linked-identity check)
-    signal a robustly-established owner turn, which gets clean provenance
-    instead. Problem 2: agent_conversation_memory used to persist the
-    wrapped text; it must persist the clean raw message instead.
+    signal a robustly-established owner turn, which gets a clean, unwrapped
+    message instead. Problem 2: agent_conversation_memory used to persist
+    the wrapped text; it must persist the clean raw message instead.
+
+    Superseded ad-hoc-prefix update (inbound-envelope wiring): the owner
+    branch used to hand-build its own "From: {name} (owner) · {channel} ·
+    direct message"/group prose prefix (_owner_provenance_message) ON TOP
+    of the clean/unwrapped fix above — that duplicated exactly the facts
+    the canonical InboundEnvelope's rendered header now states once, at the
+    execute_sage_turn chokepoint. The message this bridge hands to
+    execute_sage_turn is therefore now the bare raw text for an owner turn;
+    the attribution assertions that used to check the ad-hoc prefix now
+    live in test_inbound_envelope_personal_channels.py (envelope
+    construction) and check the `envelope=` kwarg passed to the now-mocked
+    execute_sage_turn here instead, where relevant.
 
     These tests exercise the SAME public functions/mock boundary
-    (sage_turn_adapter.execute_sage_turn_for_channel) as the rest of this
-    file, so they do not depend on the sqlite/kill-switch/rust-kernel
-    machinery the full gateway-inbound-handler integration tests need.
+    (sage_turn_adapter.execute_sage_turn, via
+    personal_channel_sage_bridge_service._execute_channel_turn_with_envelope)
+    as the rest of this file, so they do not depend on the sqlite/
+    kill-switch/rust-kernel machinery the full gateway-inbound-handler
+    integration tests need.
     """
 
     def test_owner_message_gets_clean_provenance_no_security_notice(self) -> None:
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "sure thing"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
             result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
@@ -366,8 +386,16 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         sent_message = turn_mock.call_args.kwargs["message"]
         self.assertNotIn("SECURITY NOTICE", sent_message)
         self.assertNotIn("EXTERNAL_UNTRUSTED_CONTENT", sent_message)
-        self.assertTrue(sent_message.startswith("From: Mansur (owner) · Telegram · direct message"))
-        self.assertIn("remind me to call mom", sent_message)
+        # Bare raw text now — no ad-hoc "From: ... (owner) · Telegram ·
+        # direct message" prose prefix; the canonical InboundEnvelope
+        # carries that attribution instead (checked via the envelope=
+        # kwarg below and, structurally, in
+        # test_inbound_envelope_personal_channels.py).
+        self.assertEqual(sent_message, "remind me to call mom")
+        envelope = turn_mock.call_args.kwargs["envelope"]
+        self.assertEqual(envelope.surface, SurfaceKind.OWNER_SELF_CHAT)
+        self.assertIs(envelope.sender.is_owner, True)
+        self.assertEqual(envelope.sender.display_name, "Mansur")
 
     def test_non_owner_message_keeps_full_external_content_guard_wrapping(self) -> None:
         """is_owner=False (also the default) must be byte-for-byte identical
@@ -375,8 +403,8 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         never weaken."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "who is this?"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="who is this?")),
             ) as turn_mock,
         ):
             personal_channel_sage_bridge_service.build_telegram_personal_reply(
@@ -397,8 +425,8 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         the SAFE path, never to owner trust."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "ok"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="ok")),
             ) as turn_mock,
         ):
             personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
@@ -427,11 +455,19 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
     def test_owner_in_group_is_told_this_is_a_group_not_a_direct_message(self) -> None:
         """The core mislabeling bug: an owner turn from INSIDE a group used
         to say "direct message" unconditionally, identical to a real 1:1
-        DM. The model has no way to tell those apart without this."""
+        DM. Previously this bridge encoded that distinction itself
+        (_owner_provenance_message's group-vs-DM prose); now it is the
+        canonical InboundEnvelope's job — the message this bridge hands to
+        execute_sage_turn is bare raw text either way, and the envelope
+        passed alongside it is what must correctly distinguish GROUP from
+        OWNER_SELF_CHAT (execute_sage_turn's own render_envelope_header then
+        renders that into the "posted in the Family group chat, visible to
+        other participants..." framing the model sees — covered by the
+        canonical envelope module's own tests, not re-asserted here)."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "sure thing"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
             personal_channel_sage_bridge_service.build_telegram_personal_reply(
@@ -447,23 +483,27 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         sent_message = turn_mock.call_args.kwargs["message"]
         self.assertNotIn("SECURITY NOTICE", sent_message)
         self.assertNotIn("EXTERNAL_UNTRUSTED_CONTENT", sent_message)
-        # Must NOT claim this was a direct message — that's the bug.
-        self.assertNotIn("direct message", sent_message)
-        # Must name the actual group and say other people can see it.
-        self.assertIn("Family", sent_message)
-        self.assertIn("group", sent_message.lower())
-        self.assertIn("NOT the workspace owner", sent_message)
-        self.assertIn("what does Posle mean?", sent_message)
+        # Bare raw text — no ad-hoc group/DM prose of its own any more.
+        self.assertEqual(sent_message, "what does Posle mean?")
+        # The GROUP-vs-DM distinction — the actual bug this test guards —
+        # now lives entirely in the envelope, not in the message text.
+        envelope = turn_mock.call_args.kwargs["envelope"]
+        self.assertEqual(envelope.surface, SurfaceKind.GROUP)
+        self.assertNotEqual(envelope.surface, SurfaceKind.OWNER_SELF_CHAT)
+        self.assertIs(envelope.sender.is_owner, True)
+        self.assertEqual(envelope.chat.title, "Family")
 
-    def test_owner_direct_dm_still_says_direct_message_unchanged(self) -> None:
+    def test_owner_direct_dm_still_becomes_owner_self_chat_surface(self) -> None:
         """Regression guard: is_group=False (the real 1:1 case, and the
-        default) must be byte-for-byte identical to before this fix —
-        already covered by test_owner_message_gets_clean_provenance_no_security_notice,
-        restated here for symmetry with the group test above."""
+        default) must resolve to OWNER_SELF_CHAT, not GROUP — symmetry with
+        the group test above, now expressed via the envelope rather than
+        ad-hoc message-text prose (see
+        test_owner_message_gets_clean_provenance_no_security_notice for the
+        message-text-is-now-bare-raw-text half of this same regression)."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "sure thing"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
             personal_channel_sage_bridge_service.build_telegram_personal_reply(
@@ -476,7 +516,9 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 is_group=False,
             )
         sent_message = turn_mock.call_args.kwargs["message"]
-        self.assertTrue(sent_message.startswith("From: Mansur (owner) · Telegram · direct message"))
+        self.assertEqual(sent_message, "remind me to call mom")
+        envelope = turn_mock.call_args.kwargs["envelope"]
+        self.assertEqual(envelope.surface, SurfaceKind.OWNER_SELF_CHAT)
 
     def test_family_member_group_message_carries_explicit_group_context_not_owner(self) -> None:
         """The other half: a NON-owner sender's message (the real "family
@@ -484,11 +526,19 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         owner — unchanged, already covered by
         test_non_owner_message_keeps_full_external_content_guard_wrapping —
         and (b) posted in a shared group with other participants, which
-        used to be completely absent from the prompt."""
+        used to be completely absent from the prompt.
+
+        (b) used to be conveyed by Chat-Type/Group-Name lines INSIDE the
+        SECURITY NOTICE wrapper itself; that duplicated exactly what the
+        canonical InboundEnvelope's header now states once, so those two
+        lines are gone from the wrapped message on this (primary) path —
+        the group/not-owner signal now lives entirely in the envelope=
+        kwarg asserted below (mirrors test_owner_in_group_...'s envelope
+        assertions for the owner branch)."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "'Posle' means 'later'."}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="'Posle' means 'later'.")),
             ) as turn_mock,
         ):
             personal_channel_sage_bridge_service.build_telegram_personal_reply(
@@ -508,10 +558,14 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         # Sender is attributed as the actual family member, never the owner.
         self.assertIn("Sender: Aunt Nadia", sent_message)
         self.assertNotIn("(owner)", sent_message)
-        # NEW: explicit, unambiguous group signal — this is what was
-        # missing before the fix.
-        self.assertIn("Chat-Type: group", sent_message)
-        self.assertIn("Group-Name: Family", sent_message)
+        # No more duplicate Chat-Type/Group-Name lines inside the wrapper —
+        # the envelope carries this now (asserted below).
+        self.assertNotIn("Chat-Type", sent_message)
+        self.assertNotIn("Group-Name", sent_message)
+        envelope = turn_mock.call_args.kwargs["envelope"]
+        self.assertEqual(envelope.surface, SurfaceKind.GROUP)
+        self.assertEqual(envelope.chat.title, "Family")
+        self.assertIs(envelope.sender.is_owner, False)
 
     def test_non_group_stranger_dm_has_no_group_metadata_lines(self) -> None:
         """Regression guard: is_group=False (the default, and the real 1:1
@@ -521,8 +575,8 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         restated explicitly for the new metadata keys."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "who is this?"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="who is this?")),
             ) as turn_mock,
         ):
             personal_channel_sage_bridge_service.build_telegram_personal_reply(
@@ -540,13 +594,14 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
 
     # ── Systemic verification (backend-safety task): the tests above only
     # ever exercise this rendering through build_telegram_personal_reply.
-    # _owner_provenance_message / _personal_channel_guard_metadata are
-    # channel-agnostic — every build_*_personal_reply* entry point funnels
-    # through the SAME _build_unified_sage_personal_reply(_async) — but
-    # that makes it a real risk that one of the OTHER thin wrappers has a
-    # typo'd/omitted kwarg that silently drops the signal before it ever
-    # reaches the shared function. These three prove the actual rendered
-    # text per remaining channel family: WhatsApp (build_whatsapp_personal_reply),
+    # _personal_channel_guard_metadata (non-owner branch) and
+    # _build_personal_channel_envelope (both branches) are channel-agnostic
+    # — every build_*_personal_reply* entry point funnels through the SAME
+    # _build_unified_sage_personal_reply(_async) — but that makes it a real
+    # risk that one of the OTHER thin wrappers has a typo'd/omitted kwarg
+    # that silently drops the signal before it ever reaches the shared
+    # function. These three prove the actual rendered text/envelope per
+    # remaining channel family: WhatsApp (build_whatsapp_personal_reply),
     # Telegram-cloud (build_telegram_personal_reply_async — the exact async
     # entry handle_cloud_channel_inbound calls), and local-bridge
     # (build_personal_channel_reply_async — shared by Signal/iMessage/WeChat).
@@ -556,8 +611,8 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         above, for WhatsApp's own entry point instead of Telegram's."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "sure thing"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
             personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
@@ -572,10 +627,11 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
             )
         sent_message = turn_mock.call_args.kwargs["message"]
         self.assertNotIn("SECURITY NOTICE", sent_message)
-        self.assertNotIn("direct message", sent_message)
-        self.assertIn("Family", sent_message)
-        self.assertIn("group", sent_message.lower())
-        self.assertIn("NOT the workspace owner", sent_message)
+        self.assertEqual(sent_message, "what does Posle mean?")
+        envelope = turn_mock.call_args.kwargs["envelope"]
+        self.assertEqual(envelope.surface, SurfaceKind.GROUP)
+        self.assertEqual(envelope.chat.title, "Family")
+        self.assertIs(envelope.sender.is_owner, True)
 
     def test_telegram_cloud_async_group_message_is_told_this_is_a_group_not_a_direct_message(self) -> None:
         """The exact async entry point personal_channels_service.handle_cloud_channel_inbound
@@ -586,8 +642,8 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         one the other two tests here use."""
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "'Posle' means 'later'."}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="'Posle' means 'later'.")),
             ) as turn_mock:
                 await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
                     workspace_id="workspace-1",
@@ -599,15 +655,22 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                     is_group=True,
                     chat_label="Family",
                 )
-                return turn_mock.call_args.kwargs["message"]
+                return turn_mock.call_args.kwargs
 
-        sent_message = asyncio.run(run_case())
+        call_kwargs = asyncio.run(run_case())
+        sent_message = call_kwargs["message"]
         self.assertIn("SECURITY NOTICE", sent_message)
         self.assertIn("EXTERNAL_UNTRUSTED_CONTENT", sent_message)
         self.assertIn("Sender: Aunt Nadia", sent_message)
         self.assertNotIn("(owner)", sent_message)
-        self.assertIn("Chat-Type: group", sent_message)
-        self.assertIn("Group-Name: Family", sent_message)
+        # Chat-Type/Group-Name no longer duplicated inside the wrapper — the
+        # envelope carries the group/not-owner signal instead.
+        self.assertNotIn("Chat-Type", sent_message)
+        self.assertNotIn("Group-Name", sent_message)
+        envelope = call_kwargs["envelope"]
+        self.assertEqual(envelope.surface, SurfaceKind.GROUP)
+        self.assertEqual(envelope.chat.title, "Family")
+        self.assertIs(envelope.sender.is_owner, False)
 
     def test_local_bridge_group_message_is_told_this_is_a_group_not_a_direct_message(self) -> None:
         """build_personal_channel_reply_async is the one bridge entry point
@@ -624,8 +687,8 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
             with self.subTest(surface_channel=surface_channel):
                 async def run_case():
                     with patch(
-                        "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                        new=AsyncMock(return_value={"message": "sure thing"}),
+                        "server_modules.sage_turn_adapter.execute_sage_turn",
+                        new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
                     ) as turn_mock:
                         await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
                             surface_channel=surface_channel,
@@ -639,14 +702,23 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                             is_group=True,
                             chat_label="Family",
                         )
-                        return turn_mock.call_args.kwargs["message"]
+                        return turn_mock.call_args.kwargs
 
-                sent_message = asyncio.run(run_case())
+                call_kwargs = asyncio.run(run_case())
+                sent_message = call_kwargs["message"]
                 self.assertNotIn("SECURITY NOTICE", sent_message)
-                self.assertNotIn("direct message", sent_message)
-                self.assertIn("Family", sent_message)
-                self.assertIn("group", sent_message.lower())
-                self.assertIn("NOT the workspace owner", sent_message)
+                self.assertEqual(sent_message, "what does Posle mean?")
+                envelope = call_kwargs["envelope"]
+                self.assertEqual(envelope.surface, SurfaceKind.GROUP)
+                self.assertEqual(envelope.chat.title, "Family")
+                self.assertEqual(envelope.platform, surface_channel)
+                # is_owner=True is passed explicitly for every channel in
+                # this loop, including imessage_personal — the tri-state
+                # "unverified" softening (IMessageOwnerDetectionTests in
+                # test_inbound_envelope_personal_channels.py) only applies
+                # when is_owner is falsy, so this stays a verified True here
+                # regardless of channel.
+                self.assertIs(envelope.sender.is_owner, True)
 
     def test_memory_persists_clean_raw_text_not_wrapped_or_provenanced_text(self) -> None:
         """agent_conversation_memory must store the CLEAN raw message in
@@ -662,8 +734,8 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
             agent_conversation_memory, "_CONVERSATIONS_ROOT", Path(tmpdir)
         ):
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "got it"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="got it")),
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -678,8 +750,8 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "no idea who you are"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="no idea who you are")),
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -745,8 +817,8 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             agent_conversation_memory, "_CONVERSATIONS_ROOT", Path(tmpdir)
         ):
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "booked your flight for Friday"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="booked your flight for Friday")),
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -761,8 +833,8 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "sure, anything else?"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="sure, anything else?")),
             ) as turn_mock:
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -794,8 +866,8 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             agent_conversation_memory, "_CONVERSATIONS_ROOT", Path(tmpdir)
         ):
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "TOP SECRET OWNER PLAN"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="TOP SECRET OWNER PLAN")),
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -810,8 +882,8 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "first stranger reply"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="first stranger reply")),
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -826,8 +898,8 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "second reply"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="second reply")),
             ) as turn_mock:
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -866,8 +938,8 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             agent_conversation_memory, "_CONVERSATIONS_ROOT", Path(tmpdir)
         ):
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "got it, Family Group"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="got it, Family Group")),
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -886,8 +958,8 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
-                new=AsyncMock(return_value={"message": "noted, Work Group"}),
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="noted, Work Group")),
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
@@ -1041,7 +1113,7 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
     ) -> None:
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                "server_modules.sage_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=exc),
             ):
                 return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(

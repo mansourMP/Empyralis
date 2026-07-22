@@ -238,6 +238,21 @@ async def telegram_webhook(request: Request) -> dict:
                 except Exception:
                     _attachments.append({"type": str(_m.get("type") or "file"), "file_id": _fid})
 
+    # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+    # Same reasoning as sage_telegram_hosted_service._process_update: one
+    # paired chat = one workspace, so a message reaching this point already
+    # passed the pairing gate and is treated as the verified owner.
+    from server_modules.inbound_envelope import InboundEnvelope, EnvelopeSender, SurfaceKind
+    _envelope = InboundEnvelope(
+        platform="telegram_hosted",
+        surface=SurfaceKind.DM,
+        sender=EnvelopeSender(
+            id=real_sender_id,
+            display_name=str(parsed.get("from_first_name", "")).strip(),
+            is_owner=True,
+        ),
+    )
+
     # ── Shared command dispatcher ──
     from server_modules.sage_command_dispatcher import dispatch_command
     cmd_reply = await dispatch_command(
@@ -270,6 +285,7 @@ async def telegram_webhook(request: Request) -> dict:
         sender_id=real_sender_id,
         sender_name=str(parsed.get("from_first_name", "")).strip(),
         reply_to_id=str(parsed.get("message_id") or ""),
+        envelope=_envelope,
     )
 
     if not delivered:
@@ -367,6 +383,19 @@ async def dev_poll_once() -> dict:
         # identical comment above for why chat_id must not stand in here.
         real_sender_id = str(parsed.get("from_id") or "").strip() or str(chat_id)
 
+        # ── Canonical inbound envelope — see telegram_webhook's identical
+        # comment above for why one paired chat implies a verified owner. ──
+        from server_modules.inbound_envelope import InboundEnvelope, EnvelopeSender, SurfaceKind
+        _dev_envelope = InboundEnvelope(
+            platform="telegram_hosted",
+            surface=SurfaceKind.DM,
+            sender=EnvelopeSender(
+                id=real_sender_id,
+                display_name=str(parsed.get("from_first_name", "")).strip(),
+                is_owner=True,
+            ),
+        )
+
         # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
         from server_modules.sage_command_dispatcher import dispatch_command
         cmd_reply = await dispatch_command(
@@ -396,6 +425,7 @@ async def dev_poll_once() -> dict:
             sender_id=real_sender_id,
             sender_name=str(parsed.get("from_first_name", "")).strip(),
             reply_to_id=str(parsed.get("message_id") or ""),
+            envelope=_dev_envelope,
         )
         processed += 1
     return {"ok": True, "updates_processed": processed}

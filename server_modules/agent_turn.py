@@ -24,6 +24,7 @@ from server_modules import healthguide_safety_service
 from server_modules import session_service
 from server_modules import thread_service
 from server_modules import transcript_events_service
+from server_modules.inbound_envelope import InboundEnvelope, EnvelopeSender, SurfaceKind
 from server_modules.telemetry import get_tracer, set_span_attributes
 
 
@@ -1525,6 +1526,46 @@ async def agent_turn(
     if not resolved_thread_id:
         raise ValueError("AgentTurnRequest.thread_id is required.")
     resolved_turn_request.thread_id = resolved_thread_id
+
+    # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+    # agent_turn() is the generic turn entry for run-start/durable/direct-chat
+    # turns alike; it does NOT itself route through sage_turn_adapter.
+    # execute_sage_turn — the one chokepoint every OTHER channel uses for
+    # envelope header injection. Scoped narrowly to the literal console/
+    # mobile direct-chat surface this file already names
+    # (SERVER_OWNED_DIRECT_CHAT_CHANNELS) at sync execution — the actual
+    # "authenticated owner-side account talking to their own agent" case.
+    # Durable/background runs are left unwired (envelope stays absent —
+    # unchanged behavior): those are autonomous task prompts, not the
+    # conversational turn the envelope header is meant for.
+    #
+    # Carried via context_hints["envelope"] (serialized through
+    # InboundEnvelope.to_metadata(), NOT the raw dataclass — context_hints
+    # is spread wholesale into thread_service.record_user_turn's metadata
+    # dict a few lines below, which must stay JSON-serializable) rather than
+    # mutating resolved_turn_request.message directly: this function's
+    # message ultimately reaches direct_chat_service.execute_direct_chat_
+    # turn_request's own execute_sage_turn() call (the real chokepoint for
+    # this path — see that module), which renders the header from this same
+    # envelope, exactly like every other channel. Reusing the frozen
+    # chokepoint's own rendering avoids duplicating (and risking drifting
+    # from) prepend_envelope_header's logic here.
+    _console_envelope: Optional[InboundEnvelope] = None
+    if (
+        normalize_channel(resolved_turn_request.channel) in SERVER_OWNED_DIRECT_CHAT_CHANNELS
+        and str(resolved_turn_request.execution_mode or "").strip().lower() == "sync"
+    ):
+        _actor_id = _request_actor_id(current_user)
+        _actor_name = _request_actor_display_name(current_user, _actor_id)
+        _console_envelope = InboundEnvelope(
+            platform="console",
+            surface=SurfaceKind.CONSOLE,
+            sender=EnvelopeSender(id=_actor_id, display_name=_actor_name, is_owner=True),
+        )
+        _next_context_hints = dict(resolved_turn_request.context_hints or {})
+        _next_context_hints["envelope"] = _console_envelope.to_metadata()
+        resolved_turn_request.context_hints = _next_context_hints
+
     binding_metadata = _metadata_dict(resolved_turn_request.context_hints.get("metadata"))
     trace_context = None
     session_record = None

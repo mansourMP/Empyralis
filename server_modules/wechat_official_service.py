@@ -756,20 +756,65 @@ async def handle_inbound_callback(
             remote_jid=mapped["remote_jid"], token_manager=token_manager,
         )
 
-        from server_modules.sage_command_dispatcher import dispatch_command
-        cmd_reply = await dispatch_command(
-            command=mapped["text"], workspace_id=workspace_id, thread_id="sage-main",
-            channel_origin=mapped["channel_origin"], sender_id=mapped["sender_jid"],
+        # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+        # Every WeChat Official/WeCom sender is an external customer talking
+        # to the bound agent 1:1 — Tencent's callback contract has no group
+        # concept and this channel has never had an owner-linkage mechanism
+        # (docs/design/inbound-attribution-audit.md §1). is_owner is always
+        # False, never inferred — this is also what keeps "/" text from ever
+        # being treated as an owner command below (envelope_allows_owner_commands
+        # requires a verified owner on a private surface; False fails closed).
+        from server_modules.inbound_envelope import (
+            InboundEnvelope, EnvelopeSender, SurfaceKind, envelope_allows_owner_commands,
         )
-        if cmd_reply is not None:
-            delivered = await transport.send_message(cmd_reply)
-            return {"routed": True, "processed": True, "reply_sent": delivered}
+        envelope = InboundEnvelope(
+            platform="wechat_official",
+            surface=SurfaceKind.DM,
+            sender=EnvelopeSender(
+                id=mapped["sender_jid"],
+                # No nickname is available from the inbound XML callback —
+                # WeChat's Official Account API only returns one via a
+                # separate, authenticated user-info call this pass doesn't
+                # make. render_envelope_header falls back to the id when
+                # display_name is empty.
+                display_name="",
+                is_owner=False,
+            ),
+        )
+
+        # ── FIX: per-customer thread scoping (was thread_id="sage-main" for
+        # EVERY distinct customer — see this module's own docstring/the audit
+        # for the cross-customer SQL-thread + turn-lock collapse this closes).
+        # Mirrors sage_command_dispatcher.agent_sender_thread_id's per-
+        # (agent, sender) keying, the same mechanism a resolved specialist
+        # turn already uses on every other channel — deterministic, no DB
+        # lookup, and this binding is always agent-scoped (one agent per
+        # WeChat/WeCom AppID/CorpID) so agent_install_id is always the right
+        # scoping key here.
+        from server_modules.sage_command_dispatcher import agent_sender_thread_id
+        _thread_id = agent_sender_thread_id(agent_install_id, mapped["sender_jid"])
+
+        # "/" text from a WeChat customer must never be treated as a command
+        # — envelope_allows_owner_commands is always False here (is_owner is
+        # always False), so this is a structural no-op today, but the check
+        # is explicit (not a hardcoded skip) so this stays correct if WeChat
+        # ever gains a real owner-linkage mechanism.
+        if envelope_allows_owner_commands(envelope):
+            from server_modules.sage_command_dispatcher import dispatch_command
+            cmd_reply = await dispatch_command(
+                command=mapped["text"], workspace_id=workspace_id, thread_id=_thread_id,
+                channel_origin=mapped["channel_origin"], sender_id=mapped["sender_jid"],
+            )
+            if cmd_reply is not None:
+                delivered = await transport.send_message(cmd_reply)
+                return {"routed": True, "processed": True, "reply_sent": delivered}
 
         from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
         delivered = await dispatch_sage_reply_safe(
             transport=transport, workspace_id=workspace_id, message=mapped["text"],
             channel_origin=mapped["channel_origin"], sender_id=mapped["sender_jid"],
-            reply_to_id=mapped["external_message_id"],
+            reply_to_id=mapped["external_message_id"], thread_id=_thread_id,
+            envelope=envelope,
         )
         return {"routed": True, "processed": True, "reply_sent": delivered}
     except Exception:

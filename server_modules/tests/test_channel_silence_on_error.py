@@ -284,7 +284,7 @@ class BridgeServiceNeverReturnsSendableErrorTextTests(unittest.TestCase):
         async def run_case():
             with (
                 patch(
-                    "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                    "server_modules.sage_turn_adapter.execute_sage_turn",
                     new=AsyncMock(side_effect=RuntimeError("boom")),
                 ),
                 patch(
@@ -309,7 +309,7 @@ class BridgeServiceNeverReturnsSendableErrorTextTests(unittest.TestCase):
         async def run_case():
             with (
                 patch(
-                    "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                    "server_modules.sage_turn_adapter.execute_sage_turn",
                     new=AsyncMock(side_effect=RuntimeError("boom")),
                 ),
                 patch(

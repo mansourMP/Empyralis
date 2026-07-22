@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from server_modules.inbound_envelope import InboundEnvelope
+
 
 class ChannelOrigin(str, Enum):
     """Canonical channel origin identifiers. Every inbound message must declare one.
@@ -62,6 +64,15 @@ class NormalizedSageTurn:
     channel_sender_name: str = ""
     channel_message_id: str = ""
 
+    # Canonical inbound attribution (inbound_envelope.py) — WHO sent this and
+    # FROM WHERE (owner-self-chat / DM / group / channel / console), verified
+    # by the channel, never inferred by the model. Unlike the fields above,
+    # this DOES reach the prompt: execute_sage_turn() renders it into a
+    # one-line header on the message content, and code-level gates
+    # (envelope_allows_owner_commands) consult it. None = legacy caller that
+    # hasn't been wired yet; everything then behaves exactly as before.
+    envelope: InboundEnvelope | None = None
+
 
 _SILENCE_MARKERS = (
     "[SILENT]",
@@ -82,6 +93,7 @@ def normalize_sage_inbound(
     channel_sender_id: str = "",
     channel_sender_name: str = "",
     channel_message_id: str = "",
+    envelope: InboundEnvelope | None = None,
 ) -> NormalizedSageTurn:
     """Normalize any channel's inbound message into canonical form.
 
@@ -109,6 +121,7 @@ def normalize_sage_inbound(
         channel_sender_id=str(channel_sender_id or "").strip(),
         channel_sender_name=str(channel_sender_name or "").strip(),
         channel_message_id=str(channel_message_id or "").strip(),
+        envelope=envelope if isinstance(envelope, InboundEnvelope) else None,
     )
 
 

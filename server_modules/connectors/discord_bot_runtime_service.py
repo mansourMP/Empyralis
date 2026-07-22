@@ -15,6 +15,7 @@ from server_modules.connectors.discord_connector import (
     event_matches_connector,
     should_trigger_agent_run,
 )
+from server_modules.inbound_envelope import InboundEnvelope, EnvelopeChat, EnvelopeSender, SurfaceKind
 
 
 LoadVaultFn = Callable[[], Dict[str, Any]]
@@ -582,6 +583,30 @@ class DiscordBotRuntimeService:
         if not goal:
             return {"ok": True, "handled": True, "triggered": False, "reason": "empty_goal"}
 
+        # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+        # A true 1:1 DM never reaches this handler (intercepted earlier by
+        # DiscordGatewayListener.on_message -> _handle_dm_via_gateway, the
+        # channel's one verified-owner path) — everything here is either a
+        # guild text channel or a Discord Group DM, both inherently
+        # multi-party, so surface is always GROUP. No owner-linkage check
+        # runs on this path at all (unlike the 1:1 DM /pair path), so
+        # is_owner is always None (unverified — fails closed on every
+        # owner-command gate). addressed reflects the real signal
+        # should_trigger_agent_run already computed: a true @mention of the
+        # bot vs. a plain message that only reached here via a configured
+        # trigger_pattern/trigger_on_all_messages.
+        _discord_envelope = InboundEnvelope(
+            platform="discord_guild",
+            surface=SurfaceKind.GROUP,
+            sender=EnvelopeSender(
+                id=str(parsed.get("user_id") or "").strip(),
+                display_name=str(parsed.get("username") or "").strip(),
+                is_owner=None,
+            ),
+            chat=EnvelopeChat(id=str(parsed.get("channel_id") or "").strip()),
+            addressed=str(parsed.get("message_type") or "").strip().lower() == "mention",
+        )
+
         trace_id = str(parsed.get("message_id") or parsed.get("interaction_id") or uuid.uuid4().hex).strip()
         session_key = str(parsed.get("channel_id") or parsed.get("guild_id") or "discord").strip() or "discord"
         if callable(self.append_event):
@@ -615,6 +640,7 @@ class DiscordBotRuntimeService:
                 "source_event_id": str(parsed.get("message_id") or parsed.get("interaction_id") or "").strip() or None,
             },
             allow_master_fallback=False,
+            envelope=_discord_envelope,
         )
         payload = route_result if isinstance(route_result, dict) else {}
         return {

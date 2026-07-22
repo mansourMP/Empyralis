@@ -23,6 +23,7 @@ import unittest
 from server_modules import connection_catalog_service
 from server_modules import personal_channel_sage_bridge_service
 from server_modules import personal_channels_repository
+from server_modules.sage_agent_runtime_contract import SageTurnResult
 
 
 # ---------------------------------------------------------------------------
@@ -128,14 +129,20 @@ class TelegramPersonalCertification(unittest.TestCase):
             self.assertEqual(tg["health_status"], "awaiting_code")
 
     def test_telegram_personal_inbound_context(self):
-        """build_telegram_personal_reply creates correct thread context."""
+        """build_telegram_personal_reply creates correct thread context.
+
+        Patches sage_turn_adapter.execute_sage_turn directly, not
+        execute_sage_turn_for_channel — the bridge now routes through
+        _execute_channel_turn_with_envelope, which calls execute_sage_turn
+        itself (see that helper's own docstring for why). "gateway_id" and
+        "remote_jid" are no longer forwarded as their own kwargs to
+        execute_sage_turn (they never were, even under
+        execute_sage_turn_for_channel — gateway_id was always accepted-but-
+        unused, and remote_jid is threaded as channel_sender_id instead)."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+            "server_modules.sage_turn_adapter.execute_sage_turn",
             new=AsyncMock(
-                return_value={
-                    "message": "hello from Sage",
-                    "trace_id": "trace-1",
-                }
+                return_value=SageTurnResult(message="hello from Sage", trace_id="trace-1")
             ),
         ) as execute_mock:
             result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
@@ -149,10 +156,9 @@ class TelegramPersonalCertification(unittest.TestCase):
         self.assertEqual(result["text"], "hello from Sage")
         self.assertEqual(result["source"], "sage_turn_adapter")
         kwargs = execute_mock.call_args.kwargs
-        self.assertEqual(kwargs["surface_channel"], "telegram_personal")
+        self.assertEqual(kwargs["channel_origin"], "telegram_personal")
         self.assertEqual(kwargs["workspace_id"], "workspace-1")
-        self.assertEqual(kwargs["gateway_id"], "gateway-1")
-        self.assertEqual(kwargs["remote_jid"], "tg-user-1")
+        self.assertEqual(kwargs["channel_sender_id"], "tg-user-1")
         self.assertIn("hey Sage", kwargs["message"])
 
     def test_telegram_personal_outbound_approval(self):
@@ -254,14 +260,14 @@ class WhatsAppPersonalCertification(unittest.TestCase):
             get_state.assert_called_once_with("gw-1", channel_key="whatsapp_personal")
 
     def test_whatsapp_personal_inbound_context(self):
-        """build_whatsapp_personal_reply creates correct thread context."""
+        """build_whatsapp_personal_reply creates correct thread context.
+
+        See test_telegram_personal_inbound_context's docstring above for
+        why the patch target and kwarg names changed."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+            "server_modules.sage_turn_adapter.execute_sage_turn",
             new=AsyncMock(
-                return_value={
-                    "message": "hello from Sage",
-                    "trace_id": "trace-2",
-                }
+                return_value=SageTurnResult(message="hello from Sage", trace_id="trace-2")
             ),
         ) as execute_mock:
             result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
@@ -275,9 +281,8 @@ class WhatsAppPersonalCertification(unittest.TestCase):
         self.assertEqual(result["text"], "hello from Sage")
         self.assertEqual(result["source"], "sage_turn_adapter")
         kwargs = execute_mock.call_args.kwargs
-        self.assertEqual(kwargs["surface_channel"], "whatsapp_personal")
+        self.assertEqual(kwargs["channel_origin"], "whatsapp_personal")
         self.assertEqual(kwargs["workspace_id"], "workspace-1")
-        self.assertEqual(kwargs["gateway_id"], "gateway-1")
         self.assertIn("hey Sage", kwargs["message"])
 
     def test_whatsapp_personal_outbound_approval(self):
