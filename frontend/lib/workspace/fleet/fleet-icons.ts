@@ -9,7 +9,7 @@
 // is forced to fetch the new URL fresh instead of reusing the poisoned entry.
 // This is why a channel logo could stay broken for a user across normal
 // refreshes even after the file went live — the fix is a new URL, not a reload.
-const ASSET_VERSION = "20260721";
+const ASSET_VERSION = "20260722";
 
 const withVersion = (map: Record<string, string>): Record<string, string> =>
   Object.fromEntries(
