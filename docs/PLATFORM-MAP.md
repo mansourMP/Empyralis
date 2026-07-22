@@ -7,6 +7,19 @@
 **Code:** ~275,000 lines Python (server_modules/) + TypeScript (frontend/, gateway/) + Rust (kernel/; supervisor/ archived, see §2.3)  
 **For:** Outside engineers and agents — read this cold, understand the entire platform.
 
+> **2026-07-23 refresh — skill-catalog unification, commit `86d1f94c5`
+> (22/22 tests green).** **Skills** (§14) rewritten: the hardcoded
+> `_CURATED_SKILL_PACK` (1Password/Apple Notes/Apple Reminders/tmux, zero
+> execution path anywhere) is deleted; `/api/sage-skills` and the model's
+> own capability manifest now both read `skill_registry.list_skill_definitions`
+> through one new adapter; a real `skill_invoke` Level-2 dispatch tool and a
+> `skill_write` self-authoring tool (lands disabled, pending owner review)
+> are wired through the live `direct_chat_operator_binding_service` binding
+> chokepoint; 6 real bundled `SKILL.md` packages replace the fake curated
+> pack. Driving audit: `docs/design/audit-skills.md` — its Tier 1/2 core
+> fix list plus one Tier 4 item shipped; Tier 3 items 2/5/7/8, Tier 4 item
+> 10, and Tier 5 observability remain open.
+>
 > **2026-07-13 refresh #2 (later the same day) — the `cli_subscription`
 > transport itself was root-caused and rebuilt; see the new Part 26 for the
 > full wire-level trace.** Orthogonal to the cofounder-inventory pass below
@@ -1865,59 +1878,181 @@ docstring is the owner-level warning not to casually extend it.
 
 ## Part 14: Skills
 
-"Skills" turns out to name three separate, largely-disconnected subsystems
-in this codebase, none of which share a frontend surface with the others.
+> **2026-07-23 update — skill-catalog unification landed, commit
+> `86d1f94c5` (22/22 new+updated tests green).** This section previously
+> described three disconnected subsystems, the third of which (`sage_skills_api.py`'s
+> hardcoded `_CURATED_SKILL_PACK`) was dead scaffolding with zero execution
+> path anywhere. That pack is now **deleted**. Both `/api/sage-skills` and
+> the model's own capability manifest read from the same
+> `skill_registry.list_skill_definitions` catalog that already backed the
+> Tools tab, through a new adapter. A real `skill_invoke` tool gives the
+> model a Level-2 dispatch call for any catalog skill (mirroring Claude
+> Code's "load the SKILL.md body only on invoke" progressive-disclosure
+> pattern), and a new `skill_write` tool lets an agent author a skill that
+> lands disabled pending owner review — closing the "marketplace pipeline
+> has zero agent-facing callers" gap called out below. The rewrite below
+> reflects the new state; the old three-subsystem framing is preserved
+> further down only where it's still true (the marketplace pipeline is
+> still its own storage/route surface, still with no frontend UI).
 
-**1. The built-in catalog (this is what the product UI actually calls
-"Tools," not "Skills") — VERIFIED, wired end-to-end.**
-`skill_registry.py:31-49` (`SkillDefinition` dataclass), `:1147`
-(`list_skill_definitions`), `:367` (`enforcement_tool_name`). Consumed live
-at `sage_agent_runtime_service.py:1224-1240` (`_load_safe_skill_catalog`)
-and enforced at `:1951-2050`. API: `routes_fleet.py:959-978` →
-`fleet_tools.py:696-786` (`fleet_get_agent_tools`). Frontend: the **Tools
-tab** in `FleetAgentDetail.tsx:1476-1626` (see Part 19 for the full
-governance picture — presets, admin-only contracts, the `/tools` chat
-command). Data: `workspace_agent_installs.tool_toggles` JSONB column,
-confirmed by `migrations/unify_fleet_tool_toggle_ids.sql` (a real historical
-bug — toggles were silently inert due to an id-space mismatch — is evidence
-this loop is real and was in active use).
+**1. One unified catalog, now actually one — VERIFIED, wired end-to-end.**
+`skill_registry.py:31-49` (`SkillDefinition` dataclass, unchanged shape),
+`:1148` (`list_skill_definitions`), `:1116-1138` (`_skill_registry_map` —
+merges `_BUILT_IN_SKILLS` at `:779` with filesystem-scanned
+`installed_skills.list_installed_skills()` entries and, per-workspace, MCP
+skill entries via `_definition_from_mcp_skill_entry:1092-1113`), `:367-371`
+(`enforcement_tool_name`, bridging the hyphenated display-id space to the
+underscore tool-call-name space `_specialist_tool_allowed` enforces).
+`sage_skills_api.py:387-433` adds a new adapter,
+`_skill_definition_to_item`, that turns a `SkillDefinition` into the dict
+shape the payload renderer already knew (`_skill_payload:101-146`). Both
+consumers now go through it:
+- `_build_sage_skills_payload:436-462` (backs `GET /api/sage-skills`,
+  registered at `:475`) calls `skill_registry.list_skill_definitions(...,
+  include_disabled=True)` at `:448` and maps every result through the
+  adapter at `:449` — this is what the Tools/Skills tab renders.
+- `build_sage_capabilities_payload:335-350` (backs `GET /api/sage-capabilities`,
+  registered at `:488`) calls the same `_build_sage_skills_payload` at `:336`
+  and turns its items into capability records via
+  `_skill_capability_records:223-264`, which — this is the actual fix —
+  now stamps `tool_id="skill_invoke"` on every single record (`:256`). Before
+  this, a skill with no bespoke `tools:` list got `tool_id=None`, which
+  `sage_instruction_compiler_service.build_model_capability_manifest`
+  silently drops (`:405-407`, `if not tool_id: continue`) — so most catalog
+  skills could never reach the live `## Callable Tools` prompt text
+  regardless of which catalog fed it. Every skill capability record's
+  description now also spells out the literal call the model needs, e.g.
+  `Call skill_invoke with skill_id="memory-manager" to run it.` (`:246-247`).
 
-**2. Marketplace install/publish pipeline — PARTIAL, backend-complete,
-zero live consumers.** Seven routes at `routes_health.py:131-137` →
-`skills_registry.py` (`install_marketplace_skill:494`,
-`publish_marketplace_skill:575`, `list_marketplace_skills:433`) → a real
-security scanner (`skill_scanner.py`) → storage (`installed_skills.py:27,34`).
-Storage is JSON files on disk (`marketplace/registry.json` +
-per-workspace `.registry.json`), **not** a database table. This is a
-complete, working git-clone/zip-install pipeline reachable with a direct API
-call and an admin key — but a repo-wide grep for its routes across
-`frontend/lib` and `frontend/app` returns zero matches, and it's never
-called from any agent-facing tool code either (`skill_registry.py`,
-`skills_service.py`, `universal_operator.py` all grepped for
-`skills_registry` calls: zero).
+**2. Level-2 dispatch: `skill_invoke` and `skill_write`, real tools in the
+live turn loop — VERIFIED.** Both are `ToolDescriptor`s in
+`skills_service.py`: `skill_invoke` at `:1455-1477` (`risk_level="high"`,
+`audience_safe=False` — "skills can read/write files, run shell commands,
+or message people. Owner-only."), `skill_write` at `:1493-1533`
+(`risk_level="medium"`, also owner-only, explicit instruction to the model
+not to claim a newly-authored skill is "ready"). Execution branches in
+`execute_single_direct_tool_call`: `skill_invoke` at `:4799-4861` resolves
+`skill_id`/`args` from the tool call and calls `skill_registry.execute_skill`
+directly — that function's existing dispatch chain (executor → handler →
+MCP tool → bundled-tool → SKILL.md-body-injection fallback, see #3 below)
+does the real work, so this branch is argument plumbing plus reply/artifact
+formatting. `skill_write` at `:4862-4909` calls
+`skills_registry.author_pending_skill` (new, `skills_registry.py:616-730`),
+which reuses the already-existing, already-scanned
+`install_marketplace_skill` pipeline (`:494`, `skill_scanner.scan_skill_dir`
+runs unchanged) and then immediately overwrites the freshly-installed
+skill's registry entry back to `enabled=False`,
+`review_status="pending_owner_review"` (`:709-715`) — a rejected/unsafe
+body raises straight through to the tool caller as an honest error rather
+than a silent no-op (`:701-706`).
+Both tools are wired through the live chokepoint, not just declared:
+`direct_chat_operator_binding_service.parse_tool_name` maps
+`skill_invoke`/`skill_write` to `("skill", "invoke")`/`("skill", "write")`
+at `:269-272`, and `"skill"` was added to the connector allowlist in
+`build_direct_chat_tool_runtime_bindings` at `:728` (previously any
+`skill`-prefixed call with no `__` in its name would have hit the
+`RuntimeError(f"Unsupported direct chat tool ...")` branch).
 
-**3. The curated device-skill pack — DEAD SCAFFOLDING at the execution
-layer.** `sage_skills_api.py:21-65` defines `_CURATED_SKILL_PACK`: 1Password,
-Apple Notes, Apple Reminders, tmux — with real setup-instruction copy,
-registered at `routes_workflows.py:8,21` as `/api/sage-skills` and
-`/api/sage-capabilities`. The fallback executor for skills with no real
-implementation, `skill_registry.py:52-62` (`_manual_skill_stub`), literally
-replies *"Heads up: {skill_label} is not wired to a live execution path
-yet."* A repo-wide, case-insensitive grep of `empyralis-gateway/src` for
-"skill", "1password", "apple.notes", "apple.reminders", and "tmux" returns
-**zero matches anywhere** — there is no Gateway implementation for any of
-these. Frontend API-client methods exist (`workstation-client.ts:737-738,2258`
-`listSageSkills`; `:738,2263` `listSageCapabilities`) with zero call sites.
-The curated pack's metadata does feed into the LLM's own capability manifest
-(`sage_instruction_compiler_service.py:580-584`), so the model can be told a
-skill is nominally "ready" — but no code path anywhere makes it actually do
-anything when called.
+**3. `skill_registry.execute_skill`'s fallback chain now actually covers
+adapter-less skills — VERIFIED.** `_definition_from_installed_skill`
+(`skill_registry.py:1034`) used to `return None` — i.e. silently drop
+the skill from the catalog — for any filesystem skill with no
+executor/handler/MCP adapter. That rejection is deleted; the function's own
+updated comment explains why: `execute_skill`'s final fallback (`:1279-1305`)
+already reads the skill's `SKILL.md` off disk and injects its body as
+prompt/artifact content when nothing more specific applies, before ever
+reaching `_manual_skill_stub`'s "not wired to a live execution path yet"
+message at `:1307`/`:52-61`. So a plain documentation-style skill is now a
+real, useful catalog entry instead of being invisible.
 
-**Practical read:** if someone asks "can an agent use a skill," the honest
-answer depends entirely on which of the three systems they mean. Only #1
-(the Tools tab toggle) is real and reachable by a user today, and it's an
-enable/disable switch over a fixed catalog, not a place to author a new
-skill.
+**4. Six real bundled skills replace the fake curated pack — VERIFIED.**
+New `skills/` directory at repo root, one `SKILL.md` per skill:
+`memory-manager`, `code-runner`, `file-manager`, `telegram-bot`,
+`vision-monitor`, `business-skill-template` (all six confirmed present on
+disk). `skill_registry.py:332-339` (`_BUNDLED_SKILL_DISPATCH`) maps the
+first four plus `web-search`/`browser` onto real built-in tool names (e.g.
+`memory-manager` → `memory_update`, `code-runner` → `shell__exec`);
+`_PROMPT_ONLY_SKILLS:374-377` marks `business-skill-template` and
+`vision-monitor` (the latter has its own `handler.py`, dispatched via
+`_execute_handler_skill`) as body-injection-only. This directly replaces
+the deleted `_CURATED_SKILL_PACK` (1Password/Apple Notes/Apple
+Reminders/tmux — real setup copy, zero Gateway implementation anywhere,
+now gone from `sage_skills_api.py` entirely).
+
+**5. The capability-manifest 16-item cap now reserves room for skills —
+VERIFIED, a narrow fix, not the full redesign the audit asked for.**
+`sage_instruction_compiler_service.py:64`:
+`CAPABILITY_MANIFEST_SKILL_RESERVED_ITEMS = 6`, with a comment noting the
+~36 builtin-tool records alone already exhaust the existing
+`CAPABILITY_MANIFEST_MAX_ITEMS = 16` (`:54`), so without a reserved slice
+skills were crowded out of the rendered prompt 100% of the time regardless
+of catalog correctness. `_capability_manifest_text:425-463` now splits
+`other_items` from `skill_items` (`:433-434`), sorts skill items so
+non-built-in (workspace/global/bundled-filesystem) skills outrank the ~20
+hardcoded `_BUILT_IN_SKILLS` entries within that slice (`:445`), and computes
+`skill_budget = min(len(skill_items), 6, 16)` / `other_budget = 16 -
+skill_budget` (`:446-448`). This is still a fixed cap, not the
+"scale with context window" redesign `docs/design/audit-skills.md` Tier 2
+item 6 calls for — that broader change remains open.
+
+**6. `installed_skills.list_installed_skills` no longer special-cases
+enabled-by-default on source/format — VERIFIED.**
+`installed_skills.py:746`: `enabled_default = True` unconditionally (was
+`True if has_skill_json else source == "bundled"`), with the comment
+explaining that any skill reaching this line already passed the on-disk
+existence check and the security scanner, so there's no reason to
+distinguish workspace/global/bundled skills by default-enabled state.
+Explicit opt-outs — `frontmatter enabled: false`, `config.yaml`, or a
+registry entry (including `author_pending_skill`'s deliberate
+`enabled=False` for agent-authored skills awaiting review) — still win,
+unchanged, at `:747-749`.
+
+**7. Tests — VERIFIED by running them.**
+`server_modules/tests/test_skill_catalog_unification.py` (new, 510 lines)
+plus an updated `server_modules/tests/test_sage_skills_api.py` (now asserts
+`hasattr(sage_skills_api, "_CURATED_SKILL_PACK")` is `False`). Ran both
+files directly: **22 passed, 0 failed.**
+
+**8. Disclosed rough edge, left as-is — VERIFIED still true.**
+`_skill_definition_to_item` (`sage_skills_api.py:387-433`) hardcodes
+`"supported_os": []` (`:409`) and empty lists for `missing_bins`/
+`missing_env_vars`/`missing_python_packages` (`:414-419`) on every
+catalog-sourced item, because `SkillDefinition` itself has no such
+structured fields — only a single flattened `unavailable_reason` string.
+`_skill_setup_requirement` (`sage_skills_api.py:60-98`) has an explicit
+fallback comment acknowledging this (`:87-93`) and degrades to showing the
+flattened reason instead of itemized missing-dependency text.
+
+**What's still the old, disconnected picture — unchanged by this commit.**
+The **marketplace install/publish pipeline** (`routes_health.py:131-137` →
+`skills_registry.py`'s `install_marketplace_skill:494`,
+`publish_marketplace_skill:575`, `list_marketplace_skills:433` → JSON-file
+storage in `installed_skills.py:27,34`, not a database table) still has no
+frontend route anywhere in `frontend/lib`/`frontend/app` — its only new
+agent-facing caller is `skill_write`'s reuse of `install_marketplace_skill`
+internally (#2 above), which is real progress but not the same thing as a
+UI. Per the driving audit, `docs/design/audit-skills.md`: Tier 1 item 1 and
+Tier 2 items 3–4 are the core of what this commit shipped; Tier 2 item 6 is
+only partially addressed (#5 above); Tier 3 items 2 (frontmatter validation
+rules), 5 (`build_active_skill_prompt_append` still injects everything
+unconditionally, `installed_skills.py:850`), 7 (the autopilot/Telegram
+polling path, `query_active_installed_skills`, still runs a separate
+prompt-concatenation mechanism, unreconciled with this catalog), and 8
+(per-install skill scoping via `tool_toggles`) remain open; Tier 4 item 9
+(`skill_write`) is the one Tier-4 item actually shipped here — item 10 (a
+heavier A/B self-improvement eval loop) is not; Tier 5's observability item
+11 (`used_context` still records a single `"sage_skills"`/`"sage_capabilities"`
+flag, not per-skill Level-1-vs-Level-2 telemetry — confirmed still true at
+`sage_agent_runtime_service.py:3941,4201`) also remains open.
+
+**Practical read, updated 2026-07-23:** "can an agent use a skill" now has
+one honest answer instead of three. Yes — through `skill_invoke`, against
+one real catalog that includes the 6 new bundled skills, any workspace/global
+filesystem skill, and MCP-backed skill entries — and an agent can now author
+a new one with `skill_write`, though it lands disabled until a human
+reviews it. The marketplace git-clone/zip-install pipeline is still real,
+backend-complete, and still has no UI surface a normal user would ever
+find.
 
 ---
 
