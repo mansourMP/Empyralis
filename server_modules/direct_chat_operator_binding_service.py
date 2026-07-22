@@ -680,6 +680,47 @@ def build_direct_chat_tool_runtime_bindings(
     ):
         callbacks = direct_tool_execution_callbacks()
         connector_id, action_id = callbacks.parse_tool_name(str(tool_call.get("name") or ""))
+        # MCP-namespaced tool calls (mcp__<server_id>__<tool_name>) — Phase A
+        # wiring (docs/design/mcp-applications-plan.md). This is THE live
+        # dispatch point for structured tool calls in the primary generation
+        # loop: this closure is bound into DirectChatGenerationServices.
+        # execute_single_direct_tool_call and invoked from
+        # direct_chat_generation_service.stream_provider_backed_direct_chat()
+        # (via a plain ThreadPoolExecutor — no asyncio event loop running in
+        # this thread, hence the SYNC invoke_workspace_mcp_tool(), not the
+        # _async twin used by skills_service.execute_single_direct_tool_call_
+        # async — that function is currently unreachable from this loop; see
+        # docs/design/mcp-current-state.md). Intercepted here, before the
+        # "not in {...}" custom-connector fallback below, because "mcp" is
+        # not in that whitelist and would otherwise silently mis-route to
+        # runs_execution._workflow_execute_connector_action, which has no
+        # notion of MCP servers/endpoints. The MCP-specific approval gate
+        # (_assert_tool_approved_for_execution) is enforced inside
+        # invoke_workspace_mcp_tool() itself, never bypassed here.
+        if connector_id == "mcp":
+            from server_modules import mcp_registry_service
+
+            if not mcp_registry_service.mcp_tools_enabled():
+                raise RuntimeError("MCP tools are disabled for this deployment.")
+            parsed_mcp = mcp_registry_service.parse_mcp_tool_name(str(tool_call.get("name") or ""))
+            if parsed_mcp is None:
+                raise RuntimeError(f"Malformed MCP tool name '{tool_call.get('name')}'.")
+            mcp_arguments = callbacks.tool_arguments_payload(tool_call.get("arguments"))
+            session_payload = session_ctx if isinstance(session_ctx, dict) else {}
+            metadata = skills_service._direct_tool_session_metadata(session_ctx)
+            mcp_result = mcp_registry_service.invoke_workspace_mcp_tool(
+                workspace_id=workspace_id,
+                server_id=parsed_mcp["server_id"],
+                tool_name=parsed_mcp["tool_name"],
+                arguments=mcp_arguments if isinstance(mcp_arguments, dict) else {},
+                agent_label=str(metadata.get("sage_agent_id") or metadata.get("agent_scope") or "Agent"),
+                tenant_id=skills_service._tenant_id_from_direct_tool_context(session_ctx),
+                thread_id=str(thread_id or "").strip() or None,
+                run_id=skills_service._request_id_from_direct_tool_context(session_ctx) or None,
+                user_id=str(session_payload.get("sender_id") or "").strip() or None,
+                agent_id=str(session_payload.get("active_agent_install_id") or metadata.get("sage_agent_id") or "").strip() or None,
+            )
+            return mcp_registry_service.format_mcp_tool_result(mcp_result)
         if connector_id not in {"", "http", "llm", "file", "shell", "screenshot", "computer", "hardware", "memory", "web", "browser", "image", "sage_service", "fleet"}:
             from server_modules import runs_execution
 

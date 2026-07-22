@@ -19,6 +19,7 @@ from server_modules import (
     direct_chat_generation_service,
     direct_chat_runtime_exports,
     direct_chat_tool_catalog_service,
+    mcp_registry_service,
     no_provider_service,
     response_leak_guard_service,
     sage_daily_operator_service,
@@ -29,6 +30,12 @@ from server_modules import (
     sage_profile_service,
     secret_redaction_service,
     security_audit_service,
+    # No longer called directly here (the old keyword-matched MCP bridge that
+    # called skill_registry.execute_skill was removed — see the note above
+    # _run_sage_action_loop_v3's route_decision block). Kept imported: some
+    # tests reach it via sage_agent_runtime_service.skill_registry (module
+    # attribute access), and skill_registry.execute_skill remains the real,
+    # live executor for the goal-based /skills mcp:server:tool slash command.
     skill_registry,
     workspace_context,
 )
@@ -1508,7 +1515,20 @@ def _load_safe_skill_catalog(*, workspace_id: str) -> list[dict]:
 
 
 def _build_mcp_tool_inventory(*, workspace_id: str) -> str:
-    """Build a system-prompt-friendly inventory of available MCP tools."""
+    """Build a system-prompt-friendly inventory of available MCP tools.
+
+    Purely informational — a heads-up that these tools exist and their real
+    callable names. It is NOT what makes MCP tools callable: that's
+    tool_registry_service.build_registry_entries() (source #4, fed via
+    mcp_registry_service.list_workspace_mcp_direct_tool_payloads() —
+    Phase A wiring, docs/design/mcp-applications-plan.md), which makes MCP
+    tools real, query_tool_registry-discoverable, structurally callable
+    tools like any other connector. Previously this block claimed requests
+    were "automatically routed to the correct tool" — that was never true in
+    the live loop (see docs/design/mcp-current-state.md); corrected here to
+    match the real mechanism instead of removing the block outright, since
+    it's still useful as an upfront hint of what's connected.
+    """
     all_skills = list_skill_definitions(workspace_id=workspace_id, include_disabled=False)
     mcp_skills = [
         s for s in all_skills
@@ -1519,20 +1539,25 @@ def _build_mcp_tool_inventory(*, workspace_id: str) -> str:
         return ""
     lines: list[str] = [
         "\n\n## Available MCP Tools",
-        "The following MCP tools are connected to this workspace and can be invoked:",
+        "The following MCP tools are connected to this workspace. They are real, "
+        "callable tools like any other — use query_tool_registry to pull up each one's "
+        "full parameter schema, then call the tool name shown below directly with "
+        "structured arguments:",
     ]
     for s in mcp_skills:
         sid = _coerce_text(getattr(s, "id", ""))
         label = _coerce_text(getattr(s, "label", "")) or sid
         desc = _coerce_text(getattr(s, "description", ""))
-        entry = f"- {sid}: {label}"
+        parsed = mcp_registry_service.parse_mcp_skill_id(sid)
+        callable_name = (
+            mcp_registry_service.mcp_tool_name(parsed["server_id"], parsed["tool_name"])
+            if parsed
+            else sid
+        )
+        entry = f"- {callable_name}: {label}"
         if desc:
             entry += f" — {desc}"
         lines.append(entry)
-    lines.append(
-        "\nTo use an MCP tool, request its described function. "
-        "Requests are automatically routed to the correct tool."
-    )
     return "\n".join(lines)
 
 
@@ -2368,6 +2393,25 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
         _before_core = len(tools)
         tools = [t for t in tools if _specialist_tool_allowed(str(t.get("name") or ""), specialist_toolset)]
         print(f"[TOOL_FILTER] specialist_core_tools before={_before_core} after={len(tools)}", flush=True)
+    # Phase A MCP wiring (docs/design/mcp-applications-plan.md): inject this
+    # workspace's enabled+approved MCP tools as Tier-2 registry entries.
+    # build_registry_entries() has no workspace_id parameter and deliberately
+    # keeps none — threading workspace_id through would mean churning the
+    # multi-layer facade signatures (direct_chat_composition_service ->
+    # direct_chat_callback_facade_service -> direct_chat_runtime_facade_service
+    # -> direct_chat_operator_binding_service) that also call it from other
+    # contexts. workspace_id IS already in scope here, so the minimal-churn
+    # seam is to pre-compute the tool payloads here and hand them to
+    # build_registry_entries() through the SAME availability dict it already
+    # takes as a parameter, under a new "mcp_tools" key that source #4 inside
+    # build_registry_entries() reads. Gated by mcp_registry_service.
+    # mcp_tools_enabled() (EMPYRALIS_MCP_TOOLS_ENABLED, default on) both here
+    # and again inside list_workspace_mcp_direct_tool_payloads() itself.
+    if mcp_registry_service.mcp_tools_enabled():
+        try:
+            availability["mcp_tools"] = mcp_registry_service.list_workspace_mcp_direct_tool_payloads(workspace_id)
+        except Exception:
+            availability["mcp_tools"] = []
     _registry = direct_chat_tool_catalog_service.build_registry_entries(tool_capabilities, availability)
     # Phase 4B: a specialist only discovers the connectors/tools it is bound to.
     if specialist_toolset is not None:
@@ -2464,50 +2508,6 @@ def _blocked_agent_computer_tool_for_message(message: str, availability: dict[st
         )
     ):
         return {"name": "hardware__action", "reason": "agent_computer_unavailable", "status": "blocked"}
-    return None
-
-
-def _matching_mcp_skill(*, workspace_id: str, message: str) -> Any | None:
-    compact = " ".join(str(message or "").lower().split())
-    if not compact:
-        return None
-    candidates = [
-        skill
-        for skill in list_skill_definitions(workspace_id=workspace_id, include_disabled=False)
-        if _coerce_text(getattr(skill, "execution_adapter", "")).lower() == "mcp_tool"
-    ]
-    if not candidates:
-        return None
-    for skill in candidates:
-        terms = {
-            _coerce_text(getattr(skill, "id", "")).lower(),
-            _coerce_text(getattr(skill, "label", "")).lower(),
-            *[
-                _coerce_text(term).lower()
-                for term in (getattr(skill, "trigger_terms", ()) or ())
-                if _coerce_text(term)
-            ],
-        }
-        if any(term and term in compact for term in terms):
-            return skill
-    if len(candidates) == 1 and "mcp" in compact:
-        return candidates[0]
-    # Description-based matching: check if the user message contains
-    # significant keywords from any MCP skill's description.
-    _MCP_DESC_STOPWORDS = frozenset({
-        "this", "that", "with", "from", "have", "been", "were",
-        "what", "which", "their", "there", "about", "would",
-        "could", "should", "tool", "mcp", "the", "and", "for",
-        "not", "are", "can", "has", "its", "use", "used", "using",
-    })
-    for skill in candidates:
-        desc = _coerce_text(getattr(skill, "description", "")).lower()
-        desc_keywords = {
-            word for word in desc.split()
-            if len(word) > 3 and word not in _MCP_DESC_STOPWORDS
-        }
-        if desc_keywords and any(keyword in compact for keyword in desc_keywords):
-            return skill
     return None
 
 
@@ -2901,7 +2901,6 @@ async def _run_sage_action_loop_v3(
         availability=availability,
         blocked_agent_computer_tool=blocked,
     )
-    mcp_skill = _matching_mcp_skill(workspace_id=workspace_id, message=message)
     if blocked is not None:
         # Instead of returning a hardcoded message, inject the unavailability
         # as context so Sage can respond naturally in its own words.
@@ -2921,6 +2920,18 @@ async def _run_sage_action_loop_v3(
 
     # ── All messages go through the LLM with query_tool_registry for tool discovery.
     # No keyword-based MCP routing — the LLM decides which tools to use.
+    # This is now literally true for MCP tools too (Phase A wiring,
+    # docs/design/mcp-applications-plan.md): a workspace's enabled+approved
+    # MCP tools are real, discoverable, callable tools — surfaced via
+    # _direct_tool_bundle() -> tool_registry_service.build_registry_entries()
+    # (source #4) and dispatched by connector_id=="mcp" in
+    # direct_chat_operator_binding_service.execute_single_direct_tool_call
+    # (and skills_service.execute_single_direct_tool_call_async) — not a
+    # separate keyword-matched code path. The old keyword-matching bridge
+    # (_matching_mcp_skill + _run_sage_action_loop_v2's skill_registry.
+    # execute_skill dispatch) has been removed; it was dead code (v2 had no
+    # live caller — handle_sage_chat only ever called this v3 loop) that
+    # computed a match here and then never used it.
 
     generation_services = direct_chat_runtime_exports._direct_chat_generation_services()
     # Billing dedup key — see the credit_idempotency_key parameter doc above.
@@ -3181,242 +3192,14 @@ async def _run_sage_action_loop_v3(
     }
 
 
-async def _run_sage_action_loop_v2(
-    *,
-    workspace_id: str,
-    tenant_id: str,
-    message: str,
-    provider: str,
-    model: str,
-    credentials: dict[str, Any],
-    trace_id: str,
-    actor_user_id: str,
-    channel_origin: str = "",
-    sender_class: str = "owner",
-) -> dict[str, Any] | None:
-    tools, tool_capabilities, availability, blocked_notes = _direct_tool_bundle(workspace_id=workspace_id, provider=provider, sender_class=sender_class)
-    route_decision = _build_sage_route_decision(
-        message=message,
-        tools=tools,
-        tool_capabilities=tool_capabilities,
-        availability=availability,
-    )
-    try:
-        services = direct_chat_runtime_exports._no_provider_execution_services()
-    except Exception:
-        services = None
-    blocked_tools: list[dict[str, Any]] = []
-    tool_calls: list[dict[str, Any]] = []
-    outputs: list[str] = []
-    session_ctx = {
-        "tenant_id": tenant_id or "default",
-        "workspace_id": workspace_id,
-        "thread_id": trace_id,
-        "metadata": {
-            "source": "sage_chat",
-            "surface": "sage",
-            "trace_id": trace_id,
-            "agent_scope": "sage",
-            "sage_agent_id": SAGE_MAIN_AGENT_ID,
-            "channel_origin": channel_origin or "sage",
-        },
-        "sender_id": actor_user_id or "",
-        "agent_turn_request": {
-            "tenant_id": tenant_id or "default",
-            "workspace_id": workspace_id,
-            "thread_id": trace_id,
-            "session_id": trace_id,
-            "policy_context": {
-                "agent_scope": "sage",
-                "agent_id": SAGE_MAIN_AGENT_ID,
-            },
-            "context_hints": {
-                "metadata": {
-                    "source": "sage_chat",
-                    "trace_id": trace_id,
-                    "user_id": actor_user_id or None,
-                }
-            },
-        },
-    }
-
-    from server_modules import runtime_config as _rc
-
-    direct_tool_calls: list[dict[str, Any]] = []
-    if services is not None:
-        direct_tool_calls = _plan_sage_direct_tool_calls(
-            message=message,
-            tools=tools,
-            services=services,
-        )
-        direct_tool_calls, budget_blocked_tools = _budget_sage_tool_calls(direct_tool_calls)
-        blocked_tools.extend(budget_blocked_tools)
-    if _rc.AGENT_MACHINE_MODE == "agent":
-        blocked = None
-    else:
-        blocked = _blocked_agent_computer_tool_for_message(message, availability)
-        if blocked is not None:
-            blocked_tools.append(blocked)
-
-    mcp_skill = _matching_mcp_skill(workspace_id=workspace_id, message=message)
-    if not direct_tool_calls and mcp_skill is None and not blocked_tools:
-        return None
-
-    if direct_tool_calls and services is not None:
-        approval_payload = direct_chat_runtime_exports._build_direct_tool_approval_response(
-            tool_calls=direct_tool_calls,
-            tool_capabilities=tool_capabilities,
-            session_ctx=session_ctx,
-        )
-        if approval_payload is not None:
-            # With internalized governance, approvals are logged for audit only.
-            # The agent proceeds with execution — consumers never see approval buttons.
-            approvals = list(approval_payload.get("approvals") or [])
-            return {
-                "message": "Executing your request...",
-                "tool_calls": [
-                    {
-                        "name": _coerce_text(call.get("name")),
-                        "arguments": call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
-                        "status": "executed",
-                        "iteration": 1,
-                        "action_loop_version": _SAGE_ACTION_LOOP_VERSION,
-                    }
-                    for call in direct_tool_calls
-                ],
-                "blocked_tools": [],
-                "approvals_required": approvals,
-                "action_execution_mode": "tools_executed",
-                "available_tools": tools,
-                "route_decision": route_decision,
-                "action_loop_version": _SAGE_ACTION_LOOP_VERSION,
-                "loop_budget": {
-                    "max_tool_calls": _SAGE_ACTION_LOOP_MAX_TOOL_CALLS,
-                    "planned_tool_calls": len(direct_tool_calls),
-                    "executed_tool_calls": 0,
-                    "blocked_tool_calls": 0,
-                },
-            }
-        for index, call in enumerate(direct_tool_calls, start=1):
-            tool_name = _coerce_text(call.get("name"))
-            arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-            try:
-                output = await _sage_skills_service.execute_single_direct_tool_call_async(
-                    tool_call=call,
-                    workspace_id=workspace_id,
-                    thread_id=trace_id,
-                    index=index,
-                    provider=provider,
-                    model=model,
-                    credentials=credentials,
-                    reasoning_effort="",
-                    session_ctx=session_ctx,
-                )
-                summary = _summarize_tool_output(output)
-                tool_calls.append({
-                    "name": tool_name,
-                    "arguments": arguments,
-                    "status": "completed",
-                    "output": summary,
-                    "iteration": 1,
-                    "action_loop_version": _SAGE_ACTION_LOOP_VERSION,
-                })
-                if summary:
-                    outputs.append(summary)
-            except Exception as exc:
-                error = _summarize_tool_output(str(exc), max_chars=800)
-                blocked_tools.append({"name": tool_name, "reason": error or type(exc).__name__, "status": "blocked"})
-                tool_calls.append({
-                    "name": tool_name,
-                    "arguments": arguments,
-                    "status": "failed",
-                    "error": error,
-                    "iteration": 1,
-                    "action_loop_version": _SAGE_ACTION_LOOP_VERSION,
-                })
-
-    if mcp_skill is not None:
-        skill_id = _coerce_text(getattr(mcp_skill, "id", ""))
-        try:
-            result = await skill_registry.execute_skill(
-                skill_id=skill_id,
-                tenant_id=tenant_id or "default",
-                workspace_id=workspace_id,
-                goal=message,
-                agent_label="Sage",
-                hard_context="Main Sage operator loop MCP compatibility path.",
-                operational_policy="Use approved MCP tools only; preserve Sage approval and audit policy.",
-            )
-            reply = _summarize_tool_output((result or {}).get("reply") or result)
-            tool_calls.append({
-                "name": skill_id,
-                "tool_name": skill_id,
-                "arguments": {"goal": message},
-                "status": "completed" if str((result or {}).get("status") or "ok").lower() not in {"blocked", "failed", "error"} else "failed",
-                "output": reply,
-                "iteration": 1,
-                "action_loop_version": _SAGE_ACTION_LOOP_VERSION,
-            })
-            if reply:
-                outputs.append(reply)
-        except Exception as exc:
-            raw_error = str(exc)
-            # Produce user-friendly controlled error messages for MCP failures
-            if isinstance(exc, PermissionError):
-                friendly = "The MCP tool could not be executed because it has not been approved yet."
-            elif "not approved" in raw_error.lower() or "not_approved" in raw_error.lower():
-                friendly = "The MCP tool could not be executed because it has not been approved yet."
-            elif "not found" in raw_error.lower() or "not_found" in raw_error.lower():
-                friendly = "The MCP tool was not found on the connected server."
-            elif "timeout" in raw_error.lower() or "timed out" in raw_error.lower():
-                friendly = "The MCP tool did not respond in time. Please try again."
-            elif "connection" in raw_error.lower() or "connect" in raw_error.lower() or "endpoint" in raw_error.lower():
-                friendly = "Could not reach the MCP server. Please check that the server is running."
-            elif "disabled" in raw_error.lower():
-                friendly = "The MCP tool is currently disabled for this workspace."
-            else:
-                friendly = f"The MCP tool returned an error: {raw_error[:200]}"
-            error = _summarize_tool_output(friendly, max_chars=800)
-            blocked_tools.append({"name": skill_id, "reason": error or type(exc).__name__, "status": "blocked"})
-            tool_calls.append({
-                "name": skill_id,
-                "tool_name": skill_id,
-                "arguments": {"goal": message},
-                "status": "failed",
-                "error": error,
-                "iteration": 1,
-                "action_loop_version": _SAGE_ACTION_LOOP_VERSION,
-            })
-
-    mode = (
-        "partial_tools_executed"
-        if tool_calls and blocked_tools
-        else "tools_executed"
-        if tool_calls
-        else "tool_blocked"
-        if blocked_tools
-        else "text_only"
-    )
-    return {
-        "message": "\n\n".join(output for output in outputs if output).strip()
-        or ("Sage could not run that action because the required runtime is unavailable." if blocked_tools else "Tool execution completed."),
-        "tool_calls": tool_calls,
-        "blocked_tools": blocked_tools,
-        "approvals_required": [],
-        "action_execution_mode": mode,
-        "available_tools": tools,
-        "route_decision": route_decision,
-        "action_loop_version": _SAGE_ACTION_LOOP_VERSION,
-        "loop_budget": {
-            "max_tool_calls": _SAGE_ACTION_LOOP_MAX_TOOL_CALLS,
-            "planned_tool_calls": len(direct_tool_calls) + len(blocked_tools),
-            "executed_tool_calls": len(tool_calls),
-            "blocked_tool_calls": len(blocked_tools),
-        },
-    }
-
-
-_run_sage_action_loop_v1 = _run_sage_action_loop_v2
+# _run_sage_action_loop_v2 (and its _run_sage_action_loop_v1 alias) were
+# removed here — dead code with zero live callers (handle_sage_chat only
+# ever invokes _run_sage_action_loop_v3 above). It housed the old
+# keyword-matched MCP NL-routing (_matching_mcp_skill, also removed) that
+# v3 never used. See docs/design/mcp-applications-plan.md Phase A and
+# docs/design/mcp-current-state.md for the wiring that replaced it: MCP
+# tools are now real, discoverable (query_tool_registry), structurally
+# callable tools like any other connector, not a separate NL-match path.
 
 
 def _emit_failed_audit_event(
