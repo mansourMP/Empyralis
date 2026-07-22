@@ -327,15 +327,21 @@ async def _handle_compact(workspace_id: str, thread_id: str) -> str:
         from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
         from server_modules.control_plane_repository import get_workspace_by_id
 
-        # Resolve the workspace's active provider to compute the real context window
+        # Resolve the workspace's active provider/model (its configured brain)
+        # both to compute the real context window and, below, so a manual
+        # `/sage compact` summarizes on that same model instead of
+        # compact_turns' silent platform-wide "deepseek" default.
         _ws_provider: str = ""
+        _ws_model: str = ""
         try:
             _ws_rec = await get_workspace_by_id(workspace_id)
             _ws_meta = dict((_ws_rec or {}).get("metadata") or {})
             _ws_defaults = workspace_admin_defaults_from_metadata(_ws_meta)
             _ws_provider = str(_ws_defaults.sage_ai_provider or "").strip().lower()
+            _ws_model = str(_ws_defaults.sage_ai_model or "").strip()
         except Exception:
             _ws_provider = ""
+            _ws_model = ""
         _ctx_window = resolve_context_window(_ws_provider or None, None)
 
         tenant_id = "default"
@@ -367,6 +373,8 @@ async def _handle_compact(workspace_id: str, thread_id: str) -> str:
                     tenant_id=tenant_id,
                     thread_id=thread_id,
                     previous_summary=prev,
+                    provider=_ws_provider or None,
+                    model=_ws_model or None,
                 )
             return SAGE_COMPACTED
         return SAGE_COMPACT_NOT_NEEDED

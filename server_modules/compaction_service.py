@@ -12,9 +12,12 @@ Matches OpenClaw's compaction.ts design.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from scripts.orion_local_worker_llm import openai_chat_text
+
+LOGGER = logging.getLogger(__name__)
 
 # ── Step 1: Token estimation ──────────────────────────────────────────
 
@@ -196,11 +199,22 @@ async def compact_turns(
     previous_summary: str = "",
     provider: str = "",
     model: str = "",
+    # docs/design/audit-context-anatomy.md fix #3 (compaction gap, half b):
+    # optional so every existing call site keeps working unchanged — when a
+    # caller has a live agent_trace_service.TraceContext in scope (typed Any
+    # here to avoid importing agent_trace_service at module load time, same
+    # lazy-import style already used below for control_plane_repository),
+    # a "compaction.skipped" trace event is emitted alongside the WARNING
+    # log below whenever this returns "" instead of a real summary.
+    trace_context: Any = None,
 ) -> str:
     """Summarize turns and persist as a CompactionEntry in agent_turns.
     Returns the summary text.
     """
     from server_modules import control_plane_repository
+
+    resolved_provider = str(provider or "deepseek").strip() or "deepseek"
+    resolved_model = str(model or "").strip()
 
     text = serialize_turns_for_compaction(turns)
 
@@ -211,15 +225,35 @@ async def compact_turns(
 
     # Use the existing generation pipeline with a short, focused prompt
     # Use openai_chat_text directly (sync call, same as generate_chat_reply_with_provider_fallback)
-    text, _usage, _model, _error = openai_chat_text(
+    text, _usage, _model, error = openai_chat_text(
         system_prompt=prompt,
         user_prompt="",  # all instructions are in the system prompt
-        provider=str(provider or "deepseek").strip() or "deepseek",
-        model_override=str(model or "").strip() or None,
+        provider=resolved_provider,
+        model_override=resolved_model or None,
     )
     summary = (text or "").strip()
 
     if not summary:
+        # Previously silent (returned "" with no signal anywhere) whenever the
+        # resolved provider had no usable key/route — e.g. the platform-wide
+        # DeepSeek key this falls back to being unset. Compaction fails safe
+        # (the turn falls through to raw-truncation elsewhere), but that must
+        # never be invisible.
+        reason = str(error or "empty_summary").strip() or "empty_summary"
+        LOGGER.warning(
+            "compact_turns: no summary produced (provider=%s, model=%s, reason=%s) — "
+            "compaction is a no-op for this call; caller falls back to raw truncation",
+            resolved_provider, resolved_model or "default", reason,
+        )
+        if trace_context is not None:
+            try:
+                from server_modules import agent_trace_service
+
+                await agent_trace_service.emit_compaction_skipped(
+                    trace_context, reason, resolved_provider, resolved_model,
+                )
+            except Exception:
+                pass  # observability must never break the calling turn
         return ""
 
     # Persist as agent_turn

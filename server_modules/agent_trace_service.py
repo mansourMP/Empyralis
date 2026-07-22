@@ -35,6 +35,11 @@ PERSISTED_TRACE_EVENT_TYPES = frozenset(
         "assistant.message.completed",
         "trace.completed",
         "trace.failed",
+        # docs/design/audit-context-anatomy.md fix #3 (compaction gap, half
+        # b): compact_turns used to no-op silently (empty summary, no key/
+        # provider) with nothing but a swallowed exception downstream. This
+        # makes that condition visible in trace replay, not just server logs.
+        "compaction.skipped",
     }
 )
 
@@ -887,4 +892,27 @@ async def emit_trace_failed(
         },
         persisted=True,
         item_id=failed_item_id,
+    )
+
+
+async def emit_compaction_skipped(
+    trace_context: Optional[TraceContext],
+    reason: str,
+    provider: Optional[str],
+    model: Optional[str],
+) -> Optional[str]:
+    """compact_turns (compaction_service.py) produced no summary — no key/
+    provider available for the resolved model, or the call itself failed.
+    A no-op here used to be silent (docs/design/audit-context-anatomy.md
+    fix #3); this makes it a first-class, replayable trace event alongside
+    the WARNING log compact_turns itself now emits."""
+    return await emit(
+        trace_context,
+        "compaction.skipped",
+        {
+            "reason": str(reason or "").strip(),
+            "provider": str(provider or "").strip(),
+            "model": str(model or "").strip(),
+        },
+        persisted=True,
     )

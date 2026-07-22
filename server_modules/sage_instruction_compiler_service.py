@@ -51,6 +51,15 @@ SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT = 12_000
 SAGE_RETRIEVED_MEMORY_CHAR_LIMIT = 3_000
 SAGE_PROFILE_CONTEXT_CHAR_LIMIT = 1_500
 SAGE_HEARTBEAT_CONTEXT_CHAR_LIMIT = 900
+# docs/design/audit-context-anatomy.md fix #2: _normalize_recent_messages
+# previously only capped each of the last 16 messages at 4,000 chars with no
+# ceiling on the block as a whole — 16 genuinely long turns is ~64,000 chars
+# (~16,000 tokens), several times SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT
+# (12,000 chars/~3,000 tokens, the entire system prompt's own hard cap just
+# below). Set to the same order of magnitude as that total so history can
+# never dwarf everything else in the window; truncated oldest-first (see
+# _normalize_recent_messages) so the most recent turns stay intact.
+SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT = 12_000
 CAPABILITY_MANIFEST_MAX_ITEMS = 16
 # Skills share this budget with the (larger) builtin-tool list, which lists
 # first in build_sage_capabilities_payload. Verified empirically while
@@ -604,6 +613,14 @@ def _normalize_recent_messages(
         if msg_channel and current_channel and msg_channel != current_channel:
             content = f"[via {msg_channel}] {content}"
         normalized.append({"role": role, "content": content[:4000]})
+    # Aggregate budget on top of the per-message cap above (SAGE_RECENT_
+    # HISTORY_TOTAL_CHAR_LIMIT, see its definition for why) — drop the
+    # oldest messages first until the whole block fits, always keeping at
+    # least the single most recent message.
+    total_chars = sum(len(m["content"]) for m in normalized)
+    while total_chars > SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT and len(normalized) > 1:
+        dropped = normalized.pop(0)
+        total_chars -= len(dropped["content"])
     return normalized
 
 

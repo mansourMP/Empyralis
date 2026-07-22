@@ -2357,7 +2357,8 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
         availability = {}
 
     # ── Two-tier tool assembly (same code path as web) ──
-    # Tier 1: always-on tools (8 core tools) injected every turn.
+    # Tier 1: always-on tools (12 core tools, see tool_registry_service.ALWAYS_ON_TOOL_NAMES)
+    # injected every turn.
     # Tier 2: registry — everything else, loaded on demand via query_tool_registry.
     tools: list[dict[str, Any]] = list(direct_chat_tool_catalog_service.build_always_on_direct_chat_tools())
     if specialist_toolset is None:
@@ -3559,6 +3560,12 @@ async def _action_loop_context_budget_preflight(
             workspace_id=workspace_id,
             tenant_id=tenant_id,
             thread_id=thread_id,
+            # Thread the turn's own provider/model through (same fix as
+            # _apply_fresh_session_context_policy's _ct call below) so the
+            # summary is produced on the model this turn is actually paying
+            # for, not compact_turns' silent "deepseek" default.
+            provider=provider,
+            model=model,
         )
         if not summary:
             return prior_messages
@@ -5033,6 +5040,12 @@ async def handle_sage_chat(
                         workspace_id=normalized_workspace_id,
                         tenant_id=effective_tenant_id,
                         thread_id=thread_id,
+                        # Thread the turn's own provider/model through (same
+                        # fix as _apply_fresh_session_context_policy's _ct
+                        # call) instead of compact_turns' silent "deepseek"
+                        # default.
+                        provider=provider,
+                        model=requested_model,
                     )
                     # Reload prior_messages from compacted thread so the
                     # subsequent LLM call uses the post-compaction context.
@@ -5147,6 +5160,12 @@ async def handle_sage_chat(
                                 workspace_id=normalized_workspace_id,
                                 tenant_id=effective_tenant_id,
                                 thread_id=thread_id,
+                                # Thread the turn's own provider/model through
+                                # (same fix as the proactive pre-flight path
+                                # above) instead of compact_turns' silent
+                                # "deepseek" default.
+                                provider=provider,
+                                model=requested_model,
                             )
                             # Reload prior_messages from the compacted thread so
                             # the retried call below actually uses the
@@ -5502,6 +5521,12 @@ async def handle_sage_chat(
                             workspace_id=_ws,
                             tenant_id=_tid,
                             thread_id=_thid,
+                            # Thread the turn's own provider/model through
+                            # (same fix as the other compact_turns call sites
+                            # in this file) instead of compact_turns' silent
+                            # "deepseek" default.
+                            provider=_prov,
+                            model=_mod,
                         )
                     # else: flush failed after retry — skip compaction this round,
                     # try again next turn. Do NOT discard turns we couldn't save.

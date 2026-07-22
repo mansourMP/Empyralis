@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import os
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from server_modules import compaction_service
 from server_modules import direct_chat_generation_service
@@ -190,6 +190,37 @@ class CompactConversationMessagesInPlaceTests(unittest.TestCase):
                 model="claude-haiku-4-5-20251001",
             )
         self.assertFalse(changed)
+
+    def test_threads_provider_and_model_into_compact_turns(self) -> None:
+        # docs/design/audit-context-anatomy.md fix #3 half (a): this call
+        # site already resolves the turn's real provider/model (used two
+        # lines above it for resolve_context_window) but used to drop them
+        # on the floor when calling compact_turns, which then silently
+        # defaulted to a platform-wide "deepseek" key regardless of what
+        # the user is actually paying for.
+        messages = [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "older reply"},
+            {"role": "user", "content": "recent"},
+        ]
+        compact_turns_mock = MagicMock(return_value="unused-coro-placeholder")
+        with patch.object(
+            direct_chat_generation_service, "run_async_tool_call",
+            side_effect=self._summary_side_effect("A concise summary."),
+        ), patch("server_modules.compaction_service.find_cut_point", return_value=2), \
+             patch.object(compaction_service, "compact_turns", compact_turns_mock):
+            direct_chat_generation_service._compact_conversation_messages_in_place(
+                conversation_messages=messages,
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                provider="anthropic",
+                model="claude-haiku-4-5-20251001",
+            )
+
+        self.assertEqual(compact_turns_mock.call_count, 1)
+        call_kwargs = compact_turns_mock.call_args.kwargs
+        self.assertEqual(call_kwargs.get("provider"), "anthropic")
+        self.assertEqual(call_kwargs.get("model"), "claude-haiku-4-5-20251001")
 
 
 # ── Fix #1/#2 at the stream_provider_backed_direct_chat level ──────────────
@@ -553,6 +584,36 @@ class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
         self.assertEqual(result[1], {"role": "user", "content": "recent"})
         self.assertIn("action_loop_prior_messages_compacted", used_context)
 
+    def test_threads_provider_and_model_into_compact_turns(self) -> None:
+        # docs/design/audit-context-anatomy.md fix #3 half (a): provider/
+        # model are already parameters of this function (used above for
+        # resolve_context_window) but used to be omitted from the
+        # compact_turns call itself.
+        prior = [
+            {"role": "user", "content": "old one"},
+            {"role": "assistant", "content": "old two"},
+            {"role": "user", "content": "recent"},
+        ]
+        compact_turns_mock = AsyncMock(return_value="Summary text.")
+        with patch("server_modules.compaction_service.resolve_context_window", return_value=1), \
+             patch("server_modules.compaction_service.find_cut_point", return_value=2), \
+             patch("server_modules.compaction_service.compact_turns", new=compact_turns_mock), \
+             patch.object(sage_agent_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=True)):
+            _run(
+                sage_agent_runtime_service._action_loop_context_budget_preflight(
+                    workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                    provider="anthropic", model="claude-haiku-4-5-20251001",
+                    system_prompt="sys", user_message="hi",
+                    prior_messages=prior, channel_prior_messages=None,
+                    ctx_policy_max=0, ctx_policy_action="compact",
+                    used_context=[],
+                )
+            )
+        self.assertEqual(compact_turns_mock.call_count, 1)
+        call_kwargs = compact_turns_mock.call_args.kwargs
+        self.assertEqual(call_kwargs.get("provider"), "anthropic")
+        self.assertEqual(call_kwargs.get("model"), "claude-haiku-4-5-20251001")
+
     def test_channel_turn_gets_plain_truncation_not_llm_summary(self) -> None:
         prior = [
             {"role": "user", "content": "old one"},
@@ -596,6 +657,90 @@ class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
                 )
             )
         self.assertIs(result, prior)
+
+
+# ── Fix #3 half (b): compact_turns must never fail silently ────────────────
+
+class CompactTurnsObservabilityTests(unittest.TestCase):
+    """docs/design/audit-context-anatomy.md fix #3 half (b): compact_turns
+    used to return "" completely silently whenever the resolved provider had
+    no usable key/route (e.g. the platform-wide DeepSeek key it falls back
+    to is unset on the server) — no log, no trace event, nothing. Both must
+    now fire."""
+
+    def test_logs_warning_when_no_summary_produced(self) -> None:
+        turns = [{"role": "user", "content": "hello"}]
+        with patch(
+            "server_modules.compaction_service.openai_chat_text",
+            return_value=("", None, "", "missing API key for provider deepseek"),
+        ), self.assertLogs("server_modules.compaction_service", level="WARNING") as log_ctx:
+            summary = _run(
+                compaction_service.compact_turns(
+                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                )
+            )
+        self.assertEqual(summary, "")
+        self.assertTrue(any("no summary produced" in message for message in log_ctx.output))
+        self.assertTrue(any("deepseek" in message for message in log_ctx.output))
+
+    def test_emits_compaction_skipped_trace_event_when_trace_context_given(self) -> None:
+        turns = [{"role": "user", "content": "hello"}]
+        emit_mock = AsyncMock(return_value="tevent_123")
+        with patch(
+            "server_modules.compaction_service.openai_chat_text",
+            return_value=("", None, "", "missing API key for provider deepseek"),
+        ), patch("server_modules.agent_trace_service.emit_compaction_skipped", new=emit_mock):
+            summary = _run(
+                compaction_service.compact_turns(
+                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                    provider="deepseek", model="deepseek-chat",
+                    trace_context="fake-trace-context",
+                )
+            )
+        self.assertEqual(summary, "")
+        emit_mock.assert_called_once()
+        call_args = emit_mock.call_args.args
+        self.assertEqual(call_args[0], "fake-trace-context")
+        self.assertIn("missing API key", call_args[1])
+        self.assertEqual(call_args[2], "deepseek")
+        self.assertEqual(call_args[3], "deepseek-chat")
+
+    def test_no_trace_event_emitted_when_trace_context_is_none(self) -> None:
+        # Every pre-existing call site omits trace_context (it defaults to
+        # None) — must keep working exactly as before, with only the log
+        # (asserted above) as the observability signal.
+        turns = [{"role": "user", "content": "hello"}]
+        emit_mock = AsyncMock(return_value=None)
+        with patch(
+            "server_modules.compaction_service.openai_chat_text",
+            return_value=("", None, "", "missing API key for provider deepseek"),
+        ), patch("server_modules.agent_trace_service.emit_compaction_skipped", new=emit_mock):
+            summary = _run(
+                compaction_service.compact_turns(
+                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                )
+            )
+        self.assertEqual(summary, "")
+        emit_mock.assert_not_called()
+
+    def test_succeeds_normally_when_summary_is_produced(self) -> None:
+        # Regression guard: the observability additions above must not
+        # change the happy path at all.
+        turns = [{"role": "user", "content": "hello"}]
+        with patch(
+            "server_modules.compaction_service.openai_chat_text",
+            return_value=("A real summary.", {"total_tokens": 10}, "deepseek-chat", ""),
+        ), patch(
+            "server_modules.control_plane_repository.upsert_agent_turn",
+            new=AsyncMock(return_value=None),
+        ):
+            summary = _run(
+                compaction_service.compact_turns(
+                    turns=turns, workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                    provider="anthropic", model="claude-haiku-4-5-20251001",
+                )
+            )
+        self.assertEqual(summary, "A real summary.")
 
 
 if __name__ == "__main__":

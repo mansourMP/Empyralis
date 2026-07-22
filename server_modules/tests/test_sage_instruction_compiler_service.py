@@ -298,6 +298,38 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertEqual(bundle.messages[-1], {"role": "user", "content": "what were we discussing?"})
         self.assertEqual(bundle.diagnostics["recent_messages_included"], 2)
 
+    def test_recent_message_history_has_aggregate_char_budget(self) -> None:
+        # docs/design/audit-context-anatomy.md fix #2: the last 16 messages
+        # each capped at 4,000 chars, with no aggregate ceiling, is a ~64,000
+        # char (~16,000 token) worst case. Sixteen full-length messages here
+        # must be squeezed down to SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT,
+        # dropping the OLDEST ones first and keeping the most recent intact.
+        recent = [
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"msg{i:02d}-".ljust(4000, "x"),
+            }
+            for i in range(16)
+        ]
+
+        bundle = compiler.build_sage_instruction_bundle(
+            workspace_id="ws-1",
+            message="continue where we left off",
+            provider="deepseek",
+            model="deepseek-chat",
+            recent_messages=recent,
+            capability_payload={"items": []},
+        )
+
+        total_chars = sum(len(m["content"]) for m in bundle.prior_messages)
+        self.assertLessEqual(total_chars, compiler.SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT)
+        self.assertGreater(len(bundle.prior_messages), 0)
+        # The most recent message (msg15) must survive; the oldest (msg00)
+        # must be the one dropped, not silently truncated mid-content.
+        self.assertTrue(bundle.prior_messages[-1]["content"].startswith("msg15-"))
+        surviving_content = "".join(m["content"] for m in bundle.prior_messages)
+        self.assertNotIn("msg00-", surviving_content)
+
 
 if __name__ == "__main__":
     unittest.main()
