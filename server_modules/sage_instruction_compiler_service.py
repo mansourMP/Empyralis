@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 from server_modules.channel_adapter import ChannelOrigin
 
 from server_modules import sage_skills_api
+from server_modules import tool_registry_service
 from server_modules import workspace_context
 from server_modules import workspace_context_memory_adapter
 
@@ -45,12 +46,38 @@ ALWAYS_LOAD_INSTRUCTION_FILES: tuple[str, ...] = tuple(
 )
 ROOT_MEMORY_SECTION_CHAR_LIMIT = 12_000
 ROOT_MEMORY_TOTAL_CHAR_LIMIT = 48_000
-ROOT_MEMORY_BRIEF_SECTION_CHAR_LIMIT = 900
-ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT = 4_800
+# docs/design/context-engineering-plan.md item 7 (read side): MEMORY.md used
+# to compete with SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS for a shared
+# 4,800-char "brief" pool (the now-removed ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT)
+# — on any workspace where those six files were even modestly populated,
+# MEMORY.md's remaining share went to zero and the whole index silently
+# vanished from context (verified empirically while building this fix: six
+# ~1KB root files alone already exhausted the pool). The write side
+# (memory_service.MEMORY_MD_INDEX_MAX_LINES/_BYTES, same plan item) already
+# guarantees MEMORY.md itself never exceeds 200 lines / 25KB — Claude Code's
+# own published discipline, adopted verbatim by founder decision. This gives
+# MEMORY.md a matching, DEDICATED read-time allowance, decoupled from the
+# other six files' consumption, so an index the agent curated to fit that
+# write-time cap loads WHOLE, never silently truncated by an unrelated
+# budget. Imported from memory_service so the two sides can't drift apart;
+# falls back to the same 25,000-char number if that import ever fails.
+try:
+    from server_modules.memory_service import MEMORY_MD_SELF_CURATION_CAP_CHARS as _MEMORY_MD_WRITE_CAP_CHARS
+except Exception:
+    _MEMORY_MD_WRITE_CAP_CHARS = 25_000
+MEMORY_MD_LOAD_CHAR_LIMIT = int(_MEMORY_MD_WRITE_CAP_CHARS) or 25_000
 SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT = 12_000
 SAGE_RETRIEVED_MEMORY_CHAR_LIMIT = 3_000
 SAGE_PROFILE_CONTEXT_CHAR_LIMIT = 1_500
 SAGE_HEARTBEAT_CONTEXT_CHAR_LIMIT = 900
+# docs/design/context-engineering-plan.md item 10: the specialist branch
+# (sage_agent_runtime_service.py) has no compiler budget of its own at all —
+# unlike the master path, nothing there ever clipped the assembled prompt
+# against SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT. Give the specialist's
+# newly-added capability manifest (previously omitted entirely) an explicit
+# ceiling of its own rather than leaving it unbounded like every other piece
+# of that branch's prompt.
+SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT = 3_000
 # docs/design/audit-context-anatomy.md fix #2: _normalize_recent_messages
 # previously only capped each of the last 16 messages at 4,000 chars with no
 # ceiling on the block as a whole — 16 genuinely long turns is ~64,000 chars
@@ -71,9 +98,37 @@ CAPABILITY_MANIFEST_MAX_ITEMS = 16
 # version of the cap-sizing follow-up audit item 6 calls for; that broader
 # "scale with context window like Claude Code" redesign is still open.
 CAPABILITY_MANIFEST_SKILL_RESERVED_ITEMS = 6
-CAPABILITY_DESCRIPTION_CHAR_LIMIT = 140
+# docs/design/context-engineering-plan.md item 4: this limit now applies ONLY
+# to manifest-only capabilities (named skills, and connector/MCP/other tools
+# not yet natively schema'd this turn) — the slots where the manifest prose
+# is the ONLY channel the model has. It used to also truncate tools that
+# already have a full, native function schema in the same request (see
+# _has_native_schema_this_turn / MODEL_HIDDEN_LEGACY_TOOLS below), which was
+# pure duplication (audit-context-anatomy.md §3, §7.3) that starved the
+# slots with no other channel. Raised from 140 -> 220 chars: empirically
+# covers the large majority of real skill/tool descriptions in full
+# (measured against the live builtin+skill catalog while building this fix
+# — most cluster 90-260 chars) while still bounding the handful of outliers
+# (e.g. send_image, skill_write) and leaving headroom, inside the same
+# shared SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT total, for
+# MEMORY_MD_LOAD_CHAR_LIMIT below (item 7, read side — see that constant's
+# docstring). 320 was measured and tried first; 220 was chosen instead once
+# item 7's read-side fix was added to this same wave, to keep a realistic
+# rich-workspace turn from consistently maxing out the shared budget.
+CAPABILITY_DESCRIPTION_CHAR_LIMIT = 220
 MEMORY_MANIFEST_LIMIT = 60
 MODEL_HIDDEN_LEGACY_TOOLS = {"memory_update"}
+# Tools with a real, native function schema on this turn's `tools=` payload
+# (see tool_registry_service.ALWAYS_ON_TOOL_NAMES and
+# sage_agent_runtime_service._direct_tool_bundle's unconditional fleet__*
+# addition on the master path) need no prose re-description in the manifest
+# text below — the model already has their full name/description/parameters
+# from the real schema. A specialist's capability_manifest never contains
+# fleet__* tools by the time it reaches this module (filtered upstream via
+# _specialist_tool_allowed, sage_agent_runtime_service.py's specialist
+# branch), so treating any "fleet__"-prefixed tool_id as native is accurate
+# for whichever caller (master or specialist) passed the manifest in.
+_NATIVE_SCHEMA_TOOL_NAMES = frozenset(tool_registry_service.ALWAYS_ON_TOOL_NAMES)
 
 
 @dataclass(frozen=True)
@@ -316,15 +371,18 @@ def build_root_memory_brief_sections(context_files: Mapping[str, Any] | None) ->
 
     # ── MEMORY.md: index only, capped + backed by memory_search/memory_get ──
     # This is the one file that keeps the Phase N (Stage 5) index-only
-    # treatment — correct and intentional, not part of the regression.
+    # treatment — correct and intentional, not part of the regression. Its
+    # own dedicated MEMORY_MD_LOAD_CHAR_LIMIT (matching the write-side 200-
+    # line/25KB cap) is used here instead of competing with the six
+    # always-load files above for a shared pool — see that constant's
+    # docstring for why (item 7, read side).
     mem_content = _meaningful_context_file_content("MEMORY.md", payload.get("MEMORY.md"))
     if mem_content:
         consumed_paths.add("MEMORY.md")
         total_source_chars += len(mem_content)
-        remaining = ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT - total_brief_chars
         clipped, was_truncated = _clip_text(
             mem_content,
-            min(ROOT_MEMORY_BRIEF_SECTION_CHAR_LIMIT, remaining),
+            MEMORY_MD_LOAD_CHAR_LIMIT,
             "content truncated due to length limit",
         )
         sanitized = workspace_context_memory_adapter.strip_red_facts_from_external_context(clipped)
@@ -431,6 +489,21 @@ def build_model_capability_manifest(capability_payload: Mapping[str, Any] | None
     return manifest
 
 
+def _has_native_schema_this_turn(tool_id: str) -> bool:
+    """True when ``tool_id`` already has a real, callable function schema in
+    this turn's native ``tools=`` payload — meaning re-describing it in the
+    manifest's prose is pure duplication (docs/design/context-engineering-plan.md
+    item 4; audit-context-anatomy.md §3, §7.3). A native tool still gets a
+    full manifest line, not the name-only collapse, when it carries
+    safety-relevant metadata the native JSON schema can't express — see the
+    ``carries_unexpressed_flags`` check at the call site below."""
+    if not tool_id:
+        return False
+    if tool_id in _NATIVE_SCHEMA_TOOL_NAMES:
+        return True
+    return tool_id.startswith("fleet__")
+
+
 def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) -> str:
     if not capability_manifest:
         return ""
@@ -441,6 +514,25 @@ def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) 
     all_items = list(capability_manifest)
     skill_items = [item for item in all_items if _coerce_text(item.get("type")) == "skill"]
     other_items = [item for item in all_items if _coerce_text(item.get("type")) != "skill"]
+
+    # Dedup pass (item 4): a tool already native this turn needs no prose
+    # description here unless it carries approval/runtime metadata the
+    # native schema itself can't express. Everything else in `other_items`
+    # is manifest-only — skills and not-yet-pulled connector/MCP actions
+    # have NO other channel to the model until skill_invoke/query_tool_registry
+    # actually pulls them, so they keep the full (now un-truncated) treatment.
+    native_only_tool_ids: list[str] = []
+    manifest_only_other: list[Mapping[str, Any]] = []
+    for item in other_items:
+        tool_id = _coerce_text(item.get("tool"))
+        carries_unexpressed_flags = bool(item.get("approval_required")) or (
+            _coerce_text(item.get("runtime_requirement")) not in ("", "cloud")
+        )
+        if _has_native_schema_this_turn(tool_id) and not carries_unexpressed_flags:
+            native_only_tool_ids.append(tool_id)
+        else:
+            manifest_only_other.append(item)
+
     # Within the reserved skill slice, workspace/global/bundled-filesystem
     # skills (source != "built_in") outrank the ~20 hardcoded
     # skill_registry._BUILT_IN_SKILLS entries (stable sort keeps each
@@ -454,7 +546,9 @@ def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) 
     skill_items = sorted(skill_items, key=lambda item: _coerce_text(item.get("source")) == "built_in")
     skill_budget = min(len(skill_items), CAPABILITY_MANIFEST_SKILL_RESERVED_ITEMS, CAPABILITY_MANIFEST_MAX_ITEMS)
     other_budget = CAPABILITY_MANIFEST_MAX_ITEMS - skill_budget
-    shown_items = other_items[:other_budget] + skill_items[:skill_budget]
+    shown_other = manifest_only_other[:other_budget]
+    shown_skills = skill_items[:skill_budget]
+    shown_items = shown_other + shown_skills
     for item in shown_items:
         label = _coerce_text(item.get("label")) or _coerce_text(item.get("tool"))
         tool = _coerce_text(item.get("tool"))
@@ -466,16 +560,62 @@ def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) 
         approval = "approval required" if item.get("approval_required") else "no approval required"
         runtime = _coerce_text(item.get("runtime_requirement")) or "cloud"
         lines.append(f"- {tool}: {label}. {description} ({runtime}; {approval}).")
-    omitted = len(capability_manifest) - len(shown_items)
+    if native_only_tool_ids:
+        lines.append(
+            "- Also callable now, already fully described in your own tool schemas "
+            "(no separate entry needed here): " + ", ".join(native_only_tool_ids) + "."
+        )
+    omitted = len(manifest_only_other) + len(skill_items) - len(shown_items)
     if omitted > 0:
         lines.append(f"- ... {omitted} more callable tool(s); use the capability panel or memory tools for details.")
     return "\n".join(lines)
+
+
+def render_capability_manifest_text(
+    capability_manifest: Sequence[Mapping[str, Any]],
+    *,
+    char_limit: int | None = None,
+) -> str:
+    """Public entry point for the "## Callable Tools" manifest text, for
+    callers outside this module. Added for docs/design/context-engineering-
+    plan.md item 10: sage_agent_runtime_service's specialist branch used to
+    omit the capability manifest entirely (audit-system-prompt-doctrine.md
+    §2b, §4.1&5) — it now calls this with a capability_manifest already
+    filtered down to what that specific specialist install can call (see
+    _specialist_tool_allowed there), getting the same dedup/un-truncation
+    treatment (item 4) the master path gets, scoped correctly instead of
+    unscoped. ``char_limit`` (see SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT)
+    gives that branch a budget cap of its own — the master path is capped by
+    the shared system-context budget already; the specialist branch has no
+    such budget at all, so this function must enforce its own."""
+    text = _capability_manifest_text(capability_manifest)
+    if char_limit is None or not text:
+        return text
+    clipped, _truncated = _clip_text(text, char_limit, "capability manifest truncated")
+    return clipped
 
 
 def _platform_paid_ai_source(*, billing_source: str | None = None, ai_tier: str | None = None) -> bool:
     billing_token = _coerce_text(billing_source).lower()
     tier_token = _coerce_text(ai_tier).lower().replace("-", "_")
     return billing_token == "empyralis_credits" or tier_token in {"light", "pro", "max"}
+
+
+# docs/design/context-engineering-plan.md item 9: the doctrine audit's #1
+# finding was a zero-hit grep for any first-priority phrasing anywhere in the
+# compiled prompt (audit-system-prompt-doctrine.md §3 row 1, §4.4). This is
+# that statement — it must render FIRST, before the scene-setting sentence
+# and before the memory rule, on every path (see _kernel_prompt below).
+# Adapted from agent-service-doctrine-research.md §B4's identity/priority
+# template to what Empyralis actually is: a service that works the owner's
+# standing goals and in-the-moment requests autonomously, choosing its own
+# tools — never an approval workflow (owner law: no approval language here).
+_FIRST_PRIORITY_STATEMENT = (
+    "Your job: work the user's standing goals and whatever they ask, end to end. Decide "
+    "for yourself which of your tools, skills, memory, and connected apps a task needs — "
+    "the user will not name one for you. Verify results before reporting them, and keep "
+    "going until the work is actually done, not merely attempted."
+)
 
 
 def _kernel_prompt(
@@ -485,18 +625,29 @@ def _kernel_prompt(
     billing_source: str | None = None,
     ai_tier: str | None = None,
 ) -> str:
+    # Why-first (item 9): the durability reason now leads the memory rule
+    # instead of being buried after the mechanical recipe
+    # (audit-system-prompt-doctrine.md §3 "Memory (master)" row, §5.5) — the
+    # model should know WHY it's silently calling a tool before it's told
+    # HOW. The taxonomy of what each root file is FOR (SOUL/IDENTITY/USER/
+    # GOALS/AGENTS/TOOLS/MEMORY.md) used to exist only as a Python comment
+    # (see ROOT_MEMORY_BRIEF_PRIORITY above) — it's surfaced to the model in
+    # the root-memory-brief header instead of duplicated here (see
+    # build_sage_instruction_bundle's "## Customer Root Memory" section),
+    # keeping this rule itself focused on one thing: why memory exists and
+    # when to reach for it.
     memory_rule = (
-        "\n\nCRITICAL — Durable Memory Rule:\n"
+        "\n\nMemory — why first: everything the user tells you is gone once this session "
+        "ends unless a memory tool actually runs — that's the only reason the steps below "
+        "exist.\n"
         "\n"
         "## When to WRITE (autonomous fact capture)\n"
-        "After every user message, silently check: did the user share anything you should remember?\n"
-        "Facts to capture include: name, location, job, company, role, preferences (favorites,\n"
-        "likes, dislikes), goals, projects, deadlines, decisions, contact info, accounts, tools.\n"
-        "If yes, call memory_write with path='MEMORY.md' and mode='append' to save each fact.\n"
-        "Do this SILENTLY — do NOT say \"I'll save that\" or \"let me remember that.\" Just call\n"
-        "the tool without announcing it, then continue the conversation naturally.\n"
-        "A text reply saying \"I'll remember that\" does NOT persist anything — only an actual\n"
-        "memory_write tool call saves data across sessions.\n"
+        "After every user message, silently check: did they share something durable and "
+        "reusable — identity, preferences, goals, projects, deadlines, decisions, accounts, "
+        "tools — not a one-off detail? If yes, call memory_write with path='MEMORY.md' and "
+        "mode='append'. Do this SILENTLY: never say \"I'll remember that\" in place of the "
+        "tool call, and never announce the call either — just make it, then continue "
+        "naturally. A text reply alone persists nothing.\n"
         "\n"
         "## When to READ (mandatory memory lookup)\n"
         "When the user asks a vague recall question (\"what do you know about me\", \"what were we\n"
@@ -504,17 +655,12 @@ def _kernel_prompt(
         "you MUST call memory_search or memory_read FIRST — before composing your answer.\n"
         "Never say \"I don't have any information\" without actually checking memory first.\n"
         "If memory is empty after checking, say \"I don't have anything saved yet\" — not \"I don't\n"
-        "remember\" or \"we haven't discussed that.\"\n"
+        "remember.\"\n"
         "\n"
         "## Format for MEMORY.md\n"
         "Write one fact per line: \"- key: value\" or \"- category: fact\". Examples:\n"
         "- name: Mansur\n"
-        "- preference: favorite colour is forest green\n"
-        "- project: Q3 marketing plan for Acme account\n"
-        "- vehicle: Tesla Model S\n"
-        "\n"
-        "These rules ensure facts survive across conversations. Without memory_write calls,\n"
-        "everything the user tells you is lost when the session ends."
+        "- project: Q3 marketing plan for Acme account"
     )
     # Deliberately no blanket "computer capabilities" claim here — whether a
     # personal computer is actually paired and online varies per workspace
@@ -523,11 +669,13 @@ def _kernel_prompt(
     # to every turn's system_prompt, right below the callable-tools list.
     if _platform_paid_ai_source(billing_source=billing_source, ai_tier=ai_tier):
         return (
+            _FIRST_PRIORITY_STATEMENT + "\n\n"
             "You are operating inside Empyralis, an environment connecting the user with AI, tools, files, memory, and apps. "
             "The active AI source is Empyralis AI. "
             "Workspace identity and role files may be available through tools or workspace context when relevant."
         ) + memory_rule
     return (
+        _FIRST_PRIORITY_STATEMENT + "\n\n"
         "You are operating inside Empyralis, an environment connecting the user with this AI model, tools, files, memory, and apps. "
         "Workspace identity and role files may be available through tools or workspace context when relevant."
     ) + memory_rule
@@ -712,7 +860,11 @@ def build_sage_instruction_bundle(
         append_section(
             "root_memory_brief",
             "## Customer Root Memory\n"
-            "These customer-editable files are Sage's durable personal behavior layer. Kernel rules override them. Use memory_search and memory_get for full file detail.\n\n"
+            "These customer-editable files are Sage's durable personal behavior layer, each with its own "
+            "job: SOUL (persona), IDENTITY (how you present), USER (who they are), GOALS (what they're "
+            "working toward), AGENTS (your standing operating rules), TOOLS (tool notes) — loaded in full "
+            "every turn; MEMORY.md is a searchable index only, not the full record. Kernel rules override "
+            "them. Use memory_search and memory_get for full file detail.\n\n"
             + "\n\n".join(root_sections),
         )
     if _coerce_text(profile_context):

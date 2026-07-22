@@ -56,14 +56,22 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertLess(len(bundle.system_prompt.split()), 100)
 
     def test_root_memory_brief_preserves_files_without_full_dump(self) -> None:
-        long_tail = "x" * 5000 + " SHOULD_NOT_APPEAR"
+        # A realistic-sized MEMORY.md (well under the write-side 200-line/
+        # 25KB cap, docs/design/context-engineering-plan.md item 7) must
+        # load in full now — see test_memory_md_gets_its_own_dedicated_load_
+        # budget below for the "genuinely oversized still truncates" and
+        # "not silently zeroed by the other six root files" regressions.
+        # SOUL/GOALS stay tiny here so this test's real point — ordering,
+        # Root Memory Index, legacy/extra files, workspace memory paths —
+        # isn't itself squeezed out by the shared system-prompt budget.
+        memory_note = "- Long-term preference: " + ("durable detail. " * 30)
         bundle = compiler.build_sage_instruction_bundle(
             workspace_id="ws-1",
             message="use my memory",
             provider="deepseek",
             model="deepseek-chat",
             root_context_files={
-                "MEMORY.md": "# Memory\n\n- Long-term preference.\n" + long_tail,
+                "MEMORY.md": "# Memory\n\n" + memory_note,
                 "GOALS.md": "# Goals\n\n- Ship Sage.",
                 "SOUL.md": "# Soul\n\n- Be direct.",
                 "HEARTBEAT.md": "# Heartbeat\n\n- Legacy state.",
@@ -80,13 +88,59 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertIn("HEARTBEAT.md", text)
         self.assertIn("CUSTOM.md", text)
         self.assertIn("memory/files/research.md", text)
-        self.assertNotIn("SHOULD_NOT_APPEAR", text)
+        # The fix itself: a MEMORY.md well under the write-side cap loads
+        # WHOLE, not silently cut — no truncation marker anywhere near it.
+        self.assertIn(memory_note.strip(), text)
+        self.assertNotIn("content truncated due to length limit", text)
         self.assertFalse(bundle.diagnostics["full_root_memory_included"])
-        self.assertGreater(bundle.diagnostics["root_memory_source_chars"], bundle.diagnostics["root_memory_brief_chars"])
         self.assertEqual(bundle.diagnostics["included_official_root_files"], ["SOUL.md", "GOALS.md", "MEMORY.md"])
         self.assertEqual(bundle.diagnostics["legacy_context_files"], ["HEARTBEAT.md"])
         self.assertEqual(bundle.diagnostics["extra_context_files"], ["CUSTOM.md"])
         self.assertEqual(bundle.diagnostics["available_memory_file_count"], 1)
+
+    def test_memory_md_gets_its_own_dedicated_load_budget(self) -> None:
+        # docs/design/context-engineering-plan.md item 7 (read side): before
+        # this fix, MEMORY.md competed with SOUL/IDENTITY/USER/GOALS/AGENTS/
+        # TOOLS for one shared 4,800-char pool and went silently missing
+        # entirely once those six were even modestly populated — regardless
+        # of how small MEMORY.md itself was. Six ~1KB root files (a
+        # realistic persona/identity/goals size, nowhere near either file's
+        # own generous per-file cap) already reproduced total silence on a
+        # clean HEAD checkout of this exact scenario.
+        root_files = {
+            name: f"# {name}\n" + ("durable operating detail. " * 60)
+            for name in ("SOUL.md", "IDENTITY.md", "USER.md", "GOALS.md", "AGENTS.md", "TOOLS.md")
+        }
+        root_files["MEMORY.md"] = "# Memory\n" + "\n".join(
+            f"- fact {i}: something durable and worth remembering" for i in range(60)
+        )
+        sections, diagnostics = compiler.build_root_memory_brief_sections(root_files)
+        joined = "\n\n".join(sections)
+
+        self.assertIn("### MEMORY.md (Agent Memory Index)", joined)
+        self.assertIn("fact 0:", joined)
+        self.assertIn("fact 59:", joined)
+        self.assertIn("MEMORY.md", diagnostics["included_official_root_files"])
+
+        # The cap is dedicated, not gone: content genuinely beyond the
+        # write-side allowance (MEMORY_MD_LOAD_CHAR_LIMIT) still truncates,
+        # independent of how big the other six files are.
+        oversized = dict(root_files)
+        oversized["MEMORY.md"] = "# Memory\n" + ("x" * (compiler.MEMORY_MD_LOAD_CHAR_LIMIT + 5_000))
+        oversized_sections, _ = compiler.build_root_memory_brief_sections(oversized)
+        oversized_joined = "\n\n".join(oversized_sections)
+        memory_section = next(s for s in oversized_sections if s.startswith("### MEMORY.md"))
+        self.assertIn("content truncated due to length limit", memory_section)
+        self.assertLessEqual(len(memory_section), compiler.MEMORY_MD_LOAD_CHAR_LIMIT + 200)
+
+        # A MEMORY.md right at the write-side cap loads WHOLE — Claude
+        # Code's own discipline: a curated-under-cap index is never
+        # silently truncated at load.
+        at_cap = dict(root_files)
+        at_cap["MEMORY.md"] = "# Memory\n" + ("- fact: durable detail\n" * 1)[: compiler.MEMORY_MD_LOAD_CHAR_LIMIT - 500]
+        at_cap_sections, _ = compiler.build_root_memory_brief_sections(at_cap)
+        at_cap_memory_section = next(s for s in at_cap_sections if s.startswith("### MEMORY.md"))
+        self.assertNotIn("content truncated due to length limit", at_cap_memory_section)
 
     def test_sage_chat_always_loads_instruction_files_every_turn(self) -> None:
         # Regression test for docs/design/memory-context-design.md finding #1:

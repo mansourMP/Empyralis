@@ -2644,5 +2644,152 @@ class SageAgentRuntimeSpecialistMemoryLoadTests(unittest.TestCase):
         self.assertNotIn("## Your memory", system_prompt)
 
 
+class SageAgentRuntimeSpecialistCapabilityManifestTests(unittest.TestCase):
+    """docs/design/context-engineering-plan.md item 10 (doctrine rewrite part
+    2): a specialist's turn used to include NO capability manifest at all —
+    the audit's sharpest doctrine gap and a plausible root cause of the
+    founder's mid-task hallucination complaint. This proves the fix: a
+    specialist now gets a "## Callable Tools" manifest, scoped to what THAT
+    install can actually call via the SAME per-install tool scoping the
+    native tool list already uses (_specialist_tool_allowed) — never an
+    unscoped copy of the workspace-wide manifest."""
+
+    @staticmethod
+    def _spec(agent_install_id="agent-a", **overrides):
+        base = dict(
+            agent_install_id=agent_install_id,
+            agent_label="Research Agent",
+            agent_kind="specialist",
+            persona="You are a research specialist.",
+        )
+        base.update(overrides)
+        return SpecialistRuntimeContext(**base)
+
+    @staticmethod
+    def _run_chat(*, specialist_context, capability_items, toolset):
+        mock_agent_provider = AsyncMock(
+            return_value=("anthropic", {"api_key": "sk-agent-own-key"}, "byok_api")
+        )
+        mock_workspace_provider = AsyncMock(
+            return_value=("deepseek", {"api_key": "sk-workspace-default"})
+        )
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+                return_value={},
+            ),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=mock_workspace_provider),
+            patch("server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider", new=mock_agent_provider),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_instruction_compiler_service.sage_skills_api.build_sage_capabilities_payload",
+                return_value={"items": capability_items},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_specialist_toolset",
+                new=AsyncMock(return_value=toolset),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=specialist_context,
+            ))
+        return mock_stream
+
+    def test_specialist_now_receives_a_capability_manifest_at_all(self):
+        """Before item 10, this header never appeared anywhere in a
+        specialist's system prompt, regardless of what was bound."""
+        capability_items = [
+            {"tool_id": "web__search", "label": "Web search", "description": "Search the web.", "status": "ready", "type": "tool"},
+        ]
+        toolset = {
+            "core": {"task_complete", "query_tool_registry", "update_plan", "web__search"},
+            "connectors": set(), "tools": set(), "raw_tool_toggles": {},
+            "mandate_audience_tools": [], "capability_providers": frozenset(),
+        }
+        mock_stream = self._run_chat(
+            specialist_context=self._spec(), capability_items=capability_items, toolset=toolset,
+        )
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertIn("## Callable Tools", system_prompt)
+
+    def test_specialist_manifest_is_scoped_not_the_full_workspace_list(self):
+        capability_items = [
+            {"tool_id": "web__search", "label": "Web search", "description": "Search the web.", "status": "ready", "type": "tool"},
+            # Operator-only fleet tool: never in a specialist's core/tools/connectors.
+            {"tool_id": "fleet__create_agent", "label": "Create Agent", "description": "Create a new specialist agent in the workspace.", "status": "ready", "type": "tool"},
+            # Capability-gated (image_generation); no resolved provider for this agent.
+            {"tool_id": "generate_image", "label": "Generate image", "description": "Generate one or more images from a prompt and save them locally.", "status": "ready", "type": "tool"},
+            # A workspace-authored skill this specialist IS bound to (skill_invoke enabled).
+            {"tool_id": "skill_invoke", "label": "acme-quote-builder", "description": "Builds a customer quote from the workspace price list. Call skill_invoke with skill_id=\"acme-quote-builder\" to run it.", "status": "ready", "type": "skill", "source": "workspace"},
+        ]
+        toolset = {
+            "core": {"task_complete", "query_tool_registry", "update_plan", "web__search", "web__fetch", "memory_write", "memory_read", "memory_search", "memory_get", "memory_append_daily_note", "hardware__action"},
+            "connectors": set(),  # "fleet" NOT bound
+            "tools": {"skill_invoke"},  # explicitly enabled for this install
+            "raw_tool_toggles": {},
+            "mandate_audience_tools": [],
+            "capability_providers": frozenset(),  # image_generation NOT resolved
+        }
+        mock_stream = self._run_chat(
+            specialist_context=self._spec(), capability_items=capability_items, toolset=toolset,
+        )
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+
+        self.assertIn("## Callable Tools", system_prompt)
+        # Allowed + native (item 4 dedup): name-only mention, not a full
+        # re-described line, but still present so the model knows it's live.
+        self.assertIn("web__search", system_prompt)
+        # Never bound for this specialist — must not leak into its manifest.
+        self.assertNotIn("fleet__create_agent", system_prompt)
+        self.assertNotIn("generate_image", system_prompt)
+        # Allowed + manifest-only (no native schema): full description line,
+        # un-truncated (item 4) since this is skill_invoke's only channel.
+        self.assertIn("acme-quote-builder", system_prompt)
+        self.assertIn("Builds a customer quote from the workspace price list", system_prompt)
+
+    def test_specialist_with_no_bound_tools_gets_no_manifest_leak(self):
+        """An install bound to nothing beyond bare core tools must not see
+        anything it can't call — the manifest degrades to native-only (or
+        nothing) rather than ever showing an unscoped workspace-wide list."""
+        capability_items = [
+            {"tool_id": "fleet__list_agents", "label": "List Agents", "description": "List all agents in the workspace.", "status": "ready", "type": "tool"},
+            {"tool_id": "skill_invoke", "label": "some-other-skill", "description": "Some other workspace skill.", "status": "ready", "type": "skill", "source": "workspace"},
+        ]
+        toolset = {
+            "core": {"task_complete", "query_tool_registry", "update_plan"},
+            "connectors": set(), "tools": set(), "raw_tool_toggles": {},
+            "mandate_audience_tools": [], "capability_providers": frozenset(),
+        }
+        mock_stream = self._run_chat(
+            specialist_context=self._spec(), capability_items=capability_items, toolset=toolset,
+        )
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertNotIn("fleet__list_agents", system_prompt)
+        self.assertNotIn("some-other-skill", system_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

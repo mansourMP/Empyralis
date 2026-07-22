@@ -4332,11 +4332,50 @@ async def handle_sage_chat(
             "3. Never fabricate: don't claim a lookup happened when it "
             "didn't, and don't invent facts dressed up as a real result."
         )
+        # docs/design/context-engineering-plan.md item 10 (doctrine rewrite
+        # part 2): specialists used to get NO capability manifest at all —
+        # the audit's sharpest doctrine gap and a plausible root cause of
+        # the founder's mid-task hallucination complaint (a specialist has
+        # no narrative why/when for any capability beyond whatever its own
+        # persona text happens to mention). instruction_bundle.
+        # capability_manifest is already computed every turn regardless of
+        # _spec (see build_sage_instruction_bundle above, called
+        # unconditionally) — it is workspace-wide, not scoped to this
+        # install, so it must be filtered through the SAME per-install tool
+        # scoping the native tool list already uses
+        # (_specialist_tool_allowed, defined above) before rendering, or a
+        # specialist would be told about tools (fleet management, unbound
+        # connectors) it can never actually call. This re-resolves the
+        # specialist toolset rather than threading it down from
+        # _run_sage_action_loop_v3 (computed there independently, after the
+        # prompt is already built) — one extra per-turn lookup, consistent
+        # with every other per-turn context fetch already in this function
+        # (profile/memory/attachments/MCP inventory), not a new pattern.
+        _spec_capability_manifest_block = ""
+        try:
+            _spec_toolset_for_manifest = await _resolve_specialist_toolset(
+                workspace_id=normalized_workspace_id,
+                tenant_id=normalized_tenant_id,
+                agent_install_id=_acting_install_id,
+            )
+        except Exception:
+            _spec_toolset_for_manifest = None
+        if _spec_toolset_for_manifest is not None:
+            _spec_scoped_manifest = [
+                _item for _item in (instruction_bundle.capability_manifest or [])
+                if _specialist_tool_allowed(str(_item.get("tool") or ""), _spec_toolset_for_manifest)
+            ]
+            _spec_manifest_text = sage_instruction_compiler_service.render_capability_manifest_text(
+                _spec_scoped_manifest,
+                char_limit=sage_instruction_compiler_service.SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT,
+            )
+            if _spec_manifest_text:
+                _spec_capability_manifest_block = "\n\n" + _spec_manifest_text
         # memory_context here is this install's own MEMORY.md brief (see the
         # "Specialist turn" branch above) — empty when the agent's MEMORY.md
         # is still the untouched default scaffold, never fabricated.
         _spec_memory_block = f"\n\n## Your memory\n{memory_context}" if memory_context else ""
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_channel_action_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
