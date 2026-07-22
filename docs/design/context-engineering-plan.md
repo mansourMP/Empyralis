@@ -139,11 +139,25 @@ memory correctness) × (smallness/safety of the change). Surgical fixes first, s
 - **Evidence:** `audit-context-anatomy.md` §2, §7.5 — `direct_chat_runtime_service.py:1-35`
   self-documented DORMANT, `NameError`-in-waiting at line 1079; `audit-system-prompt-doctrine.md`
   §1 footnote — `sage_agent_runtime_service.py:2360` comment vs. `tool_registry_service.py:34-47`.
-- **Files touched:** `direct_chat_runtime_service.py`, `direct_chat_prompt_service.py`,
-  `direct_chat_operator_binding_service.py`, `sage_agent_runtime_service.py` (comment only).
-- **Risk:** near-zero — deleting confirmed-dead code.
-- **Verify:** grep confirms zero remaining importers; full test suite passes unchanged (nothing live
-  exercises the dead path).
+- **⚠️ SCOPE CORRECTED 2026-07-23 (independent re-verification before deletion):** the module is
+  functionally dead (nothing live ever CALLS its functions — call-path trace confirmed through
+  `turn_runtime.execute_agent_turn_request` → `direct_chat_service.execute_direct_chat_turn_request`)
+  but the original "zero remaining importers" claim is FALSE. It is load-bearing for imports:
+  `direct_chat_runtime_facade_service.py:9` (constructs `DirectChatRuntimeServices` at :206),
+  `direct_chat_runtime_entry_facade_service.py:5`, transitively `direct_chat_composition_service.py`,
+  `direct_chat_callback_facade_service.py`, `direct_chat_runtime_exports.py` (module-level import in
+  `sage_agent_runtime_service.py:20,54`, `direct_chat_generation_service.py`, `mcp_server.py`), and a
+  dynamic `import_module("server_modules.direct_chat_runtime_exports", ...)` that runs on EVERY live
+  `/turn` request (`direct_chat_stream_runtime_service.py` via `runtime_runs_api.py:826,1023`).
+  Standalone deletion = ModuleNotFoundError on server import or on every chat turn.
+- **Status:** the safe half is DONE (stale "8 core tools"→"12 core tools" comment fixed, landed with
+  `996b8fdbe`). The module itself is tracked as **known-dead-but-load-bearing-for-imports**; deletion
+  requires a properly-scoped facade-chain refactor (6-8 files: both facade services, composition,
+  stream-runtime `fromlist` import, `DirectChatExecutionServices` in `direct_chat_service.py`) —
+  re-filed as a deliberate refactor item, NOT quick cleanup. Do not delete on the old evidence.
+- **Risk (corrected):** standalone deletion would crash production; refactor-scoped removal is medium.
+- **Verify (for the eventual refactor):** grep for importers (not just callers) across server_modules/
+  + scripts/ + mcp_server.py; server imports cleanly; a live /turn round-trip succeeds.
 
 ### 6. Memory provenance + trust-weighted injection + write filters — elevated priority, differentiator
 - **What:** every memory write carries who/what/which-channel it came from and a trust tier (owner
