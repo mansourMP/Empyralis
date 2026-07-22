@@ -15,6 +15,7 @@ from server_modules.agent_turn import (
 from server_modules.api_contract import build_turn_chat_body
 from server_modules import direct_chat_transport_service, failure_policy_service
 from server_modules.error_contracts import OBSERVABILITY_FAILURE, SEVERITY_WARNING
+from server_modules.inbound_envelope import InboundEnvelope
 
 
 logger = logging.getLogger(__name__)
@@ -330,6 +331,22 @@ async def execute_direct_chat_turn_request(
         except Exception:
             specialist_context = None
 
+    # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+    # agent_turn() (the only real caller of this function — see its own
+    # docstring) stashes a serialized envelope into
+    # context_hints["envelope"] via InboundEnvelope.to_metadata() when this
+    # turn is a console/mobile direct-chat turn (see agent_turn.py's own
+    # comment for why it's carried this way rather than mutated onto
+    # turn_request.message directly). Reconstruct it here, right before the
+    # ONE call below that actually reaches execute_sage_turn — the frozen
+    # chokepoint that renders the header and gates owner commands. Absent
+    # for any caller that didn't set it (unchanged legacy behavior).
+    _envelope_meta = (
+        turn_request.context_hints.get("envelope")
+        if isinstance(turn_request.context_hints, dict) else None
+    )
+    _console_envelope = InboundEnvelope.from_metadata(_envelope_meta) if _envelope_meta else None
+
     # ── UNIFIED ENTRY: route web chat through the SAME handle_sage_chat() that channels use ──
     import sys as _sys_turn
     print(f"[TRACE_UNIFIED_ENTRY] ws={workspace_id} channel={turn_request.channel} routing through handle_sage_chat (unified entry)", flush=True, file=_sys_turn.stderr)
@@ -391,6 +408,7 @@ async def execute_direct_chat_turn_request(
                     thread_id=thread_id,
                     request_id=client_request_id,
                     specialist_context=specialist_context,
+                    envelope=_console_envelope,
                 ))
                 _loop.close()
                 result_container['value'] = sage_result

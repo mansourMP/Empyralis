@@ -25,6 +25,11 @@ from server_modules.channel_adapter import (
     NormalizedSageTurn,
     normalize_sage_inbound,
 )
+from server_modules.inbound_envelope import (
+    InboundEnvelope,
+    envelope_allows_owner_commands,
+    prepend_envelope_header,
+)
 from server_modules.sage_agent_runtime_contract import (
     SAGE_MODE,
     SageTurnContract,
@@ -50,6 +55,12 @@ async def execute_sage_turn(
     channel_origin: str = "",
     channel_sender_id: str = "",
     channel_sender_name: str = "",
+    # Canonical inbound attribution (inbound_envelope.py) — who sent this,
+    # from where (owner-self-chat / DM / group / channel / console), verified
+    # by the channel. Rendered into a one-line header on the message below and
+    # consulted by the code-level owner-command gate. None = legacy caller;
+    # behavior is then byte-for-byte unchanged.
+    envelope: Optional["InboundEnvelope"] = None,
     attachments: Optional[List[dict]] = None,
     thread_id: str = "",
     request_id: str = "",
@@ -178,16 +189,34 @@ async def execute_sage_turn(
             channel_origin=resolved_channel_origin or "sage",
             channel_sender_id=resolved_sender_id,
             channel_sender_name=resolved_sender_name,
+            envelope=envelope,
         )
+
+    # Canonical attribution for THIS turn: the task's own envelope wins, the
+    # keyword param covers callers that pass individual parameters. None =
+    # unwired legacy caller — every gate below then behaves exactly as before.
+    _envelope = turn.envelope if turn.envelope is not None else (
+        envelope if isinstance(envelope, InboundEnvelope) else None
+    )
 
     from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
 
     # ── Directive & shortcut processing ─────────────────────────────────
     # Strip /model, /thinking, /help etc. before the LLM sees the message.
     # Directive-only messages return early — no LLM call.
+    #
+    # STRUCTURAL owner-command gate (inbound_envelope.py): when this turn
+    # carries a canonical envelope, "/" commands are honored ONLY on
+    # owner-command surfaces (verified owner + self-chat/DM/console). A "/"
+    # typed in a group or by a non-owner is treated as plain text — the model
+    # sees it with its group header and decides like any other message. This
+    # is enforcement in code, not model reasoning: a family group can never be
+    # the owner, no matter what the text says. Envelope-less legacy callers
+    # (console, unwired channels) keep the pre-envelope behavior unchanged.
     _msg = str(resolved_message or "").strip()
     _cleaned_msg = _msg
-    if _msg.startswith("/"):
+    _commands_allowed = _envelope is None or envelope_allows_owner_commands(_envelope)
+    if _msg.startswith("/") and _commands_allowed:
         from server_modules.command_registry import process_message as _proc_msg
         from server_modules.command_registry import dispatch as _cmd_dispatch
 
@@ -266,6 +295,14 @@ async def execute_sage_turn(
             message=_triage_reply or "",
             ai_setup_url=f"/w/{_ws_token}{_SAGE_AI_SETUP_PATH}" if _ws_token else _SAGE_AI_SETUP_PATH,
         )
+
+    # ── Envelope header injection (the ONE place it happens) ────────────
+    # The model must SEE the attribution, not infer it: prepend the canonical
+    # one-line header ("[Telegram · group “Family” · from X — NOT your owner
+    # · …]") to the message content. Deterministic shape, token-lean,
+    # idempotent (a retried turn can't double it). Envelope-less turns pass
+    # through untouched.
+    _cleaned_msg = prepend_envelope_header(_cleaned_msg, _envelope)
 
     result = await handle_sage_chat(
         workspace_id=turn.workspace_id,

@@ -1834,6 +1834,7 @@ async def _deliver_whatsapp_personal_reply(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    sender_id: str = "",
 ) -> Dict[str, Any]:
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
     if reply_idempotency_key and reply_idempotency_key.startswith(WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX):
@@ -1917,6 +1918,7 @@ async def _deliver_whatsapp_personal_reply(
             remote_jid=remote_jid,
             text=text,
             push_name=push_name,
+            sender_id=sender_id,
             source_event_id=external_message_id,
             linked_user_name=linked_user_name,
             agent_id=agent_id,
@@ -2203,6 +2205,13 @@ async def _handle_whatsapp_gateway_channel_inbound(
         # make the owner-unified activity feed's mirrored entries legible.
         is_group=bool(message.get("is_group")),
         chat_label=str(message.get("chat_title") or "").strip() or None,
+        # The specific participant who sent this message — differs from
+        # remote_jid inside a group. Feeds ONLY the canonical
+        # InboundEnvelope's sender.id (see
+        # personal_channel_sage_bridge_service._build_personal_channel_envelope);
+        # every other identity/routing decision in this handler already keys
+        # off remote_jid, unchanged.
+        sender_id=str(message.get("sender_jid") or "").strip(),
     )
 
 
@@ -2383,6 +2392,11 @@ async def _handle_telegram_gateway_channel_inbound(
             remote_jid=remote_jid,
             text=effective_text,
             push_name=str(message.get("push_name") or "").strip() or None,
+            # The specific participant who sent this message (differs from
+            # remote_jid inside a group) — feeds ONLY the canonical
+            # InboundEnvelope's sender.id, see
+            # personal_channel_sage_bridge_service._build_personal_channel_envelope.
+            sender_id=str(message.get("sender_jid") or "").strip(),
             source_event_id=external_message_id,
             agent_id=agent_id,
             attachments=attachments,
@@ -2541,6 +2555,7 @@ async def _deliver_local_bridge_personal_reply(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    sender_id: str = "",
 ) -> Dict[str, Any]:
     no_reply_prefix = f"{channel_key}:noreply:"
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
@@ -2572,6 +2587,7 @@ async def _deliver_local_bridge_personal_reply(
             remote_jid=remote_jid,
             text=text,
             push_name=push_name,
+            sender_id=sender_id,
             fallback_label=label,
             source_event_id=external_message_id,
             attachments=attachments,
@@ -2852,6 +2868,13 @@ async def _handle_local_bridge_gateway_channel_inbound(
         # bridge is upgraded — a safe no-op today, not a regression.
         is_group=bool(message.get("is_group")),
         chat_label=str(message.get("chat_title") or "").strip() or None,
+        # The specific participant who sent this message — differs from
+        # remote_jid inside a group. Feeds ONLY the canonical
+        # InboundEnvelope's sender.id (see
+        # personal_channel_sage_bridge_service._build_personal_channel_envelope);
+        # present on Signal (signal-cli-bridge.ts's `source`) and iMessage
+        # (imsg-imessage-runtime.ts's `event.sender_jid`) alike.
+        sender_id=str(message.get("sender_jid") or "").strip(),
     )
 
 

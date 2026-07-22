@@ -1489,6 +1489,24 @@ async def _process_update(update: dict) -> bool:
     # case where Telegram omitted `from` entirely (never a real 1:1 DM).
     real_sender_id = from_id or str(chat_id)
 
+    # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+    # Hosted Telegram is architected as one paired chat = one workspace
+    # (_SAGE_HOSTED_PAIRS, keyed by chat_id) — "owner" is implicit in the
+    # pairing itself (verify_and_pair is private-chat-only), not a per-sender
+    # check. Every message that reaches this point already passed that
+    # pairing gate, so the sender is treated as the verified owner talking
+    # to their own agent directly.
+    from server_modules.inbound_envelope import InboundEnvelope, EnvelopeSender, SurfaceKind
+    envelope = InboundEnvelope(
+        platform="telegram_hosted",
+        surface=SurfaceKind.DM,
+        sender=EnvelopeSender(
+            id=real_sender_id,
+            display_name=str(parsed.get("from_first_name", "")).strip(),
+            is_owner=True,
+        ),
+    )
+
     # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
     from server_modules.sage_command_dispatcher import dispatch_command
     cmd_reply = await dispatch_command(
@@ -1516,6 +1534,7 @@ async def _process_update(update: dict) -> bool:
         sender_id=real_sender_id,
         sender_name=str(parsed.get("from_first_name", "")).strip(),
         reply_to_id=msg_id,
+        envelope=envelope,
     )
 
 

@@ -34,6 +34,7 @@ import time
 from typing import Any, Optional
 
 from server_modules.channel_transport import ChannelTransport
+from server_modules.inbound_envelope import InboundEnvelope
 
 _logger = logging.getLogger(__name__)
 
@@ -200,6 +201,11 @@ async def dispatch_sage_reply(
     attachments: list | None = None,
     reply_to_id: Optional[str] = None,
     specialist_context: Any = None,
+    # Canonical inbound attribution (inbound_envelope.py) — who sent this,
+    # from where, verified by the channel. None = unwired caller; forwarded
+    # to execute_sage_turn() unchanged (that chokepoint treats None exactly
+    # like a legacy pre-envelope caller — see its own docstring).
+    envelope: Optional[InboundEnvelope] = None,
 ) -> bool:
     """Execute a full Sage turn and deliver the reply via transport.
 
@@ -320,6 +326,7 @@ async def dispatch_sage_reply(
                 channel_sender_name=sender_name,
                 thread_id=thread_id,
                 specialist_context=specialist_context,
+                envelope=envelope,
             )
         finally:
             if transport.supports_typing_indicator:
@@ -408,6 +415,7 @@ async def dispatch_sage_reply_safe(
     attachments: list | None = None,
     reply_to_id: Optional[str] = None,
     specialist_context: Any = None,
+    envelope: Optional[InboundEnvelope] = None,
 ) -> bool:
     """Like dispatch_sage_reply() but catches ALL exceptions.
 
@@ -433,6 +441,7 @@ async def dispatch_sage_reply_safe(
             attachments=attachments,
             reply_to_id=reply_to_id,
             specialist_context=specialist_context,
+            envelope=envelope,
         )
     except Exception as exc:
         _logger.exception(

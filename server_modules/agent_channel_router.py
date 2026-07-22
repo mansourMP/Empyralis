@@ -49,6 +49,7 @@ from server_modules.channel_errors import (  # noqa: E402
     ChannelOwnerNotFoundError,
     ChannelSecurityDeniedError,
 )
+from server_modules.inbound_envelope import InboundEnvelope  # noqa: E402
 
 # Re-exported (not directly referenced below) so `agent_channel_router.
 # ChannelIngressValidationError` etc. resolve for callers that catch them
@@ -245,6 +246,15 @@ async def route_inbound_channel_message(
     trace_id: Optional[str] = None,
     agent_installs: Optional[list] = None,
     sage_agent_id: str = "",
+    # Canonical inbound attribution (inbound_envelope.py) — who sent this,
+    # from where, verified by the calling connector. None = unwired caller
+    # (the pre-existing behavior: execute_sage_turn treats a None envelope
+    # exactly like a legacy caller — no header, no owner-command gating
+    # change). Callers that can confidently compute DM/group/owner signals
+    # (see connectors_actions.slack_events_webhook,
+    # discord_bot_runtime_service.handle_parsed_event,
+    # discord_connector._handle_dm_via_gateway) pass one through.
+    envelope: Optional[InboundEnvelope] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Route an inbound studio-connector message to the agent pipeline.
@@ -357,6 +367,7 @@ async def route_inbound_channel_message(
                 channel_sender_name=str(actor_display_name or ""),
                 request_id=message_id or run_id,
                 specialist_context=specialist_context,
+                envelope=envelope,
             )
 
             reply_text = str(sage_result.message or "")

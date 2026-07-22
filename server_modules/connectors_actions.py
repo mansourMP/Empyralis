@@ -7,6 +7,7 @@ from server_modules import secrets_broker, tool_broker
 from server_modules import shared as shared
 from server_modules import runtime_common as common
 from server_modules.channel_adapter import filter_channel_outbound_reply
+from server_modules.inbound_envelope import InboundEnvelope, EnvelopeChat, EnvelopeSender, SurfaceKind
 from server_modules.connectors.github_connector import (
     build_run_goal_from_event as github_build_run_goal_from_event,
     event_matches_connector as github_event_matches_connector,
@@ -1165,6 +1166,32 @@ async def slack_events_webhook(request: Request):
                 if not goal:
                     continue
 
+                # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+                # Slack's own channel_type ("im" = DM, "mpim"/"group"/"channel"
+                # = multi-member) is computed by parse_inbound_event but was
+                # previously discarded before reaching the model (the audit's
+                # "computed but discarded" finding). Slack has no workspace-
+                # owner concept at all (zero occurrences of is_admin/is_owner
+                # anywhere in the connector — see the audit) — is_owner is
+                # always None (unverified), which fails closed on every
+                # owner-command gate. actor_display_name is the raw user_id
+                # (no display-name resolution exists — see the audit), so the
+                # envelope's sender name is the id too, never invented.
+                _slack_channel_type = str(parsed.get("channel_type") or "").strip().lower()
+                _slack_is_mention = str(parsed.get("message_type") or "").strip().lower() == "mention"
+                _slack_surface = SurfaceKind.DM if _slack_channel_type == "im" else SurfaceKind.GROUP
+                _slack_envelope = InboundEnvelope(
+                    platform="slack",
+                    surface=_slack_surface,
+                    sender=EnvelopeSender(
+                        id=str(parsed.get("user_id") or "").strip(),
+                        display_name=str(parsed.get("user_id") or "").strip(),
+                        is_owner=None,
+                    ),
+                    chat=EnvelopeChat(id=channel_id) if _slack_surface != SurfaceKind.DM else EnvelopeChat(),
+                    addressed=_slack_is_mention if _slack_surface != SurfaceKind.DM else None,
+                )
+
                 # ── Deduplication guard ──────────────────────────────────────
                 # Slack's Events API retries a delivery (same event_id) up to
                 # 3x within a few seconds when it doesn't receive a fast
@@ -1211,6 +1238,7 @@ async def slack_events_webhook(request: Request):
                         "source_event_id": trace_token,
                     },
                     allow_master_fallback=False,
+                    envelope=_slack_envelope,
                 )
                 route_payload = route_result if isinstance(route_result, dict) else {}
                 if str(route_payload.get("run_id") or "").strip():

@@ -15,6 +15,12 @@ from server_modules.error_notification import classify_error_notification  # noq
 from server_modules import authority_mandate_service
 from server_modules import channel_lane_contract_service
 from server_modules.channel_adapter import filter_outbound_reply
+from server_modules.inbound_envelope import (
+    EnvelopeChat,
+    EnvelopeSender,
+    InboundEnvelope,
+    SurfaceKind,
+)
 
 
 def _build_error_reply_dict(
@@ -235,7 +241,7 @@ def _sanitize_channel_label(value: Optional[str]) -> str:
 
 
 def _personal_channel_guard_metadata(
-    *, remote_jid: str, is_group: bool, chat_label: Optional[str],
+    *, remote_jid: str, is_group: bool, chat_label: Optional[str], include_group_context: bool = True,
 ) -> Dict[str, Any]:
     """Metadata threaded into external_content_guard.wrap_external_content
     for a non-owner personal-channel sender ("family group" bug fix, other
@@ -253,14 +259,196 @@ def _personal_channel_guard_metadata(
     attacker-influenceable text (any group member/admin can set a group's
     name) — sanitized/truncated via _sanitize_channel_label before it
     reaches the model, same as everywhere else chat_label is used.
+
+    include_group_context: True (default) keeps the ORIGINAL behavior this
+    docstring describes — the legacy no-tools _build_personal_reply()
+    fallback still needs it, since that path never reaches
+    execute_sage_turn and so has no envelope header to state the group
+    context instead. _build_unified_sage_personal_reply_async (the primary
+    path — every real personal-channel turn) passes False: the canonical
+    InboundEnvelope's rendered header (execute_sage_turn's chokepoint)
+    already states the group/channel name and "NOT your owner" once,
+    structurally: adding it again here would be exactly the
+    "is_group/chat_label text framing" duplication the inbound-envelope
+    wiring removes. The SECURITY NOTICE/<<<EXTERNAL_UNTRUSTED_CONTENT>>>
+    trust boundary itself, and the plain remote_jid/Sender:/Channel: lines,
+    are UNCHANGED either way — this flag only ever affects the two extra
+    Chat-Type/Group-Name lines.
     """
     metadata: Dict[str, Any] = {"remote_jid": str(remote_jid or "").strip()}
-    if is_group:
+    if is_group and include_group_context:
         metadata["Chat-Type"] = "group"
         group_name = _sanitize_channel_label(chat_label)
         if group_name:
             metadata["Group-Name"] = group_name
     return metadata
+
+
+def _build_personal_channel_envelope(
+    *,
+    surface_channel: str,
+    remote_jid: str,
+    sender_id: str,
+    push_name: Optional[str],
+    is_owner: bool,
+    is_group: bool,
+    chat_label: Optional[str],
+) -> InboundEnvelope:
+    """Construct the canonical InboundEnvelope (inbound_envelope.py) for a
+    personal-channel turn, entirely from signals this bridge ALREADY
+    receives from personal_channels_service — never a new/guessed signal.
+
+    platform is surface_channel itself (e.g. "whatsapp_personal",
+    "telegram_personal", "signal_personal", "imessage_personal") — already
+    exactly the ChannelOrigin string inbound_envelope._PLATFORM_LABELS keys
+    off, so no translation is needed.
+
+    Surface derivation, specific to the PERSONAL-channel family (the
+    owner's own connected account, never a bot with separate customer
+    contacts):
+      - is_group=True -> GROUP. addressed=True here is not a guess: every
+        group message that reaches this function already passed the
+        mention/reply-to-Sage gate in personal_channels_service's inbound
+        handlers (_handle_whatsapp_gateway_channel_inbound,
+        _handle_telegram_gateway_channel_inbound,
+        _handle_local_bridge_gateway_channel_inbound all
+        `return {"ignored": ..., "reason": "group_no_mention"}` before ever
+        calling this code path), so "the agent was addressed" is an
+        already-enforced fact by the time we get here, not an inference.
+        Telegram broadcast-channel posts never reach this far either —
+        runtime.ts's isBroadcastTelegramChat() hard-drops them gateway-side
+        before sender resolution even runs (see the inbound-attribution
+        audit) — so SurfaceKind.BROADCAST_CHANNEL is never constructed from
+        this bridge; only Telegram's own gateway can ever originate it.
+      - is_group=False, envelope-owner is True -> OWNER_SELF_CHAT. On a
+        personal channel (the owner's own connected account, never a bot
+        with separate contacts) a non-group owner-verified turn is
+        structurally the owner's self-chat/Saved-Messages/Note-to-Self
+        thread — see personal_channels_service._is_owner_message: an
+        ordinary outgoing 1:1 message from that SAME account to a different
+        contact never reaches this bridge at all, because every inbound
+        handler's "from_me and not is_self_chat" guard drops it first.
+      - is_group=False, envelope-owner is False or None -> DM. A
+        stranger/contact 1:1 with the owner's own number, or (None) a
+        sender this channel could not verify at all — never assumed to be
+        a self-chat just because verification is unavailable.
+
+    sender.id: sender_id when the caller resolved one (the actual
+    participant — differs from remote_jid inside a group), else remote_jid
+    (the 1:1 case, where they're the same JID anyway).
+
+    is_owner is the SAME already-verified bool every other branch of this
+    bridge uses (personal_channels_service._is_owner_message via
+    _enforce_dm_policy) — never reinterpreted upward; a False here never
+    becomes an envelope True. The ONE exception, scoped narrowly to
+    iMessage: personal_channels_service's local-bridge dmPolicy gate can
+    only ever report is_owner=True via message.get("is_self_chat"), and the
+    imsg gateway runtime (empyralis-gateway/src/channels/
+    imsg-imessage-runtime.ts, handleInboundNotification) never populates
+    that field at all today — so an iMessage False here is not a verified
+    "not the owner" signal, it is "this channel could not tell."
+    InboundEnvelope.sender.is_owner is tri-state exactly for this case: it
+    renders as "unverified, treat as NOT your owner" in the model-facing
+    header instead of a flat "NOT your owner," which is the honest state of
+    the world. Every gate (envelope_allows_owner_commands) treats False and
+    None identically — fail-closed — so this changes nothing about what the
+    turn is ALLOWED to do, only what the model is told about why. The
+    moment the imsg bridge starts setting is_self_chat for a genuine
+    self-chat turn, is_owner=True flows straight through unchanged, exactly
+    like it already does for Signal/WhatsApp/Telegram, with no further
+    change needed here.
+    """
+    if is_owner:
+        envelope_is_owner: Optional[bool] = True
+    elif str(surface_channel or "").strip() == "imessage_personal":
+        envelope_is_owner = None
+    else:
+        envelope_is_owner = False
+
+    resolved_sender_id = str(sender_id or "").strip() or str(remote_jid or "").strip()
+    if is_group:
+        surface = SurfaceKind.GROUP
+        addressed: Optional[bool] = True
+        chat = EnvelopeChat(id=str(remote_jid or "").strip(), title=str(chat_label or "").strip())
+    else:
+        surface = SurfaceKind.OWNER_SELF_CHAT if envelope_is_owner is True else SurfaceKind.DM
+        addressed = None
+        chat = EnvelopeChat()
+
+    return InboundEnvelope(
+        platform=str(surface_channel or "").strip() or "unknown",
+        surface=surface,
+        sender=EnvelopeSender(
+            id=resolved_sender_id,
+            display_name=str(push_name or "").strip(),
+            is_owner=envelope_is_owner,
+            is_bot=False,
+        ),
+        chat=chat,
+        addressed=addressed,
+    )
+
+
+async def _execute_channel_turn_with_envelope(
+    *,
+    workspace_id: str,
+    surface_channel: str,
+    remote_jid: str,
+    push_name: Optional[str],
+    message: str,
+    agent_id: str,
+    attachments: Optional[List[dict]],
+    channel_prior_messages: Optional[List[dict]],
+    envelope: Optional[InboundEnvelope],
+) -> Dict[str, Any]:
+    """Run a personal-channel turn through the real chokepoint
+    (sage_turn_adapter.execute_sage_turn) WITH the canonical InboundEnvelope.
+
+    This duplicates sage_turn_adapter.execute_sage_turn_for_channel's own
+    body (specialist_context resolution + the individual-parameter call
+    into execute_sage_turn) ONLY because that function — frozen, owned by a
+    separate build track — doesn't yet accept `envelope=` and forward it
+    through. execute_sage_turn itself already fully supports `envelope=`
+    (it's what renders the one-line attribution header and gates "/" owner
+    commands). Once execute_sage_turn_for_channel grows an `envelope=`
+    parameter, this helper can be deleted and personal-channel calls can go
+    back to calling execute_sage_turn_for_channel(..., envelope=envelope)
+    directly — the parameter mapping below is deliberately kept identical
+    to execute_sage_turn_for_channel's so that swap is a pure deletion.
+    """
+    from server_modules.sage_agent_runtime_contract import SAGE_MODE
+    from server_modules.sage_turn_adapter import execute_sage_turn
+
+    normalized_agent_id = str(agent_id or "").strip()
+    specialist_context = None
+    if normalized_agent_id:
+        from server_modules.specialist_runtime_context import resolve_specialist_runtime_context
+
+        try:
+            specialist_context = await resolve_specialist_runtime_context(
+                workspace_id=workspace_id,
+                tenant_id="default",
+                active_agent_install_id=normalized_agent_id,
+            )
+        except Exception:
+            specialist_context = None  # fail safe to Sage — same contract as execute_sage_turn_for_channel
+
+    sage_result = await execute_sage_turn(
+        workspace_id=workspace_id,
+        tenant_id="",
+        message=message,
+        surface="chat",
+        mode=SAGE_MODE,
+        current_user=None,
+        channel_origin=str(surface_channel or "").strip(),
+        channel_sender_id=str(remote_jid or "").strip(),
+        channel_sender_name=str(push_name or "").strip(),
+        attachments=list(attachments) if attachments else None,
+        specialist_context=specialist_context,
+        channel_prior_messages=channel_prior_messages,
+        envelope=envelope,
+    )
+    return sage_result.as_dict()
 
 
 @contextmanager
@@ -382,6 +570,7 @@ async def _build_unified_sage_personal_reply_async(
     remote_jid: str,
     text: str,
     push_name: Optional[str] = None,
+    sender_id: str = "",
     fallback_label: str,
     source_event_id: Optional[str] = None,
     agent_id: str = "",
@@ -399,19 +588,30 @@ async def _build_unified_sage_personal_reply_async(
 
     agent_id: which specialist install this full-account session is bound
     to — empty means the pre-existing behavior (run as Sage). See
-    sage_turn_adapter.execute_sage_turn_for_channel's own docstring.
+    _execute_channel_turn_with_envelope's own docstring.
 
     attachments: media-pipeline attachments (image/file kinds) already
     resolved+stored by personal_channel_media_store_service — forwarded
-    as-is to execute_sage_turn_for_channel.
+    as-is to _execute_channel_turn_with_envelope.
+
+    sender_id: the specific participant who sent this message (e.g. a
+    group's per-message sender_jid, which differs from remote_jid — the
+    group's own id) when the caller resolved one; falls back to remote_jid
+    (the ordinary 1:1 case, where they're the same JID) when omitted. Feeds
+    ONLY the canonical InboundEnvelope's sender.id (see
+    _build_personal_channel_envelope) — every other identity/routing use in
+    this function still keys off remote_jid, unchanged.
 
     is_owner: True ONLY when the caller has ROBUSTLY established (see
     personal_channels_service._is_owner_message — self-chat, or a sender
     matching the channel's own linked owner id; NEVER a claimed name or
     message text, which is trivially spoofable) that this inbound message
-    is from the workspace owner. Owner turns get a clean, unwrapped
-    provenance header instead of external_content_guard's SECURITY
-    NOTICE/<<<EXTERNAL_UNTRUSTED_CONTENT>>> wrapper — the owner is not an
+    is from the workspace owner. Owner turns get a clean, unwrapped message
+    (no ad-hoc "From: X (owner) · channel · direct message" prose prefix —
+    that used to duplicate exactly what the canonical InboundEnvelope's
+    rendered header now states once, at the execute_sage_turn chokepoint)
+    instead of external_content_guard's SECURITY NOTICE/
+    <<<EXTERNAL_UNTRUSTED_CONTENT>>> wrapper — the owner is not an
     untrusted external party. Every other sender (non-owner DM, group
     member, customer, or anything uncertain) keeps the EXACT prior
     behavior: full external_content_guard wrapping, unchanged. Defaults to
@@ -439,8 +639,6 @@ async def _build_unified_sage_personal_reply_async(
     truncated before storage, see _sanitize_channel_label). None when
     unavailable; the mirror entry then falls back to fallback_label alone.
     """
-    from server_modules.sage_turn_adapter import execute_sage_turn_for_channel
-
     # The CLEAN raw message — never wrapped, never provenance-prefixed.
     # This is what agent_conversation_memory persists below, regardless of
     # which branch builds the actual turn_message sent to the model:
@@ -450,21 +648,29 @@ async def _build_unified_sage_personal_reply_async(
     raw_text = str(text or "").strip()
 
     if is_owner:
-        # OWNER — clean provenance + full trust. No SECURITY NOTICE, no
-        # untrusted-content wrapper markers. is_group/chat_label: "family
-        # group" bug fix — see _owner_provenance_message's docstring for
-        # why this can no longer say "direct message" unconditionally.
-        turn_message = _owner_provenance_message(
-            raw_text=raw_text, display_name=push_name, channel_label=fallback_label,
-            is_group=is_group, chat_label=chat_label,
-        )
+        # OWNER — clean, UNPREFIXED message. This used to call
+        # _owner_provenance_message() to hand-build a "From: {name} (owner)
+        # · {channel} · direct message"/group-chat prose header — that
+        # duplicated exactly the facts the canonical InboundEnvelope (built
+        # below) now states once, structurally, in the one-line header
+        # execute_sage_turn prepends at its own chokepoint. Removing the
+        # duplicate ad-hoc prefix here is the actual envelope wiring; the
+        # legacy no-tools _build_personal_reply() fallback above still
+        # calls _owner_provenance_message() unchanged, because that path
+        # never reaches execute_sage_turn and so has no envelope header to
+        # rely on instead.
+        turn_message = raw_text
     else:
         # EXTERNAL / non-owner / unknown sender — this is the
         # prompt-injection boundary. The SECURITY NOTICE/wrapper itself is
-        # UNCHANGED from prior behavior; the metadata now carries an
-        # explicit chat-type/group-name signal in a group turn (see
-        # _personal_channel_guard_metadata's docstring) — same "family
-        # group" bug fix, other branch.
+        # UNCHANGED from prior behavior. The Chat-Type/Group-Name lines
+        # _personal_channel_guard_metadata used to add for a group turn are
+        # dropped here (include_group_context=False) — the canonical
+        # InboundEnvelope built below already states the group/chat name
+        # and "NOT your owner" once, in the header execute_sage_turn
+        # prepends; duplicating it inside the guard wrapper too is exactly
+        # the ad-hoc "is_group/chat_label text framing" this wiring
+        # removes. See _personal_channel_guard_metadata's own docstring.
         guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
             surface_channel=surface_channel,
             text=raw_text,
@@ -472,11 +678,27 @@ async def _build_unified_sage_personal_reply_async(
             source_event_id=source_event_id,
             metadata=_personal_channel_guard_metadata(
                 remote_jid=remote_jid, is_group=is_group, chat_label=chat_label,
+                include_group_context=False,
             ),
         )
         turn_message = guarded.text
     if not str(turn_message or "").strip():
         return None
+
+    # Canonical inbound attribution (inbound_envelope.py) — see
+    # _build_personal_channel_envelope's own docstring for the surface/
+    # is_owner derivation. Rendered into the one-line header and consulted
+    # by the code-level owner-command gate at the execute_sage_turn
+    # chokepoint (_execute_channel_turn_with_envelope below), never here.
+    envelope = _build_personal_channel_envelope(
+        surface_channel=surface_channel,
+        remote_jid=remote_jid,
+        sender_id=sender_id,
+        push_name=push_name,
+        is_owner=is_owner,
+        is_group=is_group,
+        chat_label=chat_label,
+    )
 
     # ── Durable per-agent conversation memory (agent_conversation_memory) ──
     # Load recent history BEFORE the turn and hand it to the runtime; persist
@@ -518,17 +740,16 @@ async def _build_unified_sage_personal_reply_async(
         _mem_prior = []
 
     try:
-        result = await execute_sage_turn_for_channel(
+        result = await _execute_channel_turn_with_envelope(
             workspace_id=_mem_ws,
             surface_channel=surface_channel,
-            gateway_id=str(gateway_id or "").strip(),
             remote_jid=str(remote_jid or "").strip(),
-            message=turn_message,
             push_name=push_name,
-            source_event_id=source_event_id,
+            message=turn_message,
             agent_id=_mem_agent,
             attachments=list(attachments) if attachments else None,
             channel_prior_messages=_mem_prior,
+            envelope=envelope,
         )
         # Suppress the runtime's [SILENT]/NO_REPLY sentinels via the shared
         # filter — the personal-channel path (unlike direct_chat/hosted)
@@ -651,6 +872,7 @@ def _build_unified_sage_personal_reply(
     remote_jid: str,
     text: str,
     push_name: Optional[str] = None,
+    sender_id: str = "",
     fallback_label: str,
     source_event_id: Optional[str] = None,
     agent_id: str = "",
@@ -673,6 +895,7 @@ def _build_unified_sage_personal_reply(
                 remote_jid=remote_jid,
                 text=text,
                 push_name=push_name,
+                sender_id=sender_id,
                 fallback_label=fallback_label,
                 source_event_id=source_event_id,
                 agent_id=agent_id,
@@ -695,6 +918,7 @@ def _build_unified_sage_personal_reply(
                     remote_jid=remote_jid,
                     text=text,
                     push_name=push_name,
+                    sender_id=sender_id,
                     fallback_label=fallback_label,
                     source_event_id=source_event_id,
                     agent_id=agent_id,
@@ -722,6 +946,7 @@ async def build_whatsapp_personal_reply_async(
     remote_jid: str,
     text: str,
     push_name: Optional[str] = None,
+    sender_id: str = "",
     source_event_id: Optional[str] = None,
     is_owner: bool = False,
     is_group: bool = False,
@@ -735,6 +960,7 @@ async def build_whatsapp_personal_reply_async(
             remote_jid=remote_jid,
             text=text,
             push_name=push_name,
+            sender_id=sender_id,
             fallback_label="WhatsApp",
             source_event_id=source_event_id,
             is_owner=is_owner,
@@ -761,6 +987,7 @@ async def build_telegram_personal_reply_async(
     remote_jid: str,
     text: str,
     push_name: Optional[str] = None,
+    sender_id: str = "",
     source_event_id: Optional[str] = None,
     is_owner: bool = False,
     is_group: bool = False,
@@ -774,6 +1001,7 @@ async def build_telegram_personal_reply_async(
             remote_jid=remote_jid,
             text=text,
             push_name=push_name,
+            sender_id=sender_id,
             fallback_label="Telegram",
             source_event_id=source_event_id,
             is_owner=is_owner,
@@ -799,6 +1027,7 @@ async def build_discord_personal_reply_async(
     remote_jid: str,
     text: str,
     push_name: Optional[str] = None,
+    sender_id: str = "",
     source_event_id: Optional[str] = None,
     linked_user_name: Optional[str] = None,
     is_owner: bool = False,
@@ -827,6 +1056,7 @@ async def build_discord_personal_reply_async(
             remote_jid=remote_jid,
             text=text,
             push_name=push_name,
+            sender_id=sender_id,
             fallback_label="Discord",
             source_event_id=source_event_id,
             is_owner=is_owner,
@@ -850,6 +1080,7 @@ async def build_personal_channel_reply_async(
     remote_jid: str,
     text: str,
     push_name: Optional[str] = None,
+    sender_id: str = "",
     fallback_label: str = "channel",
     source_event_id: Optional[str] = None,
     attachments: Optional[List[dict]] = None,
@@ -865,6 +1096,7 @@ async def build_personal_channel_reply_async(
             remote_jid=remote_jid,
             text=text,
             push_name=push_name,
+            sender_id=sender_id,
             fallback_label=fallback_label,
             source_event_id=source_event_id,
             attachments=attachments,
@@ -888,6 +1120,7 @@ def build_whatsapp_personal_reply(
     remote_jid: str,
     text: str,
     push_name: Optional[str] = None,
+    sender_id: str = "",
     source_event_id: Optional[str] = None,
     linked_user_name: Optional[str] = None,
     agent_id: str = "",
@@ -897,8 +1130,8 @@ def build_whatsapp_personal_reply(
     chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a WhatsApp personal DM — as the specialist agent_id
-    names (see execute_sage_turn_for_channel), or as Sage when agent_id is
-    empty (pre-existing behavior).
+    names (see _execute_channel_turn_with_envelope), or as Sage when
+    agent_id is empty (pre-existing behavior).
 
     linked_user_name is accepted for future identity-context injection but
     not yet threaded into _build_unified_sage_personal_reply (same as
@@ -906,6 +1139,10 @@ def build_whatsapp_personal_reply(
 
     attachments: media-pipeline attachments (image/file kinds) already
     resolved+stored by personal_channel_media_store_service.
+
+    sender_id: the specific participant's jid (differs from remote_jid
+    inside a group) — see _build_personal_channel_envelope's docstring;
+    falls back to remote_jid when omitted.
 
     is_owner: caller-resolved via personal_channels_service._is_owner_message
     (self-chat, or sender matching this channel's linked owner id) — see
@@ -924,6 +1161,7 @@ def build_whatsapp_personal_reply(
         remote_jid=remote_jid,
         text=text,
         push_name=push_name,
+        sender_id=sender_id,
         fallback_label="WhatsApp",
         source_event_id=source_event_id,
         agent_id=agent_id,
@@ -956,6 +1194,7 @@ def build_telegram_personal_reply(
     remote_jid: str,
     text: str,
     push_name: Optional[str] = None,
+    sender_id: str = "",
     source_event_id: Optional[str] = None,
     agent_id: str = "",
     attachments: Optional[List[dict]] = None,
@@ -964,7 +1203,8 @@ def build_telegram_personal_reply(
     chat_label: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a Telegram personal DM — see build_whatsapp_personal_reply's
-    docstring for the agent_id, is_owner, is_group and chat_label contracts."""
+    docstring for the agent_id, sender_id, is_owner, is_group and chat_label
+    contracts."""
     unified = _build_unified_sage_personal_reply(
         surface_channel="telegram_personal",
         workspace_id=workspace_id,
@@ -972,6 +1212,7 @@ def build_telegram_personal_reply(
         remote_jid=remote_jid,
         text=text,
         push_name=push_name,
+        sender_id=sender_id,
         fallback_label="Telegram",
         source_event_id=source_event_id,
         agent_id=agent_id,

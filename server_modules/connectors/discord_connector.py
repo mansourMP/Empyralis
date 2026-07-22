@@ -84,6 +84,7 @@ def _env_first(*names: str) -> str:
 
 
 from server_modules.channel_sdk import _http_json_request
+from server_modules.inbound_envelope import InboundEnvelope, EnvelopeSender, SurfaceKind
 
 
 def _multipart_request(
@@ -1191,6 +1192,23 @@ async def _handle_dm_via_gateway(message: Any) -> None:
             )
             return
 
+        # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
+        # This IS the one Discord path with a real, verified owner check —
+        # get_workspace_for_discord_user() above only returned a workspace
+        # because this Discord user id previously completed /pair for it (the
+        # early-return a few lines up sends anyone else to "send /pair CODE"
+        # instead of reaching here at all). Per the task's ruling: Discord's
+        # /pair is unenforced for UNIQUENESS (multiple Discord users could
+        # each pair to the same workspace — see the audit), but the presence
+        # of a verified pairing check on THIS path is exactly what earns
+        # is_owner=True here, unlike the guild/group-DM path (no pairing
+        # check at all -> is_owner=None there).
+        _dm_envelope = InboundEnvelope(
+            platform="discord_personal",
+            surface=SurfaceKind.DM,
+            sender=EnvelopeSender(id=_author_id, display_name=_author_name, is_owner=True),
+        )
+
         from server_modules.sage_command_dispatcher import dispatch_command as _dc
         _cmd_reply = await _dc(
             command=_text,
@@ -1211,6 +1229,7 @@ async def _handle_dm_via_gateway(message: Any) -> None:
                 channel_sender_id=_author_id,
                 channel_sender_name=_author_name or None,
                 thread_id="sage-main",
+                envelope=_dm_envelope,
             )
             _raw = str(_result.message or "").strip()
             if _raw:
