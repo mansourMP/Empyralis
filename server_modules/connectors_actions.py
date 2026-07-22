@@ -1596,11 +1596,40 @@ async def discord_webhook(request: Request):
                     _dm_user_id = str(parsed.get("user_id") or "").strip()
                     _dm_text = str(parsed.get("text") or "").strip()
                     if _dm_user_id and _dm_text:
+                        # ── Canonical inbound envelope + per-sender thread
+                        # scoping (docs/design/audit-history-memory.md gap
+                        # #7) — this forward-compatible branch previously had
+                        # NEITHER: no envelope at all, and a hardcoded
+                        # thread_id="sage-main" shared by every Discord user
+                        # whose DM ever reached this endpoint — the same bug
+                        # class the WeChat and canonical Discord-DM
+                        # (discord_connector._handle_dm_via_gateway) fixes
+                        # already closed. Fixed here too even though this
+                        # branch is currently unreachable in production (see
+                        # the module note above) — it is not provably
+                        # unreachable forever, and a dormant path carrying a
+                        # live-looking bug is exactly the kind of thing that
+                        # bites the moment it does start firing.
+                        from server_modules.sage_command_dispatcher import agent_sender_thread_id
+                        _dm_thread_id = agent_sender_thread_id("sage", _dm_user_id)
+                        _dm_envelope = InboundEnvelope(
+                            platform="discord_personal",
+                            surface=SurfaceKind.DM,
+                            sender=EnvelopeSender(
+                                id=_dm_user_id,
+                                display_name=str(parsed.get("username") or "").strip(),
+                                # Unlike the canonical /pair-verified DM path,
+                                # this branch has no owner-linkage check of
+                                # its own — unverified, fails closed on every
+                                # owner-command gate.
+                                is_owner=None,
+                            ),
+                        )
                         # Shared command dispatcher first
                         _cmd_reply = await dispatch_command(
                             command=_dm_text,
                             workspace_id=workspace_id,
-                            thread_id="sage-main",
+                            thread_id=_dm_thread_id,
                             channel_origin="discord_personal",
                             sender_id=_dm_user_id or None,
                         )
@@ -1619,6 +1648,8 @@ async def discord_webhook(request: Request):
                             channel_origin="discord_personal",
                             channel_sender_id=_dm_user_id,
                             channel_sender_name=str(parsed.get("username") or "").strip() or None,
+                            thread_id=_dm_thread_id,
+                            envelope=_dm_envelope,
                         )
                         _sage_reply = str(_sage_result.message or "").strip()
                         if _sage_reply:
@@ -1789,6 +1820,38 @@ async def github_events_webhook(request: Request):
             goal = github_build_run_goal_from_event(parsed)
             if not goal:
                 continue
+
+            # ── Canonical inbound envelope (docs/design/inbound-envelope-
+            # design.md) — GitHub previously had NONE at all (confirmed by
+            # the audit: zero `envelope` references anywhere in this
+            # handler), the one live channel Part 0 of
+            # docs/design/audit-history-memory.md flagged as fully unwired.
+            # A webhook delivery has no human "conversation surface" the
+            # existing taxonomy fits exactly — not a DM (no 1:1 party), not
+            # a GROUP (no member-list/mention concept) — so this uses API,
+            # the programmatic-caller surface, same as any other
+            # webhook/API-key-driven inbound. is_owner is always None: a
+            # repository's push/issue/PR actor is never a verified
+            # Empyralis workspace owner, and there is no owner-linkage
+            # mechanism for GitHub identities today (same reasoning as
+            # WeChat's and Slack's is_owner=False/None). chat.id=repository
+            # is what gives this turn PER-REPO thread scoping (see
+            # agent_channel_router.route_inbound_channel_message's
+            # thread-id resolution: a populated chat.id keys per-room, so
+            # every event on this repo shares one thread, while a
+            # different repo — or a different connector row entirely —
+            # never bleeds into it), independent of surface.
+            _github_envelope = InboundEnvelope(
+                platform="github",
+                surface=SurfaceKind.API,
+                sender=EnvelopeSender(
+                    id=str(parsed.get("sender") or "").strip(),
+                    display_name=str(parsed.get("sender") or "").strip(),
+                    is_owner=None,
+                ),
+                chat=EnvelopeChat(id=repository, title=repository),
+            )
+
             route_result = await agent_channel_router.route_inbound_channel_message(
                 tenant_id=await _resolve_connector_tenant_id(item, workspace_id),
                 workspace_id=workspace_id,
@@ -1813,6 +1876,7 @@ async def github_events_webhook(request: Request):
                     "source_event_id": message_id or str(parsed.get("delivery_id") or "").strip() or None,
                 },
                 allow_master_fallback=False,
+                envelope=_github_envelope,
             )
             route_payload = route_result if isinstance(route_result, dict) else {}
             if str(route_payload.get("run_id") or "").strip():

@@ -794,6 +794,24 @@ async def handle_inbound_callback(
         from server_modules.sage_command_dispatcher import agent_sender_thread_id
         _thread_id = agent_sender_thread_id(agent_install_id, mapped["sender_jid"])
 
+        # ── Durable per-agent conversation memory (agent_conversation_memory) ──
+        # The SQL thread store this module's own _thread_id keys into is
+        # dead under the SQLite-fallback deployment path
+        # (agent_conversation_memory.py's own module doc;
+        # docs/design/audit-history-memory.md Part 1A/5) — this is the
+        # durable read+write source of a customer's history instead. Keyed
+        # per (agent, customer OpenID), same scoping as _thread_id above,
+        # in the "{surface}:{remote_jid}" shape
+        # personal_channel_sage_bridge_service.py's own per-silo keys use.
+        from server_modules import agent_conversation_memory
+        _mem_key = f"wechat_official:{mapped['sender_jid']}"
+        try:
+            _mem_prior = agent_conversation_memory.load_recent_turns(
+                workspace_id=workspace_id, agent_id=agent_install_id, conversation_key=_mem_key,
+            )
+        except Exception:
+            _mem_prior = []
+
         # "/" text from a WeChat customer must never be treated as a command
         # — envelope_allows_owner_commands is always False here (is_owner is
         # always False), so this is a structural no-op today, but the check
@@ -815,6 +833,11 @@ async def handle_inbound_callback(
             channel_origin=mapped["channel_origin"], sender_id=mapped["sender_jid"],
             reply_to_id=mapped["external_message_id"], thread_id=_thread_id,
             envelope=envelope,
+            channel_prior_messages=_mem_prior,
+            conversation_memory={
+                "workspace_id": workspace_id, "agent_id": agent_install_id,
+                "conversation_key": _mem_key,
+            },
         )
         return {"routed": True, "processed": True, "reply_sent": delivered}
     except Exception:
