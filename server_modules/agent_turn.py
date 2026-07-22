@@ -1676,6 +1676,15 @@ async def agent_turn(
                 ),
             },
             "request_id": str(resolved_turn_request.context_hints.get("request_id") or "").strip() or None,
+            # Canonical inbound envelope: stamp THIS turn's own true surface on
+            # the turn, so attribution never has to fall back to the thread's
+            # single `channel` column (which is last-writer-wins and so
+            # mislabels a mixed-surface conversation — e.g. an owner typing in
+            # the console reading as a Telegram "customer"). Every consumer
+            # (Work tab, memory attribution) can now read the real per-turn
+            # source instead of the thread's dominant channel.
+            "channel": normalize_channel(resolved_turn_request.channel),
+            "surface": _trace_surface(resolved_turn_request.channel),
         },
     )
     with tracer.start_as_current_span("agent_turn.handle") as span:
