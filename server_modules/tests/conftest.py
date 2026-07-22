@@ -17,6 +17,364 @@ warnings.filterwarnings(
 )
 
 
+# ---------------------------------------------------------------------------
+# Real per-operation next_action tables, ported from the Rust kernel so the
+# non-kernel test mock below can reproduce its "allow"-path behavior exactly
+# instead of a blanket echo. Each table cites the kernel source it mirrors;
+# re-derive it from there if the kernel's operation set changes.
+# ---------------------------------------------------------------------------
+
+# empyralis-runtime-kernel/src/runtime_state_store.rs next_action(), lines
+# 1106-1216 (decision == "allow" arm only — "block"/"require_approval" return
+# fixed sentinels handled separately below). Most operations are identity,
+# but several are not (e.g. "upsert_workspace_memory" -> "write_workspace_memory",
+# "upsert_sage_memory_entry" -> "write_sage_memory_entry") — that mismatch was
+# the root cause of the memory_service.py / sage_memory_service.py failures.
+_RUNTIME_STATE_STORE_NEXT_ACTIONS: dict[str, str] = {
+    "init_schema": "initialize_state_schema",
+    "upsert_live_run": "write_live_run_state",
+    "delete_live_run": "delete_live_run_state",
+    "archive_run": "write_run_archive",
+    "create_or_update_approval_request": "write_run_approval_request",
+    "resolve_approval_if_pending": "resolve_run_approval",
+    "record_approval_resolution": "record_run_approval_resolution",
+    "upsert_runtime_registration": "write_runtime_registration",
+    "upsert_fleet_queue_partition": "write_fleet_queue_partition",
+    "upsert_runtime_session": "write_runtime_session",
+    "delete_runtime_session": "delete_runtime_session",
+    "upsert_runtime_session_turn": "write_runtime_session_turn",
+    "delete_runtime_session_turn": "delete_runtime_session_turn",
+    "upsert_chat_stream_state": "write_chat_stream_state",
+    "append_channel_event": "append_channel_event",
+    "upsert_local_claim": "write_local_claim",
+    "release_local_claim": "release_local_claim",
+    "upsert_notification": "write_notification",
+    "mark_notification_read": "mark_notification_read",
+    "register_notification_device": "write_notification_device",
+    "update_notification_delivery": "write_notification_delivery",
+    "set_kill_switch": "set_kill_switch",
+    "clear_kill_switch": "clear_kill_switch",
+    "set_runtime_tool_enabled": "set_runtime_tool_enabled",
+    "upsert_agent_computer_policy": "upsert_agent_computer_policy",
+    "set_safe_mode_state": "set_safe_mode_state",
+    "upsert_security_control_state": "upsert_security_control_state",
+    "upsert_sage_profile": "upsert_sage_profile",
+    "save_mcp_server_registry": "save_mcp_server_registry",
+    "save_installed_skill_registry": "save_installed_skill_registry",
+    "write_vault_key_file": "write_vault_key_file",
+    "write_vault_blob_backup": "write_vault_blob_backup",
+    "read_vault_blob_backup": "read_vault_blob_backup",
+    "write_channel_pairings_backup": "write_channel_pairings_backup",
+    "write_jwt_secret_file": "write_jwt_secret_file",
+    "persist_artifact_record": "persist_artifact_record",
+    "write_hosted_sandbox_base_image": "write_hosted_sandbox_base_image",
+    "save_cli_companion_state": "save_cli_companion_state",
+    "write_hosted_worker_output": "write_hosted_worker_output",
+    "save_marketplace_distribution_state": "save_marketplace_distribution_state",
+    "write_sage_dreaming_memory_state": "write_sage_dreaming_memory_state",
+    "write_sage_dreaming_staging_file": "write_sage_dreaming_staging_file",
+    "save_mini_apps_state": "save_mini_apps_state",
+    "initialize_workspace_context_file": "initialize_workspace_context_file",
+    "save_workspace_context_file": "save_workspace_context_file",
+    "save_agent_computer_profile_state": "save_agent_computer_profile_state",
+    "write_profile_api_file": "write_profile_api_file",
+    "write_runtime_common_json": "write_runtime_common_json",
+    "write_acp_manager_json": "write_acp_manager_json",
+    "write_session_diagnostics_file": "write_session_diagnostics_file",
+    "append_agent_memory_daily_log": "append_agent_memory_daily_log",
+    "write_no_provider_summary": "write_no_provider_summary",
+    "write_public_bot_drill_report": "write_public_bot_drill_report",
+    "write_telegram_media_file": "write_telegram_media_file",
+    "write_machine_capability_probe_file": "write_machine_capability_probe_file",
+    "write_dropbox_download_file": "write_dropbox_download_file",
+    "write_generated_image_file": "write_generated_image_file",
+    "write_telegram_poll_lock_file": "write_telegram_poll_lock_file",
+    "write_skills_registry_file": "write_skills_registry_file",
+    "write_deployed_agent_knowledge_file": "write_deployed_agent_knowledge_file",
+    "write_outcome_pack_spreadsheet_file": "write_outcome_pack_spreadsheet_file",
+    "write_outcome_pack_document_file": "write_outcome_pack_document_file",
+    "write_outcome_pack_remote_sync_file": "write_outcome_pack_remote_sync_file",
+    "write_artifact_content_file": "write_artifact_content_file",
+    "execute_external_write_once": "execute_external_write_once",
+    "create_gateway_tool_approval": "create_gateway_tool_approval",
+    "resolve_gateway_tool_approval": "resolve_gateway_tool_approval",
+    "expire_gateway_tool_approval": "expire_gateway_tool_approval",
+    "fail_gateway_tool_approval": "fail_gateway_tool_approval",
+    "execute_gateway_tool_approval": "execute_gateway_tool_approval",
+    "send_gateway_protocol_request_frame": "send_gateway_protocol_request_frame",
+    "acquire_channel_execution_lease": "acquire_channel_execution_lease",
+    "release_channel_execution_lease": "release_channel_execution_lease",
+    "start_direct_tool_execution": "start_direct_tool_execution",
+    "block_direct_tool_execution": "block_direct_tool_execution",
+    "fail_direct_tool_execution": "fail_direct_tool_execution",
+    "complete_direct_tool_execution": "complete_direct_tool_execution",
+    "upsert_workspace_memory": "write_workspace_memory",
+    "delete_workspace_memory": "delete_workspace_memory",
+    "append_workspace_daily_log": "append_workspace_daily_log",
+    "update_workspace_context_file": "write_workspace_context_file",
+    "upsert_approval_memory_rule": "write_approval_memory_rule",
+    "consume_approval_memory_rule": "consume_approval_memory_rule",
+    "create_sage_approval": "create_sage_approval",
+    "resolve_sage_approval": "resolve_sage_approval",
+    "consume_sage_approval": "consume_sage_approval",
+    "expire_sage_approvals": "expire_sage_approvals",
+    "update_sage_service_profile": "update_sage_service_profile",
+    "create_sage_service_entry": "create_sage_service_entry",
+    "update_sage_service_entry": "update_sage_service_entry",
+    "delete_sage_service_entry": "delete_sage_service_entry",
+    "set_sage_service_entry_pinned": "set_sage_service_entry_pinned",
+    "upsert_sage_memory_entry": "write_sage_memory_entry",
+    "update_sage_memory_entry": "update_sage_memory_entry",
+    "delete_sage_memory_entry": "delete_sage_memory_entry",
+    "wipe_sage_memory": "wipe_sage_memory",
+    "append_session_transcript": "append_session_transcript",
+    "append_activity_ledger_event": "append_activity_ledger_event",
+    "write_shared_operational_board_entry": "write_shared_operational_board_entry",
+    "checkpoint_snapshot": "write_checkpoint_snapshot",
+    "prune_records": "prune_state_records",
+}
+_RUNTIME_STATE_STORE_DEFAULT_NEXT_ACTION = "review_state_store_write"  # rust line 1215
+
+
+def _mock_runtime_state_store_next_action(operation: str) -> str:
+    op = str(operation or "").strip()
+    return _RUNTIME_STATE_STORE_NEXT_ACTIONS.get(op, _RUNTIME_STATE_STORE_DEFAULT_NEXT_ACTION)
+
+
+# empyralis-runtime-kernel/src/control_plane_service.rs, allow-path only
+# (control_plane_service_decision_command(), lines 289-537). The set
+# membership tables below are copied verbatim from the Rust consts; the
+# next_action derivation mirrors lines 517-537 for the case this mock always
+# produces — decision == "allow" (no block_reasons / approval_reasons).
+_CONTROL_PLANE_SERVICE_DESTRUCTIVE_OPERATIONS = {  # rust lines 102-113
+    "workspace_archive",
+    "workspace_delete",
+    "membership_remove",
+    "invite_revoke",
+    "thread_archive",
+    "thread_delete",
+    "workspace_emergency_stop",
+    "external_user_privacy_delete",
+    "deployed_agent_scope_data_delete",
+    "workspace_scope_data_delete",
+}
+_CONTROL_PLANE_SERVICE_OWNER_REQUIRED_OPERATIONS = {  # rust lines 115-167
+    "tenant_update",
+    "transparency_settings_update",
+    "workspace_policy_update",
+    "workspace_delete",
+    "billing_update",
+    "workspace_billing_plan_update",
+    "workspace_billing_account_write",
+    "workspace_billing_subscription_write",
+    "security_control_state_write",
+    "governance_hold_write",
+    "governance_hold_release",
+    "channel_user_acquisition_touch_write",
+    "channel_user_acquisition_conversion_write",
+    "deployed_agent_upgrade_click_write",
+    "agent_channel_event_write",
+    "personal_context_event_write",
+    "personal_context_event_seen_update",
+    "agent_action_event_write",
+    "agent_secret_access_event_write",
+    "agent_egress_event_write",
+    "activity_ledger_event_write",
+    "agent_trace_create",
+    "agent_trace_event_write",
+    "agent_trace_finish",
+    "agent_turn_transcript_event_append",
+    "agent_thread_ensure",
+    "agent_session_upsert",
+    "agent_session_terminate",
+    "agent_turn_upsert",
+    "knowledge_source_upsert",
+    "knowledge_source_chunks_replace",
+    "knowledge_retrieval_event_write",
+    "compiled_workflow_artifact_create",
+    "workspace_agent_install_compiled_artifact_update",
+    "self_hosted_enrollment_intent_create",
+    "self_hosted_runtime_enroll",
+    "self_hosted_runtime_approve",
+    "self_hosted_runtime_heartbeat",
+    "self_hosted_command_enqueue",
+    "self_hosted_command_claim",
+    "self_hosted_command_complete",
+    "quota_update",
+    "admin_impersonation",
+    "workspace_emergency_stop",
+    "public_route_update",
+    "workspace_scope_data_delete",
+    "deployed_agent_daily_message_quota_consume",
+    "deployed_agent_daily_message_warning_update",
+    "deployed_agent_cost_ledger_write",
+    "workspace_hosted_ai_cost_ledger_write",
+    "credit_ledger_event_write",
+}
+_CONTROL_PLANE_SERVICE_ADMIN_REQUIRED_OPERATIONS = {  # rust lines 169-221
+    "workspace_create",
+    "workspace_update",
+    "workspace_archive",
+    "membership_add",
+    "membership_update",
+    "membership_remove",
+    "invite_create",
+    "invite_revoke",
+    "pilot_invite_create",
+    "pilot_invite_revoke",
+    "workspace_tenant_binding_ensure",
+    "compiled_workflow_artifact_create",
+    "workspace_agent_install_compiled_artifact_update",
+    "self_hosted_enrollment_intent_create",
+    "self_hosted_runtime_approve",
+    "self_hosted_command_enqueue",
+    "deployed_agent_record_write",
+    "gateway_record_write",
+    "session_record_write",
+    "audit_export",
+    "secret_reference_write",
+    "external_user_privacy_delete",
+    "deployed_agent_scope_data_delete",
+    "workspace_scope_data_delete",
+    "workspace_billing_account_write",
+    "workspace_billing_subscription_write",
+    "security_control_state_write",
+    "governance_hold_write",
+    "governance_hold_release",
+    "channel_user_acquisition_touch_write",
+    "channel_user_acquisition_conversion_write",
+    "deployed_agent_upgrade_click_write",
+    "agent_channel_event_write",
+    "personal_context_event_write",
+    "personal_context_event_seen_update",
+    "agent_action_event_write",
+    "agent_secret_access_event_write",
+    "agent_egress_event_write",
+    "activity_ledger_event_write",
+    "agent_trace_create",
+    "agent_trace_event_write",
+    "agent_trace_finish",
+    "agent_turn_transcript_event_append",
+    "agent_thread_ensure",
+    "agent_session_upsert",
+    "agent_session_terminate",
+    "agent_turn_upsert",
+    "knowledge_source_upsert",
+    "knowledge_source_chunks_replace",
+    "knowledge_retrieval_event_write",
+    "workspace_tenant_binding_ensure",
+}
+_CONTROL_PLANE_SERVICE_EXTERNAL_WRITE_OPERATIONS = {  # rust lines 223-274
+    "webhook_ingest",
+    "deployed_agent_record_write",
+    "gateway_record_write",
+    "session_record_write",
+    "public_route_update",
+    "workspace_ai_route_update",
+    "secret_reference_write",
+    "external_user_privacy_request_write",
+    "external_user_privacy_audit_write",
+    "external_user_privacy_delete",
+    "deployed_agent_scope_data_delete",
+    "workspace_scope_data_delete",
+    "workspace_billing_defaults_write",
+    "workspace_billing_plan_update",
+    "workspace_billing_account_write",
+    "workspace_billing_subscription_write",
+    "security_control_state_write",
+    "governance_hold_write",
+    "governance_hold_release",
+    "channel_user_acquisition_touch_write",
+    "channel_user_acquisition_conversion_write",
+    "deployed_agent_upgrade_click_write",
+    "agent_channel_event_write",
+    "personal_context_event_seen_update",
+    "agent_action_event_write",
+    "agent_secret_access_event_write",
+    "agent_egress_event_write",
+    "activity_ledger_event_write",
+    "agent_trace_create",
+    "agent_trace_event_write",
+    "agent_trace_finish",
+    "agent_turn_transcript_event_append",
+    "agent_thread_ensure",
+    "agent_session_upsert",
+    "agent_session_terminate",
+    "agent_turn_upsert",
+    "knowledge_source_upsert",
+    "knowledge_source_chunks_replace",
+    "knowledge_retrieval_event_write",
+    "workspace_tenant_binding_ensure",
+    "user_profile_update",
+    "compiled_workflow_artifact_create",
+    "workspace_agent_install_compiled_artifact_update",
+    "self_hosted_enrollment_intent_create",
+    "self_hosted_runtime_enroll",
+    "self_hosted_runtime_approve",
+    "self_hosted_runtime_heartbeat",
+    "self_hosted_command_enqueue",
+    "self_hosted_command_claim",
+    "self_hosted_command_complete",
+}
+
+
+def _mock_control_plane_service_next_action(operation: str, payload: dict) -> str:
+    """Mirrors control_plane_service_decision_command()'s allow-path next_action
+    (rust lines 517-537) — this mock never produces block/require_approval, so
+    those branches (lines 517-520) are intentionally omitted."""
+    op = str(operation or "").strip()
+    target_status = str(payload.get("target_status") or "active").strip()
+    source = str(payload.get("source") or "internal").strip()
+    existing_record_idempotent_return = op == "invite_revoke" and target_status == "revoked"  # line 489-490
+    if payload.get("dry_run"):
+        return "return_control_plane_dry_run"
+    if existing_record_idempotent_return:
+        return "return_existing_control_plane_record"
+    if op == "webhook_ingest":
+        return "persist_webhook_event"
+    if op == "entitlement_check":
+        return "return_entitlement_snapshot"
+    if op == "audit_export":
+        return "create_audit_export_job"
+    if op in _CONTROL_PLANE_SERVICE_DESTRUCTIVE_OPERATIONS:
+        return "apply_control_plane_destructive_write"
+    external_write = op in _CONTROL_PLANE_SERVICE_EXTERNAL_WRITE_OPERATIONS or source == "webhook"
+    if (
+        external_write
+        or op in _CONTROL_PLANE_SERVICE_ADMIN_REQUIRED_OPERATIONS
+        or op in _CONTROL_PLANE_SERVICE_OWNER_REQUIRED_OPERATIONS
+    ):
+        return "apply_control_plane_write"
+    return "allow_control_plane_read"
+
+
+# empyralis-runtime-kernel/src/control_plane.rs control_plane_decision_command(),
+# lines 22-213. Identity-ish but with a "_record" suffix (and a
+# read/status_transition special case) — not a blanket echo either.
+_CONTROL_PLANE_RECORD_NEXT_ACTIONS = {  # rust lines 132-141
+    "create": "create_record",
+    "upsert": "upsert_record",
+    "update": "update_record",
+    "archive": "archive_record",
+    "restore": "restore_record",
+    "lock": "lock_record",
+    "unlock": "unlock_record",
+}
+
+
+def _mock_control_plane_record_next_action(operation: str, payload: dict) -> str:
+    op = str(operation or "").strip()
+    if op in ("read", "list", "lookup"):  # rust lines 72-85
+        return "read_record"
+    if op == "status_transition":  # rust lines 158-213
+        current_status = str(payload.get("current_status") or "").strip()
+        next_status = str(payload.get("next_status") or "").strip()
+        if current_status and next_status and current_status == next_status:
+            return "noop"
+        return "write_status_transition"
+    return _CONTROL_PLANE_RECORD_NEXT_ACTIONS.get(op, "")
+
+
 @pytest.fixture(autouse=True)
 def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """Skip @pytest.mark.kernel tests when the Rust kernel binary is absent.
@@ -41,22 +399,26 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
         import copy
         normalized_payload = payload if isinstance(payload, dict) else {}
 
-        # The real kernel's runtime-state-store-decision command derives
-        # `next_action` from the requested `operation` on an "allow"
-        # decision (empyralis-runtime-kernel/src/runtime_state_store.rs
-        # next_action(), lines 1106-1216): for every state-store operation
-        # gated this way (e.g. "save_installed_skill_registry" ->
-        # "save_installed_skill_registry", see line 1143;
-        # "write_skills_registry_file" -> itself, line 1172;
-        # "save_mcp_server_registry" -> itself, line 1142) that mapping is
-        # the identity function. Callers such as
-        # server_modules/installed_skills.py:134-136 and
-        # server_modules/skills_registry.py:83 require next_action to
-        # equal the operation they asked for before they'll persist state,
-        # so the mock must echo it back rather than leaving it blank.
+        # Several Rust kernel commands derive `next_action` from the
+        # requested `operation` on an "allow" decision, but the mapping is
+        # NOT always the identity function — callers (memory_service.py,
+        # sage_memory_service.py, control_plane_repository.py, etc.)
+        # compare next_action against the real kernel's per-operation
+        # contract before they'll persist state, so a blanket echo produces
+        # false gate failures for every non-identity operation. Each branch
+        # below reproduces the real kernel source it's named after; see the
+        # per-command helper functions above for file:line citations.
         next_action = ""
         if command == "runtime-state-store-decision":
-            next_action = str(normalized_payload.get("operation") or "").strip()
+            next_action = _mock_runtime_state_store_next_action(normalized_payload.get("operation"))
+        elif command == "control-plane-service-decision":
+            next_action = _mock_control_plane_service_next_action(
+                normalized_payload.get("operation"), normalized_payload
+            )
+        elif command == "control-plane-decision":
+            next_action = _mock_control_plane_record_next_action(
+                normalized_payload.get("operation"), normalized_payload
+            )
 
         return {
             "ok": True,
