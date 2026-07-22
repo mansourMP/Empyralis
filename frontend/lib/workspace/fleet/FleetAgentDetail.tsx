@@ -54,7 +54,7 @@ import {
   type FleetCapability,
   type FleetScheduleItem,
 } from "./fleet-data";
-import { deriveStatus, timeAgo, formatDate, formatDateTime, formatTime, formatNumber, usagePayerLabel, type AgentStatusTone, type UsageMatrixRow } from "./fleet-presentation";
+import { timeAgo, formatDate, formatDateTime, formatTime, formatNumber, usagePayerLabel, type AgentStatusTone, type UsageMatrixRow } from "./fleet-presentation";
 import { StatusChip, StatusDot } from "./fleet-indicators";
 import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./FleetRightPanel";
 import { UsageStat, bucketSeries, type UsageBucket } from "./fleet-sparkline";
@@ -299,8 +299,6 @@ export function FleetAgentDetail({
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
   const [costMatrix, setCostMatrix] = useState<UsageMatrixRow[]>([]);
 
-  const status = deriveStatus(agent?.hardware_status || "unknown", agent?.stopped?.active, Boolean(agent?.current_run_id));
-
   useEffect(() => {
     let cancelled = false;
     fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
@@ -339,6 +337,11 @@ export function FleetAgentDetail({
   // Fleet agents never update (see docs/HARDWARE-BRAIN-REALITY-REPORT.md).
   const { gateways } = useWorkspaceGateways(workspaceId);
   const placement = resolveHardwarePlacement(agent?.hardware_access, agent?.preferred_gateway_id, gateways, agent?.model_config);
+  // deriveAgentStatus (needs `gateways`, hence computed here rather than up
+  // top): a cli_subscription agent whose bound CLI isn't signed in reads
+  // "Needs sign-in", never a false "Ready" — the header must never claim an
+  // agent is runnable when its brain can't produce a turn.
+  const status = deriveAgentStatus(agent ?? {}, gateways);
   const role = agent?.role || "agent";
   const isMaster = role === "operator";
   const { tools: agentTools } = useFleetAgentTools(workspaceId, agentId);
@@ -2742,6 +2745,7 @@ import {
 } from "./fleet-provider-constants";
 import {
   GatewayBoxPicker,
+  deriveAgentStatus,
   gatewayRuntimeReady,
   resolveHardwarePlacement,
   useWorkspaceGateways,
@@ -3131,6 +3135,16 @@ function AgentModelPickerRow({
 
   const reasoningEffortSupported = REASONING_EFFORT_SUPPORTED_MODES.has(mode);
   const localNeedsBox = mode === "local" && !gatewayBinding.trim();
+  // Brain-bound modes (cli_subscription / local) can only run on a paired
+  // computer — there is no machine in "cloud" for a subscription CLI or Ollama
+  // to run on. So don't offer them when the workspace has zero paired boxes
+  // (the founder's rule: cloud never offers "Your subscription"). The agent's
+  // currently-saved mode is always kept in the list so the <select> can render
+  // its own value even if the hardware backing it later went away.
+  const brainModesAvailable = cliGateways.length > 0;
+  const modeOptions: ProviderMode[] = ["platform_credits", "byok_api"];
+  if (brainModesAvailable) modeOptions.push("cli_subscription", "local");
+  if (!modeOptions.includes(mode)) modeOptions.push(mode);
   const cliSubscriptionNeedsBox = mode === "cli_subscription" && !gatewayBinding.trim();
 
   async function handleSave() {
@@ -3171,10 +3185,15 @@ function AgentModelPickerRow({
               value={mode}
               onChange={(e) => onModeChange(e.currentTarget.value as ProviderMode)}
             >
-              {(["platform_credits", "byok_api", "cli_subscription", "local"] as ProviderMode[]).map((m) => (
+              {modeOptions.map((m) => (
                 <option key={m} value={m}>{MODE_LABELS[m]}</option>
               ))}
             </select>
+            {!brainModesAvailable && (
+              <p className="fleet-channel-expand-hint" style={{ margin: "4px 0 0" }}>
+                Running on your own Claude/Codex subscription needs a paired computer — add one under Hardware.
+              </p>
+            )}
           </div>
 
           {mode === "platform_credits" && (
@@ -3552,26 +3571,39 @@ function ModelTab({
           <span className="fleet-wizard-option-label">Your own API key</span>
           <span className="fleet-wizard-option-body">Use your key for any provider.</span>
         </button>
-        <button
-          type="button"
-          className={`fleet-wizard-option${mode === "cli_subscription" ? " is-selected" : ""}`}
-          onClick={() => { setMode("cli_subscription"); setProvider(provider || "claude_code_cli"); setSaved(false); }}
-        >
-          <span className="fleet-wizard-option-label">Your subscription</span>
-          <span className="fleet-wizard-option-body">Claude Code or Codex via Gateway.</span>
-          <span className="fleet-wizard-option-note fleet-wizard-option-note--gateway">
-            {cliSubscriptionHint(cliGateways)}
-          </span>
-        </button>
-        <button
-          type="button"
-          className={`fleet-wizard-option${mode === "local" ? " is-selected" : ""}`}
-          onClick={() => { setMode("local"); setProvider(provider || "ollama"); setSaved(false); }}
-        >
-          <span className="fleet-wizard-option-label">Run locally</span>
-          <span className="fleet-wizard-option-body">Ollama on your own machine, via the Gateway.</span>
-        </button>
+        {/* Brain-bound modes need a Gateway/machine — offered only when the
+            workspace has a paired box (cloud has none). The current mode's card
+            always stays visible so an already-configured agent can still be
+            seen/changed even if its hardware later went away. */}
+        {(cliGateways.length > 0 || mode === "cli_subscription") && (
+          <button
+            type="button"
+            className={`fleet-wizard-option${mode === "cli_subscription" ? " is-selected" : ""}`}
+            onClick={() => { setMode("cli_subscription"); setProvider(provider || "claude_code_cli"); setSaved(false); }}
+          >
+            <span className="fleet-wizard-option-label">Your subscription</span>
+            <span className="fleet-wizard-option-body">Claude Code or Codex via Gateway.</span>
+            <span className="fleet-wizard-option-note fleet-wizard-option-note--gateway">
+              {cliSubscriptionHint(cliGateways)}
+            </span>
+          </button>
+        )}
+        {(cliGateways.length > 0 || mode === "local") && (
+          <button
+            type="button"
+            className={`fleet-wizard-option${mode === "local" ? " is-selected" : ""}`}
+            onClick={() => { setMode("local"); setProvider(provider || "ollama"); setSaved(false); }}
+          >
+            <span className="fleet-wizard-option-label">Run locally</span>
+            <span className="fleet-wizard-option-body">Ollama on your own machine, via the Gateway.</span>
+          </button>
+        )}
       </div>
+      {cliGateways.length === 0 && mode !== "cli_subscription" && mode !== "local" && (
+        <p className="fleet-config-hint" style={{ marginTop: 6 }}>
+          Running on your own Claude/Codex subscription or a local model needs a paired computer — add one under Hardware.
+        </p>
+      )}
 
       {/* platform_credits has no provider/model fields (fixed to the
           platform default) — reasoning effort is the one thing left to
