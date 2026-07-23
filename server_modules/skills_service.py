@@ -3000,6 +3000,24 @@ def _agent_scope_from_direct_tool_context(session_ctx: Dict[str, Any] | None) ->
     return "studio_agent"
 
 
+def _agent_install_id_from_direct_tool_context(session_ctx: Dict[str, Any] | None) -> str:
+    """Resolves the CALLING agent's install id from verified session
+    identity — the same resolution every memory__* tool dispatch in this
+    file already uses (see e.g. the agent_install_id= kwargs throughout the
+    memory tool handlers below). Reads session_ctx directly rather than
+    _direct_tool_session_metadata, which does not carry agent_install_id/
+    active_agent_install_id at all. Used to scope the Gateway file/shell
+    connector's on-box mount to the calling agent — see
+    _execute_direct_tool_via_gateway_async's file/shell dispatch and
+    docs/design/memory-placement-scope.md's "gateway seam" isolation gap."""
+    session_payload = session_ctx if isinstance(session_ctx, dict) else {}
+    return str(
+        session_payload.get("agent_install_id")
+        or session_payload.get("active_agent_install_id")
+        or ""
+    ).strip()
+
+
 def _tenant_id_from_direct_tool_context(session_ctx: Dict[str, Any] | None) -> str:
     session_payload = session_ctx if isinstance(session_ctx, dict) else {}
     agent_turn_request = session_payload.get("agent_turn_request") if isinstance(session_payload.get("agent_turn_request"), dict) else {}
@@ -3259,6 +3277,7 @@ def _execute_direct_tool_via_gateway(
     request_id: str = "",
     session_ctx: Dict[str, Any] | None = None,
     require_approval: Optional[bool] = None,
+    agent_install_id: Optional[str] = None,
     callbacks: Any,
 ) -> Dict[str, Any]:
     from server_modules import hardware_action_broker_service
@@ -3281,6 +3300,7 @@ def _execute_direct_tool_via_gateway(
             request_id=request_id,
             trace_context=trace_context,
             require_approval=require_approval,
+            agent_install_id=agent_install_id,
         )
     )
     payload = dict(response) if isinstance(response, dict) else {"result": response}
@@ -3316,6 +3336,7 @@ async def _execute_direct_tool_via_gateway_async(
     request_id: str = "",
     session_ctx: Dict[str, Any] | None = None,
     require_approval: Optional[bool] = None,
+    agent_install_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Async version of _execute_direct_tool_via_gateway.
 
@@ -3342,6 +3363,7 @@ async def _execute_direct_tool_via_gateway_async(
         request_id=request_id,
         trace_context=trace_context,
         require_approval=require_approval,
+        agent_install_id=agent_install_id,
     )
     payload = dict(response) if isinstance(response, dict) else {"result": response}
     if isinstance(payload.get("execution"), dict):
@@ -4332,6 +4354,38 @@ async def execute_single_direct_tool_call_async(
             metadata = _direct_tool_session_metadata(session_ctx)
             tenant_id = _tenant_id_from_direct_tool_context(session_ctx)
             trace_context = session_payload.get("trace_context")
+            # SECURITY: filesystem.read_write and shell.execute on the
+            # Gateway share one on-box directory per (mount, workspace_id) —
+            # see docs/design/memory-placement-scope.md's "gateway seam"
+            # section and PLATFORM-MAP.md Part 27.8 (the identical leak
+            # class, for connector credentials). gateway_adapter now folds
+            # the CALLING agent's own identity into that mount server-side
+            # (never from anything the model/caller supplied, and never read
+            # from the tool call's own `arguments` — only from verified
+            # session_ctx) so two SPECIALIST agent installs sharing a
+            # workspace + Gateway box can't reach each other's files through
+            # this connector.
+            #
+            # Deliberately NOT a hard fail-closed gate on empty identity,
+            # unlike commit 8cc8d69dd's skill_invoke-routed memory
+            # executors: verified (sage_agent_runtime_service.py's
+            # _run_sage_action_loop_v3, 3 call sites, all commented "empty
+            # for Sage") that the owner-facing agent's OWN turn — the
+            # primary, highest-volume caller of this exact connector when a
+            # box is paired — never has active_agent_install_id/
+            # agent_install_id set in session_ctx at all. A hard fail here
+            # would break Sage's own file/shell tool use outright, not just
+            # a specialist edge case. This mirrors PLATFORM-MAP.md's Part
+            # 27.1 precedent for memory: "an empty agent_install_id does not
+            # mean 'no scope' — it resolves to the WORKSPACE ROOT ...
+            # intentional and correct for the owner-facing agent's own
+            # turns." Empty here is a stable, server-controlled signal
+            # ("this is Sage's own turn," never model-forgeable) rather than
+            # a "we don't know who's asking" ambiguity — gateway_adapter's
+            # _agent_scoped_mount leaves the mount unchanged (today's
+            # existing, workspace-level bucket) when it's empty, and scopes
+            # it per-agent whenever a real specialist identity resolves.
+            resolved_agent_install_id = _agent_install_id_from_direct_tool_context(session_ctx)
             gateway_arguments = _gateway_arguments_for_direct_local_tool(
                 normalized_connector,
                 normalized_action,
@@ -4365,6 +4419,7 @@ async def execute_single_direct_tool_call_async(
                             session_ctx=session_ctx,
                         ),
                         agent_scope=_agent_scope_from_direct_tool_context(session_ctx),
+                        agent_install_id=resolved_agent_install_id or None,
                         tenant_id=tenant_id,
                         thread_id=str(thread_id or "").strip(),
                         request_id=gateway_request_id,
@@ -4986,7 +5041,12 @@ def execute_single_direct_tool_call(
             # 2026-07-14.
             agent_install_id=session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id") or None,
         )
-        return json.dumps({"results": results}, ensure_ascii=False)
+        # search_memory_notebook returns a self-describing envelope
+        # ({results, files_searched, errors, status, message}) so the model can
+        # tell "searched everything, confirmed nothing" from "the search never
+        # ran" or "some files were unreadable and NOT searched". Pass it
+        # through flat — re-wrapping would bury status/errors a level deeper.
+        return json.dumps(results, ensure_ascii=False)
     if connector_id == "memory" and action_id == "get":
         rel_path = str(argument_payload.get("path") or argument_payload.get("input") or "").strip()
         if not rel_path:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from server_modules import (
@@ -23,17 +24,48 @@ from server_modules import (
 from server_modules.hardware_runtime_adapters.common import dict_value, text
 
 
+_MOUNT_SCOPE_UNSAFE_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _agent_scoped_mount(base_mount: str, agent_install_id: Optional[str]) -> str:
+    """Folds the CALLING agent's identity into a Gateway mount name so two
+    agent installs sharing one workspace + one Gateway box never land on the
+    identical on-disk directory (`mounts/<mount>/<workspace_id>/` in
+    empyralis-gateway/src/shell/runtime.ts — filesystem.read_write and
+    shell.execute both key off this exact path). Without this, the seam is
+    scoped by (mount-bucket, workspace_id) only, which is shared across
+    every agent in a workspace — the same leak class PLATFORM-MAP.md Part
+    27.8 flagged CRITICAL for connector credentials, here for the file/shell
+    connectors instead (see docs/design/memory-placement-scope.md's
+    "gateway seam" section).
+
+    agent_install_id must be resolved server-side by the caller from
+    verified session identity — it is never read from the `arguments` a
+    model/caller supplied. None/empty (e.g. the human-operator
+    /runtime/hardware/actions/execute REST route in runtime_runtime_api.py,
+    which has no per-agent concept — a human operating their own workspace
+    directly, not a specialist agent acting on the model's behalf) leaves
+    today's workspace-shared mount name unchanged, matching that route's
+    existing, already-authorized behavior.
+    """
+    scope = _MOUNT_SCOPE_UNSAFE_CHARS.sub("_", text(agent_install_id).strip())
+    return f"agent-{scope}__{base_mount}" if scope else base_mount
+
+
 def _resolve_file_mount_for_gateway_action(
     capability_id: str,
     arguments: Dict[str, Any],
     file_mount_grants: Optional[List[Dict[str, Any]]],
+    *,
+    agent_install_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolves which named mount (artifacts/project/shared/knowledge/local_root/
     connector_files) a filesystem.* gateway action is allowed to touch, and at
     what grant level, using the same file_mount_security path run_service.py's
     execute_workflow_local_tool() already uses for the equivalent workflow
     execution path. Returns arguments unchanged for non-filesystem capabilities
-    (shell.execute has no single target path to resolve a mount against).
+    (shell.execute has no single target path to resolve a mount against — its
+    own agent-scoping is applied separately in execute_gateway_action).
 
     The Gateway trusts this resolved mount NAME (not a host path — the Gateway
     itself, not the cloud, knows how mount names map to its own local disk
@@ -60,7 +92,7 @@ def _resolve_file_mount_for_gateway_action(
         execution_target,
     )
     resolved_arguments = dict(arguments)
-    resolved_arguments["mount"] = file_access["mount"]
+    resolved_arguments["mount"] = _agent_scoped_mount(file_access["mount"], agent_install_id)
     return resolved_arguments
 
 
@@ -229,9 +261,24 @@ async def execute_gateway_action(
     runtime_target: str = "user_device_gateway",
     agent_scope: str = "studio_agent",
     file_mount_grants: Optional[List[Dict[str, Any]]] = None,
+    agent_install_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
-        arguments = _resolve_file_mount_for_gateway_action(capability_id, arguments, file_mount_grants)
+        arguments = _resolve_file_mount_for_gateway_action(
+            capability_id, arguments, file_mount_grants, agent_install_id=agent_install_id,
+        )
+        # shell.execute has no single target path for
+        # _resolve_file_mount_for_gateway_action to check a grant against
+        # (it returns shell.execute's arguments unchanged, by design — see
+        # its docstring), but shell.execute lands on the exact same on-box
+        # `mounts/<mount>/<workspace_id>/` directory as filesystem.* does.
+        # Apply the identical agent-scoped mount here so the file connector
+        # and the shell connector can't be used to route around each
+        # other's isolation. Never trusts a caller-supplied `mount`
+        # argument for shell either — always server-computed.
+        if text(capability_id).strip() == "shell.execute" and text(agent_install_id).strip():
+            arguments = dict(arguments)
+            arguments["mount"] = _agent_scoped_mount("default", agent_install_id)
     except Exception as exc:
         failure = agent_computer_permission_secret_model.local_failure_classification(exc)
         state = text(failure.get("state")) or "failed"

@@ -45,7 +45,16 @@ class SkillsServiceTests(unittest.TestCase):
             llm_task=lambda *args, **kwargs: {"ok": True},
             web_search=lambda query: [],
             web_fetch=lambda url: f"Fetched {url}",
-            search_memory_notebook=lambda workspace_id, query, max_results=5, agent_install_id=None: [{"path": "MEMORY.md", "query": query, "max_results": max_results, "agent_install_id": agent_install_id}],
+            # Mirrors the real search_memory_notebook envelope (results +
+            # files_searched/status/message/errors) so the model can tell a
+            # confirmed-empty search from one that never ran.
+            search_memory_notebook=lambda workspace_id, query, max_results=5, agent_install_id=None: {
+                "results": [{"path": "MEMORY.md", "query": query, "max_results": max_results, "agent_install_id": agent_install_id}],
+                "files_searched": 1,
+                "errors": [],
+                "status": "matches_found",
+                "message": "Searched 1 memory file(s).",
+            },
             get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None, agent_install_id=None: {
                 "path": rel_path,
                 "from_line": from_line,
