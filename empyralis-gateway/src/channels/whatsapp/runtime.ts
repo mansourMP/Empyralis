@@ -1341,13 +1341,28 @@ export class WhatsAppPersonalRuntime {
       if (mapped.message.is_group && mapped.message.quoted_stanza_id) {
         mapped.message.is_reply_to_sage = this.sentMessageIds.has(String(mapped.message.quoted_stanza_id));
       }
-      // Group gate: skip group messages unless mentioned or replying to Sage
-      if (mapped.message.is_group && !mapped.message.is_mentioned && !mapped.message.is_reply_to_sage) {
-        continue;
-      }
-      // Best-effort group subject lookup — ONLY for messages that just
-      // passed the gate above (mentioned/reply-to-sage), so this network
-      // round trip is paid rarely, not on every group message. Threaded
+      // Group gate: REMOVED as a gateway-side DECISION (2026-07-23,
+      // group_policy build). This runtime still computes the raw mention
+      // FACTS above (is_mentioned via mapWhatsAppInboundMessage's
+      // mentionedJid scan, is_reply_to_sage just above) — unavoidably
+      // platform-specific, stays here. What moved is WHO DECIDES shouldSkip
+      // from those facts: personal_channels_service.py's
+      // mention_gating_service.resolve_inbound_mention_decision is now the
+      // ONE shared resolver (mirrors OpenClaw's resolveInboundMentionDecision
+      // — see docs/OpenClaw.md's GROUP/MENTION GATING section), replacing
+      // what used to be TWO independent copies of the same shouldSkip
+      // decision (this "primary gate" here, plus an inline backend
+      // safety-net check in personal_channels_service.py). Every group
+      // message is now always forwarded with its computed facts; the
+      // backend decides — see personal_channels_service.py's
+      // DEFAULT_REQUIRE_MENTION doc comment for the default (OFF — Ruling A
+      // "see-and-decide") this now defers to.
+      //
+      // Group subject lookup now runs for EVERY group message (previously
+      // only for ones that passed the gate above) — this is intentional,
+      // not a leftover: the group context (is_group/chat_title) the model
+      // needs to exercise its own see-and-decide judgment (Ruling A) is
+      // needed on every group turn now, not just addressed ones. Threaded
       // through to the server as chat_title so the owner-unified activity
       // feed's mirrored "[sent to WhatsApp · <subject>]" entries are
       // legible instead of a bare remote_jid (see

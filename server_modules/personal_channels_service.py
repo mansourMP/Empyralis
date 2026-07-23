@@ -13,6 +13,7 @@ from server_modules import (
     channel_lane_contract_service,
     gateway_state_repository,
     kill_switch_gate,
+    mention_gating_service,
     personal_channel_sage_bridge_service,
     personal_channels_repository,
     rust_runtime_kernel_client,
@@ -1152,6 +1153,282 @@ async def _handle_dm_policy_blocked(
     }
 
 
+# ── groupPolicy: which groups the agent is even active in, + mention-gating ──
+#
+# TWO ORTHOGONAL AXES, both owner-configurable, neither ever an AI runtime
+# decision:
+#
+#   1. group_policy (this section's storage, mirroring dm_policy's exact
+#      install_metadata.<key>[channel_key] shape — see
+#      _load_agent_dm_policy_config/_persist_agent_dm_policy_config above,
+#      whose pattern this copies): open | allowlist | disabled. Is this
+#      SPECIFIC group (keyed on the group's own chat id, not a sender id)
+#      allowed to have the agent active at all. Parallels OpenClaw's
+#      groupPolicy (dist/runtime-group-policy-BEjP88cf.js — see
+#      docs/OpenClaw.md's GROUP/MENTION GATING section).
+#   2. requireMention (also stored here, per-group-policy-config) — whether
+#      an unaddressed message in an allowed group should be skipped.
+#      Delegated to mention_gating_service.resolve_inbound_mention_decision,
+#      the ONE shared resolver mirroring OpenClaw's
+#      resolveInboundMentionDecision formula.
+#
+# DEFAULTS — read this before ever touching either constant below:
+#
+# Two standing rulings govern this, and they are in tension on their face:
+#   Ruling A (2026-07-16): "Groups = see-and-decide, NOT mention-gated. The
+#   agent should SEE every group message and decide to reply or stay silent
+#   by its own judgment ... Do NOT build rigid gates."
+#   Ruling B (2026-07-23): no filter may flag-and-withhold a message from
+#   the reasoning model on CONTENT grounds; every message reaches the model
+#   unconditionally (see sage_turn_adapter.py's removed Phase-P gate).
+#
+# The ACTUAL code shipped between those two dates (0fe9ada19 2026-07-18,
+# c8b8fbed0 2026-07-19) added a hard, non-configurable gate to Telegram and
+# the local-bridge channels (mirroring WhatsApp's pre-existing one): an
+# unaddressed group message is silently dropped BEFORE ever reaching the
+# model (see test_personal_channel_group_gate.py's pre-existing
+# test_unaddressed_group_message_is_ignored_and_never_dispatched, which
+# encodes exactly that as "today's" behavior). That gate is real, was
+# deliberately built to fix a live "family group" spam incident, and is
+# what a naive "preserve exact current behavior" reading of this section
+# would keep as the default.
+#
+# The founder's resolution (2026-07-23), which this section implements
+# instead: Ruling A is explicitly "still in force" and the 2026-07-18/19
+# gate is a rigid gate of exactly the kind Ruling A says not to build.
+# REQUIRE_MENTION_DEFAULT is OFF — restoring Ruling A's see-and-decide
+# default (the agent sees every group message and can choose [SILENT] via
+# its own judgment, given the group context this handler threads through
+# regardless — is_group/chat_label — same as any other turn). This is a
+# DELIBERATE behavior change against the code as it stood before this
+# build, not an oversight: test_personal_channel_group_gate.py's
+# unaddressed-message tests were updated (not merely "no longer applicable")
+# to reflect it, and new tests prove requireMention=True (an explicit,
+# owner-configured, advance-of-time lever — never an AI runtime decision)
+# reproduces the pre-2026-07-23 hard-gate behavior byte-for-byte, so nothing
+# already relying on the old strict gate has lost the ability to have it —
+# it is now an opt-in the owner pulls, not the default everyone is stuck
+# with.
+#
+# GROUP_POLICY_DEFAULT_MODE stays "open": unlike requireMention, the
+# open|allowlist|disabled identity axis does not exist in any form before
+# this build (every group was already implicitly "open" — see
+# docs/OpenClaw.md: "Empyralis's personal-channel group gate has no
+# equivalent allowlist/open/disabled axis"). "open" is therefore the one
+# value that adds NO new restriction beyond what already existed, on
+# EITHER axis this section governs, on top of the requireMention default
+# above — not a second, independent behavior change.
+GROUP_POLICY_OPEN = "open"
+GROUP_POLICY_ALLOWLIST = "allowlist"
+GROUP_POLICY_DISABLED = "disabled"
+GROUP_POLICY_MODES = {GROUP_POLICY_OPEN, GROUP_POLICY_ALLOWLIST, GROUP_POLICY_DISABLED}
+DEFAULT_GROUP_POLICY_MODE = GROUP_POLICY_OPEN
+DEFAULT_REQUIRE_MENTION = False
+
+# Reason codes _enforce_group_policy returns when blocking — matches the
+# pre-existing "group_no_mention" literal's style (a short, stable,
+# machine-readable token every {"ignored": True, "reason": ...} caller
+# already surfaces/traces, never a silent drop).
+GROUP_GATE_REASON_NO_MENTION = "group_no_mention"
+GROUP_GATE_REASON_POLICY_DENIED = "group_policy_denied"
+
+
+def _normalize_group_policy_config(raw: Any) -> Dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    mode = str(data.get("mode") or "").strip().lower()
+    if mode not in GROUP_POLICY_MODES:
+        mode = DEFAULT_GROUP_POLICY_MODE
+    allowlist = sorted({str(x).strip() for x in (data.get("allowlist") or []) if str(x or "").strip()})
+    require_mention = _boolish(data.get("require_mention"), default=DEFAULT_REQUIRE_MENTION)
+    return {"mode": mode, "allowlist": allowlist, "require_mention": require_mention}
+
+
+async def _load_agent_group_policy_config(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    channel_key: str,
+) -> Dict[str, Any]:
+    """Read-only, safe-by-default — mirrors _load_agent_dm_policy_config
+    exactly, persisted at install_metadata.group_policy[channel_key].
+
+    UNLIKE dm_policy, there is no separate stricter "unresolved identity"
+    fallback: dm_policy's owner_only fallback is safe precisely because the
+    owner's own messages bypass dm_policy entirely (is_owner is checked
+    BEFORE dm_policy is even loaded — see _enforce_dm_policy). group_policy
+    has no such owner-bypass story to lean on for a random group's traffic,
+    so a stricter fallback here would silently DISABLE every group for any
+    agent_id that can't resolve — which for local-bridge channels
+    (Signal/iMessage/WeChat, permanently agent_id="" — see
+    LOCAL_BRIDGE_PERSONAL_CHANNELS) is EVERY call, always, forever. That
+    would be a real new restriction violating "deploying this must change
+    zero behavior for existing users", so the unresolved-identity case
+    below returns the exact same default as a resolved-but-never-configured
+    agent, not a stricter one.
+    """
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
+        return _normalize_group_policy_config(None)
+    try:
+        from server_modules import agent_registry_repository as _repo
+
+        install = await _repo.get_workspace_agent_install_bundle(
+            normalized_agent_id,
+            tenant_id=str(tenant_id or "default").strip() or "default",
+            workspace_id=str(workspace_id or "default").strip() or "default",
+        )
+    except Exception:
+        _logger.warning("group_policy: install lookup failed for agent_id=%s — defaulting to open", normalized_agent_id, exc_info=True)
+        return _normalize_group_policy_config(None)
+    if not isinstance(install, dict):
+        return _normalize_group_policy_config(None)
+    meta = dict(install.get("install_metadata") or install.get("metadata") or {})
+    all_policies = meta.get("group_policy") if isinstance(meta.get("group_policy"), dict) else {}
+    return _normalize_group_policy_config(all_policies.get(channel_key))
+
+
+async def _persist_agent_group_policy_config(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    channel_key: str,
+    config: Dict[str, Any],
+) -> bool:
+    """Write path for a future settings API to call — mirrors
+    _persist_agent_dm_policy_config's read-modify-write-the-whole-dict
+    shape exactly (update_workspace_agent_install merges `metadata`
+    shallowly at the TOP level only, so a naive per-channel write would
+    clobber sibling channels' group_policy). Best-effort: never raises."""
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
+        return False
+    resolved_tenant_id = str(tenant_id or "default").strip() or "default"
+    resolved_workspace_id = str(workspace_id or "default").strip() or "default"
+    try:
+        from server_modules import agent_registry_repository as _repo
+
+        install = await _repo.get_workspace_agent_install_bundle(
+            normalized_agent_id, tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id,
+        )
+        if not isinstance(install, dict):
+            return False
+        meta = dict(install.get("install_metadata") or install.get("metadata") or {})
+        all_policies = dict(meta.get("group_policy")) if isinstance(meta.get("group_policy"), dict) else {}
+        all_policies[channel_key] = _normalize_group_policy_config(config)
+        updated = await _repo.update_workspace_agent_install(
+            normalized_agent_id,
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+            metadata={"group_policy": all_policies},
+        )
+        return updated is not None
+    except Exception:
+        _logger.warning("group_policy: persist failed for agent_id=%s channel=%s", normalized_agent_id, channel_key, exc_info=True)
+        return False
+
+
+def _group_policy_group_id(message: Dict[str, Any], *, remote_jid: str) -> str:
+    """The identity group_policy's open|allowlist|disabled axis authorizes
+    against: the group's own chat id (remote_jid — unlike dmPolicy's
+    _dm_policy_sender_id, this is NEVER sender_jid; a group's membership
+    list is irrelevant to "is this group itself allowed", only the group's
+    own identity is)."""
+    return str(remote_jid or "").strip()
+
+
+async def _enforce_group_policy(
+    *,
+    registration: Dict[str, Any],
+    channel_key: str,
+    agent_id: str,
+    message: Dict[str, Any],
+    remote_jid: str,
+) -> Dict[str, Any]:
+    """THE group gate — replaces the inline `if is_group: if not
+    is_mentioned and not is_reply_to_sage: skip` duplicated across the
+    WhatsApp/Telegram/local-bridge/cloud handlers below. Combines the two
+    axes documented above this function's constants.
+
+    HARD CONSTRAINT: never reads message content/topic — only
+    message["is_group"]/["is_mentioned"]/["is_reply_to_sage"] (platform-
+    computed addressing facts a channel plugin derives from mention
+    entities/reply-linkage, never from what the message says) and the
+    group's own chat id.
+
+    Self-chat bypass: self-chat (message["is_self_chat"]) is, by
+    construction, never a group message on any channel (Saved
+    Messages/Note-to-Self is always a private 1:1 with the owner) — the
+    is_group short-circuit below already means self-chat is never gated.
+    This explicit check is defense-in-depth so that remains true even if a
+    future bridge ever mis-set both flags at once, matching the "owner's
+    self-chat is NEVER gated by either policy" hard constraint literally
+    rather than as an implied consequence.
+
+    Returns {"allowed": bool, "reason": Optional[str], "mode": Optional[str],
+    "require_mention": Optional[bool], "group_id": Optional[str],
+    "was_addressed": Optional[bool]}. `reason` is GROUP_GATE_REASON_NO_MENTION
+    or GROUP_GATE_REASON_POLICY_DENIED when blocked.
+
+    was_addressed: the HONEST, real "was this message actually addressed"
+    fact (explicit mention or reply-to-agent) — None for a DM/self-chat
+    (not applicable; addressed is meaningless outside a group), otherwise
+    the resolver's effective_was_mentioned, computed independently of
+    require_mention. THIS MUST BE THREADED THROUGH to whatever builds the
+    reply and feeds personal_channel_sage_bridge_service's InboundEnvelope
+    (see _build_personal_channel_envelope's `addressed` field) — with
+    requireMention defaulting OFF, allowed=True no longer implies "this was
+    addressed" the way it used to when this gate hard-blocked every
+    unaddressed message; callers that skip threading this through would
+    silently tell the model "you were addressed directly" for a message
+    that was not, breaking Ruling A's own "informed judgment" mechanism.
+    """
+    if bool(message.get("is_self_chat")) or not bool(message.get("is_group")):
+        return {
+            "allowed": True, "reason": None, "mode": None, "require_mention": None,
+            "group_id": None, "was_addressed": None,
+        }
+
+    group_id = _group_policy_group_id(message, remote_jid=remote_jid)
+    tenant_id = str(registration.get("tenant_id") or "default").strip() or "default"
+    workspace_id = str(registration.get("workspace_id") or "default").strip() or "default"
+    config = await _load_agent_group_policy_config(
+        tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id, channel_key=channel_key,
+    )
+    mode = config["mode"]
+    require_mention = bool(config["require_mention"])
+
+    # Computed regardless of require_mention (the formula doesn't depend on
+    # it) so was_addressed is always the honest fact, whether or not this
+    # policy would actually enforce it.
+    mention_decision = mention_gating_service.resolve_inbound_mention_decision(
+        facts=mention_gating_service.mention_facts_from_message(message),
+        policy={"is_group": True, "require_mention": require_mention},
+    )
+    was_addressed = bool(mention_decision["effective_was_mentioned"])
+
+    if mode == GROUP_POLICY_DISABLED:
+        return {
+            "allowed": False, "reason": GROUP_GATE_REASON_POLICY_DENIED, "mode": mode,
+            "require_mention": require_mention, "group_id": group_id, "was_addressed": was_addressed,
+        }
+    if mode == GROUP_POLICY_ALLOWLIST and (not group_id or group_id not in config["allowlist"]):
+        return {
+            "allowed": False, "reason": GROUP_GATE_REASON_POLICY_DENIED, "mode": mode,
+            "require_mention": require_mention, "group_id": group_id, "was_addressed": was_addressed,
+        }
+    if mention_decision["should_skip"]:
+        return {
+            "allowed": False, "reason": GROUP_GATE_REASON_NO_MENTION, "mode": mode,
+            "require_mention": require_mention, "group_id": group_id, "was_addressed": was_addressed,
+        }
+    return {
+        "allowed": True, "reason": None, "mode": mode,
+        "require_mention": require_mention, "group_id": group_id, "was_addressed": was_addressed,
+    }
+
+
 def _as_mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -1459,6 +1736,18 @@ def get_gateway_personal_channel_surfaces(gateway_id: str) -> Dict[str, Any]:
                 "dm_policy": {
                     "default_mode": DEFAULT_DM_POLICY_MODE,
                     "modes": sorted(DM_POLICY_MODES),
+                    "enforced_server_side": True,
+                },
+                # group_policy: the SAME channel-level default/enforcement
+                # description as dm_policy above, for the separate group
+                # axes (see _enforce_group_policy). require_mention's
+                # default is OFF (Ruling A, see-and-decide) — an owner can
+                # opt any agent back into a hard mention-only gate per
+                # channel; see that constant's own doc comment for why.
+                "group_policy": {
+                    "default_mode": DEFAULT_GROUP_POLICY_MODE,
+                    "modes": sorted(GROUP_POLICY_MODES),
+                    "default_require_mention": DEFAULT_REQUIRE_MENTION,
                     "enforced_server_side": True,
                 },
                 "manifest": secret_redaction_service.sanitize_mapping(manifest),
@@ -1835,6 +2124,7 @@ async def _deliver_whatsapp_personal_reply(
     is_group: bool = False,
     chat_label: Optional[str] = None,
     sender_id: str = "",
+    was_addressed: Optional[bool] = None,
 ) -> Dict[str, Any]:
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
     if reply_idempotency_key and reply_idempotency_key.startswith(WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX):
@@ -1926,6 +2216,7 @@ async def _deliver_whatsapp_personal_reply(
             is_owner=is_owner,
             is_group=is_group,
             chat_label=chat_label,
+            was_addressed=was_addressed,
         )
         reply_media = list((reply or {}).get("media") or [])
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
@@ -2072,21 +2363,34 @@ async def _handle_whatsapp_gateway_channel_inbound(
         raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
     if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
         return {"ignored": True, "reason": "from_me", "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY}
-    # Group gate: skip group messages unless mentioned or replying to Sage.
-    # The Gateway-side filter (runtime.ts) is the primary gate; this is a
-    # backend safety net in case the Gateway bypasses it for any reason.
-    if bool(message.get("is_group")):
-        if not bool(message.get("is_mentioned")) and not bool(message.get("is_reply_to_sage")):
-            return {
-                "ignored": True,
-                "reason": "group_no_mention",
-                "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY,
-            }
     # Resolved BEFORE the sync below (not after): this reflects whichever
     # agent's configure() call (or a prior message) already owns this
     # gateway+channel, and the sync then updates THAT SAME row to
-    # "connected" rather than risking a second, wrongly-scoped row.
+    # "connected" rather than risking a second, wrongly-scoped row. Also
+    # needed by the group gate right below (group_policy is per-agent
+    # config), which is why this now runs before that gate rather than
+    # after it as it used to when the gate was a hardcoded inline check.
     agent_id = _resolve_agent_id_for_inbound(gateway_id, WHATSAPP_PERSONAL_CHANNEL_KEY)
+    # Group gate: _enforce_group_policy — the ONE shared resolver (see its
+    # own docstring above) replacing what used to be an inline `if is_group
+    # and not is_mentioned and not is_reply_to_sage: skip` here. The
+    # Gateway-side filter (runtime.ts) used to be a primary gate duplicating
+    # this same decision; it now only computes/forwards the raw mention
+    # facts (is_mentioned/is_reply_to_sage) and this is the ONE place the
+    # shouldSkip decision is made.
+    group_decision = await _enforce_group_policy(
+        registration=registration,
+        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
+        message=message,
+        remote_jid=remote_jid,
+    )
+    if not group_decision["allowed"]:
+        return {
+            "ignored": True,
+            "reason": group_decision["reason"],
+            "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY,
+        }
     # Read BEFORE the sync below writes to it: dmPolicy's owner check (further
     # down) needs the identity established at login, not whatever the sync
     # payload is about to (re)write — see _resolve_linked_identity_for_sync's
@@ -2212,6 +2516,13 @@ async def _handle_whatsapp_gateway_channel_inbound(
         # every other identity/routing decision in this handler already keys
         # off remote_jid, unchanged.
         sender_id=str(message.get("sender_jid") or "").strip(),
+        # The REAL "was this message actually addressed" fact from the
+        # group gate above (None for a non-group turn) — see
+        # _enforce_group_policy's own docstring for why this must be
+        # threaded through rather than left to default: with
+        # requireMention OFF by default, allowed=True no longer implies
+        # "addressed" the way it used to.
+        was_addressed=group_decision.get("was_addressed"),
     )
 
 
@@ -2246,20 +2557,27 @@ async def _handle_telegram_gateway_channel_inbound(
     # still has is_self_chat=False and is still ignored here.
     if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
         return {"ignored": True, "reason": "from_me", "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY}
-    # Group gate: skip group messages unless mentioned or replying to Sage.
-    # The Gateway-side filter (runtime.ts) is the primary gate; this is a
-    # backend safety net in case the Gateway bypasses it for any reason —
-    # identical contract to the WhatsApp handler above.
-    if bool(message.get("is_group")):
-        if not bool(message.get("is_mentioned")) and not bool(message.get("is_reply_to_sage")):
-            return {
-                "ignored": True,
-                "reason": "group_no_mention",
-                "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY,
-            }
     # Resolved BEFORE the sync below — see the WhatsApp handler's identical
-    # comment above for why the ordering matters.
+    # comment above for why the ordering matters. Also now needed by the
+    # group gate right below (group_policy is per-agent config).
     agent_id = _resolve_agent_id_for_inbound(gateway_id, TELEGRAM_PERSONAL_CHANNEL_KEY)
+    # Group gate: _enforce_group_policy — the ONE shared resolver, replacing
+    # what used to be an inline `if is_group and not is_mentioned and not
+    # is_reply_to_sage: skip` here — identical contract to the WhatsApp
+    # handler above.
+    group_decision = await _enforce_group_policy(
+        registration=registration,
+        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id,
+        message=message,
+        remote_jid=remote_jid,
+    )
+    if not group_decision["allowed"]:
+        return {
+            "ignored": True,
+            "reason": group_decision["reason"],
+            "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY,
+        }
     # Read BEFORE the sync below writes to it — see the WhatsApp handler's
     # identical comment above (_resolve_linked_identity_for_sync's docstring).
     existing_state = personal_channels_repository.get_telegram_state(
@@ -2406,11 +2724,14 @@ async def _handle_telegram_gateway_channel_inbound(
             # private chat has no .title, a group/supergroup/channel does;
             # no extra network call). Absent on any inbound predating that
             # Gateway upgrade, which safely reads as False/None here — never
-            # a regression, matches "Telegram personal has NO group/mention
-            # gate" above (this only affects memory routing/labeling, not
-            # whether a group message reaches the model at all).
+            # a regression.
             is_group=bool(message.get("is_group")),
             chat_label=str(message.get("chat_title") or "").strip() or None,
+            # The REAL "was this message actually addressed" fact from the
+            # group gate above (None for a non-group turn) — see
+            # _enforce_group_policy's own docstring for why this must be
+            # threaded through rather than left to default.
+            was_addressed=group_decision.get("was_addressed"),
         )
         reply_media = list((reply or {}).get("media") or [])
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
@@ -2556,6 +2877,7 @@ async def _deliver_local_bridge_personal_reply(
     is_group: bool = False,
     chat_label: Optional[str] = None,
     sender_id: str = "",
+    was_addressed: Optional[bool] = None,
 ) -> Dict[str, Any]:
     no_reply_prefix = f"{channel_key}:noreply:"
     reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
@@ -2594,6 +2916,7 @@ async def _deliver_local_bridge_personal_reply(
             is_owner=is_owner,
             is_group=is_group,
             chat_label=chat_label,
+            was_addressed=was_addressed,
         )
         reply_media = list((reply or {}).get("media") or [])
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
@@ -2749,21 +3072,31 @@ async def _handle_local_bridge_gateway_channel_inbound(
     # keep the previous from_me-always-ignored behavior until they do).
     if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
         return {"ignored": True, "reason": "from_me", "channel_key": channel_key}
-    # Group gate: skip group messages unless mentioned or replying to Sage.
-    # The Gateway-side filter (local-bridge-runtime.ts's pollInboundEvents)
-    # is the primary gate; this is a backend safety net in case the Gateway
-    # bypasses it for any reason — identical contract to the WhatsApp/
+    # Group gate: _enforce_group_policy — the ONE shared resolver, replacing
+    # what used to be an inline `if is_group and not is_mentioned and not
+    # is_reply_to_sage: skip` here — identical contract to the WhatsApp/
     # Telegram handlers. Whether is_group/is_mentioned/is_reply_to_sage are
     # ever true here depends on the specific bridge (signal-cli-bridge.ts,
     # bluebubbles-bridge.ts, or a third-party WeChat bridge) actually
     # computing them — see local-bridge-runtime.ts's mapInboundEvent.
-    if bool(message.get("is_group")):
-        if not bool(message.get("is_mentioned")) and not bool(message.get("is_reply_to_sage")):
-            return {
-                "ignored": True,
-                "reason": "group_no_mention",
-                "channel_key": channel_key,
-            }
+    # agent_id="": local-bridge channels don't resolve a per-agent identity
+    # (see the dmPolicy comment further down) — the group_policy loader's
+    # unresolved-identity fallback returns the same open default as a
+    # resolved-but-unconfigured agent (see _load_agent_group_policy_config's
+    # own docstring for why that's deliberate, unlike dmPolicy).
+    group_decision = await _enforce_group_policy(
+        registration=registration,
+        channel_key=channel_key,
+        agent_id="",
+        message=message,
+        remote_jid=remote_jid,
+    )
+    if not group_decision["allowed"]:
+        return {
+            "ignored": True,
+            "reason": group_decision["reason"],
+            "channel_key": channel_key,
+        }
     inbound, created = personal_channels_repository.record_inbound_message(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=channel_key,
@@ -2875,6 +3208,9 @@ async def _handle_local_bridge_gateway_channel_inbound(
         # present on Signal (signal-cli-bridge.ts's `source`) and iMessage
         # (imsg-imessage-runtime.ts's `event.sender_jid`) alike.
         sender_id=str(message.get("sender_jid") or "").strip(),
+        # The REAL "was this message actually addressed" fact from the
+        # group gate above — see _enforce_group_policy's own docstring.
+        was_addressed=group_decision.get("was_addressed"),
     )
 
 
@@ -3657,14 +3993,27 @@ async def handle_cloud_channel_inbound(
     # is_group defaults to False deliberately — a DM (the only shape the
     # wire actually sends today) must never be silently dropped by this
     # gate.
-    if bool(message.get("is_group")):
-        if not bool(message.get("is_mentioned")) and not bool(message.get("is_reply_to_sage")):
-            return {
-                "ignored": True,
-                "reason": "group_no_mention",
-                "channel_key": channel_key,
-                "session_id": session_id,
-            }
+    #
+    # Now routed through _enforce_group_policy — the same ONE shared
+    # resolver the three Gateway handlers use — instead of its own inline
+    # copy, so this stays a genuine no-op today (agent_id="": no per-agent
+    # identity resolves on this path, same as the local-bridge handler) but
+    # picks up group_policy/requireMention consistently the moment the
+    # upstream wire ever does start sending these fields.
+    group_decision = await _enforce_group_policy(
+        registration={"tenant_id": "default", "workspace_id": resolved_workspace_id},
+        channel_key=channel_key,
+        agent_id="",
+        message=message,
+        remote_jid=remote_jid,
+    )
+    if not group_decision["allowed"]:
+        return {
+            "ignored": True,
+            "reason": group_decision["reason"],
+            "channel_key": channel_key,
+            "session_id": session_id,
+        }
 
     # ── Shared command dispatcher ──
     from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
@@ -3715,6 +4064,7 @@ async def handle_cloud_channel_inbound(
         source_event_id=external_message_id,
         is_group=bool(message.get("is_group")),
         chat_label=str(message.get("chat_title") or "").strip() or None,
+        was_addressed=group_decision.get("was_addressed"),
     )
 
     # ABSOLUTE RULE: no hardcoded platform status/error message may EVER be

@@ -23,6 +23,15 @@ omits it, this backend gate is what stops an unaddressed group message from
 reaching a live agent turn — and it must never mistake "fields absent" (the
 100% shape today) for "must be blocked".
 
+UPDATED 2026-07-23 (group_policy build): the gate itself is now
+personal_channels_service._enforce_group_policy — the SAME shared resolver
+every other personal-channel handler uses — and, like those, its
+requireMention default flipped to OFF (Ruling A, "see-and-decide"; see
+personal_channels_service.py's DEFAULT_REQUIRE_MENTION doc comment and
+test_personal_channel_group_gate.py's file docstring for the full history).
+An unaddressed group message is therefore no longer hard-blocked by
+default here either — see the updated test below.
+
 No personal_channels_repository / sqlite involved: unlike the Gateway
 handlers, handle_cloud_channel_inbound never touches that repository at all,
 so this harness only needs to mock the function's direct collaborators
@@ -53,15 +62,20 @@ class CloudChannelGroupGateTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.enabled_patcher.stop()
 
-    async def test_unaddressed_group_message_is_ignored_and_never_dispatched(self) -> None:
+    async def test_unaddressed_group_message_is_seen_by_default_see_and_decide(self) -> None:
+        """UPDATED 2026-07-23: with requireMention defaulting OFF, an
+        unaddressed group message is no longer hard-blocked here — it
+        reaches the model (build_telegram_personal_reply_async is called
+        with is_group=True), which is then free to reply or emit [SILENT]
+        by its own judgment (Ruling A)."""
         with (
             patch(
                 "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply_async",
-                new=AsyncMock(side_effect=AssertionError("must not build a reply for an unaddressed group message")),
-            ),
+                new=AsyncMock(return_value={"text": "[SILENT]", "source": "sage"}),
+            ) as build_reply_mock,
             patch(
                 "server_modules.personal_channels_service.dispatch_cloud_channel_outbound",
-                new=AsyncMock(side_effect=AssertionError("must not dispatch for an unaddressed group message")),
+                new=AsyncMock(side_effect=AssertionError("[SILENT] must never be dispatched")),
             ),
         ):
             result = await personal_channels_service.handle_cloud_channel_inbound(
@@ -79,10 +93,10 @@ class CloudChannelGroupGateTests(unittest.IsolatedAsyncioTestCase):
                     "is_reply_to_sage": False,
                 },
             )
-        self.assertTrue(result.get("ignored"))
-        self.assertEqual(result.get("reason"), "group_no_mention")
-        self.assertEqual(result.get("session_id"), "csm-sess-1")
-        self.assertEqual(result.get("channel_key"), "telegram_personal")
+        build_reply_mock.assert_awaited_once()
+        call_kwargs = build_reply_mock.call_args.kwargs
+        self.assertTrue(call_kwargs.get("is_group"))
+        self.assertNotEqual(result.get("reason"), "group_no_mention")
 
     async def test_mentioned_group_message_is_not_gated(self) -> None:
         with (

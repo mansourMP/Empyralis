@@ -1553,10 +1553,22 @@ export class TelegramPersonalRuntime {
         this.sentMessageIds.get(mapped.message.remote_jid)?.has(String(mapped.message.quoted_stanza_id)),
       );
     }
-    // Group gate: skip group messages unless mentioned or replying to Sage.
-    if (mapped.message.is_group && !mapped.message.is_mentioned && !mapped.message.is_reply_to_sage) {
-      return;
-    }
+    // Group gate: REMOVED as a gateway-side DECISION (2026-07-23,
+    // group_policy build). This runtime still computes the raw mention
+    // FACTS above (is_mentioned via hasExplicitTelegramMention,
+    // is_reply_to_sage just above) — that computation is unavoidably
+    // platform-specific and stays here. What moved is WHO DECIDES shouldSkip
+    // from those facts: personal_channels_service.py's
+    // mention_gating_service.resolve_inbound_mention_decision is now the
+    // ONE shared resolver (mirroring OpenClaw's own
+    // resolveInboundMentionDecision — see docs/OpenClaw.md's GROUP/MENTION
+    // GATING section), replacing what used to be TWO independent copies of
+    // the same shouldSkip decision (this gate here as the "primary gate",
+    // plus an inline backend safety-net check in personal_channels_service.py).
+    // Every group message is now always forwarded with its computed facts;
+    // the backend decides. See personal_channels_service.py's
+    // DEFAULT_REQUIRE_MENTION doc comment for the default (OFF — Ruling A
+    // "see-and-decide") this now defers to.
     // Typing starts NOW (before the debouncer) so the indicator is live for
     // the whole coalesce window and the agent's think-time — see
     // startTypingForChat. The publish itself is coalesced: a burst of rapid
