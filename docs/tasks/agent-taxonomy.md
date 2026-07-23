@@ -1,5 +1,14 @@
 # Agent Taxonomy — Native & External Agent Architecture
 
+> **OUTDATED (2026-07-23):** this taxonomy was written 2026-06-30 and is
+> superseded by the 2026-07-23 founder ruling: the platform has only agents,
+> of exactly three kinds — owner-facing, customer-facing serving the owner,
+> and AskAI. Any taxonomy below that differs from that is no longer product
+> doctrine. It also predates that same ruling terminologically — "Sage" is
+> dead product terminology; this document uses it throughout as a live
+> concept. See `docs/design/root-taxonomy-removal-scope.md` for the active
+> removal-scope work. Kept for history; do not build from this.
+
 **Created:** 2026-06-30
 **Source:** Code audit + graphify knowledge graph (27,358 nodes, 72,124 edges)
 **Status:** reference doc

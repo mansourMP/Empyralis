@@ -1,5 +1,7 @@
 # Inbound Attribution Audit — how a deployed agent perceives who's talking to it
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers (e.g. `"sage-main"`, `sage_agent_runtime_service.py`) are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 **Date:** 2026-07-22
 **Scope:** every inbound path into a deployed Empyralis agent — Telegram (Hosted bot + Personal full-account), WhatsApp, WeChat, iMessage, Signal, Slack, Discord, plus the web console. Verified against live code, not docs. `docs/OpenClaw.md` and `docs/PLATFORM-MAP.md` were read but every claim below is grep/file:line-checked against the current `main` branch (HEAD `fafab001d` at time of writing).
 

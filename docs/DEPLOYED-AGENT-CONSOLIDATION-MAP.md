@@ -1,5 +1,14 @@
 # Deployed/Studio Agent → Fleet Consolidation Map
 
+> **OUTDATED (2026-07-23):** this is a point-in-time consolidation plan from
+> 2026-07-09. Per `docs/PLATFORM-MAP.md` §13, the consolidation it plans has
+> since happened — Fleet is the only live agent path; Deployed/Studio is
+> frozen as a dormant reference implementation. It also predates the
+> 2026-07-23 founder ruling that "Sage" is dead product terminology (the
+> platform has only agents — owner-facing, customer-facing serving the
+> owner, and AskAI); this document uses "Sage" throughout as a live concept.
+> Kept for history; do not build from this.
+
 **Date:** 2026-07-09
 **Branch:** `verify`
 **Scope:** Read-only research. No code changes made in producing this report.

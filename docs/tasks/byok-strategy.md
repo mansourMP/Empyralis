@@ -1,5 +1,14 @@
 # BYOK Strategy — Subscription vs API Key Decision
 
+> **OUTDATED (2026-07-23):** this pending-decision doc is from 2026-06-30 —
+> the decision it poses has since been made and built (`cli_subscription` is
+> live; see `docs/design/reliability-audit-4-byo-billing-models.md` and
+> `docs/PLATFORM-MAP.md` Part 25/26). It also predates the 2026-07-23 founder
+> ruling that "Sage" is dead product terminology (the platform has only
+> agents — owner-facing, customer-facing serving the owner, and AskAI); this
+> document uses "Sage" throughout as a live concept. Kept for history; do
+> not build from this.
+
 **Created:** 2026-06-30
 **Status:** pending decision
 **Decision to make:** Should Empyralis support subscription/CLI-based auth, or API-key-only?

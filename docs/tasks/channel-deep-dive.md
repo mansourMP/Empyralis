@@ -1,5 +1,14 @@
 # Channel Deep Dive — Setup Methods, Lanes, One-Click vs Hardware, Rules
 
+> **OUTDATED (2026-07-23):** this reference doc is from 2026-06-30 — its
+> ground has since been re-covered, more currently, by
+> `docs/design/reliability-audit-2-channels.md`, `docs/design/gap-personal-channels.md`,
+> and `docs/design/gap-bot-channels.md`. It also predates the 2026-07-23
+> founder ruling that "Sage" is dead product terminology (the platform has
+> only agents — owner-facing, customer-facing serving the owner, and AskAI);
+> this document uses "Sage" throughout as a live concept. Kept for history;
+> do not build from this.
+
 **Created:** 2026-06-30
 **Source:** Code audit + `channel_lane_contract_service.py` + frontend connectors pane + graphify graph
 **Status:** reference doc — pending your review before creating tasks

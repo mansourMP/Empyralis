@@ -7,6 +7,22 @@
 **Code:** ~275,000 lines Python (server_modules/) + TypeScript (frontend/, gateway/) + Rust (kernel/; supervisor/ archived, see §2.3)  
 **For:** Outside engineers and agents — read this cold, understand the entire platform.
 
+> ## ⚠️ Terminology (2026-07-23)
+> **The platform has only agents — of exactly three kinds: (1) owner-facing
+> agents, (2) customer-facing agents that serve the owner, and (3) AskAI.
+> "Sage" is dead product terminology — the concept was removed from the
+> product ~1.5 months before this note.** `sage_*` is a legacy **code**
+> prefix only (e.g. `sage_agent_runtime_service.py`, `sage_turn_adapter.py`)
+> — those file names are a future rename, not a live concept, and every
+> `file:line` citation below that touches a `sage_*` module remains
+> accurate as a code pointer. But **everywhere this document's prose says
+> "Sage," "the Sage agent," "Sage's memory," or similar — read that as "the
+> agent runtime"** (concretely: the owner-facing agent for owner-facing
+> flows, or "an agent" generically for platform-wide mechanics). This
+> document predates the terminology change throughout and has not been
+> fully swept; treat every remaining prose "Sage" as this stand-in, not as
+> a still-live named entity.
+>
 > **2026-07-23 refresh — skill-catalog unification, commit `86d1f94c5`
 > (22/22 tests green).** **Skills** (§14) rewritten: the hardcoded
 > `_CURATED_SKILL_PACK` (1Password/Apple Notes/Apple Reminders/tmux, zero
@@ -157,8 +173,8 @@
 │  │       │   └─ LLM provider → response → tool_broker (if tool calls)    │
 │  │       └─ durable-run path ── runs_engine.py → run_service.py          │
 │  │                                                                       │
-│  ├─ Sage (operator agent) ── sage_agent_runtime_service.py               │
-│  ├─ Studio (specialist agents) ── agent_registry_repository.py           │
+│  ├─ Owner-facing agent (operator) ── sage_agent_runtime_service.py       │
+│  ├─ Studio (customer-facing agents) ── agent_registry_repository.py     │
 │  ├─ Memory ── memory_service.py + unified_memory_service.py              │
 │  ├─ Governance ── unified_governance_gate.py + runtime_policy.py         │
 │  │                                                                       │
@@ -274,7 +290,7 @@ the latency work in progress.
 | Surface | File | What it does |
 |---------|------|--------------|
 | Create-agent wizard | `FleetCreateAgentWizard.tsx` | `model_config` defaults to `platform_credits` the moment the agent is created (Step 1, "Placement"); the "Brain" step (Step 2) only PATCHes it if the user picks BYOK or local. **`cli_subscription` was silently broken here until recently** — the wizard's own code comment (`:307-312`) records that this branch used to fall through with no PATCH at all, so "Every BYO-brain agent created via the wizard hit this bug," fixed by commit `df06f7577`. Confirmed fixed as of `verify` HEAD. |
-| Agent detail → Model tab | `FleetAgentDetail.tsx` (ModelTab) | Edits model_config post-creation via PATCH. **Rendered for every agent with no `isMaster` gate** (`:341`) — unlike sibling rows in the same file that do gate on `isMaster` — see Part 25 for what happens when you actually use it on Sage's own card. |
+| Agent detail → Model tab | `FleetAgentDetail.tsx` (ModelTab) | Edits model_config post-creation via PATCH. **Rendered for every agent with no `isMaster` gate** (`:341`) — unlike sibling rows in the same file that do gate on `isMaster` — see Part 25 for what happens when you actually use it on the owner-facing agent's own card. |
 | Backend validation | `fleet_tools.py` `_VALID_MODEL_MODES` | Rejects invalid modes |
 | Provider catalog | `provider_profiles.py` `PROVIDER_CATALOG` | 17 providers with auth modes, models, scopes |
 | Platform credit gating | `provider_catalog_service.py` `PLATFORM_CREDIT_MODEL_ALLOWLIST` | Only DeepSeek for platform credits |
@@ -284,8 +300,8 @@ the latency work in progress.
 **See Part 25 for the 2026-07-13 execution-layer deep dive** — confirms
 DeepSeek-as-default with a passing unit test, confirms BYOK storage is
 genuinely Fernet-encrypted (not plaintext), and finds two gaps this summary
-table doesn't show: `cli_subscription`/`local` mode saved on **Sage's own**
-Model tab is silently never honored at turn time, and a specialist's own
+table doesn't show: `cli_subscription`/`local` mode saved on **the
+owner-facing agent's own** Model tab is silently never honored at turn time, and a specialist's own
 `byok_api` provider choice can diverge from the credentials actually sent
 with it.
 
@@ -365,18 +381,18 @@ This IS the production backend. Everything below lives at `server_modules/`.
 | `turn_runtime.py` | — | **Execution switchboard** — direct chat vs durable run dispatch |
 | `turn_ingress_service.py` | — | Turn ingress normalization |
 
-#### Sage / Operator Agent
+#### Owner-Facing Agent / Operator (code prefix `sage_*` — legacy name, not a live product concept; see terminology note at top of doc)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `sage_agent_runtime_service.py` | 3,417 | ⚠️ Sage agent loop — `_COMMUNICATION_SCOPES`, `_CONNECTOR_ROUTE_KEYWORDS`, `_GATEWAY_ROUTE_KEYWORDS` hardcode channel names |
+| `sage_agent_runtime_service.py` | 3,417 | ⚠️ Owner-facing agent loop — `_COMMUNICATION_SCOPES`, `_CONNECTOR_ROUTE_KEYWORDS`, `_GATEWAY_ROUTE_KEYWORDS` hardcode channel names |
 | `sage_command_dispatcher.py` | — | Command dispatcher + error messages (classify_error token leak fixed in T2) |
-| `sage_turn_adapter.py` | — | ✅ Unified sage turn execution for all channels |
+| `sage_turn_adapter.py` | — | ✅ Unified owner-facing-agent turn execution for all channels |
 | `sage_reply_dispatcher.py` | — | ⚠️ Reply dispatch |
-| `sage_transparency_service.py` | — | Sage transparency events |
+| `sage_transparency_service.py` | — | Owner-facing agent transparency events |
 | `sage_daily_operator_service.py` | — | Daily operator tasks |
 | `universal_operator.py` | — | Universal operator actions (14 strings fixed in T2) |
-| `channel_adapter.py` | — | ✅ Channel normalization — NormalizedSageTurn |
+| `channel_adapter.py` | — | ✅ Channel normalization — `NormalizedSageTurn` (code symbol name, unchanged) |
 | `error_response_service.py` | — | Error response normalization |
 
 #### Direct Chat Subsystem (~30 files)
@@ -568,7 +584,7 @@ This IS the production backend. Everything below lives at `server_modules/`.
 | File | Lines | Purpose |
 |------|-------|---------|
 | `agent_registry_api.py` | 2,168 | Agent registry REST API |
-| `agent_registry_repository.py` | 2,436 | Agent registry persistence (Sage + specialist seeds with display_name) |
+| `agent_registry_repository.py` | 2,436 | Agent registry persistence (owner-facing agent + specialist seeds with display_name) |
 | `agent_specialist_repository.py` | — | Specialist agent persistence |
 | `specialist_service.py` | — | Specialist agent service |
 | `fleet_tools.py` | — | fleet_list_agents, fleet_create_agent, fleet_configure_agent, fleet_get_agent_activity, fleet_message_agent, schedule_task + _parse_when() |
@@ -1142,7 +1158,7 @@ Both should be split. Community 1 is a catch-all for UI components that don't re
 
 ### 5.1 Personal Channels (require Agent Computer Gateway)
 
-| Channel | Transport | Status | Session Owner | Routes Through Sage? | Requires Hardware? | Files |
+| Channel | Transport | Status | Session Owner | Routes Through Owner-Facing Agent? | Requires Hardware? | Files |
 |---------|-----------|--------|---------------|---------------------|--------------------|-------|
 | `telegram_personal` | GramJS via Gateway WSS | **PROVEN** | `paired_gateway` | yes | yes | `gateway/channels/telegram/runtime.ts` (825 lines), `personal_channel_sage_bridge_service.py` |
 | `whatsapp_personal` | Baileys via Gateway WSS | **PROVEN** | `paired_gateway` | yes | yes | `gateway/channels/whatsapp/runtime.ts` (665 lines) |
@@ -1153,7 +1169,7 @@ Both should be split. Community 1 is a catch-all for UI components that don't re
 
 ### 5.2 Business Channels (cloud-only, no hardware)
 
-| Channel | Transport | Status | Routes Through Sage? | Files |
+| Channel | Transport | Status | Routes Through Owner-Facing Agent? | Files |
 |---------|-----------|--------|---------------------|-------|
 | `telegram_bot` | Bot API (webhook + polling) | **PROVEN** | yes | `routes_sage_telegram_hosted.py`, `connectors/telegram_ingress_service.py` |
 | `discord_bot` | Discord HTTP Interactions | **PROVEN** | yes | `connectors/discord_connector.py`, `connectors/discord_bot_runtime_service.py` |
@@ -1184,7 +1200,7 @@ Both should be split. Community 1 is a catch-all for UI components that don't re
 
 - **Adding a channel requires touching 12+ files** — should be 1-2
 - **Frontend only shows 2 channels** (Telegram, WhatsApp) despite 27 in backend catalog
-- **Only 3 studio channels route through Sage**: `slack`, `discord`, `github`. All others return `channel_unavailable`
+- **Only 3 studio channels route through the owner-facing agent**: `slack`, `discord`, `github`. All others return `channel_unavailable`
 - **Two `telegram_personal` paths**: Gateway (GramJS on user machine) vs Cloud Session Manager (GramJS in cloud) — no code sharing
 - **`discord_personal` metadata contradiction**: ~~`runtime_lane: personal_gateway` but `session_owner: cloud_connector`~~ — **fixed as of the 2026-07-13 pass.** `channel_lane_contract_service.py:114-118` now carries an explicit comment ("this previously said `personal_gateway`, which contradicted both") and correctly declares `discord_personal` as `runtime_lane: "cloud_connector"` throughout — there is no self-hosted/Gateway mode for Discord by design (Discord's ToS forbids automating a real user account; `FleetAgentDetail.tsx:974` states this directly in a comment). The contradiction this map used to describe no longer exists in the code.
 
@@ -1194,9 +1210,9 @@ Re-verified each of the six channels above against current code. What changed or
 
 - **Telegram** — the most fully-built of the six. Self-hosted Gateway path (`empyralis-gateway/src/channels/telegram/runtime.ts:73`, real GramJS), hosted-bot path (`routes_sage_telegram_hosted.py:131-233`), and genuine per-agent BYO-bot binding (`hosted_bot_provisioning_service.py:171-216` → `agent_channel_bindings` unique index) are all wired end-to-end, click through DB constraint. **But** a third, fully-coded mode — a cloud-hosted personal account via Cloud Session Manager (`cloud-session-manager/src/telegram/client-factory.js:16-350`, real GramJS, real relay to the backend) — has session-*creation* endpoints (`cloud-session-manager/src/api/routes.js:162-220`) that nothing in the frontend ever calls; a user cannot self-serve into this mode. A second, generic pairing-UI component, `frontend/lib/workspace/workspace-channel-pairing-surface.tsx`, is dead code — its backend (`routes_auth.py:419-452`) and Next.js proxy routes are real, but nothing renders the component.
 - **WhatsApp** — exactly one real path: personal account via Gateway/Baileys (`empyralis-gateway/src/channels/whatsapp/runtime.ts:116`), with genuine QR-code and pairing-code UI (`PersonalChannelConnectPanel.tsx:318-478`). "WhatsApp Business" via Twilio (`routes_connectors.py:546` → `connectors/autopilot_runtime_exports.py`) is real, dormant legacy code — `channel_lane_contract_service.py:164-174,317-332` itself marks it `"stage": "roadmap"`, `"live_capable": False`, and there is no setup UI for it at all (only an icon-name string). No cloud-hosted alternative exists for WhatsApp (confirmed: no `whatsapp/` subdirectory under `cloud-session-manager/src/`).
-- **Discord** — the bot runtime is a genuine live Discord Gateway WebSocket running **inside the Python backend process itself** (`server_modules/connectors/discord_connector.py:1062-1141`, started at boot via `server.py:269-292`) — there is no TypeScript/Gateway bridge for Discord at all. DM-to-Sage pairing (`/pair CODE`) and OAuth identify-bind both work. **New finding:** the per-agent "Bot" OAuth button in the Channels tab (`FleetAgentDetail.tsx:1108-1132`) never sends `metadata.agent_install_id` in its `startOAuth()` call — per `connection_oauth_service.py:1701-1731`'s own code comment, the resulting credential is stored as *"a bare workspace credential,"* not bound to the specific agent whose tab it was clicked from. The backend mechanism that *would* do a real per-agent Discord bind (`discord_bot_provisioning_service.py:133-198`) exists and is DB-enforced, but has zero frontend callers (contrast: the equivalent Telegram string IS found in the frontend).
-- **Slack** — the OAuth-connect and inbound-webhook-to-reply round trip is real, live code (`connectors/slack_connector.py`, 707 lines; `connectors_actions.py:1105` `slack_events_webhook`). **New finding:** the checked-in `slack-app-manifest.json` declares OAuth/event URLs that don't match the actually-registered routes — the manifest is stale relative to the code. **New finding:** binding a specific deployed agent (rather than Sage) to a specific Slack workspace does not work — the one DB writer for a `"slack"` channel binding is never called, and `agent_channel_router.py:2251-2298`'s own comment says specialist dispatch was deferred to a future stage ("Stage 5") and a literal `pass` discards the resolved candidate. Every connected Slack workspace answers as Sage today, by the router's own comment.
-- **iMessage** — the most complete of the three "bridge" channels: `empyralis-gateway/src/bridges/bluebubbles-bridge.ts` (421 lines) is a genuinely complete BlueBubbles HTTP bridge, and the UI (`LocalBridgeChannelStatus`, `FleetAgentDetail.tsx:987-1022`) honestly shows live bridge health rather than a faked "connected" state — its own comment explicitly rejects inventing a connected state. There is no in-app pairing *flow* by design (the UI tells the user to set two env vars manually), and — same pattern as Slack/Discord — no verified way for an agent other than Sage to own an iMessage conversation.
+- **Discord** — the bot runtime is a genuine live Discord Gateway WebSocket running **inside the Python backend process itself** (`server_modules/connectors/discord_connector.py:1062-1141`, started at boot via `server.py:269-292`) — there is no TypeScript/Gateway bridge for Discord at all. DM-to-owner-facing-agent pairing (`/pair CODE`) and OAuth identify-bind both work. **New finding:** the per-agent "Bot" OAuth button in the Channels tab (`FleetAgentDetail.tsx:1108-1132`) never sends `metadata.agent_install_id` in its `startOAuth()` call — per `connection_oauth_service.py:1701-1731`'s own code comment, the resulting credential is stored as *"a bare workspace credential,"* not bound to the specific agent whose tab it was clicked from. The backend mechanism that *would* do a real per-agent Discord bind (`discord_bot_provisioning_service.py:133-198`) exists and is DB-enforced, but has zero frontend callers (contrast: the equivalent Telegram string IS found in the frontend).
+- **Slack** — the OAuth-connect and inbound-webhook-to-reply round trip is real, live code (`connectors/slack_connector.py`, 707 lines; `connectors_actions.py:1105` `slack_events_webhook`). **New finding:** the checked-in `slack-app-manifest.json` declares OAuth/event URLs that don't match the actually-registered routes — the manifest is stale relative to the code. **New finding:** binding a specific deployed agent (rather than the owner-facing agent) to a specific Slack workspace does not work — the one DB writer for a `"slack"` channel binding is never called, and `agent_channel_router.py:2251-2298`'s own comment says specialist dispatch was deferred to a future stage ("Stage 5") and a literal `pass` discards the resolved candidate. Every connected Slack workspace answers as the owner-facing agent today, by the router's own comment.
+- **iMessage** — the most complete of the three "bridge" channels: `empyralis-gateway/src/bridges/bluebubbles-bridge.ts` (421 lines) is a genuinely complete BlueBubbles HTTP bridge, and the UI (`LocalBridgeChannelStatus`, `FleetAgentDetail.tsx:987-1022`) honestly shows live bridge health rather than a faked "connected" state — its own comment explicitly rejects inventing a connected state. There is no in-app pairing *flow* by design (the UI tells the user to set two env vars manually), and — same pattern as Slack/Discord — no verified way for an agent other than the owner-facing agent to own an iMessage conversation.
 - **WeChat** — every layer's own code comments call it unbuilt: *"Personal WeChat has no official API to build a bridge against, so this isn't supported yet"* (`SageLauncher.tsx:53`); the connector catalog entry itself says *"Not launch-ready until the local bridge runtime is certified"* (`connection_catalog_service.py:272`). No bridge program exists anywhere under `empyralis-gateway/src/bridges/` (confirmed by directory listing — only BlueBubbles and signal-cli live there). The generic personal-channel HTTP route would accept and forward a `wechat_personal` send, but nothing at the far end can deliver it. (A separately-named, unrelated `wechat_work` connector — outbound-only enterprise WeCom webhooks — is real and marked "PROVEN" in §5.3; don't conflate the two.)
 
 ---
@@ -1350,7 +1366,7 @@ The target is ONE of each primitive:
 
 | Primitive | Target Location | Current Reality |
 |-----------|----------------|-----------------|
-| ONE Agent class | `server/agent/` | `server_modules/` — Sage + specialist + autopilot = at least 3 agent classes |
+| ONE Agent class | `server/agent/` | `server_modules/` — owner-facing agent + specialist + autopilot = at least 3 agent classes |
 | ONE channel router | `server/channels/router.py` | `agent_channel_router.py` + `channel_lane_contract_service.py` + `personal_channel_handler_registry.py` + `personal_channel_sage_bridge_service.py` = at least 4 routing layers |
 | ONE OAuth vault | `server/vault/` | `vault_store.py` + `connection_oauth_service.py` + `secrets_broker.py` — 3 files |
 | ONE MCP client | `server/mcp/client.py` | `mcp_registry_service.py` + `skill_registry.py` + `connectors_actions.py` (DEPRECATED) |
@@ -1366,7 +1382,7 @@ The target is ONE of each primitive:
 Each "ONE primitive" in the target currently has multiple implementations:
 
 - **Channel routing**: 4 layers (agent_channel_router, channel_lane_contract, personal_channel_handler_registry, personal_channel_sage_bridge)
-- **Agent classes**: Sage operator + fleet specialist + autopilot = 3 distinct agent types with separate code paths
+- **Agent classes**: owner-facing-agent operator + fleet specialist + autopilot = 3 distinct agent types with separate code paths
 - **Session management**: 7 files spread across session_service, session_lifecycle_service, session_manager/ (4 files), thread_service
 - **Tool dispatch**: tool_broker.py + skill_registry.py + connectors_actions.py (DEPRECATED but still 2,521 lines)
 - **Memory**: 5 files with import cycles between them
@@ -1375,7 +1391,7 @@ Each "ONE primitive" in the target currently has multiple implementations:
 
 To reach feature parity with `server_modules/`, the `server/` directory would need:
 
-- `agent/` — Sage loop, specialist service, triage, turn runtime, context building, prompt assembly
+- `agent/` — owner-facing-agent loop, specialist service, triage, turn runtime, context building, prompt assembly
 - `channels/` — Telegram, Discord, Slack, WhatsApp, Signal, iMessage adapters + router
 - `tools/` — Tool broker, fleet tools, skill registry, MCP client, schedule_task
 - `oauth/` — Provider configs, token exchange, refresh, APP_MCP_SERVER_MAP (31 providers)
@@ -1422,13 +1438,13 @@ Per the platform vision: the cure for doubt is ONE real user who finds it useful
 - ✅ Operator/specialist agent roles with purpose_preset
 - ✅ **Kill switch** — workspace and per-agent emergency stop, hard-blocked before any LLM call, wired to real UI controls (Part 11)
 - ✅ **Authority Mandate** — owner/audience/system tiers, two fail-closed choke points on tool execution, owner-declared per-agent `audience_tools` allowlist (Part 10)
-- ✅ **Activity and usage attribution** — an agent's Overview activity feed and per-agent cost/usage now correctly filter by that agent's own install_id instead of returning empty or blending into Sage's identity (Part 12)
+- ✅ **Activity and usage attribution** — an agent's Overview activity feed and per-agent cost/usage now correctly filter by that agent's own install_id instead of returning empty or blending into the owner-facing agent's identity (Part 12)
 - ✅ **First-run honesty** — a freshly created agent's Overview ("Now" status strip, recent-activity feed), chat transparency events, and Work tab conversation rows show true zero/empty state instead of stale or fabricated data
 - ✅ **One agent class** — Fleet is the only live agent path; Deployed/Studio is frozen as a dormant reference implementation, not active scaffolding (Part 13)
-- ✅ **Persistent memory** — MEMORY.md is genuinely injected into every Sage turn, the agent is instructed to silently write facts to it, and an owner can read/edit it live in the Memory tab; the "starter scaffold" banner shown before anyone has written to it is a real byte-comparison against a template, not a guess (Part 16)
+- ✅ **Persistent memory** — MEMORY.md is genuinely injected into every owner-facing-agent turn, the agent is instructed to silently write facts to it, and an owner can read/edit it live in the Memory tab; the "starter scaffold" banner shown before anyone has written to it is a real byte-comparison against a template, not a guess (Part 16)
 - ✅ **Tool enable/disable** — the Tools tab toggle genuinely changes what the LLM can call; a real historical bug (toggles silently inert due to an id-space mismatch) was fixed via `migrations/unify_fleet_tool_toggle_ids.sql` (Part 19)
 - ✅ **Connector execution, confirmed for at least 2 of 46 catalog entries** — once connected, a chat agent can actually call the Notion and GitHub APIs, not just store a credential (Part 20)
-- ✅ **Tool-honesty guard** — two independent runtime pipelines (Sage-mediated chat and a specialist's own direct chat) both run a structural post-hoc check that catches an agent claiming success without a tool call, or denying success after one succeeded, plus three separate proactive prompt-construction sites that tell the model only about tools actually installed (Part 21)
+- ✅ **Tool-honesty guard** — two independent runtime pipelines (owner-facing-agent-mediated chat and a specialist's own direct chat) both run a structural post-hoc check that catches an agent claiming success without a tool call, or denying success after one succeeded, plus three separate proactive prompt-construction sites that tell the model only about tools actually installed (Part 21)
 - ✅ **Hardware placement resolver** — a `cli_subscription` agent's brain dispatch reads `model_config.gateway_binding` exclusively; it does not fall back to `hardware_access` at all, confirmed by grep returning zero hits in either owning file (Part 22)
 
 ### 9.2 What Blocks a Real User
@@ -1436,16 +1452,16 @@ Per the platform vision: the cure for doubt is ONE real user who finds it useful
 | Blocker | Detail | Impact |
 |---------|--------|--------|
 | **No production deploy** | Frontend runs on localhost:3000 — no public URL, no HTTPS, no production build. Unchanged since the last refresh — still the single biggest blocker. | Nobody outside this machine can use it |
-| **Per-agent channel identities not built** | One shared workspace bot per channel — specialists can't have their own Telegram/Discord identities. Confirmed worse than previously stated: Discord's per-agent OAuth button silently produces a *workspace-wide* credential (Part 5.5), and Slack has no working per-agent bind at all — every connected Slack workspace answers as Sage. | Agent identity is invisible to end users |
+| **Per-agent channel identities not built** | One shared workspace bot per channel — specialists can't have their own Telegram/Discord identities. Confirmed worse than previously stated: Discord's per-agent OAuth button silently produces a *workspace-wide* credential (Part 5.5), and Slack has no working per-agent bind at all — every connected Slack workspace answers as the owner-facing agent. | Agent identity is invisible to end users |
 | **No channel health alerts** | If a Telegram bot token expires or Discord webhook fails, no alert | Silent failures lose messages |
 | **No mandate/schedule UI** | The Authority Mandate's `mandate.audience_tools` allowlist (Part 10) and per-agent wake/heartbeat scheduling are both real, enforced backend mechanisms with **zero frontend surface for the mandate half** — owners can only set `audience_tools` via a raw PATCH. (The wake-schedule half now *does* have a real UI — `ScheduleSection` in the agent Overview tab — see the next row for why scheduling still doesn't work.) | Owners can't see or control what their agent lets end-customers trigger without reading API docs |
 | ~~**Scheduled wake-ups silently never fire**~~ **RESOLVED 2026-07-13, live-verified — no longer a blocker.** | Was: the one scheduler instance that would execute a wake-up (`HeartbeatScheduler`) is started with `workspace_id=None` and dies at `scope_missing` before ever advancing a row — still true of *that specific* legacy instance. Fixed by a second, cross-workspace scanner (already on this branch as `dbde0a6aa`) that claims due wake requests across all workspaces independent of that broken instance; live-verified twice (a real scheduled wake-up claimed within ~1-16s of due and reached `status="executed"`, cross-confirmed by a matching `HEARTBEAT.md` entry). Two secondary bugs found and fixed in the same pass: the finalized wake request's own `run_id` was always null (wrong nesting level read), and `trigger_source` was never set to `"schedule"` (silently defaulted to `"user"`) — both confirmed fixed by inspecting the resulting run's own persisted metadata. (Part 18, top-of-section update) | An owner who schedules a wake-up now gets a real, autonomous turn — this un-blocks the whole "autonomous agent" story, not just this one feature. A newly-surfaced, separate, NOT-yet-fixed issue: the test run itself failed with a credentials error instead of reaching the agent's actual `cli_subscription` gateway brain — flagged as follow-up work, not fixed here (out of that fix's scope). |
 | **Sub-agent delegation has a complete backend and zero confirmed callers** | `POST /runs/{run_id}/delegate` and its two siblings are fully implemented (role model, depth cap, trace events the chat UI already knows how to render) but a repo-wide search found no code — frontend, tool registration, or scripts — that ever calls them. A separate agent-to-agent mailbox tool (`fleet__message_agent`) writes real rows but nothing ever reads them back out into a turn. (Part 17) | A cofounder should not assume agents can currently delegate to each other in the live product |
 | **Two of three "skills" subsystems are backend-only or fully dead** | The marketplace install/publish pipeline works over a direct API call but has no frontend and is never invoked from any agent-facing code path; the curated device-skill pack (1Password, Apple Notes, Apple Reminders, tmux) is described to the LLM as available but has no execution implementation anywhere — not in the backend, not in the Gateway. Only the Tools-tab enable/disable toggle (which the product calls "Tools," not "Skills") is genuinely wired end-to-end. (Part 14) | The product's public description of "skills" is broader than what a user can actually create, install, or run |
 | **No marketing landing page exists, so there's nothing to gate** | `frontend/app/page.tsx` is a pure 25-line auth-redirect (logged out → `/login`, logged in → workspace). No hero/pricing/marketing component exists anywhere in the frontend. Separately, both invite-gating mechanisms that *do* exist in code (`EMPYRALIS_INVITE_CODE`, `ORION_PILOT_SIGNUP_MODE`) are unset in every env file in this repo, so signup is open as shipped here. (Part 23) | Anything describing a marketing site or invite-only positioning is describing work that either isn't merged to `verify` or isn't turned on |
-| **Sage has broader tool access than a deployed agent, not a restricted one** | The recurring internal framing that Sage "has no connectors, only helps operate the platform" does not match the code: Sage's turn gets the full, unfiltered workspace tool registry plus exclusive operator-only tools, while a deployed specialist is restricted to its explicitly-bound connectors. The one real restriction is that Sage cannot be given a public/business-channel persona (a Slack app, a Discord bot identity) — a hard 403, confirmed. The "Ask Sage" → "Ask AI" rename referenced elsewhere has not been started: zero occurrences of "Ask AI" anywhere in the codebase. (Part 24) | Any plan premised on "Sage is sandboxed relative to specialists" or "the rename already happened" needs correcting first |
+| **The owner-facing agent has broader tool access than a deployed agent, not a restricted one** | The recurring internal framing that the owner-facing agent "has no connectors, only helps operate the platform" does not match the code: its turn gets the full, unfiltered workspace tool registry plus exclusive operator-only tools, while a deployed specialist is restricted to its explicitly-bound connectors. The one real restriction is that it cannot be given a public/business-channel persona (a Slack app, a Discord bot identity) — a hard 403, confirmed. The legacy "Ask Sage" → "Ask AI" rename referenced elsewhere has not been started: zero occurrences of "Ask AI" anywhere in the codebase, and "Ask Sage" is still the live UI string. (Part 24) | Any plan premised on "the owner-facing agent is sandboxed relative to specialists" or "the rename already happened" needs correcting first |
 | **Channel-scope kill switch is dead** | An owner can flip a channel-scope kill switch through a real, owner-gated API and it saves correctly to `security_control_states` — but the one function that would check it before dispatching an inbound channel message (`is_channel_disabled`) is imported and never called anywhere in production. Global/workspace/agent/gateway scopes are genuinely wired (with caveats — see amended Part 11); channel is the exception. | Setting a channel-scope kill switch currently has no effect |
-| **Setting Sage's own Model tab to a subscription/local brain silently does nothing** | The Model tab renders for Sage with no master-agent gate, and the PATCH that saves `cli_subscription`/`local` mode succeeds — but Sage's own turn-time provider resolution (`_resolve_cloud_provider`) has zero knowledge of `model_config` modes at all; only specialist agents' turns ever reach the function that understands them. No error is shown. (Part 25.1) | An owner can configure Sage to use their own Claude/Codex subscription, see it save, and Sage will keep silently running on the platform-credits/DeepSeek default instead |
+| **Setting the owner-facing agent's own Model tab to a subscription/local brain silently does nothing** | The Model tab renders for the owner-facing agent with no master-agent gate, and the PATCH that saves `cli_subscription`/`local` mode succeeds — but its own turn-time provider resolution (`_resolve_cloud_provider`) has zero knowledge of `model_config` modes at all; only specialist agents' turns ever reach the function that understands them. No error is shown. (Part 25.1) | An owner can configure the owner-facing agent to use their own Claude/Codex subscription, see it save, and it will keep silently running on the platform-credits/DeepSeek default instead |
 | **A specialist's own BYOK provider choice can outrun its credentials** | If a specialist sets its own `model_config.provider` different from the workspace default, the code swaps the provider label but doesn't re-fetch matching credentials — the stale credentials dict flows through four call sites unchanged. The one function that resolves provider+credentials together correctly is never called from anywhere in the codebase. Traced at the source level; the live failure mode (error vs. silently wrong key) wasn't observed directly. (Part 25.3) | A specialist configured with its own API key may not actually be using it |
 
 Smaller known gaps, not re-verified in this pass (carried forward from the
@@ -1519,8 +1535,8 @@ vocabulary:
   defaulting to owner only when there's no live channel sender at all — a
   web/API session). Stamped as `authority_tier` at
   `sage_agent_runtime_service.py:2097` via
-  `derive_tier_from_sender_class()` — the one site covering Sage and every
-  fleet specialist, on every channel.
+  `derive_tier_from_sender_class()` — the one site covering the owner-facing
+  agent and every fleet specialist, on every channel.
 - **Web/API session path** — `agent_turn.build_direct_chat_turn_request`
   (`agent_turn.py:1028-1030`) derives from
   `derive_tier_from_owner_flag(_current_user_is_owner(current_user))`; a
@@ -1725,7 +1741,7 @@ guards against, not read latency or availability.
 
 Whether a piece of activity or usage links back to the *specific agent
 install* that produced it, rather than blurring into the workspace or
-Sage's own identity. Two independent mechanisms — do not conflate them.
+the owner-facing agent's own identity. Two independent mechanisms — do not conflate them.
 
 **Activity ledger attribution** (`activity_ledger_events.install_id`,
 `control_plane_repository.py:1361`). `specialist_activity` is not a table —
@@ -1743,10 +1759,10 @@ operator itself.
   (`sage_agent_runtime_service.py:3649,4031`) previously didn't pass
   `install_id=` at all (defaulting to `NULL`) and hardcoded
   `event_class="sage_activity"`/`status="logged"` unconditionally — so
-  every specialist's turn got misattributed into Sage's own identity, and
+  every specialist's turn got misattributed into the owner-facing agent's own identity, and
   failed turns were mislabeled as successfully "completed." They now pass
   `install_id=_acting_install_id` (resolved at `:2915-2935`, with a
-  master-Sage fallback when no specialist is acting) and derive the correct
+  master/owner-facing-agent fallback when no specialist is acting) and derive the correct
   event_class/status per turn outcome via `_sage_chat_ledger_fields()`
   (`:587-619`).
 - **Read path:** `fleet_tools.fleet_get_agent_activity()` (`:469-537`) and
@@ -1758,7 +1774,7 @@ operator itself.
   read "No activity yet" even after real conversations happened.
 - **Tests:** `test_fleet_activity_install_id_attribution.py` (7 methods) —
   pins both the corrected SQL filter and the four `_sage_chat_ledger_fields()`
-  outcome combinations (Sage/specialist × success/failure).
+  outcome combinations (owner-facing-agent/specialist × success/failure).
 
 **Usage/billing attribution** — a **separate** system, untouched by this
 pass, covered in full in the `usage_events` fix write-up: `usage_events.agent_install_id`
@@ -2125,8 +2141,8 @@ dispatched through `tool_broker.py:489-539`.
 `sage_instruction_compiler_service.py:249-334`
 (`build_root_memory_brief_sections`) is called from `:611-619` inside
 `build_sage_instruction_bundle` (`:554`), itself called from
-`handle_sage_chat` (`sage_agent_runtime_service.py:3714`) on every Sage
-turn, reached via `POST /api/sage/chat` (`sage_chat_api.py:99-173`, mounted
+`handle_sage_chat` (`sage_agent_runtime_service.py:3714`) on every
+owner-facing-agent turn, reached via `POST /api/sage/chat` (`sage_chat_api.py:99-173`, mounted
 through `routes_workflows.py:10,23`). This is a real, traced, end-to-end
 path from HTTP request to LLM system prompt.
 
@@ -2492,7 +2508,7 @@ Previously undocumented in this map. Core module: `tool_honesty_guard.py`
 (300 lines). Its own docstring (`:12-19`) states the architecture plainly:
 **"Two live pipelines reach a 'final reply, about to be delivered' point
 with no shared code between them"** — Pipeline A is
-`sage_agent_runtime_service.py`'s `_run_sage_action_loop_v3` (Sage-mediated
+`sage_agent_runtime_service.py`'s `_run_sage_action_loop_v3` (owner-facing-agent-mediated
 chat, which covers every channel including all personal channels); Pipeline
 B is `direct_chat_generation_service.py`'s
 `stream_provider_backed_direct_chat` (a specialist's own Chat tab / `/api/turn`).
@@ -2505,7 +2521,7 @@ proactive, all confirmed present in the live code:**
    (`build_model_capability_manifest`) filters the live, per-workspace
    `sage_skills_api.build_sage_capabilities_payload()` down to
    status "ready"/"approval_required," emits *"Do not mention or invent
-   unavailable tools"* (`:373-395`), and is injected into every Sage system
+   unavailable tools"* (`:373-395`), and is injected into every owner-facing-agent system
    prompt (`:625`, inside `build_sage_instruction_bundle`). This is derived
    from the live tool registry at prompt-build time, not a static string.
 2. A specialist-specific "tool honesty" rule —
@@ -2685,17 +2701,24 @@ evidence of deliberate mobile tuning the way the auth pages show.
 
 ---
 
-## Part 24: Sage's Actual Boundaries
+## Part 24: The Owner-Facing Agent's Actual Boundaries (code/UI still say "Sage" in places — see below)
 
-**The recurring internal framing — "Sage has no connectors, only helps
-operate the platform" — is backwards. Sage has *more* tool access than a
-deployed specialist, not less.** `sage_agent_runtime_service.py:1864-1868`'s
-own docstring says so directly: a specialist install gets a computed tool
-whitelist, "or **None for the master/Sage path (no per-install
-restriction)**." Enforced at `:2002-2058` (`_direct_tool_bundle`): when the
-specialist toolset is `None` (i.e., it's Sage), the turn receives the full,
-unfiltered workspace tool registry —
-`resolve_workspace_tool_capabilities(workspace_id)`
+*(Framing note: "Sage" is legacy terminology — see the terminology note at
+the top of this doc. This section's finding is precisely that the code and
+UI have NOT yet been swept for the old name; that gap is the finding, not
+this doc's word choice. Quoted docstrings, error strings, and UI copy below
+are reproduced exactly as they exist in the code today and are left
+unchanged — the quotes ARE the evidence that the rename hasn't happened.)*
+
+**The recurring internal framing — "the owner-facing agent has no
+connectors, only helps operate the platform" — is backwards. The
+owner-facing agent has *more* tool access than a deployed specialist, not
+less.** `sage_agent_runtime_service.py:1864-1868`'s own docstring says so
+directly: a specialist install gets a computed tool whitelist, "or **None
+for the master/Sage path (no per-install restriction)**." Enforced at
+`:2002-2058` (`_direct_tool_bundle`): when the specialist toolset is `None`
+(i.e., it's the owner-facing agent), the turn receives the full, unfiltered
+workspace tool registry — `resolve_workspace_tool_capabilities(workspace_id)`
 (`tool_availability_truth.py:282-296`, every vault-connected connector for
 the whole workspace, no filter) — **plus** operator-only fleet-management
 tools added specifically because "a specialist must never see these at
@@ -2703,45 +2726,51 @@ all" (`:2019-2042`). A specialist, by contrast, goes through
 `_resolve_specialist_toolset` (`:1864-1930`), restricted to only its
 explicitly-bound connectors (`agent_connector_bindings`).
 
-**The one restriction on Sage that is real: it cannot hold a public/business
-channel persona.** `channel_lane_contract_service.py:8-9` defines two
-lanes — `personal_gateway` and `studio_business_connector`. Every
-business/work channel (Slack, Discord bot, Notion, Linear, GitHub, Dropbox,
-S3, Microsoft 365, Teams, Matrix, WeChat Work, Instagram Business, the
-web-chat widget, SMTP/IMAP) is declared `surface_support: ["studio"]` only
-(`:131-541`); `platform_channel_catalog("sage")` filters all of these out,
-and `channel_platform_service.py:461-465` hard-403s any attempt to bind one:
+**The one restriction on the owner-facing agent that is real: it cannot
+hold a public/business channel persona.** `channel_lane_contract_service.py:8-9`
+defines two lanes — `personal_gateway` and `studio_business_connector`.
+Every business/work channel (Slack, Discord bot, Notion, Linear, GitHub,
+Dropbox, S3, Microsoft 365, Teams, Matrix, WeChat Work, Instagram Business,
+the web-chat widget, SMTP/IMAP) is declared `surface_support: ["studio"]`
+only (`:131-541`); `platform_channel_catalog("sage")` filters all of these
+out (note: `"sage"` is the literal internal code/string identifier for the
+owner-facing agent path — unchanged, a code fact), and
+`channel_platform_service.py:461-465` hard-403s any attempt to bind one:
 *"Personal channels are Agent Computer/Sage runtime channels and cannot be
-bound to Studio cloud agents."* This part of the claim holds: Sage can pair
-personal channels (Telegram, WhatsApp, iMessage, etc., all routing back to
-its own identity) but can never be given a Slack app or Discord bot
-identity of its own.
+bound to Studio cloud agents."* (verbatim code error string, unchanged).
+This part of the claim holds: the owner-facing agent can pair personal
+channels (Telegram, WhatsApp, iMessage, etc., all routing back to its own
+identity) but can never be given a Slack app or Discord bot identity of its
+own.
 
 **A real owner-facing narrowing control exists, but only on the
 backend.** `GET`/`PATCH /workspaces/{workspace_id}/sage/tool-policy`
-(`routes_workspaces.py:675-719`) lets an owner deny specific Sage
-capabilities (Web Search, HTTP, Gmail, Calendar, File Access, Code
-Execution — `workspace_admin_service.py:107-132`,
-`SAGE_TOOL_POLICY_DEFINITIONS`), backed by a real `workspace_policies`
-deny-list column. A typed frontend API client exists for it
-(`workstation-client.ts:628,870-871,1210,2729-2743`) — but a repo-wide grep
-found zero callers of these methods outside the client file and Playwright
-e2e test mocks. **DEAD SCAFFOLDING** — an owner cannot exercise this from
-the product today.
+(`routes_workspaces.py:675-719`, literal route path, unchanged) lets an
+owner deny specific owner-facing-agent capabilities (Web Search, HTTP,
+Gmail, Calendar, File Access, Code Execution —
+`workspace_admin_service.py:107-132`, `SAGE_TOOL_POLICY_DEFINITIONS`),
+backed by a real `workspace_policies` deny-list column. A typed frontend
+API client exists for it (`workstation-client.ts:628,870-871,1210,2729-2743`)
+— but a repo-wide grep found zero callers of these methods outside the
+client file and Playwright e2e test mocks. **DEAD SCAFFOLDING** — an owner
+cannot exercise this from the product today.
 
-**"Ask Sage" → "Ask AI" rename: not started.** "Ask Sage" is the live,
-tested name everywhere it appears — five occurrences in
-`SageLauncher.tsx` (a code comment at `:57`, `emptyTitle` at `:147`,
-`emptyBody` at `:148`, `aria-label` at `:223`, and the actual visible button
-text, `:228`) — plus two lowercase incidental backend mentions
-(`pilot_operations_service.py:137`, `mini_apps_service.py:1268`) and two
-proof/test scripts (`scripts/proof_uc_fleet_wiring.py:123`,
+**"Ask Sage" → "Ask AI" rename: not started — the legacy name is still
+live in the UI today.** "Ask Sage" is the live, tested name everywhere it
+appears — five occurrences in `SageLauncher.tsx` (a code comment at `:57`,
+`emptyTitle` at `:147`, `emptyBody` at `:148`, `aria-label` at `:223`, and
+the actual visible button text, `:228`) — plus two lowercase incidental
+backend mentions (`pilot_operations_service.py:137`,
+`mini_apps_service.py:1268`) and two proof/test scripts
+(`scripts/proof_uc_fleet_wiring.py:123`,
 `scripts/proof_u4_fleet_ui.py:65,192,206`) that assert the exact string
 `"Ask Sage to create your first one"` as expected, current UI content —
-i.e., it's actively pinned as correct, not flagged as stale.
-`docs/UI-CONTRACT.md:123,150` likewise names "Ask Sage launcher" as the
-defined element. **"Ask AI" appears zero times** anywhere in `frontend/`,
-`server_modules/`, `scripts/`, or `docs/` on this branch.
+i.e., it's actively pinned as correct, not flagged as stale. This is a real
+product surface that still visibly says "Sage" and has not been updated to
+match the 2026-07-23 terminology ruling. `docs/UI-CONTRACT.md:123,150`
+likewise names "Ask Sage launcher" as the defined element. **"Ask AI"
+appears zero times** anywhere in `frontend/`, `server_modules/`, `scripts/`,
+or `docs/` on this branch.
 
 ---
 
@@ -2752,7 +2781,7 @@ still accurate as a map of the surface. This section adds what the
 2026-07-13 execution-layer pass found underneath it — confirmations,
 one reconciled number, and two gaps not visible from the summary table.
 
-### 25.1 `cli_subscription` — real for specialists, dead scaffolding for Sage itself
+### 25.1 `cli_subscription` — real for specialists, dead scaffolding for the owner-facing agent itself
 
 The install/login/dispatch chain is genuinely built and tested: `cli.install`
 / `cli.login.*` capabilities (`cli_setup_service.py:9-12`, routes
@@ -2766,24 +2795,26 @@ UI surface (`cli-runner.ts` only appends `--model` if one is given, and
 nothing gives one) — always the CLI's own default, and the UI is self-aware
 of this (`FleetAgentDetail.tsx:78` labels the field `"CLI default"`).
 
-**The gap: Sage's own Model tab accepts and saves `cli_subscription`/`local`
-mode, then never honors it.** `FleetAgentDetail.tsx:341` renders the Model
-tab for *any* agent, master included, with no `isMaster` gate (contrast
-other rows in the same file that do gate on it). `fleet_configure_agent`
-(`fleet_tools.py:800-919`, the save path) has no master/operator guard
-anywhere in its body either — the PATCH succeeds. But at turn time, Sage's
-own runs go through `_resolve_cloud_provider(workspace_id)`
+**The gap: the owner-facing agent's own Model tab accepts and saves
+`cli_subscription`/`local` mode, then never honors it.**
+`FleetAgentDetail.tsx:341` renders the Model tab for *any* agent, master
+included, with no `isMaster` gate (contrast other rows in the same file
+that do gate on it). `fleet_configure_agent` (`fleet_tools.py:800-919`, the
+save path) has no master/operator guard anywhere in its body either — the
+PATCH succeeds. But at turn time, the owner-facing agent's own runs go
+through `_resolve_cloud_provider(workspace_id)`
 (`sage_agent_runtime_service.py:3576`), a function with **zero knowledge of
 `model_config` or modes at all** — it only knows "explicit
-`sage_ai_provider` string" vs. the DeepSeek default. The function that
-*does* understand `cli_subscription`/`local`,
-`_resolve_agent_cloud_provider`, is only reached when a specialist context
-object is present (`specialist_runtime_context.py:139-140` explicitly
-returns `None` for the master, with the comment *"the master (Sage) runs
-its normal runtime"*). **Net effect:** an owner can open Sage's own card,
-pick "Your subscription," bind a Gateway, and Save — it works, no error —
-and Sage keeps running on whatever `_resolve_cloud_provider` returns
-instead, silently.
+`sage_ai_provider` string" vs. the DeepSeek default (`sage_ai_provider` is
+the literal, unchanged code/DB field name). The function that *does*
+understand `cli_subscription`/`local`, `_resolve_agent_cloud_provider`, is
+only reached when a specialist context object is present
+(`specialist_runtime_context.py:139-140` explicitly returns `None` for the
+master, with the comment *"the master (Sage) runs its normal runtime"* —
+verbatim code comment, unchanged). **Net effect:** an owner can open the
+owner-facing agent's own card, pick "Your subscription," bind a Gateway,
+and Save — it works, no error — and it keeps running on whatever
+`_resolve_cloud_provider` returns instead, silently.
 
 ### 25.2 The durable-dispatch deadline, reconciled definitively
 
@@ -2809,7 +2840,7 @@ citing the specific risk it used to carry ("exposed secrets through process
 arguments"). The key/model/provider UI is real and complete on both the
 wizard and the Model tab.
 
-**The gap:** at the master (Sage) level, `_resolve_cloud_provider` resolves
+**The gap:** at the master (owner-facing agent) level, `_resolve_cloud_provider` resolves
 `(provider, credentials)` once, workspace-wide. If a *specialist* has its
 own `model_config.provider` set and it differs from the workspace default,
 the code overwrites the `provider` string (`sage_agent_runtime_service.py:3578-3581`)
@@ -3273,9 +3304,9 @@ table, one **physically separate `.db` file per `(workspace_id,
 agent_install_id)`** — `agent_memory.py:190-197` — so isolation there is
 enforced by the filesystem itself, not by a `WHERE` clause). Critically, an
 **empty `agent_install_id` does not mean "no scope" — it resolves to the
-WORKSPACE ROOT**, which is Sage's own memory location, predating specialist
+WORKSPACE ROOT**, which is the owner-facing agent's own memory location, predating specialist
 agents (`workspace_context.py:222-226`). This is intentional and correct
-for Sage's own turns; it is dangerous for any caller acting on behalf of a
+for the owner-facing agent's own turns; it is dangerous for any caller acting on behalf of a
 specialist that forgets to pass the specialist's real id.
 
 ### 27.2 Attack (a)+(c): confirmed real leak, fixed
@@ -3288,9 +3319,10 @@ every sibling (`update`, `read`, `write`, `stage_edit`, `apply_edit`,
 `append_daily_note`, `stage_consolidation`, `consolidate_daily_notes`,
 `list_versions`, `rollback_version`) already did this correctly. Net effect,
 confirmed and reproduced before fixing: **any specialist agent's
-`memory_search`/`memory_get` tool call silently searched/read Sage's own
-root-level memory notebook instead of that specialist's own** — a real
-cross-agent (specialist → Sage) leak, reachable from an ordinary tool call
+`memory_search`/`memory_get` tool call silently searched/read the
+owner-facing agent's own root-level memory notebook instead of that
+specialist's own** — a real cross-agent (specialist → owner-facing agent)
+leak, reachable from an ordinary tool call
 during a turn, no special conditions required. Two specialists sharing this
 bug would also have collided with each other through that same shared root.
 
@@ -3373,7 +3405,7 @@ on-demand mechanism as any other memory file.
 `server_modules/tests/test_memory_cross_agent_isolation.py` — 19 tests,
 all passing, covering all 3 attack vectors: path traversal + symlink escape
 (6 tests), the real leak's regression coverage including the alias key and
-Sage's-own-root case (6 tests), and the SQLite layer's per-file isolation
+the owner-facing-agent's-own-root case (6 tests), and the SQLite layer's per-file isolation
 (5 tests, plus 2 directory/workspace isolation checks in the first group).
 Confirmed to fail without the fix (§27.2), confirmed to pass with it, and
 confirmed to introduce zero regressions elsewhere via git-stash diff
@@ -3454,14 +3486,14 @@ Scoped to `sage_agent_runtime_service.py`'s `_resolve_cloud_provider`/
 three reported gaps, one fixed in that scope, two root-caused precisely
 and flagged because the real fix needs code outside it.
 
-### 28.1 Fixed: Sage's own subscription setting was silently ignored (§25.1, closed)
+### 28.1 Fixed: the owner-facing agent's own subscription setting was silently ignored (§25.1, closed)
 
-`_resolve_cloud_provider` — Sage's own turn-time resolver — had zero
+`_resolve_cloud_provider` — the owner-facing agent's own turn-time resolver — had zero
 knowledge of `model_config` at all, so saving `cli_subscription`/`local`
-mode on Sage's own Model tab (the save itself always succeeded;
-`fleet_configure_agent` has no master/operator guard) did nothing: Sage
+mode on its own Model tab (the save itself always succeeded;
+`fleet_configure_agent` has no master/operator guard) did nothing: it
 kept answering on DeepSeek/platform credits with no error, no signal,
-nothing an owner could see short of noticing Sage never actually used
+nothing an owner could see short of noticing it never actually used
 their subscription.
 
 **Fixed with an opt-in check**, `check_master_model_config: bool = False`
@@ -3469,14 +3501,14 @@ their subscription.
 on behalf of a completely unrelated agent's `platform_credits` mode
 (`_resolve_agent_cloud_provider`'s `platform_credits` branch delegates to
 the same shared workspace-default resolution). An unconditional check
-would mean a stale/wrong setting on Sage's own card could break a
+would mean a stale/wrong setting on the owner-facing agent's own card could break a
 different specialist's unrelated turn — exactly the cross-agent coupling
 class of bug Part 27 fixed for memory. So the check is opt-in, defaults to
 completely off (proven by a test that makes the master-lookup functions
 raise `AssertionError` if ever called with the default), and the one
 in-scope caller (`_resolve_agent_cloud_provider`'s `platform_credits`
-branch) explicitly passes `False`. When a future caller resolves Sage's
-own turn specifically, it should pass `True` — see §28.2.
+branch) explicitly passes `False`. When a future caller resolves the
+owner-facing agent's own turn specifically, it should pass `True` — see §28.2.
 
 ### 28.2 Flagged, not fixed: two gaps whose real fix is outside this scope
 
@@ -3581,8 +3613,8 @@ architecturally out of reach from `runs_execution.py` alone:**
    text ("Wake reasons:\n- [kind] summary"), never for identity/
    model_config lookup. The resulting turn's `context_hints["agent_role"]`
    (`:150`) is always `merged_metadata.get("agent_role") or "orchestrator"`
-   — every heartbeat/wake-triggered run executes as Sage's generic
-   orchestrator, never as the specific agent that requested the wake-up.
+   — every heartbeat/wake-triggered run executes as the owner-facing
+   agent's generic orchestrator, never as the specific agent that requested the wake-up.
    Confirmed with a fresh live query of both persisted runs: `agent_role:
    "orchestrator"`, `owner_user_id: "telegram-bot"`, and zero occurrences
    of Pixel's `agent_install_id` anywhere in either ~30KB payload.
@@ -3634,7 +3666,7 @@ agent's) key, mislabeled as its own provider.
 **Fixed**: wired in `_resolve_agent_cloud_provider` (§25.3's correct,
 complete, zero-caller resolver) as an **opt-in per-agent override** —
 only a specialist with its own `mode`/`provider` set takes the new path;
-one with nothing configured, and Sage's own turn
+one with nothing configured, and the owner-facing agent's own turn
 (`specialist_context=None`), fall straight through on the unchanged
 workspace-default resolution. `local`/`cli_subscription` are excluded on
 purpose: those dispatch entirely separately via the gateway WSS rail
@@ -3653,8 +3685,8 @@ prevent.
 (`handle_sage_chat` → `_run_sage_action_loop_v3` →
 `stream_provider_backed_direct_chat`, discovered by tracing actual debug
 trace output — specialists use this tool-capable path, not
-`generate_chat_reply_with_provider_fallback`, which only Sage's plain-chat
-path uses) — mocking only the two outermost boundaries (the resolver's
+`generate_chat_reply_with_provider_fallback`, which only the owner-facing
+agent's plain-chat path uses) — mocking only the two outermost boundaries (the resolver's
 return value, the final network-bound generation call). Two specialists
 with two different keys are proven to each reach the generation call with
 their *own* resolved credentials, zero cross-contamination; the
@@ -3687,7 +3719,7 @@ unaffected live, not just in tests.
 read but not touched — nothing in the fix required changing it.
 
 **Bottom line**: §28.2/§25.3's per-agent BYOK gap is closed. Combined with
-§28.1 (Sage's own subscription setting) and §28.3 (honest failure for
+§28.1 (the owner-facing agent's own subscription setting) and §28.3 (honest failure for
 scheduled runs), all three provider-resolution gaps from the original
 2026-07-14 audit are now either fixed or precisely scoped to the specific
 out-of-scope files that block them.
@@ -3798,12 +3830,13 @@ trivial. `agent_channel_router.py::handle_cloud_channel_inbound` is dead
 code (its own docstring: "currently has no callers"). The real, live
 handler is `personal_channels_service.py::handle_cloud_channel_inbound`
 (outside this pass's declared scope) — it passes
-`gateway_id=f"cloud:{session_id}"` into the Sage bridge, a synthetic id
-that can never match a real, gateway-paired
+`gateway_id=f"cloud:{session_id}"` into the owner-facing-agent bridge, a
+synthetic id that can never match a real, gateway-paired
 `personal_channels_repository` state row. Every cloud-relayed Telegram/
-WhatsApp session therefore resolves to no agent and runs as Sage,
-regardless of §1's agent-scoped repository work — the same "always
-answers as Sage" bug class as §29.2, in a third place. Fixing it requires
+WhatsApp session therefore resolves to no agent and runs as the
+owner-facing agent, regardless of §1's agent-scoped repository work — the
+same "always answers as the owner-facing agent" bug class as §29.2, in a
+third place. Fixing it requires
 either the Cloud Session Manager (a separate service — GramJS/Node,
 referenced but not in this repo) to carry an `agent_id` in its signed
 payload, or a session→agent mapping built on this side; both are
@@ -3829,7 +3862,7 @@ These are recorded in `docs/PLATFORM.md` Section 7. Do NOT reverse without expli
 
 ```
 Turn engine:        server_modules/agent_turn.py → turn_runtime.py
-Sage agent:         server_modules/sage_agent_runtime_service.py (3,417 lines)
+Owner-facing agent: server_modules/sage_agent_runtime_service.py (3,417 lines)
 Tool broker:        server_modules/tool_broker.py
 MCP client:         server_modules/mcp_registry_service.py
 MCP server:         mcp_server.py (267 lines, 9 tools)
@@ -3845,7 +3878,7 @@ Kill switch:        server_modules/kill_switch_gate.py, safe_mode_service.py (Pa
 Activity/usage attribution: server_modules/activity_ledger_service.py, usage_events_repository.py (Part 12)
 Skills (built-in):  server_modules/skill_registry.py, skills_service.py (Part 14)
 Skills (marketplace, no UI): server_modules/skills_registry.py, skill_scanner.py (Part 14)
-Memory (Sage):      server_modules/agent_memory_tools.py, sage_instruction_compiler_service.py (Part 16)
+Memory (owner-facing agent): server_modules/agent_memory_tools.py, sage_instruction_compiler_service.py (Part 16)
 Sub-agent delegation (no caller): server_modules/runtime_run_delegation_service.py, runs_delegation.py (Part 17)
 Scheduled wake-up (fixed 2026-07-13, live-verified): server_modules/bounded_scheduler_service.py (scan_due_wake_requests_once, run_wake_request_scan_forever), runtime_heartbeat_service.py (_extract_turn_run_id) (Part 18)
 Cron/weekly scheduler (live, no UI): server_modules/runs_core.py, run_service.py (Part 18)
@@ -3853,7 +3886,7 @@ Connectors execution: server_modules/connectors/notion_connector.py, github_conn
 Tool-honesty guard: server_modules/tool_honesty_guard.py (Part 21)
 Hardware placement resolver: server_modules/sage_agent_runtime_service.py `_resolve_agent_cloud_provider` (Part 22)
 Invite gating:      server_modules/routes_auth.py, pilot_invite_service.py (Part 23)
-Sage tool policy (no UI): server_modules/workspace_admin_service.py (Part 24)
+Owner-facing agent tool policy (no UI): server_modules/workspace_admin_service.py (Part 24)
 CLI-subscription dispatch: server_modules/sage_agent_runtime_service.py `_resolve_agent_cloud_provider`/`_dispatch_cli_subscription_gateway_brain` (Part 25)
 BYOK encryption:    server_modules/vault_store.py (Fernet+PBKDF2) (Part 25)
 cli_subscription wire trace: server_modules/gateway_protocol_service.py (_PendingInvoke, durable flush) + empyralis-gateway/src/llm/{runtime.ts,cli-runner.ts,codex-app-server.ts} (Part 26)
@@ -3894,7 +3927,7 @@ Organized by subsystem with verified one-line purposes. Files marked ⚠️ are 
 | `agent_turn.py` | **Canonical turn contract**: AgentTurnRequest dataclass, all request builders converging on turn_runtime |
 | `turn_runtime.py` | **Execution switchboard**: bridges AgentTurnRequest to direct_chat_service or run_service |
 | `turn_ingress_service.py` | **Canonical ingress facade**: the ONLY accepted boundary for starting work |
-| `sage_turn_adapter.py` | **Unified Sage ingress**: SINGLE entry point for ALL Main Agent channels |
+| `sage_turn_adapter.py` | **Unified owner-facing-agent ingress**: SINGLE entry point for ALL Main Agent channels |
 | `sage_agent_runtime_contract.py` | SageTurnContract, SageTurnResult, SAGE_MODE, surface normalization |
 | `sage_agent_runtime_service.py` | Runtime dispatch: wires activity ledger, specialist repo, transparency, tool broker |
 | `run_service.py` | Durable run execution services + execute_durable_turn_request |
@@ -3910,7 +3943,7 @@ Organized by subsystem with verified one-line purposes. Files marked ⚠️ are 
 | `sage_reply_dispatcher.py` | SINGLE owner of ALL channel reliability logic |
 | `command_registry.py` | Single command registry — one source of truth for every /command |
 | `agent_action_metering_service.py` | Action metering: categorizes agent actions into domains with hashes |
-| `sage_transparency_service.py` | Sage/Main Agent transparency event emission |
+| `sage_transparency_service.py` | Owner-facing-agent (Main Agent) transparency event emission |
 
 ### D.2 Channel Layer (60 files)
 
@@ -3990,7 +4023,7 @@ Organized by subsystem with verified one-line purposes. Files marked ⚠️ are 
 
 `agent_registry_api.py`, `agent_registry_models.py`, `agent_registry_repository.py`, `agent_specialist_repository.py`, `agent_manifest.py`, `agent_workspace_api.py`, `deployed_agent_service.py` (full lifecycle), `deployed_agent_config_schema.py`, `deployed_agent_runtime_contract_service.py`, `deployed_agent_virtual_runtime_service.py`, `deployed_agent_admin_dashboard_service.py`, `deployed_agent_analytics_service.py`, `deployed_agent_business_insights_service.py`, `deployed_agent_marketplace_service.py`, `deployed_agent_test_turn_service.py`, `deployed_agent_transparency_service.py`, `routes_agents.py`, `routes_deployed_agents.py`, `routes_marketplace.py`
 
-### D.11 Sage Services (16 files)
+### D.11 Owner-Facing-Agent Services (16 files, code prefix `sage_*`)
 
 `sage_chat_api.py`, `sage_profile_service.py`, `sage_profile_api.py`, `sage_services_service.py`, `sage_services_api.py`, `sage_skills_api.py`, `sage_context_files_api.py`, `sage_heartbeat_service.py`, `sage_heartbeat_api.py`, `sage_daily_operator_service.py`, `sage_dreaming_pipeline.py`, `sage_instruction_compiler_service.py`, `sage_doctor_service.py`, `sage_proof_log_service.py`, `routes_studio.py`, `routes_health.py`
 
@@ -4051,7 +4084,7 @@ Organized by subsystem with verified one-line purposes. Files marked ⚠️ are 
 | Billing / Quota / Credits | 16 |
 | Governance / Safety | 22 |
 | Agent Registry / Deployed | 18 |
-| Sage Services | 16 |
+| Owner-Facing-Agent Services | 16 |
 | Infrastructure / Cross-Cutting | ~130 |
 | Pass-Through Stubs | 6 |
 | **TOTAL** (non-test source files) | **~410** |

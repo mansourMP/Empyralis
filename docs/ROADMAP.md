@@ -3,6 +3,8 @@
 Living record of intent. Anything here is a decision, not code — nothing in
 this file is built until it's referenced from an actual PR.
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers are legacy code artifacts only, not a live product concept. Anywhere below says "Sage," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 ## Planned
 
 ### cli_subscription — BYO Claude Code / Codex via Gateway

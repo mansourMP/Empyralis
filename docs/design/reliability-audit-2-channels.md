@@ -1,5 +1,7 @@
 # Reliability Audit 2 — Channels
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers (e.g. `"sage-main"`, `sage_agent_runtime_service.py`) are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 READ-ONLY fact inventory. No fixes proposed. Every claim cited `file:line`. Snapshot as of 2026-07-21, branch `fix/slack-channel-uniqueness` (main-tracking, HEAD at commit `b7f17d367`).
 
 Scope directories: `empyralis-gateway/src/channels/`, `empyralis-gateway/src/bridges/`, `server_modules/{connection_catalog_service,personal_channels_service,channel_platform_service,gateway_state_repository,personal_channels_repository,routes_personal_channels}.py`, plus whatever else those files pulled in (Discord/Slack/Email have no gateway presence at all — they live in other `server_modules/*.py`).

@@ -1,5 +1,7 @@
 # Context-Safety Research: How the Industry Stops a Polluted Context Window From Breaking Production
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 **Research date:** 2026-07-23
 **Mission:** Establish, from live official sources fetched this session, how Claude Code, Codex CLI, Anthropic's agentic-browsing safety program, OpenAI's agent-building guidance, the MCP spec, and the "lethal trifecta" mental model actually stop a confused, polluted, or injected context window from causing catastrophic real-world action — then translate the pattern onto Empyralis, which has an owner law of **no approval system** (no approve/deny buttons, no approval-pending states; the agent acts on reasoning).
 

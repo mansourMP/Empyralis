@@ -1,5 +1,13 @@
 # Drill #2 — Fresh-Account Verification Report
 
+> **OUTDATED (2026-07-23):** this is a point-in-time fresh-account drill from
+> 2026-07-09 — its findings have since been folded into and superseded by
+> `docs/PLATFORM-MAP.md`. It also predates the 2026-07-23 founder ruling that
+> "Sage" is dead product terminology (the platform has only agents —
+> owner-facing, customer-facing serving the owner, and AskAI); this document
+> uses "Sage" throughout as a live concept. Kept for history; do not build
+> from this.
+
 **Date:** 2026-07-09 | **Branch:** `verify` | **Method:** real UI in browser (`web-verify2` :3200 / `backend-verify2` :8211), live backend, no code changes, no simulated turns. Account: `drill2-20260709-183237@empyralis-test.com` ("Drill Two Tester"), created fresh through the actual signup form.
 
 This re-runs the Project #1 drill's 8-item friction log against current `main`-bound `verify` work (mandate, kill-switch, transparency-v1, attribution, first-run honesty, truth-in-numbers, Fleet consolidation) and adds four new checks for work that landed since: usage metering, inline rename, wizard placement, Cmd+K.

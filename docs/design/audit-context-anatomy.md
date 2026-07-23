@@ -1,7 +1,13 @@
 # Audit: Context-Window Anatomy — What Actually Enters an Empyralis Agent's Prompt
 
 **Date:** 2026-07-23
-**Scope:** Reconstruct, file:line-verified, exactly what enters the model's `system` / `messages` / `tools` on a real turn — web chat and channel (Sage) turns both — in the style of Claude Code's context-window breakdown. Evidence gathered by reading the live code paths, not the docstrings that describe them.
+> **Terminology note:** "Sage" is legacy product terminology (the concept was
+> removed from the product ~1.5 months before this audit) — the platform has
+> only agents (owner-facing, customer-facing serving the owner, and AskAI).
+> `sage_*` is a legacy code prefix only. This doc uses "owner-facing agent" /
+> "master" throughout instead of "Sage"; file:line citations to `sage_*.py`
+> modules are unchanged, since those are accurate code pointers.
+**Scope:** Reconstruct, file:line-verified, exactly what enters the model's `system` / `messages` / `tools` on a real turn — web chat and channel (owner-facing-agent) turns both — in the style of Claude Code's context-window breakdown. Evidence gathered by reading the live code paths, not the docstrings that describe them.
 
 **Note on sourcing:** `direct_chat_generation_service.py` had a 112-line working-tree diff against `HEAD` at audit time (a concurrent edit). Every claim below about that file cites line numbers from `git show HEAD:server_modules/direct_chat_generation_service.py`, not the working tree, so citations stay stable. Everything else cites the working tree directly.
 
@@ -25,7 +31,7 @@
 | **Tools — always-on tier** (`task_complete`, `update_plan`, 7 memory tools, `web__search`, `web__fetch`, `hardware__action`, `query_tool_registry`) | ~800 (estimated at design time, not re-measured) | Always loaded, native schemas | `tool_registry_service.py:34-47` (`ALWAYS_ON_TOOL_NAMES`, 12 names), `:527-562` |
 | **Tools — registry (everything else)** | 0 by default | **Deferred** — name+description not even sent; loaded only via `query_tool_registry`, top 3-5 (max 10) results per call, BM25-ranked, real function schemas | `tool_registry_service.py:1-18` (module docstring), `:276-337` (registry build), `:416-453` (search) |
 | **Messages — prior turns (web/direct chat)** | proportional to model window: `conversation_budget` up to 65% of window, recent-turn slice ≤35% of that (≤24,000 tokens hard cap) | Loaded, **window-proportional**, non-LLM heuristic truncation for old turns | `conversation_memory_policy.py:322-347` (`build_model_aware_memory_policy`), `conversation_compaction.py:63-112` |
-| **Messages — prior turns (channel/Sage recall)** | up to 16 messages × 4,000 chars ≈ **worst case ~16,000 tokens** | Loaded, **per-message capped, NO aggregate token budget** | `sage_instruction_compiler_service.py:583-607` (`_normalize_recent_messages`, `[-16:]`, `content[:4000]`) |
+| **Messages — prior turns (channel/owner-facing-agent recall)** | up to 16 messages × 4,000 chars ≈ **worst case ~16,000 tokens** | Loaded, **per-message capped, NO aggregate token budget** | `sage_instruction_compiler_service.py:583-607` (`_normalize_recent_messages`, `[-16:]`, `content[:4000]`) |
 | **Tool results (this turn, non-Codex providers)** | ≤1,000 tokens per result (4,000 char cap) | Loaded, capped | `direct_chat_generation_service.py:2202-2204` (HEAD) |
 | **Tool results (this turn, Codex/`codex_cli` provider)** | **unbounded** | Loaded, **no cap at all** | `direct_tool_execution_service.py:789-795` (`direct_tool_followup_message`), call site `direct_chat_generation_service.py:2191-2200` (HEAD) |
 | **Tool result — `web__fetch`** | ≤3,000 (12,000 char cap) | Loaded, capped, no pagination | `web_tools.py:72-82` |
@@ -50,7 +56,7 @@ Every supported provider gets **real, native, structured tool/function schemas**
 | OpenAI Codex (Responses API) | `{"type":"function","name","description","parameters"}` on `/responses` | `orion_local_worker_llm.py:2486-2500` |
 
 **DeepSeek specifically gets native tool-calling**, not prose — this directly answers the founder's stated worry. It goes through the same `iter_openai_compatible_chat_events` path as every OpenAI-compatible provider (`orion_local_worker_llm.py:2020-2135`). What DeepSeek gets that's *different* is workaround handling for two live-verified provider bugs:
-- A **20-tool hard trim** — connected-app tools first, then Sage tools, then the rest — only for `provider_id == "deepseek"` (`direct_chat_generation_service.py:1113-1144`, HEAD).
+- A **20-tool hard trim** — connected-app tools first, then owner-facing-agent tools, then the rest — only for `provider_id == "deepseek"` (`direct_chat_generation_service.py:1113-1144`, HEAD).
 - **Tool-definition stripping after the first tool-executing round** — DeepSeek is the sole member of `_TOOL_STRIP_REQUIRED_PROVIDERS` because it returns empty content when tools + prior tool-results coexist in one request; every other provider keeps tools live across iterations for real multi-round tool use (`direct_chat_generation_service.py:226-247`, HEAD).
 - A **retry-without-tools fallback** when DeepSeek returns empty content with tools in the payload (`orion_local_worker_llm.py:2109-2119`).
 
@@ -62,13 +68,13 @@ These are honest, narrowly-scoped, comment-documented workarounds for one model'
 
 ## 3. Tool surface per turn
 
-A genuinely Claude-Code-shaped two-tier design, shared identically by web chat and channel/Sage turns:
+A genuinely Claude-Code-shaped two-tier design, shared identically by web chat and channel/owner-facing-agent turns:
 
 - **Tier 1 — always-on (12 tools, ~800 tokens estimated):** `task_complete`, `update_plan`, `memory_write/read/search/get/update/append_daily_note` (7 memory tools total incl. `query_tool_registry` counted separately), `web__search`, `web__fetch`, `hardware__action`, `query_tool_registry` — `tool_registry_service.py:34-47`.
 - **Tier 2 — registry, loaded on demand:** everything else — ~37 built-in tool descriptors total minus the always-on 11 real ones (`skills_service.py:659-1932`, 37 `tool_name=` entries counted directly), plus local tools, plus every connected-app tool, plus enabled+approved MCP tools (`tool_registry_service.py:276-337`). None of these names or schemas are sent up front.
 - **Discovery:** the model calls `query_tool_registry(task_description)`; results come back via **real Okapi BM25** (not a substring/keyword scorer) with name-field weighting 3x over description, plus a small hand-curated synonym layer for chat vocabulary ("mail"→"email", "chat"→"message"/"slack") — `tool_registry_service.py:340-412`, `:74-113`. Top 3-5 results (max 10), full native schemas, get appended to the live `tools` list for the rest of the turn, deduped by name (`direct_chat_generation_service.py:1793-1807`, HEAD).
 - **Estimated savings:** the module's own docstring claims ~87% token savings on simple Q&A turns, ~75% on typical tool-using turns vs. sending all 48+ tools every time — "estimated at the time the two-tier design was introduced; not re-measured since" (`tool_registry_service.py:16-18`). Worth an actual re-measurement, but the architecture itself is sound.
-- **This is the same design used for both surfaces**, confirmed: web chat builds tools via `build_always_on_direct_chat_tools_fn` + `build_registry_entries_fn` in `direct_chat_entry_service.py:444-451`; channel/Sage turns call the identical `direct_chat_tool_catalog_service.build_registry_entries()` at `sage_agent_runtime_service.py:2415`.
+- **This is the same design used for both surfaces**, confirmed: web chat builds tools via `build_always_on_direct_chat_tools_fn` + `build_registry_entries_fn` in `direct_chat_entry_service.py:444-451`; channel/owner-facing-agent turns call the identical `direct_chat_tool_catalog_service.build_registry_entries()` at `sage_agent_runtime_service.py:2415`.
 - **Capability-manifest prose (separate from the above):** `sage_instruction_compiler_service.py` also renders up to 16 capability items as a "## Callable Tools" prose list in the system prompt (`:425-463`) — this is a **redundant description of tools already passed as native schemas**. It's small (capped, ~700-900 tokens worst case) and safety-net-motivated (comment: "Only these tools are callable in this turn... do not invent"), but it is real duplication Claude Code doesn't do — Claude Code trusts the native tool list alone.
 
 ---
@@ -127,7 +133,7 @@ No evidence of memory being "dumped" — every path found is capped and most are
 
 1. **Codex-provider tool results are completely unbounded.** `direct_tool_followup_message()` (`direct_tool_execution_service.py:789-795`) wraps `result_text` with zero truncation and re-injects it as a plain `user` message (`direct_chat_generation_service.py:2191-2200`, HEAD) — the exact same result that every *other* provider caps at 4,000 chars (`:2202-2204`, HEAD) is, for `codex_cli`, sent raw. A large file read, a verbose connector JSON dump, or a big `web__fetch` result (already itself capped at 12,000 chars — so up to ~3,000 tokens) goes straight through uncapped for this one provider. **Highest-priority fix.**
 
-2. **Channel/Sage recent-message history has no aggregate token budget.** `_normalize_recent_messages` (`sage_instruction_compiler_service.py:583-607`) keeps the last 16 messages, each capped at 4,000 chars, but never sums them — worst case (16 genuinely long turns) is ~16,000 tokens with no proportional-to-window scaling, unlike the web-chat path's `build_model_aware_memory_policy` which *is* window-proportional (`conversation_memory_policy.py:322-347`). A small-context model (or a long-running Telegram thread) can absorb a disproportionate history hit here relative to everything else in the budget.
+2. **Channel/owner-facing-agent recent-message history has no aggregate token budget.** `_normalize_recent_messages` (`sage_instruction_compiler_service.py:583-607`) keeps the last 16 messages, each capped at 4,000 chars, but never sums them — worst case (16 genuinely long turns) is ~16,000 tokens with no proportional-to-window scaling, unlike the web-chat path's `build_model_aware_memory_policy` which *is* window-proportional (`conversation_memory_policy.py:322-347`). A small-context model (or a long-running Telegram thread) can absorb a disproportionate history hit here relative to everything else in the budget.
 
 3. **The capability-manifest prose list duplicates the native tool schemas.** `_capability_manifest_text` (`sage_instruction_compiler_service.py:425-463`) renders up to 16 tools as `"- {tool}: {label}. {description} ({runtime}; {approval})."` lines in the system prompt — information the model already has as structured, callable schemas via `tools=`. Bounded (~700-900 tokens) and safety-motivated, but genuinely redundant against the Claude Code pattern of trusting native tool definitions alone.
 

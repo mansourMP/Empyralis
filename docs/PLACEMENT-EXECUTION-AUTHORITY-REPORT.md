@@ -1,5 +1,13 @@
 # Placement, Execution, Authority, Channels, Transparency — Research Report
 
+> **OUTDATED (2026-07-23):** this is a point-in-time research report from
+> 2026-07-09 — its findings have since been folded into and superseded by
+> `docs/PLATFORM-MAP.md`, the current canonical architecture doc. It also
+> predates the 2026-07-23 founder ruling that "Sage" is dead product
+> terminology (the platform has only agents — owner-facing, customer-facing
+> serving the owner, and AskAI); this document uses "Sage" throughout as a
+> live concept. Kept for history; do not build from this.
+
 **Date:** 2026-07-09
 **Branch:** `verify`
 **Purpose:** End-to-end mental model of how agent placement, execution, authority,

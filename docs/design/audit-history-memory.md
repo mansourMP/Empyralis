@@ -1,5 +1,7 @@
 # Thread History + Memory Audit — what makes an agent an agent
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers (e.g. `"sage-main"`, `sage_agent_runtime_service.py`) are legacy code artifacts only, not a live product concept. This document's prose has been updated to say "owner-facing agent" / "master" instead of "Sage"; literal quoted code strings/constants (e.g. `"sage-main"`) are left verbatim since those are evidence of what the code currently contains.
+
 **Date:** 2026-07-22
 **Scope:** every place a deployed Empyralis agent's past conversations or durable
 facts are stored and read back — the SQL thread store, the per-agent JSONL
@@ -113,7 +115,7 @@ if not resolved_thread_id:
 `agent_sender_thread_id()` is genuinely per-(agent, sender) — this is exactly
 the "room = counterpart" keying the target model wants, but it **only fires
 when a specialist agent is bound to the channel**. The common case — running
-as Sage/master with no specialist bound — always falls through to
+as the owner-facing agent/master with no specialist bound — always falls through to
 `get_active_thread()`, which reads a single `workspace.channel_active_threads[channel_origin]`
 pointer that defaults to the literal string `"sage-main"` for every channel
 that hasn't set an override. **No channel sets an override by default.**

@@ -1,5 +1,14 @@
 # Hardware & Brain — Reality Map
 
+> **OUTDATED (2026-07-23):** this is a point-in-time research report from
+> 2026-07-10. `docs/PLATFORM-MAP.md` (§22, and the note near line 81) already
+> flags this document's contrary claims as predating a real fix — treat this
+> doc as superseded, not current reality. It also predates the 2026-07-23
+> founder ruling that "Sage" is dead product terminology (the platform has
+> only agents — owner-facing, customer-facing serving the owner, and AskAI);
+> this document uses "Sage" throughout as a live concept. Kept for history;
+> do not build from this.
+
 **Date:** 2026-07-10 | **Branch:** `verify` | **Scope:** Read-only research, no code changes
 
 Three independent, file:line-verified investigations into what's actually wired vs. spec-only across the agent Hardware tab, the `cli_subscription` brain mode, and the VPS provisioning flow — so the next design pass works from ground truth, not assumption.

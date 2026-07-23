@@ -1,5 +1,13 @@
 # The Truth Map — Pre-Deploy Capability Audit
 
+> **OUTDATED (2026-07-23):** this is a point-in-time pre-deploy capability
+> audit from 2026-07-10 — its findings have since been folded into and
+> superseded by `docs/PLATFORM-MAP.md`, the current canonical architecture
+> doc. It also predates the 2026-07-23 founder ruling that "Sage" is dead
+> product terminology (the platform has only agents — owner-facing,
+> customer-facing serving the owner, and AskAI); this document uses "Sage"
+> throughout as a live concept. Kept for history; do not build from this.
+
 **Date:** 2026-07-10 | **Branch audited:** `verify` @ `dfe808048` (current main working tree, unpatched — does not include the unmerged `build/u3-j-hardware-truth` branch) | **Method:** fresh account, live browser + live backend, cross-checked against source
 
 Every row below was either driven live and observed, or traced to source with file:line evidence (or both). Where I could not fully verify something this session, it's named explicitly in its own section at the end rather than silently assumed either way.

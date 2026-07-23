@@ -1,4 +1,16 @@
-# Audit: does the live Sage system prompt meet the "doctrine prompt" standard?
+# Audit: does the live owner-facing-agent system prompt meet the "doctrine prompt" standard?
+
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the
+> platform has only agents (owner-facing, customer-facing serving the owner,
+> and AskAI). `sage_*` is a legacy code/variable prefix only. This audit's own
+> prose below has been updated to say "owner-facing agent" / "master" instead
+> of "Sage"; every literal quoted code string, comment, constant, or variable
+> name (e.g. `"You are Sage, a helpful AI assistant."`, `"Sage's durable
+> personal behavior layer"`, `SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT`) is left
+> verbatim, unchanged, because those quotes ARE the audit's evidence of what
+> the code currently contains — several of them are themselves findings that
+> the literal string "Sage" is still live in shipped prompt/fallback text and
+> has not been swept post-rename.
 
 Read-only audit. Standard being audited against (founder's ruling): a great
 agent system prompt (1) states the agent's FIRST PRIORITY plainly up front,
@@ -18,11 +30,11 @@ when this audit ran, so nothing here was invalidated mid-read).
 ## 0. Two different prompts, not one
 
 The single biggest structural fact this audit turned up: **master/operator
-(Sage) turns and specialist-agent turns get two different, differently-built
-prompts.** Everything below is organized around that split because scoring
-them as one prompt would hide the gap between them.
+(owner-facing agent) turns and specialist-agent turns get two different,
+differently-built prompts.** Everything below is organized around that split
+because scoring them as one prompt would hide the gap between them.
 
-- Master (Sage, `agent_install_id` empty): `server_modules/sage_agent_runtime_service.py:4338-4343` builds the prompt from `instruction_bundle.system_prompt` (the full compiler output — kernel, policy, capability manifest, memory, channel) plus guardrails.
+- Master (the owner-facing agent, `agent_install_id` empty): `server_modules/sage_agent_runtime_service.py:4338-4343` builds the prompt from `instruction_bundle.system_prompt` (the full compiler output — kernel, policy, capability manifest, memory, channel) plus guardrails.
 - Specialist (a fleet agent, `agent_install_id` set, cloud mode): `server_modules/sage_agent_runtime_service.py:4275-4337` builds `_specialist_system_prompt` from the specialist's own persona plus four short rules and a raw memory dump — **the capability manifest is never included** (see §3).
 - Specialist in `local` or `cli_subscription` mode short-circuits the whole action loop and never reaches `_run_sage_action_loop_v3` at all (`sage_agent_runtime_service.py:4353-4423`, `4433-4520`).
 
@@ -33,18 +45,18 @@ them as one prompt would hide the gap between them.
 1. **Compiler** — `server_modules/sage_instruction_compiler_service.py:622` `build_sage_instruction_bundle()` is the only function that assembles the budgeted, ordered core of the prompt. It is called from two sites in `sage_agent_runtime_service.py`:
    - `:4152-4170` — the live call inside `handle_sage_chat`, wrapped in a `try/except` that falls back to a two-line stub prompt on any exception (`:4171-4185`, `"You are Sage, a helpful AI assistant."` — no kernel, no memory rule, no capabilities, nothing).
    - `:3363-3410` — a second, older call site inside a function that is documented as **dead** (`:3210-3216`: "`_run_sage_action_loop_v2`... were removed here — dead code with zero live callers"); the surrounding function at `:3363` is not reachable from `handle_sage_chat`. Not part of the live path.
-2. **Runtime appends (master/Sage path)** — `sage_agent_runtime_service.py:4338-4343`: `envelope["system_prompt"] = f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}{attachment_context}{mcp_tool_inventory}"`.
+2. **Runtime appends (master/owner-facing-agent path)** — `sage_agent_runtime_service.py:4338-4343`: `envelope["system_prompt"] = f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}{attachment_context}{mcp_tool_inventory}"`.
 3. **Runtime appends (specialist path)** — `:4332`: `_specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_channel_action_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"` — no `instruction_bundle.system_prompt` at all, so no kernel/policy/capability-manifest/root-memory content reaches a specialist.
 4. **Action-loop appends (both paths, cloud mode only)** — inside `_run_sage_action_loop_v3` (`:2755`): hardware paired/not-paired block (`:2858-2875`, unconditional every turn), specialist bound-connector honesty block (`:2885-2901`, specialist-only), blocked-tool context (`:2910-2925`, conditional).
 5. **Dispatch** — the final `system_prompt` string is handed to `direct_chat_generation_service.stream_provider_backed_direct_chat` (`sage_agent_runtime_service.py:3128`, `direct_chat_generation_service.py:1073`), which appends at most one more thing: a reasoning-effort instruction for models with no native reasoning param (`direct_chat_generation_service.py:1181-1184`). No further section assembly happens there.
-6. **Native tools are a separate channel from the system-prompt text.** `_direct_tool_bundle` (`sage_agent_runtime_service.py:2346-2429`) builds the actual callable-function list handed to the provider API. This is a two-tier design (`server_modules/tool_registry_service.py:1-19`): 12 "always-on" tools (`ALWAYS_ON_TOOL_NAMES`, `tool_registry_service.py:34-47`: `task_complete, update_plan, memory_write, memory_read, memory_search, memory_get, memory_update, memory_append_daily_note, web__search, web__fetch, hardware__action, query_tool_registry`) are injected as real function schemas every turn; everything else (skill_invoke, browser__*, generate_image, http_request, llm__task, sage_service__*, all connector actions, all MCP tools) lives in a lazy BM25-searched registry (`tool_registry_service.py:276-336`) the model must pull via `query_tool_registry`. Fleet tools (`fleet__*`) are the one exception — unconditionally added to the master/Sage native tool list outside the always-on set (`sage_agent_runtime_service.py:2362-2386`), never given to specialists.
+6. **Native tools are a separate channel from the system-prompt text.** `_direct_tool_bundle` (`sage_agent_runtime_service.py:2346-2429`) builds the actual callable-function list handed to the provider API. This is a two-tier design (`server_modules/tool_registry_service.py:1-19`): 12 "always-on" tools (`ALWAYS_ON_TOOL_NAMES`, `tool_registry_service.py:34-47`: `task_complete, update_plan, memory_write, memory_read, memory_search, memory_get, memory_update, memory_append_daily_note, web__search, web__fetch, hardware__action, query_tool_registry`) are injected as real function schemas every turn; everything else (skill_invoke, browser__*, generate_image, http_request, llm__task, sage_service__*, all connector actions, all MCP tools) lives in a lazy BM25-searched registry (`tool_registry_service.py:276-336`) the model must pull via `query_tool_registry`. Fleet tools (`fleet__*`) are the one exception — unconditionally added to the master/owner-facing-agent native tool list outside the always-on set (`sage_agent_runtime_service.py:2362-2386`), never given to specialists.
    - The comment at `sage_agent_runtime_service.py:2360` says "8 core tools"; the actual `ALWAYS_ON_TOOL_NAMES` set has 12 entries (`tool_registry_service.py:34-47`) — stale comment, minor but real.
 
 ---
 
 ## 2. The prompt as the model sees it
 
-### 2a. Master/Sage path — ordered sections + est. tokens
+### 2a. Master/owner-facing-agent path — ordered sections + est. tokens
 
 Token estimates use the repo's own convention, `chars/4` (`sage_instruction_compiler_service.py:88-92`). Sections 1-8 share one hard budget, `SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT = 12,000` chars ≈ **3,000 tokens** (`:50`, override via `EMPYRALIS_SAGE_SYSTEM_CONTEXT_CHAR_BUDGET`, `:103-107`), consumed **in this fixed order, first-come-first-served** (`append_section`, `:663-677`) — later sections get whatever's left, not a fair share.
 

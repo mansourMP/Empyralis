@@ -1,5 +1,7 @@
 # Gap Analysis — Bring-Your-Own Model / Subscription Support: OpenClaw vs Empyralis
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers (e.g. `"sage-main"`, `sage_agent_runtime_service.py`) are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 Read-only fact audit, no code changed. Every claim is file:line-cited against
 `/Users/mansur/openclaw` (checked-out source tree, `package.json` version
 2026.6.11) and `/Users/mansur/empyralis` on branch `fix/hardware-detail-width`

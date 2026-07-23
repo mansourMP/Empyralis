@@ -1,5 +1,14 @@
 # Empyralis Build State
 
+> **OUTDATED (2026-07-23):** this is a point-in-time build-state snapshot from
+> 2026-07-03 (Phase T, boot reliability) — three weeks of subsequent work have
+> moved the platform far past this phase; current state lives in
+> `docs/PLATFORM-MAP.md`. It also predates the 2026-07-23 founder ruling that
+> "Sage" is dead product terminology (the platform has only agents —
+> owner-facing, customer-facing serving the owner, and AskAI); this document
+> uses "Sage" throughout as a live concept. Kept for history; do not build
+> from this.
+
 **Last updated:** 2026-07-03
 **Current phase:** T (boot reliability — in progress)
 **Branch:** main

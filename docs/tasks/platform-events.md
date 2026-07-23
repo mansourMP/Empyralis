@@ -1,5 +1,13 @@
 # PlatformEvent Audit — Leaks, Severity & Heads-Up Wiring
 
+> **OUTDATED (2026-07-23):** this pending audit is from 2026-06-30, three
+> weeks of subsequent work behind current reality — verify against
+> `docs/PLATFORM-MAP.md` before trusting a claim here. It also predates the
+> 2026-07-23 founder ruling that "Sage" is dead product terminology (the
+> platform has only agents — owner-facing, customer-facing serving the
+> owner, and AskAI); this document uses "Sage" throughout as a live concept.
+> Kept for history; do not build from this.
+
 **Created:** 2026-06-30
 **Status:** pending
 

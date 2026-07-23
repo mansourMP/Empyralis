@@ -1,5 +1,13 @@
 # Fleet UI Audit Report — Q1–Q4
 
+> **OUTDATED (2026-07-23):** this is a point-in-time UI audit from 2026-07-08
+> — its findings have since been folded into and superseded by
+> `docs/PLATFORM-MAP.md` and `docs/UI-CONTRACT.md`. It also predates the
+> 2026-07-23 founder ruling that "Sage" is dead product terminology (the
+> platform has only agents — owner-facing, customer-facing serving the
+> owner, and AskAI); this document uses "Sage" throughout as a live concept.
+> Kept for history; do not build from this.
+
 **Date:** 2026-07-08 | **Branch:** `verify` | **Scope:** Read-only
 
 ---

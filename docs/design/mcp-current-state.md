@@ -1,5 +1,7 @@
 # MCP current-state audit — what exists vs. what's needed for workspace-connected MCP apps
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers (e.g. `"sage-main"`, `sage_agent_runtime_service.py`) are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 **Date:** 2026-07-22
 **Method:** direct code reading + repo-wide grep + running the existing test suite. Every claim below is file:line-cited or backed by a command run in this session. Where a prior doc (`docs/tasks/mcp-apps-deep-dive.md`, 2026-06-30) made a claim that turned out to be stale or wrong, that's called out explicitly — this doc supersedes it on those points.
 

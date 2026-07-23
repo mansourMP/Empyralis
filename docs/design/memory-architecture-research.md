@@ -1,5 +1,7 @@
 # Memory Architecture Research — How the Industry's Best Agent Products Build Memory
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 Research date: 2026-07-23
 Scope: live fetches this session from official sources only (platform docs, engineering blogs, help centers, primary papers). No secondary blog paraphrase used as a source of fact where the primary doc was reachable. Empyralis's own code is out of scope — this is the industry side; a separate audit (`docs/design/memory-context-design.md` and commit `80f9a2e31`) covers our implementation.
 

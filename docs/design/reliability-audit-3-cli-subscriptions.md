@@ -1,5 +1,7 @@
 # Reliability Audit 3 — CLI Subscriptions (Claude Code / Codex on a Gateway)
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 **Scope:** READ-ONLY fact-gathering. No fixes proposed. Every claim is
 file:line-cited against the `fix/slack-channel-uniqueness` branch as checked
 out at audit time (2026-07-21). Where a fact comes from prior verified work

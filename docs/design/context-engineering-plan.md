@@ -70,7 +70,7 @@ memory correctness) × (smallness/safety of the change). Surgical fixes first, s
   confirm it truncates identically to the OpenAI-compatible path; confirm Codex tool loops still
   complete correctly post-truncation.
 
-### 2. Give channel/Sage history an aggregate token budget — **IN FLIGHT**
+### 2. Give channel/owner-facing-agent history an aggregate token budget — **IN FLIGHT**
 - **What:** replace the flat `[-16:]`/`[:4000-char]` pair in `_normalize_recent_messages` with the
   same window-proportional logic web chat already uses.
 - **Why:** worst case today is ~16,000 tokens of channel history with zero scaling to the model's
@@ -261,9 +261,9 @@ memory correctness) × (smallness/safety of the change). Surgical fixes first, s
   context) into the specialist branch (`sage_agent_runtime_service.py:4332`), which omits it
   entirely today.
 - **Why:** specialists are the higher-traffic, customer-facing fleet-agent surface
-  (Telegram/WhatsApp/Discord bots) and today get a structurally *worse* prompt than the master/Sage
-  path — no kernel, no policy context, no capability manifest, and a bare memory dump with zero rule
-  attached.
+  (Telegram/WhatsApp/Discord bots) and today get a structurally *worse* prompt than the
+  master/owner-facing-agent path — no kernel, no policy context, no capability manifest, and a bare
+  memory dump with zero rule attached.
 - **Evidence:** `audit-system-prompt-doctrine.md` §0, §2b, §4.1&5, §5.2 —
   `sage_agent_runtime_service.py:4275-4337` (specialist) vs. `:4338-4343` (master); `:4331` (bare
   memory dump); `:4332` (manifest omitted despite being computed every turn regardless).

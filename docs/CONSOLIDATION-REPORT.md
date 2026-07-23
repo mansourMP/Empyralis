@@ -1,5 +1,13 @@
 # Consolidation Report — one tree
 
+> **OUTDATED (2026-07-23):** this is a point-in-time branch-consolidation
+> report from 2026-07-10 — a one-off record of reconciling scattered
+> uncommitted work, not living architecture. It also predates the 2026-07-23
+> founder ruling that "Sage" is dead product terminology (the platform has
+> only agents — owner-facing, customer-facing serving the owner, and AskAI);
+> this document uses "Sage" throughout as a live concept. Kept for history;
+> do not build from this.
+
 **Date:** 2026-07-10 | **Target:** `verify` (local only — nothing pushed) | **Trigger:** the Truth Map audit ran against a stale snapshot because tonight's work was scattered across three uncommitted locations, and re-flagged a facade already fixed on an unmerged branch.
 
 ---

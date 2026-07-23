@@ -1,5 +1,7 @@
 # The Anthropic Agent Backbone: How Claude Code and the Claude Agent SDK Actually Work
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 Status: research reference, verified against live Anthropic docs on 2026-07-22.
 Scope: the seven backbone dimensions requested — context-window management, compaction, prompt caching, Agent Skills, sub-agents, continuous/long-horizon work, self-improvement (memory). Every claim below is sourced from an official doc fetched during this research pass; URLs are inline.
 

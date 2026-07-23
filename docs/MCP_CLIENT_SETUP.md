@@ -87,7 +87,7 @@ whether streamable HTTP is now supported.
 | `empyralis_get_agent_activity` | Get recent ledger events for an agent |
 | `empyralis_memory_read` | Read a memory entry by key |
 | `empyralis_memory_list` | List all memory entries |
-| `empyralis_chat` | Full turn through Sage (triage → reasoning → reply) |
+| `empyralis_chat` | Full turn through the owner-facing agent (triage → reasoning → reply) |
 
 ### Write (requires `EMPYRALIS_MCP_WRITE_ENABLED=true` on server)
 
@@ -117,7 +117,7 @@ whether streamable HTTP is now supported.
 - **Write tools are gated** behind `EMPYRALIS_MCP_WRITE_ENABLED=true`.
   Until enabled, only read and chat tools are available.
 - **Operator role rules apply.** The MCP caller acts as the workspace's
-  Sage identity (operator).  Specialist-only tools are not accessible
+  owner-facing agent identity (operator).  Specialist-only tools are not accessible
   to external MCP clients.
 
 ## 7. Troubleshooting

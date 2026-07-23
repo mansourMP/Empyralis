@@ -1,5 +1,18 @@
 # Empyralis — Platform Architecture & Map
 
+> **OUTDATED (2026-07-23):** this document predates the Phase 8 removal of
+> the legacy workstation shell (2026-07-06 — `WorkspaceSurfacePage.tsx`,
+> `workstation-kernel-shell.tsx`, and ~40 `workstation-*` panes described
+> below as current were deleted in that phase) and predates the 2026-07-23
+> founder ruling that "Sage" is dead product terminology (the platform has
+> only agents — owner-facing, customer-facing serving the owner, and
+> AskAI; this document uses "Sage" throughout as a live concept). It is
+> superseded by `docs/PLATFORM-MAP.md`, the current canonical architecture
+> doc. Kept for history; do not build from this — Appendix A of
+> PLATFORM-MAP.md still cites this file's Section 7 (Architecture
+> Decisions) as accurate, but everything else below should be treated as a
+> historical snapshot only.
+
 Managed, reliable, safe agent platform. Cloud-first, hardware as upgrade.
 Consumers get their own agent in their channels.
 
