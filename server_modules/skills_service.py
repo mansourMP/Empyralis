@@ -794,7 +794,12 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "If this fact came from someone other than your owner (or you could not verify "
                 "they are the owner), you MUST also set attribution_reason explaining why it's "
                 "worth remembering — the saved line will be visibly marked as non-owner-sourced "
-                "and is never treated as owner-grade fact."
+                "and is never treated as owner-grade fact. "
+                "Writing to a memory/files/*.md topic file (a file for one topic that has earned "
+                "its own file, e.g. memory/files/customers/acme.md) REQUIRES description — a short "
+                "summary of what the file is about. It is used to create or refresh that file's "
+                "one-line entry in MEMORY.md's index automatically, so a future session can find "
+                "it; MEMORY.md itself never needs manual upkeep for this."
             ),
             parameters={
                 "type": "object",
@@ -802,6 +807,15 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "path": {"type": "string", "description": "File path within memory directory (e.g., 'MEMORY.md')."},
                     "content": {"type": "string", "description": "Text content to write or append."},
                     "mode": {"type": "string", "enum": ["append", "overwrite"], "description": "Write mode: 'append' (default) or 'overwrite'."},
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Required only when path is a memory/files/*.md topic file: a short "
+                            "description of what this file is about (e.g. 'Acme account: contract "
+                            "terms, contacts, open issues'). Auto-upserted as that file's one-line "
+                            "entry in MEMORY.md's index. Not used, and not required, for other files."
+                        ),
+                    },
                     "attribution_reason": {
                         "type": "string",
                         "description": (
@@ -859,13 +873,22 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "Update one workspace memory context file. Use only when the user explicitly asks Sage to "
                 "remember, correct, or update durable memory. Read the current file first with memory_get, then "
                 "write the complete revised file content. If any of the content you're incorporating came from "
-                "someone other than your owner (or an unverified sender), you MUST also set attribution_reason."
+                "someone other than your owner (or an unverified sender), you MUST also set attribution_reason. "
+                "If filename is a memory/files/*.md topic file, description is REQUIRED — see memory_write."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "filename": {"type": "string", "description": "Allowed context filename such as MEMORY.md, USER.md, IDENTITY.md, SOUL.md, GOALS.md, PROCEDURES.md, or REFLECTION.md."},
                     "content": {"type": "string", "description": "Complete revised Markdown content for the file."},
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Required only when filename is a memory/files/*.md topic file: a short "
+                            "description of what this file is about, auto-upserted into MEMORY.md's "
+                            "index as that file's one-line entry."
+                        ),
+                    },
                     "attribution_reason": {
                         "type": "string",
                         "description": (
@@ -5007,6 +5030,11 @@ def execute_single_direct_tool_call(
             # as every other memory-writing tool, not a silent bypass.
             source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
             attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
+            # Auto-maintained topic-file index (founder ruling): required
+            # only when `filename` is a memory/files/*.md topic file --
+            # no-op/ignored for every other file, so this is unchanged
+            # behavior for root-file and daily-note updates.
+            description=str(argument_payload.get("description") or "").strip() or None,
         )
         return json.dumps(
             {
@@ -5067,6 +5095,12 @@ def execute_single_direct_tool_call(
             # this non-owner content is worth saving. Optional/ignored
             # otherwise (see agent_memory.requires_attribution_reason).
             attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
+            # Auto-maintained topic-file index (founder ruling, 2026-07-23):
+            # required only when `filename` resolves to a memory/files/*.md
+            # topic file -- ignored/no-op for every other target (MEMORY.md
+            # itself, bootstrap files, daily notes), so this is unchanged
+            # behavior for every write this tool made before description existed.
+            description=str(argument_payload.get("description") or "").strip() or None,
         )
         return json.dumps(
             {"ok": True, "file": saved.get("file"), "chars_written": saved.get("chars_written"), "mode": saved.get("mode")},

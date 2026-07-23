@@ -118,8 +118,14 @@ def append_file(
 
 
 def delete_file(workspace_id: str, path: str, *, agent_install_id: Optional[str] = None) -> bool:
-    from server_modules.workspace_context import delete_workspace_context_file
-    return delete_workspace_context_file(path, workspace_id=workspace_id, agent_install_id=agent_install_id)
+    """Delete a topic file. Routed through memory_service.memory_delete_topic_file
+    (rather than calling workspace_context directly) so MEMORY.md's
+    auto-maintained topic-file index line for this file is removed in the
+    same call -- the index must never claim a file exists that's actually
+    been deleted, whether the deletion came from the agent or (as here) the
+    owner's own manual Memory-tab editor."""
+    from server_modules import memory_service
+    return memory_service.memory_delete_topic_file(workspace_id, path, agent_install_id=agent_install_id)
 
 
 # ── Selective retrieval (for per-turn injection) ─────────────────────────────

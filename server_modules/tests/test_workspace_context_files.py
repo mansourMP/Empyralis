@@ -188,7 +188,7 @@ class WorkspaceContextFilesTests(unittest.TestCase):
                         workspace_id=workspace_id,
                     )
 
-    def test_user_memory_file_quota_rejects_more_than_twenty_files(self) -> None:
+    def test_user_memory_file_quota_rejects_more_than_max_count_files(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             with patch("server_modules.workspace_context._WORKSPACE_DIR", Path(tempdir)):
                 workspace_id = "workspace-1"

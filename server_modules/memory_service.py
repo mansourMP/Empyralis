@@ -20,6 +20,8 @@ from server_modules import workspace_context_memory_adapter
 from server_modules.telemetry import get_tracer, set_span_attributes
 from server_modules.workspace_context import (
     ALLOWED_CONTEXT_FILENAMES,
+    USER_MEMORY_FILE_RE,
+    delete_workspace_context_file,
     read_workspace_context_file,
     read_workspace_context_files,
     normalize_workspace_context_filename,
@@ -747,6 +749,7 @@ def update_memory_context_file(
     audit_metadata: Optional[Dict[str, Any]] = None,
     source: Dict[str, Any] | None = None,
     attribution_reason: str | None = None,
+    description: str | None = None,
 ) -> Dict[str, Any]:
     """`source`/`attribution_reason`: same write-filter contract as
     memory_write_file -- required whenever `source` resolves to a non-owner
@@ -760,7 +763,11 @@ def update_memory_context_file(
     agent_memory_tree_service.write_file), this path is also subject to the
     same 200-line/25KB index cap memory_write_file enforces -- otherwise a
     model-driven memory_update call could silently replace MEMORY.md with
-    content of unbounded size, bypassing the cap entirely."""
+    content of unbounded size, bypassing the cap entirely.
+
+    `description`: same requirement + auto-index-upsert contract as
+    memory_write_file -- required whenever the target is a memory/files/**.md
+    topic file, unless reason=="memory_tree_write" (optional there)."""
     _require_attribution_reason_or_raise(
         source=source,
         attribution_reason=attribution_reason,
@@ -772,11 +779,37 @@ def update_memory_context_file(
     normalized_reason = str(reason or "").strip()
     if normalized_filename == "MEMORY.md" and normalized_reason != "memory_tree_write":
         _reject_over_index_cap(str(content or ""))
+
+    _is_topic_file = bool(USER_MEMORY_FILE_RE.fullmatch(normalized_filename))
+    _topic_description: str | None = None
+    if _is_topic_file:
+        if normalized_reason == "memory_tree_write":
+            cleaned = _clean_topic_file_description(description)
+            _topic_description = cleaned or None
+        else:
+            _topic_description = _require_topic_file_description_or_raise(normalized_filename, description)
+
     old_content = read_workspace_context_file(
         normalized_filename,
         workspace_id=normalized_workspace_id,
         agent_install_id=normalized_agent_install_id,
     )
+
+    # Pre-validate the topic-file index sync BEFORE writing anything -- see
+    # memory_write_file's identical guard for why (never a partial success).
+    _pending_index_content: str | None = None
+    _current_index_content: str = ""
+    if _topic_description:
+        _current_index_content = read_workspace_context_file(
+            "MEMORY.md",
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _pending_index_content = _upsert_topic_index_content(
+            _current_index_content, normalized_filename, _topic_description,
+        )
+        _reject_over_index_cap(_pending_index_content)
+
     _enforce_memory_state_decision(
         operation="update_workspace_context_file",
         workspace_id=normalized_workspace_id,
@@ -808,6 +841,37 @@ def update_memory_context_file(
         run_id=run_id,
         metadata=merged_metadata,
     )
+
+    if _pending_index_content is not None:
+        _enforce_memory_state_decision(
+            operation="update_workspace_context_file",
+            workspace_id=normalized_workspace_id,
+            actor_id=actor,
+            payload={
+                "filename": "MEMORY.md",
+                "content": _pending_index_content,
+                "agent_install_id": normalized_agent_install_id,
+                "run_id": run_id,
+            },
+        )
+        index_saved = write_workspace_context_file(
+            "MEMORY.md",
+            _pending_index_content,
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _append_memory_file_version_record(
+            normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+            actor=actor,
+            filename="MEMORY.md",
+            old_content=_current_index_content,
+            new_content=str(index_saved.get("content") or ""),
+            reason="memory_topic_index_sync",
+            run_id=run_id,
+            metadata={"topic_file": normalized_filename, "description": _topic_description},
+        )
+
     return {
         "workspace_id": normalized_workspace_id,
         "agent_install_id": normalized_agent_install_id,
@@ -948,6 +1012,171 @@ def _require_attribution_reason_or_raise(
     )
 
 
+# ── Auto-maintained topic-file index (founder ruling, 2026-07-23) ──────────
+# The founder's intended flow: "the agent creates a file, names it, and
+# mentions it inside MEMORY.md so a future session can find it." Rather than
+# trust the agent to remember that second step on its own -- and inevitably
+# drift -- the topic-file write chokepoint (memory_write_file /
+# update_memory_context_file, whenever the target is a memory/files/**.md
+# topic file) does it FOR the agent: every create/update REQUIRES a short
+# description and un-driftably upserts that file's one-line index entry
+# (path + description) into MEMORY.md in the same call. A future session
+# reading MEMORY.md always sees an accurate map -- the index can never
+# disagree with what's actually on disk. Deleting a topic file
+# (memory_delete_topic_file) removes its line the same way.
+#
+# Exempt: reason=="memory_tree_write" (the owner's own manual Memory-tab
+# editor, agent_memory_tree_service.write_file) -- same precedent as the
+# size cap in memory_write_file below. A description is optional there; the
+# index is still kept in sync opportunistically when one is supplied, but
+# nothing is required of the owner's own manual edits.
+#
+# The existing MEMORY_MD_INDEX_MAX_LINES/_MAX_BYTES cap applies to the
+# upserted result exactly like any other MEMORY.md write: computed and
+# checked BEFORE anything is saved, so a topic-file write can never
+# partially succeed (file saved, index silently left stale, or vice versa)
+# -- an overflow fails the whole write with the same consolidate-first
+# error the index cap always raises.
+_TOPIC_FILE_INDEX_HEADING = "## Topic files"
+_TOPIC_INDEX_LINE_RE = re.compile(
+    r"^- (?P<path>(?:memory/files/)?[A-Za-z0-9][A-Za-z0-9._/-]*\.md) — (?P<description>.+)$"
+)
+_TOPIC_FILE_DESCRIPTION_MAX_CHARS = 200
+
+
+def _topic_file_friendly_path(normalized_filename: str) -> str:
+    """memory/files/customers/acme.md -> customers/acme.md (matches the
+    friendly form agent_memory_tree_service already presents topic paths in)."""
+    prefix = "memory/files/"
+    text = str(normalized_filename or "")
+    return text[len(prefix):] if text.startswith(prefix) else text
+
+
+def _require_topic_file_description_or_raise(normalized_filename: str, description: str | None) -> str:
+    cleaned = " ".join(str(description or "").split()).strip()
+    if not cleaned:
+        raise ValueError(
+            f"Cannot write memory topic file '{normalized_filename}' without a description. "
+            "Pass a short description (what this file is about, e.g. 'Acme account: contract "
+            "terms, contacts, open issues') so MEMORY.md's index can name it for a future "
+            "session to find -- this was NOT saved."
+        )
+    return cleaned[:_TOPIC_FILE_DESCRIPTION_MAX_CHARS]
+
+
+def _clean_topic_file_description(description: str | None) -> str:
+    return " ".join(str(description or "").split()).strip()[:_TOPIC_FILE_DESCRIPTION_MAX_CHARS]
+
+
+def _build_topic_index_line(normalized_filename: str, description: str) -> str:
+    return f"- {_topic_file_friendly_path(normalized_filename)} — {description}"
+
+
+def _upsert_topic_index_content(memory_md_content: str, normalized_filename: str, description: str) -> str:
+    """Pure function: returns MEMORY.md's text with `normalized_filename`'s
+    one-line index entry created or refreshed -- never mutates in place.
+    Callers validate the result against the index cap before writing it
+    anywhere (see the module docstring above this section)."""
+    friendly = _topic_file_friendly_path(normalized_filename)
+    new_line = _build_topic_index_line(normalized_filename, description)
+    lines = str(memory_md_content or "").splitlines()
+    for idx, line in enumerate(lines):
+        match = _TOPIC_INDEX_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        if _topic_file_friendly_path(match.group("path")) == friendly:
+            lines[idx] = new_line
+            return "\n".join(lines).strip() + "\n"
+    # Not present yet -- append under the Topic files heading, creating the
+    # heading the first time this workspace ever earns a topic file.
+    if _TOPIC_FILE_INDEX_HEADING in lines:
+        insert_at = lines.index(_TOPIC_FILE_INDEX_HEADING) + 1
+        while insert_at < len(lines) and lines[insert_at].strip() and not lines[insert_at].startswith("#"):
+            insert_at += 1
+        lines.insert(insert_at, new_line)
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(_TOPIC_FILE_INDEX_HEADING)
+        lines.append(new_line)
+    return "\n".join(lines).strip() + "\n"
+
+
+def _remove_topic_index_content(memory_md_content: str, normalized_filename: str) -> str:
+    """Pure function: returns MEMORY.md's text with `normalized_filename`'s
+    index line removed (no-op if it was never listed)."""
+    friendly = _topic_file_friendly_path(normalized_filename)
+    lines = str(memory_md_content or "").splitlines()
+    out: List[str] = []
+    for line in lines:
+        match = _TOPIC_INDEX_LINE_RE.match(line.strip())
+        if match and _topic_file_friendly_path(match.group("path")) == friendly:
+            continue
+        out.append(line)
+    return "\n".join(out).strip() + "\n"
+
+
+def memory_delete_topic_file(
+    workspace_id: str,
+    filename: str,
+    *,
+    agent_install_id: str | None = None,
+    actor: str = _MEMORY_DEFAULT_ACTOR,
+    run_id: str | None = None,
+) -> bool:
+    """Delete a memory/files/**.md topic file and remove its one-line entry
+    from MEMORY.md's auto-maintained index in the same call -- the index
+    must never claim a topic file exists that has actually been deleted.
+    Returns True if a file was actually deleted (matches
+    workspace_context.delete_workspace_context_file's contract)."""
+    normalized_filename = normalize_workspace_context_filename(filename)
+    if not USER_MEMORY_FILE_RE.fullmatch(normalized_filename):
+        raise ValueError(f"Only memory topic files (memory/files/**) may be deleted this way, not: {normalized_filename}")
+    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    normalized_agent_install_id = str(agent_install_id or "").strip() or None
+    deleted = delete_workspace_context_file(
+        normalized_filename,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
+    )
+    current_index_content = read_workspace_context_file(
+        "MEMORY.md",
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
+    )
+    new_index_content = _remove_topic_index_content(current_index_content, normalized_filename)
+    if new_index_content.strip() != str(current_index_content or "").strip():
+        _enforce_memory_state_decision(
+            operation="update_workspace_context_file",
+            workspace_id=normalized_workspace_id,
+            actor_id=actor,
+            payload={
+                "filename": "MEMORY.md",
+                "content": new_index_content,
+                "agent_install_id": normalized_agent_install_id,
+                "run_id": run_id,
+            },
+        )
+        saved = write_workspace_context_file(
+            "MEMORY.md",
+            new_index_content,
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _append_memory_file_version_record(
+            normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+            actor=actor,
+            filename="MEMORY.md",
+            old_content=current_index_content,
+            new_content=str(saved.get("content") or ""),
+            reason="memory_topic_index_sync",
+            run_id=run_id,
+            metadata={"topic_file": normalized_filename, "removed": True},
+        )
+    return deleted
+
+
 def memory_write_file(
     workspace_id: str,
     filename: str,
@@ -960,6 +1189,7 @@ def memory_write_file(
     run_id: str | None = None,
     source: Dict[str, Any] | None = None,
     attribution_reason: str | None = None,
+    description: str | None = None,
 ) -> Dict[str, Any]:
     """Write to a memory file. Used by Sage to update MEMORY.md (append new facts)
     or edit bootstrap files (SOUL.md, AGENTS.md, TOOLS.md, IDENTITY.md) via replace.
@@ -981,24 +1211,37 @@ def memory_write_file(
     `source` resolves to a non-owner or unverified trust tier -- the write
     filter half of the same decision. Never required for an owner source or
     no source at all.
+
+    `description`: required (raises ValueError otherwise) whenever the
+    target is a memory/files/**.md TOPIC file, unless reason=="memory_tree_write"
+    (the owner's own manual Memory-tab editor, where it's optional). When
+    provided, MEMORY.md's auto-maintained topic-file index is created or
+    refreshed with this file's one-line entry in the SAME call -- see the
+    "Auto-maintained topic-file index" section above _require_attribution_reason_or_raise.
     """
-    from server_modules.workspace_context import (
-        read_workspace_context_file,
-        write_workspace_context_file,
-        normalize_workspace_context_filename,
-    )
     _require_attribution_reason_or_raise(
         source=source,
         attribution_reason=attribution_reason,
         what=f"write to memory file '{filename}'",
     )
+    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    normalized_agent_install_id = str(agent_install_id or '').strip() or None
     normalized_filename = normalize_workspace_context_filename(filename)
     normalized_mode = str(mode or 'replace').strip().lower() or 'replace'
+    normalized_reason = str(reason or '').strip()
     _is_live_memory_md_append = (
         normalized_filename == "MEMORY.md"
         and normalized_mode == 'append'
-        and str(reason or '').strip() == _MEMORY_MD_LIVE_APPEND_REASON
+        and normalized_reason == _MEMORY_MD_LIVE_APPEND_REASON
     )
+    _is_topic_file = bool(USER_MEMORY_FILE_RE.fullmatch(normalized_filename))
+    _topic_description: str | None = None
+    if _is_topic_file:
+        if normalized_reason == "memory_tree_write":
+            cleaned = _clean_topic_file_description(description)
+            _topic_description = cleaned or None
+        else:
+            _topic_description = _require_topic_file_description_or_raise(normalized_filename, description)
 
     if normalized_mode == 'append':
         stamped_content = str(content or '').strip()
@@ -1009,8 +1252,8 @@ def memory_write_file(
                 stamped_content = f"{marker}{stamped_content}"
         existing = read_workspace_context_file(
             normalized_filename,
-            workspace_id=_normalize_workspace_id(workspace_id),
-            agent_install_id=str(agent_install_id or '').strip() or None,
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
         )
         combined = str(existing or '').rstrip() + '\n' + stamped_content
         final_content = combined.strip()
@@ -1018,32 +1261,48 @@ def memory_write_file(
             _reject_over_index_cap(final_content)
     else:
         final_content = str(content or '')
-        if normalized_filename == "MEMORY.md" and str(reason or '').strip() != "memory_tree_write":
+        if normalized_filename == "MEMORY.md" and normalized_reason != "memory_tree_write":
             # Whole-file replace of MEMORY.md via this path (as opposed to
             # the owner's manual memory_tree_write editor) must not be a
             # backdoor around the same index cap the append path enforces.
             _reject_over_index_cap(final_content)
 
+    # Pre-validate the topic-file index sync BEFORE writing anything, so
+    # this call can never partially succeed (topic file saved, index left
+    # stale, or vice versa). An index-cap overflow fails the WHOLE write.
+    _pending_index_content: str | None = None
+    _current_index_content: str = ""
+    if _topic_description:
+        _current_index_content = read_workspace_context_file(
+            "MEMORY.md",
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _pending_index_content = _upsert_topic_index_content(
+            _current_index_content, normalized_filename, _topic_description,
+        )
+        _reject_over_index_cap(_pending_index_content)
+
     _enforce_memory_state_decision(
         operation='update_workspace_context_file',
-        workspace_id=_normalize_workspace_id(workspace_id),
+        workspace_id=normalized_workspace_id,
         actor_id=actor,
         payload={
             'filename': normalized_filename,
             'content': final_content,
-            'agent_install_id': str(agent_install_id or '').strip() or None,
+            'agent_install_id': normalized_agent_install_id,
             'run_id': run_id,
         },
     )
     saved = write_workspace_context_file(
         normalized_filename,
         final_content,
-        workspace_id=_normalize_workspace_id(workspace_id),
-        agent_install_id=str(agent_install_id or '').strip() or None,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
     )
     _append_memory_file_version_record(
-        _normalize_workspace_id(workspace_id),
-        agent_install_id=str(agent_install_id or '').strip() or None,
+        normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
         actor=actor,
         filename=normalized_filename,
         old_content='',
@@ -1056,6 +1315,37 @@ def memory_write_file(
             'attribution_reason': str(attribution_reason or '').strip() or None,
         },
     )
+
+    if _pending_index_content is not None:
+        _enforce_memory_state_decision(
+            operation='update_workspace_context_file',
+            workspace_id=normalized_workspace_id,
+            actor_id=actor,
+            payload={
+                'filename': 'MEMORY.md',
+                'content': _pending_index_content,
+                'agent_install_id': normalized_agent_install_id,
+                'run_id': run_id,
+            },
+        )
+        index_saved = write_workspace_context_file(
+            'MEMORY.md',
+            _pending_index_content,
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _append_memory_file_version_record(
+            normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+            actor=actor,
+            filename='MEMORY.md',
+            old_content=_current_index_content,
+            new_content=str(index_saved.get('content') or ''),
+            reason='memory_topic_index_sync',
+            run_id=run_id,
+            metadata={'topic_file': normalized_filename, 'description': _topic_description},
+        )
+
     return {
         'file': saved.get('filename'),
         'chars_written': len(str(saved.get('content', ''))),

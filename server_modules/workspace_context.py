@@ -35,7 +35,69 @@ MAX_CONTEXT_FILE_BYTES = 64_000
 MAX_CONTEXT_SCOPE_BYTES = 512_000
 MAX_CONTEXT_DAILY_NOTES = 365
 MAX_CONTEXT_DREAM_STAGING_NOTES = 10
-MAX_CONTEXT_USER_MEMORY_FILES = 20
+# Founder ruling (2026-07-23, memory-file architecture): the NUMBER of memory
+# topic files (memory/files/**) is hard capped -- "a reasonable amount, not
+# hundreds." The founder is NOT settled on the exact number (40 is the
+# orchestrator's chosen default, pending real-usage data) -- what IS decided
+# is that a hard cap exists and lives in exactly this one named constant, so
+# the number can change later without hunting for it. Change this constant to
+# change the cap everywhere it's enforced (write_workspace_context_file,
+# below); do not hardcode 40 elsewhere (including tests -- assert against
+# this constant, not the literal). At the cap, creating a NEW topic file is
+# rejected with an explicit error telling the agent to consolidate into an
+# existing file instead; updating any of the existing files is always
+# allowed. MAX_CONTEXT_USER_MEMORY_FILES is kept as a byte-for-byte alias --
+# it predates this ruling (was a fixed 20) -- so any existing caller/test
+# that references it by its original name still works, now against the
+# current value.
+#
+# PLACEMENT-AWARE (founder ruling, same day, updated): this generous default
+# is for HARDWARE-BACKED agents (paired computer/VPS -- memory will
+# eventually live on their own box). CLOUD-ONLY agents (no hardware,
+# platform-hosted memory -- e.g. a Telegram-only Q&A agent) get a much
+# smaller cap instead -- "three or five files are good enough... no more
+# than that" -- see MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY below.
+#
+# Selecting between the two per-write requires knowing the CALLING agent's
+# placement/hardware binding (RuntimeProfileModel.runtime_class /
+# placement_mode, reached via agent_registry_repository, keyed off
+# agent_install_id -> workspace_agent_installs.runtime_profile_id ->
+# runtime_profiles). That is a SQLAlchemy+Postgres-backed, async lookup --
+# a heavy dependency this chokepoint does not otherwise have, and one this
+# module deliberately stays free of (it's a synchronous, filesystem-only
+# primitive used from many sync call sites and tests with no DB configured
+# at all -- sqlalchemy isn't even installed in every environment this runs
+# in; see test_control_plane_agent_registry.py's collection error).
+#
+# TODO(placement wiring): rather than import that dependency chain here,
+# write_workspace_context_file takes an explicit `topic_file_max_count`
+# override (below) instead. Whichever caller CAN cleanly resolve placement
+# without dragging that chain into a hot synchronous path (e.g.
+# skills_service.py's tool dispatch, if/when agent placement is already
+# resolved and sitting in session_metadata by the time it gets there) should
+# resolve it there and pass MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY through
+# for a confirmed cloud-only install. Until that wiring lands, every caller
+# that doesn't pass an override gets MEMORY_TOPIC_FILE_MAX_COUNT (the
+# generous, hardware-backed default) -- unchanged behavior from before this
+# ruling, and the safe direction to default in (never silently OVER-capping
+# a hardware-backed agent that just hasn't been wired up yet).
+MEMORY_TOPIC_FILE_MAX_COUNT = 40
+MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY = 5
+MAX_CONTEXT_USER_MEMORY_FILES = MEMORY_TOPIC_FILE_MAX_COUNT
+# Same founder ruling: every memory topic file gets the SAME per-file cap as
+# MEMORY.md's own index cap (memory_service.MEMORY_MD_INDEX_MAX_LINES /
+# _MAX_BYTES -- 200 lines / 25KB, whichever hits first), enforced at write
+# time with an explicit reject-and-explain error -- never a silent
+# truncation. Defined here rather than imported from memory_service (which
+# imports this module, so importing back would be circular) -- the two are
+# kept at the same numeric values by this comment, not by shared code, since
+# they protect two different file classes (the index vs. its topic files)
+# through two different call paths that both bottom out at
+# write_workspace_context_file, the one chokepoint every topic-file write
+# (memory_write_file, update_memory_context_file, and any future caller)
+# already funnels through.
+MEMORY_TOPIC_FILE_MAX_LINES = 200
+MEMORY_TOPIC_FILE_MAX_BYTES = 25_000
 DREAM_STAGING_TTL_DAYS = 7
 
 _DATE_SEGMENT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -446,14 +508,26 @@ def _count_existing_dream_notes(root: Path) -> int:
 
 
 def _count_existing_user_memory_files(root: Path) -> int:
+    """Count existing memory topic files toward MEMORY_TOPIC_FILE_MAX_COUNT.
+    Must walk both flat files (memory/files/foo.md) AND the one-level-deep
+    category files USER_MEMORY_FILE_RE itself allows (memory/files/customers/
+    acme.md) -- a shallow files_dir.iterdir() only sees the top level and
+    silently does not count anything filed under a category subdirectory,
+    which would let an agent create unlimited categorized topic files past
+    the cap. rglob walks every depth; the regex fullmatch below still
+    excludes anything deeper than one level (or otherwise malformed), same
+    as it always did."""
     files_dir = root / "memory" / "files"
     if not files_dir.exists() or not files_dir.is_dir():
         return 0
     count = 0
-    for path in sorted(files_dir.iterdir(), key=lambda item: item.name):
+    for path in sorted(files_dir.rglob("*.md"), key=lambda item: str(item)):
         if not path.is_file():
             continue
-        rel = f"memory/files/{path.name}"
+        try:
+            rel = f"memory/files/{path.relative_to(files_dir).as_posix()}"
+        except ValueError:
+            continue
         if USER_MEMORY_FILE_RE.fullmatch(rel):
             count += 1
     return count
@@ -561,23 +635,59 @@ def write_workspace_context_file(
     *,
     workspace_id: str | None = None,
     agent_install_id: str | None = None,
+    topic_file_max_count: int | None = None,
 ) -> Dict[str, str]:
+    """`topic_file_max_count`: override for the memory-topic-file count cap
+    (see MEMORY_TOPIC_FILE_MAX_COUNT / MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY
+    above for the placement-aware split and why this is a plain parameter
+    rather than something resolved in here). None (the default) applies
+    MEMORY_TOPIC_FILE_MAX_COUNT -- unchanged behavior for every caller that
+    doesn't know the calling agent's placement."""
     normalized = normalize_workspace_context_filename(filename)
     root = agent_workspace_context_dir(workspace_id=workspace_id, agent_install_id=agent_install_id)
     _prune_expired_dream_notes(root)
     path = _resolve_context_file_path(root, normalized)
+    is_topic_file = bool(USER_MEMORY_FILE_RE.fullmatch(normalized))
+    _topic_file_count_cap = (
+        int(topic_file_max_count) if topic_file_max_count is not None else MEMORY_TOPIC_FILE_MAX_COUNT
+    )
     if DAILY_NOTE_RE.fullmatch(normalized):
         if not path.exists() and _count_existing_daily_notes(root) >= MAX_CONTEXT_DAILY_NOTES:
             raise ValueError("Daily note storage exceeds file quota.")
     if DREAMS_NOTE_RE.fullmatch(normalized):
         if not path.exists() and _count_existing_dream_notes(root) >= MAX_CONTEXT_DREAM_STAGING_NOTES:
             raise ValueError("Dream staging storage exceeds file quota.")
-    if USER_MEMORY_FILE_RE.fullmatch(normalized):
-        if not path.exists() and _count_existing_user_memory_files(root) >= MAX_CONTEXT_USER_MEMORY_FILES:
-            raise ValueError("Memory file storage exceeds file quota.")
+    if is_topic_file:
+        # Founder ruling: the count cap only ever blocks CREATING a new
+        # (N+1-th) topic file -- updating any of the files that already exist
+        # is always allowed, so curating what's already there can never trip
+        # this check.
+        if not path.exists() and _count_existing_user_memory_files(root) >= _topic_file_count_cap:
+            raise ValueError(
+                f"Cannot create memory topic file '{normalized}': this workspace already has "
+                f"{_topic_file_count_cap} memory topic files (memory/files/**), the maximum "
+                "allowed. This was NOT saved -- consolidate this content into an existing topic "
+                "file instead of creating a new one."
+            )
 
     payload = str(content or "")
     encoded = payload.encode("utf-8")
+
+    if is_topic_file:
+        # Founder ruling: every memory topic file gets the SAME per-file cap
+        # as MEMORY.md's own index cap -- 200 lines / 25KB, whichever hits
+        # first -- applied on every write (create or update), never silently
+        # truncated.
+        line_count = payload.count("\n") + (1 if payload and not payload.endswith("\n") else 0)
+        byte_count = len(encoded)
+        if byte_count > MEMORY_TOPIC_FILE_MAX_BYTES or line_count > MEMORY_TOPIC_FILE_MAX_LINES:
+            raise ValueError(
+                f"Memory topic file '{normalized}' would exceed its {MEMORY_TOPIC_FILE_MAX_LINES}-line / "
+                f"{MEMORY_TOPIC_FILE_MAX_BYTES}-byte cap (would be {line_count} lines, {byte_count} bytes). "
+                "This write was NOT saved -- shorten this file, split it into a separate "
+                "memory/files/*.md topic file, or consolidate it into another existing topic file."
+            )
+
     if len(encoded) > MAX_CONTEXT_FILE_BYTES:
         raise ValueError("Context file content exceeds per-file quota.")
 
