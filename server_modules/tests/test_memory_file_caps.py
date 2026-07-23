@@ -12,7 +12,7 @@ chokepoint every topic-file write funnels through:
       shorten/split/consolidate. Never a silent truncation.
   (2) Placement-aware count caps: MEMORY_TOPIC_FILE_MAX_COUNT = 40
       (hardware-backed agents, the generous default every caller gets
-      today) and MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY = 10 (cloud-only
+      today) and MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY = 20 (cloud-only
       agents), selected via an explicit `topic_file_max_count` override
       parameter on write_workspace_context_file -- placement resolution
       is not yet wired into the chokepoint itself (see that file's TODO).
@@ -174,7 +174,7 @@ class TestTopicFilePerFileCap(_MemoryFileCapsTestBase):
 class TestTopicFileCountCap(_MemoryFileCapsTestBase):
     def test_constants_exist_hardware_and_cloud_only(self) -> None:
         self.assertEqual(workspace_context.MEMORY_TOPIC_FILE_MAX_COUNT, 40)
-        self.assertEqual(workspace_context.MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY, 10)
+        self.assertEqual(workspace_context.MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY, 20)
         # Legacy alias (predates this ruling, was a fixed 20) stays in sync
         # with the current, tunable hardware-backed default.
         self.assertEqual(

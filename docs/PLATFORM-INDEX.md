@@ -60,12 +60,22 @@ product concept.
 
 - `MEMORY.md` — one markdown file per agent, injected into every owner-facing-agent turn
 - `memory_read` / `memory_write` / `memory_list` — path-traversal-hardened LLM tools
-- Per-file caps (200 lines / 25KB) and per-workspace file-count caps (40 hardware-backed / 5 cloud-only), enforced atomically
+- Per-file caps (200 lines / 25KB) and per-agent file-count caps (40 hardware-backed / 20 cloud-only), enforced atomically
 - Self-maintaining `MEMORY.md` index — every write/delete upserts its own index line; index can never list a file that doesn't exist
 - Semantic/topic retrieval layer (SQLite `memory_entries`, optional embeddings) — gated, fires only when a message-heuristic says a query needs it
 - Cross-session continuity — old turns summarized and carried into the next session's metadata
 - Memory tab — per-agent file-tree browser, editable, live "starter scaffold" banner for untouched templates
 - Separate `/api/sage-memory` CRUD API (export/wipe/pin) — no confirmed live UI consumer `(built, not wired)`
+
+## Isolation (per-agent, infrastructure level)
+
+- Every agent's memory database is a physically separate SQLite file: `memory/<workspace_id>/agents/<agent_install_id>/`
+- Every agent's MEMORY.md and topic files live in their own directory: `context/<workspace_id>/agents/<agent_install_id>/`
+- Agents address memory by logical NAME only; the server resolves the path from the agent's verified identity — a model can never supply a path, so it can never reach another agent's store
+- On-box (gateway) file and shell access is scoped per agent: mount `agent-<agent_install_id>__<bucket>`; several agents on one VPS cannot share a directory
+- Identity always comes from the verified session, never from the tool call's own arguments — not model-forgeable
+- An empty agent id means the owner-facing agent's own turn (server-controlled signal, not a missing value)
+- Connector credentials are per-agent bound (`agent_connector_bindings`) on top of the project-scoped vault
 
 ## Skills
 

@@ -90,7 +90,7 @@ MEMORY_TOPIC_FILE_MAX_COUNT = 40
 # same Claude-Code-derived discipline (MEMORY_TOPIC_FILE_MAX_LINES /
 # _MAX_BYTES below) already proven at the single-file level. Hardware-backed
 # stays at 40 (unchanged).
-MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY = 10
+MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY = 20
 MAX_CONTEXT_USER_MEMORY_FILES = MEMORY_TOPIC_FILE_MAX_COUNT
 # Same founder ruling: every memory topic file gets the SAME per-file cap as
 # MEMORY.md's own index cap (memory_service.MEMORY_MD_INDEX_MAX_LINES /
