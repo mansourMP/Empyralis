@@ -248,6 +248,111 @@ def save_mcp_server_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# §1.3 containment (docs: Multiplayer Projects plan) — the registry key below
+# is (workspace_id, server_id) with server_id a STATIC per-provider slug from
+# APP_MCP_SERVER_MAP (e.g. "google-gmail" — see connection_oauth_service.py).
+# It carries no account/credential discriminator, so a second agent
+# connecting its OWN account of the same provider in the same workspace
+# would silently overwrite the row every agent's tool calls resolve through
+# (_resolve_mcp_credential below reads only this one row per server_id) —
+# every other agent's next MCP tool call would silently start hitting a
+# DIFFERENT mailbox, with no error and nothing the owner would see in time.
+#
+# Making the key itself account-aware is the real fix, but it ripples into
+# mcp_skill_id()/mcp_tool_name() (which embed server_id into every skill id
+# and model-facing tool name), the tool-listing/approval UI, and the
+# specialist/primary tool-injection paths in sage_agent_runtime_service.py —
+# too invasive to land safely in one pass without a migration. The
+# containment below is the smallest correct fix instead: refuse the upsert
+# loudly (McpServerCredentialCollisionError) instead of silently swapping
+# whose credential the row resolves to. Existing single-account and
+# workspace-shared setups (no agent_install_id anywhere in play) are
+# byte-for-byte unaffected — see _assert_no_cross_agent_credential_collision.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def credential_owner_agent_install_id(credential_id: Any) -> Optional[str]:
+    """Best-effort: the agent_install_id a vault credential row is scoped to
+    (via vault_helpers.credential_agent_scope), or None if the credential is
+    workspace-shared (no agent_install_id set) or no longer resolvable (e.g.
+    deleted -- treated as "no current owner" so a stale registry slot can
+    still be reclaimed). Never raises. Deferred imports mirror
+    _resolve_mcp_credential's pattern below (vault_store/vault_helpers are
+    heavier modules this file only needs for this one lookup)."""
+    normalized_id = str(credential_id or "").strip()
+    if not normalized_id:
+        return None
+    try:
+        from server_modules.vault_store import get_credential
+        from server_modules.vault_helpers import credential_agent_scope
+        entry = get_credential(normalized_id)
+    except Exception:
+        return None
+    if not isinstance(entry, dict):
+        return None
+    return credential_agent_scope(entry) or None
+
+
+class McpServerCredentialCollisionError(RuntimeError):
+    """Raised instead of silently overwriting an MCP server registry row's
+    credential_id when the incoming credential is owned by a DIFFERENT agent
+    than whichever agent the existing row's credential belongs to. See the
+    module banner above for the full rationale."""
+
+    def __init__(self, server_id: str, workspace_id: str, existing_owner: Optional[str], new_owner: Optional[str]) -> None:
+        self.server_id = server_id
+        self.workspace_id = workspace_id
+        self.existing_owner = existing_owner
+        self.new_owner = new_owner
+        detail = (
+            f"MCP server '{server_id}' in workspace '{workspace_id}' is already connected "
+            f"under a different account (owned by agent '{existing_owner}'). Connecting "
+            f"agent '{new_owner or 'unassigned'}' would silently redirect every agent's "
+            f"tool calls for this provider to a different account, so this connection was "
+            f"refused rather than applied. Disconnect the existing connection first if you "
+            f"intend to replace it."
+        )
+        super().__init__(detail)
+
+
+def _assert_no_cross_agent_credential_collision(
+    *,
+    existing: Optional[Dict[str, Any]],
+    new_credential_id: Any,
+    workspace_id: str,
+    server_id: str,
+) -> None:
+    """Fires ONLY when there is an existing row with a credential_id, a NEW
+    credential_id is being set that differs from it, AND the existing
+    credential is scoped to one specific agent while the incoming credential
+    belongs to a different agent (or is unscoped) -- see
+    McpServerCredentialCollisionError / the module banner above.
+
+    Deliberately permissive in every other case, to keep this migration-safe:
+      - No existing row, or credential_id isn't being touched -> no-op.
+      - Existing row's credential is workspace-shared/unassigned (today's
+        single-account default) -> still silently overwritable, unchanged.
+      - Same agent reconnecting / re-authing its own account -> allowed.
+    """
+    new_id = str(new_credential_id or "").strip()
+    if not new_id or not isinstance(existing, dict):
+        return  # nothing being set, or no prior row to collide with
+    existing_id = str(existing.get("credential_id") or "").strip()
+    if not existing_id or existing_id == new_id:
+        return  # first assignment to this slot, or re-saving the same credential
+
+    existing_owner = credential_owner_agent_install_id(existing_id)
+    if not existing_owner:
+        return  # existing row is workspace-shared, or its credential is gone -- reclaimable
+
+    new_owner = credential_owner_agent_install_id(new_id)
+    if new_owner == existing_owner:
+        return  # same agent reconnecting / re-authing its own account
+
+    raise McpServerCredentialCollisionError(server_id, workspace_id, existing_owner, new_owner)
+
+
 def _workspace_bucket(workspace_id: str, registry: Dict[str, Any]) -> Dict[str, Any]:
     workspaces = registry.get("workspaces") if isinstance(registry.get("workspaces"), dict) else {}
     bucket = workspaces.get(workspace_id)
@@ -1036,6 +1141,13 @@ def upsert_workspace_mcp_server(
     normalized_server_id = _normalize_server_id(server_id)
     existing = servers.get(normalized_server_id) if isinstance(servers.get(normalized_server_id), dict) else None
 
+    _assert_no_cross_agent_credential_collision(
+        existing=existing,
+        new_credential_id=credential_id,
+        workspace_id=normalized_workspace_id,
+        server_id=normalized_server_id,
+    )
+
     _validate_mcp_endpoint(str(endpoint or "").strip())
 
     payload = _normalize_server_payload(
@@ -1106,6 +1218,13 @@ async def upsert_workspace_mcp_server_async(
     servers = bucket.get("servers") if isinstance(bucket.get("servers"), dict) else {}
     normalized_server_id = _normalize_server_id(server_id)
     existing = servers.get(normalized_server_id) if isinstance(servers.get(normalized_server_id), dict) else None
+
+    _assert_no_cross_agent_credential_collision(
+        existing=existing,
+        new_credential_id=credential_id,
+        workspace_id=normalized_workspace_id,
+        server_id=normalized_server_id,
+    )
 
     _validate_mcp_endpoint(str(endpoint or "").strip())
 

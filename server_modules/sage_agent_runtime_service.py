@@ -2242,6 +2242,12 @@ async def _resolve_specialist_toolset(
         "raw_tool_toggles": raw_toggles,
         "mandate_audience_tools": mandate_audience_tools,
         "capability_providers": capability_providers,
+        # §1.3 (Multiplayer Projects plan): this specialist's own identity,
+        # so _filter_registry_for_specialist can tell "an MCP server this
+        # workspace has connected" apart from "an MCP server THIS agent (or
+        # nobody in particular) owns the credential for" — see
+        # _mcp_entry_owned_by_or_unassigned.
+        "agent_install_id": aid,
     }
 
 
@@ -2321,14 +2327,65 @@ def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
     return bool(connector and connector in toolset.get("connectors", set()))
 
 
-def _filter_registry_for_specialist(registry: Any, toolset: dict[str, Any]) -> list[Any]:
+def _mcp_entry_owned_by_or_unassigned(tool_name: str, *, workspace_id: str, agent_install_id: str) -> bool:
+    """True if this ``mcp__<server_id>__<tool>`` registry entry's CURRENT
+    credential is workspace-shared/unassigned, or scoped to THIS specialist's
+    own agent_install_id — False if it is scoped to a specific DIFFERENT
+    agent (never hand a specialist another agent's connected mailbox just
+    because a connector/tool toggle happens to match).
+
+    §1.3 (Multiplayer Projects plan): _specialist_tool_allowed /
+    _filter_registry_for_specialist previously gated MCP tools purely on
+    connector-id / explicit-tool-name membership — never on WHICH credential
+    the workspace's single (workspace_id, server_id) MCP registry row
+    currently resolves to (mcp_registry_service._resolve_mcp_credential reads
+    only that one row). This closes the read side of that gap for the one
+    path that actually carries an agent identity today (the specialist
+    toolset — see _resolve_specialist_toolset); the primary/master-agent
+    injection path (_direct_tool_bundle, specialist_toolset=None) carries no
+    per-call agent identity at all today and is a separate, larger plumbing
+    change — see the module's PR notes.
+
+    Fails CLOSED (drops the entry) on any lookup error or unparseable name,
+    matching _resolve_specialist_toolset's own "deny-more, never allow-more"
+    convention: this is a narrowing filter layered on top of the pre-existing
+    checks below, so a lookup hiccup can only ever remove access, never
+    grant more of it.
+    """
+    try:
+        parsed = mcp_registry_service.parse_mcp_tool_name(tool_name)
+        if not parsed:
+            return False
+        server = mcp_registry_service.get_workspace_mcp_server(workspace_id, parsed["server_id"])
+        if not isinstance(server, dict):
+            return False
+        owner = mcp_registry_service.credential_owner_agent_install_id(server.get("credential_id"))
+        if not owner:
+            return True  # workspace-shared/unassigned credential — legitimately available to any agent
+        return owner == agent_install_id
+    except Exception:
+        return False
+
+
+def _filter_registry_for_specialist(registry: Any, toolset: dict[str, Any], *, workspace_id: str = "") -> list[Any]:
     """Keep only registry entries the specialist is bound to (core tools are
     normally not in the registry — they're in the always-on list — but this
-    stays consistent with _specialist_tool_allowed for the rare case one is)."""
+    stays consistent with _specialist_tool_allowed for the rare case one is).
+
+    MCP tools get one extra gate on top of the connector/tool membership
+    checks below: see _mcp_entry_owned_by_or_unassigned. Skipped when
+    ``workspace_id`` isn't supplied (kept optional so existing callers/tests
+    that pre-date the MCP credential-ownership check are unaffected)."""
     kept: list[Any] = []
     for entry in registry or []:
         name = str(getattr(entry, "tool_name", "") or "").strip()
         connector = str(getattr(entry, "connector_id", "") or "").strip().lower()
+        if connector == "mcp" and workspace_id and not _mcp_entry_owned_by_or_unassigned(
+            name,
+            workspace_id=workspace_id,
+            agent_install_id=str(toolset.get("agent_install_id") or "").strip(),
+        ):
+            continue
         capability_gate = _capability_gate_for_tool(name)
         if capability_gate:
             if capability_gate in toolset.get("capability_providers", frozenset()):
@@ -2417,7 +2474,7 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
     # Phase 4B: a specialist only discovers the connectors/tools it is bound to.
     if specialist_toolset is not None:
         _before_reg = len(_registry)
-        _registry = _filter_registry_for_specialist(_registry, specialist_toolset)
+        _registry = _filter_registry_for_specialist(_registry, specialist_toolset, workspace_id=workspace_id)
         print(f"[TOOL_FILTER] specialist_registry before={_before_reg} after={len(_registry)}", flush=True)
     availability["_tool_registry"] = _registry
 

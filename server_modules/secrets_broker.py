@@ -571,6 +571,40 @@ def _run_coro_sync(coro: Any) -> Any:
     return sync_asyncio_bridge.run_coro_sync(coro)
 
 
+def _resolve_bound_connector_credential_id(
+    *, tenant_id: Optional[str], workspace_id: str, agent_id: str, connector_key: str,
+) -> Optional[str]:
+    """The credential_id an ENABLED agent_connector_bindings row points this
+    agent at for `connector_key`, or None. This is the reuse-path half of the
+    per-agent connector model (connectors_actions.
+    subscribe_agent_to_project_credential writes the binding; this reads it)
+    — used by resolve_provider_secret's agent-identified branch as the
+    fallback when the agent owns no vault_credentials row of its own (i.e.
+    it is a SUBSCRIBED agent, not the one that originally connected the
+    credential). Never raises; returns None on any lookup failure so the
+    caller's original RuntimeError still surfaces."""
+    try:
+        from server_modules import agent_bindings_repository
+        rows = _run_coro_sync(
+            agent_bindings_repository.list_agent_connector_bindings(
+                tenant_id=str(tenant_id or "default").strip() or "default",
+                workspace_id=str(workspace_id or "").strip(),
+                agent_install_id=str(agent_id or "").strip(),
+                enabled_only=True,
+            )
+        )
+    except Exception:
+        return None
+    normalized_key = str(connector_key or "").strip().lower()
+    for row in rows or []:
+        if str((row or {}).get("key") or "").strip().lower() != normalized_key:
+            continue
+        candidate_id = str(((row or {}).get("binding") or {}).get("credential_id") or "").strip()
+        if candidate_id:
+            return candidate_id
+    return None
+
+
 def _sanitize_token(value: Any) -> str:
     token = str(value or "").strip()
     if token.lower().startswith("bearer "):
@@ -1118,13 +1152,39 @@ def resolve_provider_secret(
             agent_actor_id = str(actor_id or "").strip()
             agent_workspace_id = normalize_workspace_id(workspace_id)
             if str(actor_type or "").strip().lower() == "agent" and agent_actor_id and agent_workspace_id:
-                secret = _raw_resolve_agent_credential(
-                    load_vault_fn,
-                    decrypt_fn,
-                    normalized_provider_id,
-                    agent_workspace_id,
-                    agent_actor_id,
-                )
+                try:
+                    secret = _raw_resolve_agent_credential(
+                        load_vault_fn,
+                        decrypt_fn,
+                        normalized_provider_id,
+                        agent_workspace_id,
+                        agent_actor_id,
+                    )
+                except RuntimeError:
+                    # §1.2 (Multiplayer Projects plan): resolve_agent_credential
+                    # only matches vault_credentials.agent_install_id — it has
+                    # no idea about the OTHER half of the reuse model, an
+                    # enabled agent_connector_bindings row
+                    # (connectors_actions.subscribe_agent_to_project_credential)
+                    # that points a SUBSCRIBED (non-connecting) agent at
+                    # someone else's project-scoped credential. Before giving
+                    # up, check for exactly that: an enabled binding for
+                    # (workspace_id, agent_id, connector_key=provider_id), and
+                    # resolve ITS credential_id directly — never the unscoped
+                    # "most recently updated in the workspace" fallback
+                    # runs_execution.py's _workflow_tool_connector_secret uses
+                    # (that's a separate, milder risk, not copied here).
+                    bound_credential_id = _resolve_bound_connector_credential_id(
+                        tenant_id=tenant_id,
+                        workspace_id=agent_workspace_id,
+                        agent_id=agent_actor_id,
+                        connector_key=normalized_provider_id,
+                    )
+                    if not bound_credential_id:
+                        raise
+                    secret = _raw_resolve_vault_credential(
+                        load_vault_fn, decrypt_fn, bound_credential_id, agent_workspace_id,
+                    )
             else:
                 secret = _raw_resolve_default_vault_credential(load_vault_fn, decrypt_fn, normalized_provider_id, workspace_id)
         resolved_provider = str(secret.get("_provider") or "").strip().lower()
