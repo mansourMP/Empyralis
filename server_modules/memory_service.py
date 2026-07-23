@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from server_modules import agent_memory as _workspace_memory_store
 from server_modules import memory_summary_service
 from server_modules import rust_runtime_kernel_client
+from server_modules import secret_redaction_service
 from server_modules import workspace_context_memory_adapter
 from server_modules.telemetry import get_tracer, set_span_attributes
 from server_modules.workspace_context import (
@@ -85,6 +86,18 @@ def _redact_daily_note_payload(value: str) -> str:
     text = str(value or "")
     for pattern in _DAILY_MEMORY_SECRET_PATTERNS:
         text = pattern.sub("[redacted-secret]", text)
+    # MAN-53 follow-up: layer the shared, codebase-wide redactor (the same
+    # secret_redaction_service.redact_text already wired into
+    # memory_write_file/update_memory_context_file below, and previously
+    # proven at agent_memory_tools.py's per-agent memory_write) on top of
+    # the three narrow local patterns above -- a daily note now gets the
+    # same breadth of protection (JWTs, AWS/GitHub/Slack/Stripe-style
+    # tokens, private keys, card numbers, phone numbers, unrecognized
+    # high-entropy secrets) as every other native memory write, not just
+    # the sk-/api_key=/Bearer trio the local patterns alone caught. Applying
+    # it here (idempotent on text the local patterns already touched) is
+    # reuse, not a second implementation.
+    text = secret_redaction_service.redact_text(text)
     return text.strip()
 
 
@@ -777,12 +790,21 @@ def update_memory_context_file(
 
     `description`: same requirement + auto-index-upsert contract as
     memory_write_file -- required whenever the target is a memory/files/**.md
-    topic file, unless reason=="memory_tree_write" (optional there)."""
+    topic file, unless reason=="memory_tree_write" (optional there).
+
+    Secret redaction (MAN-53): same treatment as memory_write_file -- `content`
+    is run through secret_redaction_service.redact_text before the cap check
+    or anything touches disk, since this whole-file-replace path shares the
+    same write_workspace_context_file chokepoint and was an equally live gap.
+    The returned dict's `redacted` flag reports whether anything changed."""
     _require_attribution_reason_or_raise(
         source=source,
         attribution_reason=attribution_reason,
         what=f"update memory file '{filename}'",
     )
+    _raw_content_for_redaction = str(content or "")
+    content = secret_redaction_service.redact_text(_raw_content_for_redaction)
+    _content_was_redacted = content != _raw_content_for_redaction
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or "").strip() or None
     normalized_filename = normalize_workspace_context_filename(filename)
@@ -890,6 +912,7 @@ def update_memory_context_file(
         "old_hash": version_record.get("old_hash"),
         "new_hash": version_record.get("new_hash"),
         "version_id": version_record.get("version_id"),
+        "redacted": _content_was_redacted,
     }
 
 
@@ -1246,12 +1269,28 @@ def memory_write_file(
     provided, MEMORY.md's auto-maintained topic-file index is created or
     refreshed with this file's one-line entry in the SAME call -- see the
     "Auto-maintained topic-file index" section above _require_attribution_reason_or_raise.
+
+    Secret redaction (MAN-53): `content` is run through the same
+    secret_redaction_service.redact_text already proven at
+    agent_memory_tools.py's per-agent memory_write BEFORE any provenance
+    marker is spliced in, any cap is checked, or anything touches disk --
+    this was the verified gap: the native memory_write tool (this function,
+    reached via direct_chat_operator_binding_service.parse_tool_name ->
+    skills_service.py's ("memory","write") dispatch) had zero redaction
+    before this fix, while the parallel per-agent skill path already had
+    it. The returned dict's `redacted` flag is True whenever the incoming
+    content actually changed under the redactor, so the calling tool layer
+    can tell the model (and the model can tell the user) a secret was
+    removed -- never silent.
     """
     _require_attribution_reason_or_raise(
         source=source,
         attribution_reason=attribution_reason,
         what=f"write to memory file '{filename}'",
     )
+    _raw_content_for_redaction = str(content or '')
+    content = secret_redaction_service.redact_text(_raw_content_for_redaction)
+    _content_was_redacted = content != _raw_content_for_redaction
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or '').strip() or None
     normalized_filename = normalize_workspace_context_filename(filename)
@@ -1378,6 +1417,7 @@ def memory_write_file(
         'file': saved.get('filename'),
         'chars_written': len(str(saved.get('content', ''))),
         'mode': normalized_mode,
+        'redacted': _content_was_redacted,
     }
 
 def memory_append_daily_note(
@@ -1395,12 +1435,22 @@ def memory_append_daily_note(
     "[who via where — status] " prefix spliced into the persisted daily-note
     line (see _insert_daily_note_marker), and requires attribution_reason or
     the write is refused with an explicit error. None (the default) leaves
-    behavior exactly as it was before these parameters existed."""
+    behavior exactly as it was before these parameters existed.
+
+    Secret redaction (MAN-53): `note` already passes through
+    _build_daily_note_entry -> _redact_daily_note_payload, which now layers
+    the shared secret_redaction_service.redact_text on top of its own
+    narrower patterns (see that function). The `redacted` flag returned
+    below reports whether the raw incoming note actually changed under that
+    redactor, independent of the noise-stripping/timestamp formatting the
+    entry-building pipeline also does."""
     _require_attribution_reason_or_raise(
         source=source,
         attribution_reason=attribution_reason,
         what="append a daily memory note",
     )
+    _raw_note_for_redaction = str(note or "")
+    _content_was_redacted = secret_redaction_service.redact_text(_raw_note_for_redaction) != _raw_note_for_redaction
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or "").strip() or None
     note_date = str(_append_note_now() or "").strip()
@@ -1440,6 +1490,7 @@ def memory_append_daily_note(
                 "duplicate_of": body,
                 "duplicate_similarity": round(similarity, 3),
                 "usefulness": usefulness_reason,
+                "redacted": _content_was_redacted,
             }
     payload = f"{entry}\n"
     if str(existing or "").strip():
@@ -1486,6 +1537,7 @@ def memory_append_daily_note(
         "old_hash": version_record.get("old_hash"),
         "new_hash": version_record.get("new_hash"),
         "version_id": version_record.get("version_id"),
+        "redacted": _content_was_redacted,
     }
 
 
@@ -1597,6 +1649,13 @@ def apply_memory_consolidation_staging(
     actor: str = _MEMORY_DEFAULT_ACTOR,
     run_id: str | None = None,
 ) -> Dict[str, Any]:
+    """Secret redaction (MAN-53): unlike memory_write_file/update_memory_context_file,
+    this path never routes through either of them -- it calls
+    write_workspace_context_file directly per merged_files entry. Each
+    file's content is run through secret_redaction_service.redact_text
+    before that write, same as the other native memory-writing seams. The
+    returned dict's `redacted` flag is True if ANY merged file's content
+    was changed by the redactor."""
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or "").strip() or None
     if not (bool(user_approved) or bool(policy_allows)):
@@ -1615,6 +1674,13 @@ def apply_memory_consolidation_staging(
         raise ValueError("Consolidation merge requires at least one root file update.")
     applied_files: List[str] = []
     versions: List[Dict[str, Any]] = []
+    # MAN-53 follow-up: this is a second, DIRECT-to-write_workspace_context_file
+    # seam (unlike memory_write_file/update_memory_context_file, it never routes
+    # through either of those) that lands model-composed root-file content --
+    # merged_files is caller-supplied at call time, not necessarily derived from
+    # already-redacted stored content -- so it gets the same redact-before-disk
+    # treatment, independently, right here.
+    _any_file_redacted = False
     for filename, content in merged_files.items():
         normalized = normalize_workspace_context_filename(str(filename or "").strip())
         if normalized not in ALLOWED_CONTEXT_FILENAMES:
@@ -1624,9 +1690,13 @@ def apply_memory_consolidation_staging(
             workspace_id=normalized_workspace_id,
             agent_install_id=normalized_agent_install_id,
         )
+        _raw_merge_content = str(content or "")
+        redacted_content = secret_redaction_service.redact_text(_raw_merge_content)
+        if redacted_content != _raw_merge_content:
+            _any_file_redacted = True
         write_workspace_context_file(
             normalized,
-            str(content or ""),
+            redacted_content,
             workspace_id=normalized_workspace_id,
             agent_install_id=normalized_agent_install_id,
         )
@@ -1636,7 +1706,7 @@ def apply_memory_consolidation_staging(
             actor=actor,
             filename=normalized,
             old_content=old_content,
-            new_content=str(content or ""),
+            new_content=redacted_content,
             reason="memory_apply_consolidation",
             run_id=run_id,
             metadata={"staging_filename": normalized_staging_filename},
@@ -1658,6 +1728,7 @@ def apply_memory_consolidation_staging(
         "approved": bool(user_approved),
         "policy_allowed": bool(policy_allows),
         "versions": versions,
+        "redacted": _any_file_redacted,
     }
 
 

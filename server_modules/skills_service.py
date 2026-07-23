@@ -4701,6 +4701,29 @@ def _queue_outbound_media(session_ctx: Optional[Dict[str, Any]], item: Dict[str,
     return True
 
 
+def _memory_redaction_result_fields(saved: Any) -> Dict[str, Any]:
+    """MAN-53: every native memory-writing tool result (memory_write,
+    memory_update, memory_append_daily_note, memory_apply_edit) surfaces
+    whether memory_service redacted a live secret out of the content before
+    it touched disk — never silent. `saved` is whatever the memory_service
+    call returned; a non-dict or a dict with no `redacted` key (an older
+    caller/mock) is treated as "not redacted" rather than raising, so this
+    is purely additive to every one of this function's call sites.
+    The note text is model-facing wording, not hardcoded agent speech --
+    the model reads it and decides how to phrase it to the user (e.g. "I
+    saved that but removed the key")."""
+    redacted = bool(saved.get("redacted")) if isinstance(saved, dict) else False
+    fields: Dict[str, Any] = {"redacted": redacted}
+    if redacted:
+        fields["redaction_note"] = (
+            "Part of this content looked like a live secret (an API key, "
+            "token, password, or similar) and was replaced with a "
+            "redaction placeholder before saving. Tell the user what you "
+            "saved, but mention the secret itself was removed, not stored."
+        )
+    return fields
+
+
 def execute_single_direct_tool_call(
     *,
     tool_call: Dict[str, Any],
@@ -5105,6 +5128,7 @@ def execute_single_direct_tool_call(
                 "old_hash": saved.get("old_hash") if isinstance(saved, dict) else None,
                 "new_hash": saved.get("new_hash") if isinstance(saved, dict) else None,
                 "version_id": saved.get("version_id") if isinstance(saved, dict) else None,
+                **_memory_redaction_result_fields(saved),
             },
             ensure_ascii=False,
         )
@@ -5164,7 +5188,13 @@ def execute_single_direct_tool_call(
             description=str(argument_payload.get("description") or "").strip() or None,
         )
         return json.dumps(
-            {"ok": True, "file": saved.get("file"), "chars_written": saved.get("chars_written"), "mode": saved.get("mode")},
+            {
+                "ok": True,
+                "file": saved.get("file"),
+                "chars_written": saved.get("chars_written"),
+                "mode": saved.get("mode"),
+                **_memory_redaction_result_fields(saved),
+            },
             ensure_ascii=False,
         )
     if connector_id == "memory" and action_id == "stage_edit":
@@ -5236,7 +5266,9 @@ def execute_single_direct_tool_call(
             actor=actor,
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
         )
-        return json.dumps(result if isinstance(result, dict) else {"ok": True}, ensure_ascii=False)
+        payload = dict(result) if isinstance(result, dict) else {"ok": True}
+        payload.update(_memory_redaction_result_fields(payload))
+        return json.dumps(payload, ensure_ascii=False)
     if connector_id == "memory" and action_id == "append_daily_note":
         note = str(argument_payload.get("note") or argument_payload.get("input") or "")
         if not note.strip():
@@ -5275,6 +5307,7 @@ def execute_single_direct_tool_call(
                 "old_hash": saved.get("old_hash") if isinstance(saved, dict) else None,
                 "new_hash": saved.get("new_hash") if isinstance(saved, dict) else None,
                 "version_id": saved.get("version_id") if isinstance(saved, dict) else None,
+                **_memory_redaction_result_fields(saved),
             },
             ensure_ascii=False,
         )
