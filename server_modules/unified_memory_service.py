@@ -176,12 +176,18 @@ def search_unified_memory_documents(
     limit: int = 6,
 ) -> List[Dict[str, Any]]:
     safe_limit = max(1, min(int(limit or 6), 20))
-    notebook_hits = memory_service.search_memory_notebook(
+    notebook_search = memory_service.search_memory_notebook(
         workspace_id,
         query,
         max_results=safe_limit,
         agent_install_id=agent_install_id,
     )
+    # search_memory_notebook returns a self-describing envelope (see
+    # agent_memory._search_memory_notebook's docstring) -- "results" holds
+    # the same match-item list this call site always consumed; the sibling
+    # files_searched/status/errors/message fields are for the model-facing
+    # memory_search tool response and aren't needed for this merge.
+    notebook_hits = notebook_search.get("results", []) if isinstance(notebook_search, dict) else (notebook_search or [])
     knowledge_hits = _search_knowledge_documents(
         workspace_id=workspace_id,
         query=query,

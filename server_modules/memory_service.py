@@ -892,24 +892,42 @@ def memory_read_file(
 ) -> Dict[str, Any]:
     """Read a memory file on demand. Used by Sage when MEMORY.md is not in bootstrap context.
 
-    Returns {file, content, chars} so Sage can consume the file contents.
+    Returns {file, content, chars, is_default, exists} so Sage can consume
+    the file contents. `exists` (additive -- every prior field is unchanged)
+    is the ground truth on whether this path is a real file on disk; check
+    it before trusting `is_default`, which structurally cannot distinguish
+    "this memory/files/**.md path was never created" from "it was created
+    and is curated-but-empty" -- both read as `is_default: False` today (see
+    workspace_context.workspace_context_file_exists's docstring). A
+    hallucinated or mistyped topic-file path now comes back as
+    `{content: "", is_default: False, exists: False}` instead of silently
+    looking like real, empty, curated content.
     """
     from server_modules.workspace_context import (
         read_workspace_context_file,
         normalize_workspace_context_filename,
         is_default_context_content,
+        workspace_context_file_exists,
     )
     normalized_filename = normalize_workspace_context_filename(filename)
+    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    normalized_agent_install_id = str(agent_install_id or '').strip() or None
+    file_exists = workspace_context_file_exists(
+        normalized_filename,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
+    )
     content = read_workspace_context_file(
         normalized_filename,
-        workspace_id=_normalize_workspace_id(workspace_id),
-        agent_install_id=str(agent_install_id or '').strip() or None,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
     )
     return {
         'file': normalized_filename,
         'content': str(content or ''),
         'chars': len(str(content or '')),
         'is_default': is_default_context_content(normalized_filename, str(content or '')),
+        'exists': file_exists,
     }
 
 

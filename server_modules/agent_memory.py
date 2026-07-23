@@ -1004,10 +1004,51 @@ def _search_memory_notebook(
     *,
     max_results: int = 5,
     agent_install_id: str | None = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
+    """Linear scan + token-overlap scoring over every `.md` file under the
+    agent's notebook dir.
+
+    Returns a self-describing envelope, never a bare list -- a bare
+    `{"results": []}` is structurally identical whether nothing was searched
+    (empty/missing query), everything was searched and genuinely has no
+    match, or some files silently failed to read, and a weak tool-calling
+    model cannot tell those apart from the shape alone. See
+    docs/design/memory-retrieval-reliability.md, hallucination vectors 1-2.
+
+    Response shape (the historical bare-list callers read `["results"]`,
+    which keeps its original item shape and ordering -- only the envelope
+    around it is new):
+      results: [{"path","start_line","end_line","score","snippet"}, ...]
+      files_searched: int -- files actually opened and scanned (excludes
+        both candidates that failed to read AND, for an empty/missing
+        query, everything -- nothing is opened in that case)
+      errors: [{"path": str, "reason": str}, ...] -- candidate files that
+        exist but could not be read; NEVER silently dropped from the caller's
+        view (fix for vector 2 -- these used to `continue` with zero trace)
+      status: "matches_found" | "no_matches" | "not_searched" | "incomplete"
+        -- "no_matches" means every candidate file was actually read and
+        scored, so absence is a confirmed fact, not a guess; "not_searched"
+        means no query was given, so nothing happened at all; "incomplete"
+        means some candidate file(s) could not be read, so a claim of
+        "nothing is saved on this" would not be trustworthy yet.
+      message: str -- model-facing explanation of exactly what happened and,
+        where relevant, what to do next (retry with a query, try different
+        terms, or don't conclude anything from an incomplete view).
+    """
     normalized_query = re.sub(r"\s+", " ", str(query or "").strip()).lower()
     if not normalized_query:
-        return []
+        return {
+            "results": [],
+            "files_searched": 0,
+            "errors": [],
+            "status": "not_searched",
+            "message": (
+                "memory_search was called with no query, so nothing was "
+                "searched. This is not a confirmed-empty result -- it means "
+                "the search never ran. Call memory_search again with a "
+                "specific, non-empty query."
+            ),
+        }
     query_tokens = [
         token
         for token in re.split(r"[^a-z0-9]+", normalized_query)
@@ -1015,7 +1056,9 @@ def _search_memory_notebook(
     ]
     docs = _memory_notebook_documents(workspace_id, agent_install_id=agent_install_id)
     results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
     seen: set[tuple[str, int]] = set()
+    files_searched = 0
 
     for item in docs:
         rel_path = str(item.get("path") or "").strip()
@@ -1024,8 +1067,14 @@ def _search_memory_notebook(
             continue
         try:
             lines = abs_path.read_text(encoding="utf-8").splitlines()
-        except Exception:
+        except Exception as exc:
+            # FIX for vector 2: a file that exists and might contain the
+            # answer but can't be read must never look identical to a file
+            # that never existed -- record it, don't swallow it.
+            reason = f"{type(exc).__name__}: {exc}"
+            errors.append({"path": rel_path, "reason": reason[:200]})
             continue
+        files_searched += 1
         for index, line in enumerate(lines):
             compact_line = re.sub(r"\s+", " ", str(line or "").strip()).lower()
             if not compact_line:
@@ -1061,7 +1110,43 @@ def _search_memory_notebook(
             int(item.get("start_line") or 0),
         )
     )
-    return results[: max(1, min(int(max_results or 5), 20))]
+    results = results[: max(1, min(int(max_results or 5), 20))]
+
+    if results:
+        status = "matches_found"
+        message = f"Found {len(results)} match(es) across {files_searched} searched file(s)."
+        if errors:
+            message += (
+                f" {len(errors)} file(s) could not be read and were NOT searched -- "
+                "see 'errors'. There may be additional matches in those files that "
+                "this result does not include."
+            )
+    elif errors:
+        status = "incomplete"
+        message = (
+            f"Searched {files_searched} file(s) and found no matches, but "
+            f"{len(errors)} file(s) could not be read (see 'errors') and were NOT "
+            "searched. Do not conclude that nothing is saved on this topic -- that "
+            "would not be true, it would be unverified. Retry the search, or try "
+            "memory_get on the file(s) listed in 'errors' directly."
+        )
+    else:
+        status = "no_matches"
+        message = (
+            f"Searched {files_searched} memory file(s) and found no matches for "
+            "this query. This is a confirmed result, not a failed search -- every "
+            "file that exists was checked. Try broader or different search terms "
+            "before concluding nothing is saved, or state plainly that nothing is "
+            "saved on this topic."
+        )
+
+    return {
+        "results": results,
+        "files_searched": files_searched,
+        "errors": errors,
+        "status": status,
+        "message": message,
+    }
 
 
 def _get_memory_notebook_excerpt(

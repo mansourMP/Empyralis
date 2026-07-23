@@ -54,9 +54,8 @@ MAX_CONTEXT_DREAM_STAGING_NOTES = 10
 # PLACEMENT-AWARE (founder ruling, same day, updated): this generous default
 # is for HARDWARE-BACKED agents (paired computer/VPS -- memory will
 # eventually live on their own box). CLOUD-ONLY agents (no hardware,
-# platform-hosted memory -- e.g. a Telegram-only Q&A agent) get a much
-# smaller cap instead -- "three or five files are good enough... no more
-# than that" -- see MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY below.
+# platform-hosted memory -- e.g. a Telegram-only Q&A agent) get a smaller
+# cap instead -- see MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY below.
 #
 # Selecting between the two per-write requires knowing the CALLING agent's
 # placement/hardware binding (RuntimeProfileModel.runtime_class /
@@ -82,7 +81,16 @@ MAX_CONTEXT_DREAM_STAGING_NOTES = 10
 # ruling, and the safe direction to default in (never silently OVER-capping
 # a hardware-backed agent that just hasn't been wired up yet).
 MEMORY_TOPIC_FILE_MAX_COUNT = 40
-MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY = 5
+# Founder ruling (2026-07-23, revised same day): raised from 5 to 10 -- 10
+# files x 25KB (MEMORY_TOPIC_FILE_MAX_BYTES, below) is ~250KB per agent at
+# the absolute worst case, negligible storage, while giving cloud-only
+# agents real working room instead of running out of topic-file slots
+# almost immediately. The per-file caps (200 lines / 25KB) are unchanged --
+# this only moves how many files a cloud-only agent may have, matching the
+# same Claude-Code-derived discipline (MEMORY_TOPIC_FILE_MAX_LINES /
+# _MAX_BYTES below) already proven at the single-file level. Hardware-backed
+# stays at 40 (unchanged).
+MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY = 10
 MAX_CONTEXT_USER_MEMORY_FILES = MEMORY_TOPIC_FILE_MAX_COUNT
 # Same founder ruling: every memory topic file gets the SAME per-file cap as
 # MEMORY.md's own index cap (memory_service.MEMORY_MD_INDEX_MAX_LINES /
@@ -604,6 +612,37 @@ def read_workspace_context_file(
         return path.read_text(encoding="utf-8")
     except Exception:
         return ""
+
+
+def workspace_context_file_exists(
+    filename: str,
+    *,
+    workspace_id: str | None = None,
+    agent_install_id: str | None = None,
+) -> bool:
+    """True when ``filename`` resolves to a file that actually exists on
+    disk. This is the fix for the `memory_read` false-negative: for any
+    ``memory/files/**.md`` topic-file path (or a daily/dream note),
+    ``is_default_context_content`` structurally cannot answer "does this
+    file exist" -- it only ever compares byte-for-byte against a seeded
+    scaffold, and no scaffold exists for topic files, so it always returns
+    False for them. That reads as "this is real, curated content" even when
+    the path was never created at all -- the opposite of the truth. Call
+    this FIRST and report both fields; don't infer existence from
+    `is_default`.
+
+    Root files in ALLOWED_CONTEXT_FILENAMES always report True: they are
+    auto-seeded with default scaffold content on first read/write
+    (`ensure_workspace_context_files`), so "does not exist" is never a real
+    state for them -- only "still has default content" is, which
+    `is_default_context_content` already answers correctly.
+    """
+    normalized = normalize_workspace_context_filename(filename)
+    if normalized in ALLOWED_CONTEXT_FILENAMES:
+        return True
+    root = agent_workspace_context_dir(workspace_id=workspace_id, agent_install_id=agent_install_id)
+    path = _resolve_context_file_path(root, normalized)
+    return path.exists()
 
 
 def delete_workspace_context_file(

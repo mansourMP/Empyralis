@@ -28,12 +28,16 @@ class AgentMemoryNotebookTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        sushi_results = memory_service.search_memory_notebook("default", "favorite_food")
-        self.assertTrue(any(item["path"] == "MEMORY.md" for item in sushi_results))
+        # search_memory_notebook returns a self-describing envelope, not a
+        # bare list (docs/design/memory-retrieval-reliability.md hardening
+        # item 1) -- "results" keeps its original item shape/order.
+        sushi_search = memory_service.search_memory_notebook("default", "favorite_food")
+        self.assertEqual(sushi_search["status"], "matches_found")
+        self.assertTrue(any(item["path"] == "MEMORY.md" for item in sushi_search["results"]))
 
-        session_results = memory_service.search_memory_notebook("default", "night owl")
-        self.assertEqual(session_results[0]["path"], "memory/2026-04-02.md")
-        self.assertIn("night owl", session_results[0]["snippet"].lower())
+        session_search = memory_service.search_memory_notebook("default", "night owl")
+        self.assertEqual(session_search["results"][0]["path"], "memory/2026-04-02.md")
+        self.assertIn("night owl", session_search["results"][0]["snippet"].lower())
 
     def test_get_memory_notebook_excerpt_reads_requested_line_window(self) -> None:
         notes_dir = memory_service._workspace_memory_store._memory_notebook_dir("default")
@@ -69,8 +73,8 @@ class AgentMemoryNotebookTests(unittest.TestCase):
         (install_a_notes_dir / "a.md").write_text("# A\n\nAlpha only fact.\n", encoding="utf-8")
         (install_b_notes_dir / "b.md").write_text("# B\n\nBravo only fact.\n", encoding="utf-8")
 
-        a_results = memory_service.search_memory_notebook("default", "fact", agent_install_id="install-a")
-        b_results = memory_service.search_memory_notebook("default", "fact", agent_install_id="install-b")
+        a_search = memory_service.search_memory_notebook("default", "fact", agent_install_id="install-a")
+        b_search = memory_service.search_memory_notebook("default", "fact", agent_install_id="install-b")
 
-        self.assertEqual([item["path"] for item in a_results], ["memory/a.md"])
-        self.assertEqual([item["path"] for item in b_results], ["memory/b.md"])
+        self.assertEqual([item["path"] for item in a_search["results"]], ["memory/a.md"])
+        self.assertEqual([item["path"] for item in b_search["results"]], ["memory/b.md"])

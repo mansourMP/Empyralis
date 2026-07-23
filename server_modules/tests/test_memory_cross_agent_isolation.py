@@ -187,6 +187,31 @@ def _real_memory_callbacks() -> direct_tool_execution_service.DirectToolExecutio
     )
 
 
+def _search_results(raw_tool_json: str) -> list:
+    """Unwrap the memory_search tool response down to the match-item list.
+
+    memory_service.search_memory_notebook now returns a self-describing
+    envelope (docs/design/memory-retrieval-reliability.md hardening item 1:
+    {"results": [...], "files_searched": ..., "status": ..., ...}) instead of
+    a bare list. skills_service.py's dispatch (execute_single_direct_tool_call,
+    the "memory"/"search" branch) still wraps whatever the callback returns
+    as {"results": <callback return value>} -- it has not been updated to
+    unwrap the envelope itself (out of scope for this pass: skills_service.py
+    was frozen for a concurrent security-agent edit; see
+    docs/design/memory-retrieval-reliability.md for the exact one-line fix
+    needed there, changing `json.dumps({"results": results})` to
+    `json.dumps(results)`). Until that lands, the wire shape is nested one
+    level deeper than ideal: {"results": {"results": [...], ...}}. This
+    helper isolates that interim double-wrap in one place so it only needs
+    updating here once the dispatch catches up."""
+    import json as _json
+
+    outer = _json.loads(raw_tool_json)["results"]
+    if isinstance(outer, dict):
+        return outer.get("results", [])
+    return outer
+
+
 class MemorySearchGetCrossAgentTests(_IsolatedMemoryTestCase):
     def _seed(self, *, agent_install_id: str, filename: str, content: str) -> None:
         # Write straight to the resolved path rather than going through
@@ -212,7 +237,7 @@ class MemorySearchGetCrossAgentTests(_IsolatedMemoryTestCase):
             session_ctx={"agent_install_id": "agent-a"},
             callbacks=_real_memory_callbacks(),
         )
-        self.assertEqual(json.loads(as_a)["results"], [], "agent A's search must not find agent B's content")
+        self.assertEqual(_search_results(as_a), [], "agent A's search must not find agent B's content")
 
         as_a_own = skills_service.execute_single_direct_tool_call(
             tool_call={"name": "memory_search", "arguments": {"query": "apollo-project"}},
@@ -220,7 +245,7 @@ class MemorySearchGetCrossAgentTests(_IsolatedMemoryTestCase):
             session_ctx={"agent_install_id": "agent-a"},
             callbacks=_real_memory_callbacks(),
         )
-        self.assertGreater(len(json.loads(as_a_own)["results"]), 0, "agent A must still find its OWN content")
+        self.assertGreater(len(_search_results(as_a_own)), 0, "agent A must still find its OWN content")
 
     def test_agent_b_search_never_surfaces_agent_as_content(self) -> None:
         self._seed(agent_install_id="agent-a", filename="MEMORY.md", content="## Summary\n\nAgent A tracks apollo-project deadlines.\n")
@@ -232,7 +257,7 @@ class MemorySearchGetCrossAgentTests(_IsolatedMemoryTestCase):
             session_ctx={"agent_install_id": "agent-b"},
             callbacks=_real_memory_callbacks(),
         )
-        self.assertEqual(json.loads(as_b)["results"], [], "agent B's search must not find agent A's content")
+        self.assertEqual(_search_results(as_b), [], "agent B's search must not find agent A's content")
 
     def test_memory_get_scoped_to_the_calling_agent_not_another_specialists(self) -> None:
         self._seed(agent_install_id="agent-a", filename="MEMORY.md", content="## Summary\n\nOnly agent A knows this.\n")
@@ -266,7 +291,7 @@ class MemorySearchGetCrossAgentTests(_IsolatedMemoryTestCase):
             session_ctx={"active_agent_install_id": "agent-a"},
             callbacks=_real_memory_callbacks(),
         )
-        self.assertEqual(json.loads(raw)["results"], [])
+        self.assertEqual(_search_results(raw), [])
 
     def test_sage_own_turn_with_no_agent_install_id_reads_its_own_root_not_a_specialists(self) -> None:
         """Sage (no agent_install_id at all — the legitimate root-level
@@ -281,7 +306,7 @@ class MemorySearchGetCrossAgentTests(_IsolatedMemoryTestCase):
             session_ctx={},
             callbacks=_real_memory_callbacks(),
         )
-        self.assertEqual(json.loads(raw)["results"], [], "Sage's own turn must not surface a specialist's private content")
+        self.assertEqual(_search_results(raw), [], "Sage's own turn must not surface a specialist's private content")
 
 
 # ── (c): the SQLite memory_entries layer (agent_memory.py) ─────────────────
