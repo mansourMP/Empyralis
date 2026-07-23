@@ -55,7 +55,17 @@ _DAILY_NOTE_TEMPORARY_HINTS = re.compile(
     r"ignore this|wip|draft only|just testing|random thought"
     r")\b"
 )
-_SAFE_CONSOLIDATION_TARGET_FILES = {"MEMORY.md", "GOALS.md", "PROCEDURES.md", "REFLECTION.md"}
+# Founder ruling (2026-07-23, final): GOALS.md is removed from the root-file
+# taxonomy -- daily-note consolidation now routes goal/milestone content into
+# a MEMORY.md-indexed topic file (memory/files/goals.md) instead, same as any
+# other topic file. See the index-upsert step inside
+# consolidate_daily_memory_notes's merge loop below, which keeps MEMORY.md's
+# "## Topic files" section in sync every time this target is written -- a
+# plain write_workspace_context_file call (like the other three targets get)
+# would silently orphan the file with no index entry pointing to it.
+_GOALS_TOPIC_FILE = "memory/files/goals.md"
+_GOALS_TOPIC_FILE_DESCRIPTION = "Consolidated goal/milestone/roadmap notes auto-merged from daily logs."
+_SAFE_CONSOLIDATION_TARGET_FILES = {"MEMORY.md", _GOALS_TOPIC_FILE, "PROCEDURES.md", "REFLECTION.md"}
 _SAFE_CONSOLIDATION_DEFAULT_TARGET = "MEMORY.md"
 _MEMORY_DEFAULT_ACTOR = "system"
 
@@ -203,7 +213,7 @@ def _classify_daily_note_usefulness(value: str) -> tuple[bool, str]:
 def _safe_consolidation_target_for_text(value: str) -> str:
     normalized = str(value or "").strip().lower()
     if re.search(r"\b(goal|goals|milestone|roadmap|plan|target|objective|next step)\b", normalized):
-        return "GOALS.md"
+        return _GOALS_TOPIC_FILE
     if re.search(r"\b(procedure|process|workflow|runbook|steps|how to|playbook|operating)\b", normalized):
         return "PROCEDURES.md"
     if re.search(r"\b(reflection|lesson|learned|mistake|improve|retrospective|insight)\b", normalized):
@@ -1210,10 +1220,10 @@ def memory_write_file(
     description: str | None = None,
 ) -> Dict[str, Any]:
     """Write to a memory file. Used by Sage to update MEMORY.md (append new facts)
-    or edit bootstrap files (SOUL.md, AGENTS.md, TOOLS.md, IDENTITY.md) via replace.
+    or a memory/files/*.md topic file via replace.
 
     mode='append': adds content to end of file (for MEMORY.md facts)
-    mode='replace': overwrites entire file (for bootstrap file edits)
+    mode='replace': overwrites entire file (for topic-file edits)
 
     `source`: optional attribution snapshot for THIS write (InboundEnvelope.
     to_metadata() shape, or inbound_attribution_recovery.build_attribution's
@@ -1816,6 +1826,45 @@ def consolidate_daily_memory_notes(
                 "version_id": version_record.get("version_id"),
             }
         )
+
+        # Topic-file consolidation targets (memory/files/goals.md, migrated
+        # off GOALS.md by the 2026-07-23 root-taxonomy removal) must get
+        # their MEMORY.md index line upserted the same way every other
+        # topic-file write does -- otherwise the index silently stops
+        # matching what's actually on disk, breaking pull-on-demand
+        # discovery (see the founder ruling above _SAFE_CONSOLIDATION_
+        # TARGET_FILES). _upsert_topic_index_content replaces the line in
+        # place on every subsequent consolidation run, so this never grows
+        # unbounded -- one index line total for this target, ever.
+        if USER_MEMORY_FILE_RE.fullmatch(target_file):
+            _index_content = read_workspace_context_file(
+                "MEMORY.md",
+                workspace_id=normalized_workspace_id,
+                agent_install_id=normalized_agent_install_id,
+            )
+            _new_index_content = _upsert_topic_index_content(
+                _index_content,
+                target_file,
+                _GOALS_TOPIC_FILE_DESCRIPTION if target_file == _GOALS_TOPIC_FILE else "Consolidated daily-note content.",
+            )
+            if _new_index_content.strip() != str(_index_content or "").strip():
+                write_workspace_context_file(
+                    "MEMORY.md",
+                    _new_index_content,
+                    workspace_id=normalized_workspace_id,
+                    agent_install_id=normalized_agent_install_id,
+                )
+                _append_memory_file_version_record(
+                    normalized_workspace_id,
+                    agent_install_id=normalized_agent_install_id,
+                    actor=actor,
+                    filename="MEMORY.md",
+                    old_content=_index_content,
+                    new_content=_new_index_content,
+                    reason="memory_topic_index_sync",
+                    run_id=run_id,
+                    metadata={"topic_file": target_file, "proposal_id": proposal_id},
+                )
 
     compacted_daily_notes: List[str] = []
     compacted_versions: List[Dict[str, Any]] = []

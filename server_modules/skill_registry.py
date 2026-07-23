@@ -601,7 +601,7 @@ async def _live_memory_read_skill(
     if not path:
         return {
             "status": "error",
-            "reply": "I need a file path to read from memory, e.g. SOUL.md or memory/notes.md.",
+            "reply": "I need a file path to read from memory, e.g. notes.md or memory/notes.md.",
             "artifact": None,
             "steps": [{"label": "Reading memory", "detail": "No path found in request", "status": "error", "kind": "thinking"}],
         }
@@ -653,7 +653,7 @@ async def _live_memory_write_skill(
     if not path:
         return {
             "status": "error",
-            "reply": "I need a file path to write to memory, e.g. SOUL.md or memory/notes.md.",
+            "reply": "I need a file path to write to memory, e.g. notes.md or memory/notes.md.",
             "artifact": None,
             "steps": [{"label": "Writing memory", "detail": "No path found in request", "status": "error", "kind": "thinking"}],
         }

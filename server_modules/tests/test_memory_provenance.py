@@ -282,8 +282,10 @@ class TestBrotherScenarioFileBased(unittest.TestCase):
             "ws-1", "Decided to ship the memory provenance work today.",
             source={"sender_name": "Mansur", "sender_is_owner": True},
         )
+        # 2026-07-23 root-taxonomy removal: GOALS.md is no longer a root
+        # context file -- PROCEDURES.md exercises the same owner-path update.
         memory_service.update_memory_context_file(
-            "ws-1", "GOALS.md", "# Goals\n\n- Ship the memory wave.\n", reason="memory_update",
+            "ws-1", "PROCEDURES.md", "# Procedures\n\n- Ship the memory wave.\n", reason="memory_update",
         )
         content = workspace_context.read_workspace_context_file("MEMORY.md", workspace_id="ws-1")
         self.assertIn("likes concise updates", content)

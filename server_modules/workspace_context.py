@@ -10,20 +10,63 @@ from server_modules import rust_runtime_kernel_client
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WORKSPACE_DIR = _REPO_ROOT / ".orion-stack" / "workspace"
 
+# Founder ruling (2026-07-23, final): the SOUL.md/IDENTITY.md/USER.md/
+# GOALS.md/AGENTS.md/TOOLS.md root-file taxonomy is removed ENTIRELY. It was
+# killed as a product surface ~1.5 months before this ruling, but the
+# machinery that auto-created, injected, and let the model write to all six
+# kept running unchanged until this change (see
+# docs/design/root-taxonomy-removal-scope.md for the full audit). Replacement
+# model: the compiled system prompt is always in the window (static
+# persona/operating-rule copy lives there now, not in SOUL.md/AGENTS.md/
+# TOOLS.md), and MEMORY.md is the index-first memory -- durable per-user facts
+# (name, role, communication style, standing rules -- what USER.md/
+# IDENTITY.md/SOUL.md held) live in a MEMORY.md-indexed topic file
+# (memory/files/profile.md, see sage_profile_service.py), and goal notes
+# (what GOALS.md held) live in memory/files/goals.md the same way.
+#
+# Existing workspaces that had a live turn before this ruling still have all
+# ten old files on disk with real content -- NEVER deleted (delete_
+# workspace_context_file already refuses to remove any root file, unchanged
+# below). They are simply no longer auto-created for new workspaces, no
+# longer injected into any prompt, and no longer writable through the normal
+# validated path (see the LEGACY_TAXONOMY_FILENAMES guard in
+# _validate_context_path below). read_legacy_root_file() is the one
+# sanctioned way to still read that old orphaned content directly off disk,
+# for the few call sites (bounded_scheduler_service.py, unified_memory_
+# service.py) that need best-effort backward compatibility with pre-migration
+# workspaces.
 ALLOWED_CONTEXT_FILENAMES = (
-    # Bootstrap: loaded every turn in the system prompt.
-    # The agent must know who the user is, their goals, and their
-    # preferences before every reply.
+    # HEARTBEAT.md: a real, live, system-written run log (runtime_heartbeat_
+    # service.py), read by the scheduler as owner-tier config. Never part of
+    # the SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS taxonomy in spirit -- closer
+    # to a system log than to customer-editable persona/identity data -- so
+    # it is out of scope for this removal.
+    "HEARTBEAT.md",
+    # MEMORY.md: the one file guaranteed to be injected every turn -- the
+    # index. Everything else is pulled on demand via memory_search/memory_get.
+    "MEMORY.md",
+    # PROCEDURES.md / REFLECTION.md: daily-note auto-consolidation targets:
+    # already NOT in the always-loaded set, and REFLECTION.md's own scaffold
+    # text already documents the pull-on-demand-only intent.
+    "PROCEDURES.md",
+    "REFLECTION.md",
+)
+
+# The six removed root-taxonomy filenames (founder ruling above). Kept as a
+# named set -- NOT part of ALLOWED_CONTEXT_FILENAMES -- so
+# read_legacy_root_file() can validate against exactly these names: a
+# read-only escape hatch for orphaned pre-migration content, never a general
+# path-validation bypass. `_validate_context_path` below explicitly rejects
+# any of these names outright rather than letting its own bare-filename ->
+# memory/files/<name> remap heuristic silently reroute them into a
+# confusingly-named new topic file.
+LEGACY_TAXONOMY_FILENAMES = (
     "SOUL.md",
     "AGENTS.md",
     "TOOLS.md",
     "IDENTITY.md",
-    "HEARTBEAT.md",
     "USER.md",
     "GOALS.md",
-    "MEMORY.md",
-    "PROCEDURES.md",
-    "REFLECTION.md",
 )
 
 # All core memory files are now loaded every turn.
@@ -117,6 +160,13 @@ USER_MEMORY_FILE_RE = re.compile(
     r"^memory/files/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*\.md$"
 )
 
+# NOTE: the SOUL.md/AGENTS.md/TOOLS.md/IDENTITY.md/USER.md/GOALS.md entries
+# below are RETAINED even though those six names are no longer in
+# ALLOWED_CONTEXT_FILENAMES (see the founder-ruling comment above) -- kept
+# only so is_default_context_content() can still correctly classify legacy,
+# pre-migration file content read via read_legacy_root_file() as
+# "still the untouched scaffold" vs. "the owner actually wrote real content
+# here." No live code path writes these scaffolds to disk anymore.
 DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
     "SOUL.md": (
         "---\n"
@@ -336,6 +386,24 @@ def _validate_context_path(filename: str) -> str:
 
     if ".." in segments or any(part == "." for part in segments):
         raise ValueError(f"Path traversal is not allowed: {normalized}")
+
+    # Founder ruling (2026-07-23): the six removed root-taxonomy filenames
+    # must fail loudly, not fall through to the bare-filename remap below.
+    # Without this explicit guard, "SOUL.md" (no longer in
+    # ALLOWED_CONTEXT_FILENAMES) would silently satisfy the remap heuristic
+    # just below and get quietly rerouted to a brand-new
+    # "memory/files/SOUL.md" topic file -- a confusing, easy-to-miss surprise
+    # for any caller (model tool call, internal code) still using the old
+    # name. An explicit, named error is the same "never silent" discipline
+    # every other guard in this module already follows.
+    if normalized in LEGACY_TAXONOMY_FILENAMES:
+        raise ValueError(
+            f"Unsupported context filename: {normalized} (the SOUL/IDENTITY/USER/GOALS/"
+            "AGENTS/TOOLS root-file taxonomy was removed 2026-07-23; use MEMORY.md or a "
+            "memory/files/*.md topic file instead. Pre-migration content at this legacy "
+            "path, if any, is still readable via workspace_context.read_legacy_root_file, "
+            "but is never auto-created or written here anymore.)"
+        )
 
     # Phase 6: friendly topic paths (e.g. "customers/acme.md", "notes.md") map into
     # the agent's memory/files tree. Known root files and existing memory/ paths are
@@ -606,6 +674,37 @@ def read_workspace_context_file(
     if normalized in ALLOWED_CONTEXT_FILENAMES:
         return ensure_workspace_context_files(workspace_id=workspace_id, agent_install_id=agent_install_id).get(normalized, "")
     path = _resolve_context_file_path(root, normalized)
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def read_legacy_root_file(
+    filename: str,
+    *,
+    workspace_id: str | None = None,
+    agent_install_id: str | None = None,
+) -> str:
+    """Read one of the six removed root-taxonomy files (see
+    LEGACY_TAXONOMY_FILENAMES) directly off disk, bypassing
+    normalize_workspace_context_filename entirely -- these names are
+    deliberately rejected there now (see _validate_context_path). This is a
+    one-way, read-only escape hatch for pre-migration workspaces that wrote
+    real content to e.g. USER.md before the 2026-07-23 root-taxonomy removal;
+    it never creates the file and is not a general path-validation bypass
+    (restricted to exactly LEGACY_TAXONOMY_FILENAMES).
+
+    Returns "" if the file was never created on this workspace/agent (a
+    workspace created after the removal will always get "" here -- correct,
+    since nothing writes these filenames anymore)."""
+    normalized = str(filename or "").strip()
+    if normalized not in LEGACY_TAXONOMY_FILENAMES:
+        raise ValueError(f"Not a legacy root-taxonomy filename: {normalized}")
+    root = agent_workspace_context_dir(workspace_id=workspace_id, agent_install_id=agent_install_id)
+    path = root / normalized
     if not path.exists():
         return ""
     try:

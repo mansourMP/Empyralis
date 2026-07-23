@@ -119,7 +119,7 @@ async def memory_read(
     """Read a file from the agent's memory directory.
 
     Args:
-        path: Relative path within the memory directory (e.g., "SOUL.md")
+        path: Relative path within the memory directory (e.g., "notes.md")
     """
     try:
         memory_dir = _agent_memory_dir(

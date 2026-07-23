@@ -11,36 +11,33 @@ from server_modules import tool_registry_service
 from server_modules import workspace_context
 from server_modules import workspace_context_memory_adapter
 
+# Founder ruling (2026-07-23, final): SOUL.md/IDENTITY.md/USER.md/GOALS.md/
+# AGENTS.md/TOOLS.md are removed from the root-file taxonomy entirely (see
+# workspace_context.py's ALLOWED_CONTEXT_FILENAMES and
+# docs/design/root-taxonomy-removal-scope.md). MEMORY.md is now the only
+# "official" root memory file: static persona/operating-rule copy that used
+# to live in SOUL.md/AGENTS.md/TOOLS.md belongs in the always-in-window
+# kernel/system prompt instead (see _kernel_prompt below); durable per-user
+# facts that used to live in USER.md/IDENTITY.md/GOALS.md now live in
+# MEMORY.md-indexed topic files (memory/files/profile.md,
+# memory/files/goals.md) pulled on demand via memory_search/memory_get, the
+# same as any other topic file.
 OFFICIAL_ROOT_MEMORY_FILES: tuple[str, ...] = (
-    "SOUL.md",
-    "IDENTITY.md",
-    "USER.md",
-    "AGENTS.md",
-    "TOOLS.md",
     "MEMORY.md",
-    "GOALS.md",
 )
 LEGACY_ROOT_MEMORY_FILES: tuple[str, ...] = (
     "HEARTBEAT.md",
 )
 ROOT_MEMORY_BRIEF_PRIORITY: tuple[str, ...] = (
-    "SOUL.md",
-    "IDENTITY.md",
-    "USER.md",
-    "GOALS.md",
-    "AGENTS.md",
-    "TOOLS.md",
     "MEMORY.md",
 )
-# The agent's always-loaded operating instructions and profile — the
-# Claude-Code `CLAUDE.md`-equivalent tier. Everything in OFFICIAL_ROOT_MEMORY_FILES
-# except MEMORY.md belongs here: persona (SOUL.md), surface identity
-# (IDENTITY.md), who the user is (USER.md), what they're working toward
-# (GOALS.md), operating rules (AGENTS.md), and tool notes (TOOLS.md).
-# Unlike MEMORY.md (a capped index backed by memory_search/memory_get for
-# on-demand detail), these files are injected in full every turn — dropping
-# them silently regresses the agent to running without its own operating
-# instructions. See docs/design/memory-context-design.md finding #1 / C5.
+# The agent's always-loaded operating instructions tier -- now empty: with
+# the six taxonomy files removed, nothing is left in ROOT_MEMORY_BRIEF_PRIORITY
+# besides MEMORY.md itself (excluded by construction below, since MEMORY.md
+# gets its own dedicated index-only treatment, not full-file injection). Kept
+# as a named tuple (rather than deleted outright) so build_root_memory_brief_
+# sections' loop over it needs no special-casing if a future always-loaded
+# instruction file is ever reintroduced.
 ALWAYS_LOAD_INSTRUCTION_FILES: tuple[str, ...] = tuple(
     filename for filename in ROOT_MEMORY_BRIEF_PRIORITY if filename != "MEMORY.md"
 )
@@ -228,80 +225,16 @@ def _append_file_section(
     return len(clipped), truncated
 
 
-def build_root_memory_sections(context_files: Mapping[str, Any] | None) -> tuple[list[str], dict[str, Any]]:
-    payload = dict(context_files or {})
-    sections: list[str] = []
-    consumed_paths: set[str] = set()
-    total_chars = 0
-    truncated = False
-    included_official: list[str] = []
-    included_legacy: list[str] = []
-    included_extra: list[str] = []
-
-    def append_named(filename: str, *, legacy: bool = False, extra: bool = False) -> None:
-        nonlocal total_chars, truncated
-        content = _meaningful_context_file_content(filename, payload.get(filename))
-        if not content or total_chars >= ROOT_MEMORY_TOTAL_CHAR_LIMIT:
-            return
-        consumed, was_truncated = _append_file_section(
-            sections=sections,
-            filename=filename,
-            content=content,
-            title_prefix="Legacy/Extra Context File: " if legacy or extra else "",
-            remaining_budget=ROOT_MEMORY_TOTAL_CHAR_LIMIT - total_chars,
-        )
-        if consumed <= 0:
-            return
-        total_chars += consumed
-        truncated = truncated or was_truncated
-        consumed_paths.add(filename)
-        if legacy:
-            included_legacy.append(filename)
-        elif extra:
-            included_extra.append(filename)
-        else:
-            included_official.append(filename)
-
-    for filename in OFFICIAL_ROOT_MEMORY_FILES:
-        append_named(filename)
-
-    for filename in LEGACY_ROOT_MEMORY_FILES:
-        append_named(filename, legacy=True)
-
-    for filename in sorted(_coerce_text(key) for key in payload.keys()):
-        if not filename or filename in consumed_paths or "/" in filename:
-            continue
-        append_named(filename, extra=True)
-
-    memory_paths = [
-        filename
-        for filename in sorted(_coerce_text(key) for key in payload.keys())
-        if filename
-        and filename not in consumed_paths
-        and filename.startswith("memory/")
-        and not filename.startswith("memory/.dreams/")
-        and _meaningful_context_file_content(filename, payload.get(filename))
-    ]
-    if memory_paths:
-        shown_paths = memory_paths[:MEMORY_MANIFEST_LIMIT]
-        manifest_lines = [
-            "Additional workspace memory files exist. Use memory_search and memory_get when the user's request needs them."
-        ]
-        manifest_lines.extend(f"- {path}" for path in shown_paths)
-        if len(memory_paths) > len(shown_paths):
-            manifest_lines.append(f"- ... {len(memory_paths) - len(shown_paths)} more memory file(s)")
-        sections.append("### Available Memory Files\n" + "\n".join(manifest_lines))
-
-    return sections, {
-        "included_root_files": [*included_official, *included_legacy, *included_extra],
-        "included_official_root_files": included_official,
-        "legacy_context_files": included_legacy,
-        "extra_context_files": included_extra,
-        "available_memory_file_count": len(memory_paths),
-        "context_truncated": truncated,
-        "root_memory_chars": total_chars,
-    }
-
+# build_root_memory_sections (the pre-Phase-N full-file-injection predecessor
+# of build_root_memory_brief_sections below) was deleted 2026-07-23 as part
+# of the root-taxonomy removal: it had zero callers anywhere in this
+# codebase (confirmed by repo-wide grep, and independently already flagged as
+# dead in docs/design/memory-context-design.md's C4 item before this
+# change), and it existed only to full-inject OFFICIAL_ROOT_MEMORY_FILES /
+# LEGACY_ROOT_MEMORY_FILES -- constants this change repoints away from the
+# six removed taxonomy filenames. Rather than keep a confirmed-dead function
+# referencing a taxonomy that no longer exists, it's removed outright;
+# build_root_memory_brief_sections is the one live path.
 
 
 # Phase 0.2: Per-session context cache — avoid rebuilding context every turn
@@ -344,13 +277,15 @@ def build_root_memory_brief_sections(context_files: Mapping[str, Any] | None) ->
     truncated = False
 
     # ── Always-loaded instruction tier ──────────────────────────────────
-    # SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS are the agent's operating
-    # instructions, not on-demand memory — inject them in full every turn,
-    # bounded by the same per-file/total caps the (now-dead) full-file path
-    # used, so one runaway file can't blow the prompt budget. This is the
-    # fix for the Pipeline B content blackout (design doc finding #1 / C5):
-    # previously only MEMORY.md was ever injected here and these six files
-    # were tracked as "consumed" but never surfaced anywhere.
+    # Historical note: this loop used to full-inject SOUL/IDENTITY/USER/
+    # GOALS/AGENTS/TOOLS every turn (the fix for the Pipeline B content
+    # blackout, design doc finding #1 / C5). All six were removed from the
+    # root-file taxonomy 2026-07-23 (see ALWAYS_LOAD_INSTRUCTION_FILES's own
+    # docstring above) -- static persona/operating-rule copy moved to the
+    # always-in-window kernel prompt, durable per-user facts moved to
+    # MEMORY.md-indexed topic files. ALWAYS_LOAD_INSTRUCTION_FILES is empty
+    # now, so this loop is a no-op; kept (rather than deleted) so a future
+    # always-loaded instruction file needs no new plumbing here.
     for filename in ALWAYS_LOAD_INSTRUCTION_FILES:
         content = _meaningful_context_file_content(filename, payload.get(filename))
         if not content or total_source_chars >= ROOT_MEMORY_TOTAL_CHAR_LIMIT:
@@ -629,13 +564,14 @@ def _kernel_prompt(
     # instead of being buried after the mechanical recipe
     # (audit-system-prompt-doctrine.md §3 "Memory (master)" row, §5.5) — the
     # model should know WHY it's silently calling a tool before it's told
-    # HOW. The taxonomy of what each root file is FOR (SOUL/IDENTITY/USER/
-    # GOALS/AGENTS/TOOLS/MEMORY.md) used to exist only as a Python comment
-    # (see ROOT_MEMORY_BRIEF_PRIORITY above) — it's surfaced to the model in
-    # the root-memory-brief header instead of duplicated here (see
-    # build_sage_instruction_bundle's "## Customer Root Memory" section),
-    # keeping this rule itself focused on one thing: why memory exists and
-    # when to reach for it.
+    # HOW. (Stale-comment fix, 2026-07-23: this used to describe a
+    # SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS/MEMORY.md taxonomy header that
+    # commit 57ee98d82 already deleted from the actual rendered prompt text
+    # -- the header is just "## Memory" now, and that whole six-file
+    # taxonomy is removed entirely as of this change. Nothing below this
+    # comment changed; only the stale description of what used to be here.)
+    # This rule stays focused on one thing: why memory exists and when to
+    # reach for it.
     memory_rule = (
         "\n\nMemory — why first: everything the user tells you is gone once this session "
         "ends unless a memory tool actually runs — that's the only reason the steps below "

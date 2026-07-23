@@ -214,10 +214,13 @@ class MemoryServiceTests(unittest.TestCase):
             )
 
     def test_create_memory_consolidation_staging_file_writes_under_dreams(self) -> None:
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- REFLECTION.md exercises the same "multiple root
+        # targets" path.
         saved = memory_service.create_memory_consolidation_staging_file(
             "default",
-            "Decision: consolidate durable user preferences from daily notes into USER.md and PROCEDURES.md.",
-            target_files=["USER.md", "PROCEDURES.md"],
+            "Decision: consolidate durable notes from daily notes into REFLECTION.md and PROCEDURES.md.",
+            target_files=["REFLECTION.md", "PROCEDURES.md"],
             source_refs=["memory/2026-05-10.md#L12", "memory/2026-05-11.md#L3"],
         )
 
@@ -225,7 +228,7 @@ class MemoryServiceTests(unittest.TestCase):
         content = workspace_context.read_workspace_context_file(saved["filename"], workspace_id="default")
         self.assertIn("## Proposed Consolidation", content)
         self.assertIn("## Proposed Target Files", content)
-        self.assertIn("USER.md", content)
+        self.assertIn("REFLECTION.md", content)
 
     def test_apply_memory_consolidation_staging_requires_approval_or_policy(self) -> None:
         saved = memory_service.create_memory_consolidation_staging_file(
@@ -243,19 +246,21 @@ class MemoryServiceTests(unittest.TestCase):
             )
 
     def test_apply_memory_consolidation_staging_updates_root_when_approved(self) -> None:
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- REFLECTION.md exercises the same approved-merge path.
         saved = memory_service.create_memory_consolidation_staging_file(
             "default",
-            "Decision: keep USER.md concise with stable preferences.",
-            target_files=["USER.md"],
+            "Decision: keep REFLECTION.md concise with stable notes.",
+            target_files=["REFLECTION.md"],
         )
         result = memory_service.apply_memory_consolidation_staging(
             "default",
             saved["filename"],
-            {"USER.md": "# User Profile\n\n- Prefers async updates.\n"},
+            {"REFLECTION.md": "# Reflection\n\n- Prefers async updates.\n"},
             user_approved=True,
         )
-        self.assertIn("USER.md", result["applied_files"])
-        updated = workspace_context.read_workspace_context_file("USER.md", workspace_id="default")
+        self.assertIn("REFLECTION.md", result["applied_files"])
+        updated = workspace_context.read_workspace_context_file("REFLECTION.md", workspace_id="default")
         self.assertIn("Prefers async updates", updated)
 
     def test_consolidate_daily_memory_notes_returns_proposal_without_merge(self) -> None:
@@ -273,7 +278,9 @@ class MemoryServiceTests(unittest.TestCase):
         result = memory_service.consolidate_daily_memory_notes("default", apply_merge=False)
         self.assertFalse(result["merged"])
         self.assertIn("MEMORY.md", result["proposed_updates"])
-        self.assertIn("GOALS.md", result["proposed_updates"])
+        # 2026-07-23 root-taxonomy removal: goal notes now consolidate into
+        # the memory/files/goals.md topic file, not GOALS.md.
+        self.assertIn("memory/files/goals.md", result["proposed_updates"])
         self.assertIsNone(result["audit_id"])
 
     def test_consolidate_daily_memory_notes_requires_approval_for_merge(self) -> None:
@@ -508,14 +515,17 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in items], ["shared", "install-a"])
 
     def test_agent_memory_namespace_denies_cross_agent_reads(self) -> None:
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- HEARTBEAT.md (still a per-install root context
+        # file) exercises the same cross-agent isolation path.
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "HEARTBEAT.md",
             "Agent A private profile.",
             workspace_id="default",
             agent_install_id="install-a",
         )
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "HEARTBEAT.md",
             "Agent B private profile.",
             workspace_id="default",
             agent_install_id="install-b",
@@ -688,9 +698,12 @@ class MemoryServiceTests(unittest.TestCase):
         emit_log_mock.assert_called_once()
 
     def test_direct_chat_workspace_context_text_reads_install_namespace_when_requested(self) -> None:
-        workspace_context.write_workspace_context_file("USER.md", "Shared user profile.\n", workspace_id="default")
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- HEARTBEAT.md (still a per-install root context
+        # file) exercises the same shared-vs-install-namespace path.
+        workspace_context.write_workspace_context_file("HEARTBEAT.md", "Shared user profile.\n", workspace_id="default")
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "HEARTBEAT.md",
             "Specialist user profile.\n",
             workspace_id="default",
             agent_install_id="install-specialist",
@@ -714,13 +727,15 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertNotIn("Shared log entry.", text)
 
     def test_direct_chat_workspace_context_text_collects_context_logs_and_memory(self) -> None:
-        workspace_context.write_workspace_context_file("USER.md", "Owner prefers async updates.\n", workspace_id="default")
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- HEARTBEAT.md exercises the same inclusion path.
+        workspace_context.write_workspace_context_file("HEARTBEAT.md", "Owner prefers async updates.\n", workspace_id="default")
         memory_service.save_memory("default", "timezone", "Asia/Shanghai")
         memory_service.save_daily_log("default", "Reviewed the canonical architecture document.")
 
         text = memory_service.direct_chat_workspace_context_text("default", memory_query="timezone")
 
-        self.assertIn("USER.md", text)
+        self.assertIn("HEARTBEAT.md", text)
         self.assertIn("MEMORY.md", text)
         self.assertIn("Recent Daily Logs", text)
         self.assertIn("Retrieved Relevant Memory", text)

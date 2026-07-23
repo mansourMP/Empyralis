@@ -22,6 +22,9 @@ _ALLOW_DECISION = {
 
 class WorkspaceContextProfileRustGateTests(unittest.TestCase):
     def test_workspace_context_write_calls_rust_before_persisting(self) -> None:
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- MEMORY.md exercises the same rust-gate-before-write
+        # path.
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "workspace"
             with mock.patch.object(workspace_context, "_WORKSPACE_DIR", root), mock.patch.object(
@@ -30,18 +33,18 @@ class WorkspaceContextProfileRustGateTests(unittest.TestCase):
                 return_value=dict(_ALLOW_DECISION),
             ) as rust_decision:
                 result = workspace_context.write_workspace_context_file(
-                    "USER.md",
-                    "# User\n",
+                    "MEMORY.md",
+                    "# Memory\n",
                     workspace_id="workspace-1",
                 )
 
-            self.assertEqual(result["filename"], "USER.md")
+            self.assertEqual(result["filename"], "MEMORY.md")
             self.assertTrue(Path(result["path"]).exists())
             payload = rust_decision.call_args.kwargs
             self.assertEqual(payload["operation"], "save_workspace_context_file")
             self.assertEqual(payload["state_class"], "workspace_context_files")
             self.assertEqual(payload["workspace_id"], "workspace-1")
-            self.assertEqual(payload["payload"]["filename"], "USER.md")
+            self.assertEqual(payload["payload"]["filename"], "MEMORY.md")
 
     def test_workspace_context_write_blocks_before_file_write_when_rust_blocks(self) -> None:
         block_decision = {
@@ -61,12 +64,12 @@ class WorkspaceContextProfileRustGateTests(unittest.TestCase):
             ):
                 with self.assertRaises(workspace_context.WorkspaceContextRustGateError):
                     workspace_context.write_workspace_context_file(
-                        "USER.md",
-                        "# User\n",
+                        "MEMORY.md",
+                        "# Memory\n",
                         workspace_id="workspace-1",
                     )
 
-            self.assertFalse((root / "workspace-1" / "USER.md").exists())
+            self.assertFalse((root / "workspace-1" / "MEMORY.md").exists())
 
     def test_agent_computer_profile_state_calls_rust_before_persisting(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

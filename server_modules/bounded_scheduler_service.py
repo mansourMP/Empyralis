@@ -1190,10 +1190,24 @@ async def build_wakeup_execution_bundle(
         limit=8,
         unseen_only=False,
     )
+    # Founder ruling (2026-07-23, final): USER.md is removed from the
+    # root-file taxonomy -- onboarding now projects the owner profile into
+    # the memory/files/profile.md topic file instead (see
+    # sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE). Read that first;
+    # fall back to the raw legacy USER.md file for workspaces that had real
+    # content written before this migration (never auto-created or written
+    # to anymore, but never deleted either -- see workspace_context.
+    # read_legacy_root_file), so the scheduler keeps working for both new
+    # and pre-migration workspaces.
     user_preferences = workspace_context.read_workspace_context_file(
-        "USER.md",
+        "memory/files/profile.md",
         workspace_id=workspace_id,
     ).strip()
+    if not user_preferences:
+        user_preferences = workspace_context.read_legacy_root_file(
+            "USER.md",
+            workspace_id=workspace_id,
+        ).strip()
     workspace_meta = _coerce_dict(_coerce_dict(workspace).get("metadata"))
     master_meta = _coerce_dict(_coerce_dict(master_install).get("metadata"))
     goals = list(workspace_meta.get("goals") or master_meta.get("goals") or master_meta.get("scheduler_goals") or [])

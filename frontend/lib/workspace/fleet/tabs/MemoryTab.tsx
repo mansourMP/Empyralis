@@ -240,7 +240,7 @@ export function MemoryTab({
         credentials: "include",
         headers: buildCookieAuthHeaders("DELETE", {}),
       });
-      // The backend refuses to delete core files (MEMORY.md, SOUL.md, …) by
+      // The backend refuses to delete core files (MEMORY.md, HEARTBEAT.md, …) by
       // raising server-side, which routes_fleet.py's delete handler catches
       // and turns into {ok:false, error} at HTTP 200 — checking res.ok alone
       // (as this used to) reads that as success and shows "deleted" for a

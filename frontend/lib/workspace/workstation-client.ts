@@ -298,11 +298,6 @@ export type WorkstationSageProfileRecord = Record<string, unknown> & {
   updated_at?: string | null;
 };
 
-export type WorkstationSageContextFileRecord = {
-  filename: string;
-  content: string;
-};
-
 export type WorkstationSageHeartbeatRecord = Record<string, unknown> & {
   profile?: Record<string, unknown> | null;
   bootstrap?: Record<string, unknown> | null;
@@ -587,8 +582,6 @@ export type WorkstationClientPaths = {
   sageMemoryStoragePolicy: string;
   sageMemoryExport: string;
   sageMemoryWipe: string;
-  sageContextFiles: string;
-  sageContextFile: (filename: string) => string;
   sageMemoryEntries: string;
   sageMemoryEntry: (entryId: string) => string;
   sageMemoryPin: (entryId: string) => string;
@@ -749,11 +742,6 @@ export type WorkstationClient = {
     answer: string;
   }) => Promise<WorkstationSageProfileRecord>;
   getSageMemoryStoragePolicy: () => Promise<Record<string, unknown>>;
-  listSageContextFiles: () => Promise<Record<string, unknown>>;
-  updateSageContextFile: (options: {
-    filename: string;
-    content: string;
-  }) => Promise<Record<string, unknown>>;
   exportSageMemory: () => Promise<Record<string, unknown>>;
   wipeSageMemory: (options: { confirm: string }) => Promise<Record<string, unknown>>;
   createSageMemoryEntry: (options: {
@@ -1154,10 +1142,6 @@ export function buildWorkstationApiPaths(workspaceId: string): WorkstationClient
     sageMemoryExport:
       `/api/sage-memory/export${buildQueryString({ workspace_id: workspaceId })}`,
     sageMemoryWipe: '/api/sage-memory/wipe',
-    sageContextFiles:
-      `/api/sage-context-files${buildQueryString({ workspace_id: workspaceId })}`,
-    sageContextFile: (filename) =>
-      `/api/sage-context-files/${filename.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`,
     sageMemoryEntries: '/api/sage-memory/entries',
     sageMemoryEntry: (entryId) =>
       `/api/sage-memory/entries/${encodeURIComponent(entryId)}`,
@@ -2311,24 +2295,6 @@ export function createWorkstationClient(
       requestJson<Record<string, unknown>>({
         path: paths.sageMemoryStoragePolicy,
         policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    listSageContextFiles: () =>
-      requestJson<Record<string, unknown>>({
-        path: paths.sageContextFiles,
-        policy: READ_REQUEST_POLICY,
-      }) as Promise<Record<string, unknown>>,
-    updateSageContextFile: ({ filename, content }) =>
-      requestJson<Record<string, unknown>>({
-        path: paths.sageContextFile(filename),
-        init: {
-          method: 'PATCH',
-          headers: mergeJsonHeaders(),
-          body: JSON.stringify({
-            workspace_id: scope.workspaceId,
-            content,
-          }),
-        },
-        policy: WRITE_REQUEST_POLICY,
       }) as Promise<Record<string, unknown>>,
     exportSageMemory: () =>
       requestJson<Record<string, unknown>>({

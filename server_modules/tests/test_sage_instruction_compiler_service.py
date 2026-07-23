@@ -61,9 +61,14 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         # load in full now — see test_memory_md_gets_its_own_dedicated_load_
         # budget below for the "genuinely oversized still truncates" and
         # "not silently zeroed by the other six root files" regressions.
-        # SOUL/GOALS stay tiny here so this test's real point — ordering,
-        # Root Memory Index, legacy/extra files, workspace memory paths —
-        # isn't itself squeezed out by the shared system-prompt budget.
+        #
+        # 2026-07-23 root-taxonomy removal: SOUL.md/GOALS.md are no longer
+        # "official" always-load root files — MEMORY.md is the only one
+        # left (see OFFICIAL_ROOT_MEMORY_FILES). This test previously
+        # asserted their special ordering; that ordering no longer exists
+        # by design, so the payload no longer includes them at all here —
+        # CUSTOM.md alone exercises the "extra" (unrecognized filename)
+        # bucket this test is also checking.
         memory_note = "- Long-term preference: " + ("durable detail. " * 30)
         bundle = compiler.build_sage_instruction_bundle(
             workspace_id="ws-1",
@@ -72,8 +77,6 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
             model="deepseek-chat",
             root_context_files={
                 "MEMORY.md": "# Memory\n\n" + memory_note,
-                "GOALS.md": "# Goals\n\n- Ship Sage.",
-                "SOUL.md": "# Soul\n\n- Be direct.",
                 "HEARTBEAT.md": "# Heartbeat\n\n- Legacy state.",
                 "CUSTOM.md": "# Custom\n\n- Extra context.",
                 "memory/files/research.md": "# Research\n\nCursor comparison notes.",
@@ -82,8 +85,6 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         )
 
         text = bundle.system_prompt
-        self.assertLess(text.index("### SOUL.md"), text.index("### GOALS.md"))
-        self.assertLess(text.index("### GOALS.md"), text.index("### MEMORY.md"))
         self.assertIn("### Root Memory Index", text)
         self.assertIn("HEARTBEAT.md", text)
         self.assertIn("CUSTOM.md", text)
@@ -93,7 +94,7 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertIn(memory_note.strip(), text)
         self.assertNotIn("content truncated due to length limit", text)
         self.assertFalse(bundle.diagnostics["full_root_memory_included"])
-        self.assertEqual(bundle.diagnostics["included_official_root_files"], ["SOUL.md", "GOALS.md", "MEMORY.md"])
+        self.assertEqual(bundle.diagnostics["included_official_root_files"], ["MEMORY.md"])
         self.assertEqual(bundle.diagnostics["legacy_context_files"], ["HEARTBEAT.md"])
         self.assertEqual(bundle.diagnostics["extra_context_files"], ["CUSTOM.md"])
         self.assertEqual(bundle.diagnostics["available_memory_file_count"], 1)
@@ -142,12 +143,19 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         at_cap_memory_section = next(s for s in at_cap_sections if s.startswith("### MEMORY.md"))
         self.assertNotIn("content truncated due to length limit", at_cap_memory_section)
 
-    def test_sage_chat_always_loads_instruction_files_every_turn(self) -> None:
-        # Regression test for docs/design/memory-context-design.md finding #1:
-        # on the sage_chat surface, SOUL.md/AGENTS.md/TOOLS.md/USER.md/IDENTITY.md
-        # used to vanish from context entirely — only MEMORY.md was injected,
-        # and the agent ran the primary path with none of its own operating
-        # instructions. These must always be injected in full every turn.
+    def test_sage_chat_no_longer_loads_removed_taxonomy_files_every_turn(self) -> None:
+        # Founder ruling (2026-07-23, final): SOUL.md/IDENTITY.md/USER.md/
+        # GOALS.md/AGENTS.md/TOOLS.md are removed from the root-file
+        # taxonomy entirely. This test used to be the regression proof that
+        # all six were always injected in full every turn (docs/design/
+        # memory-context-design.md finding #1) — that behavior is now
+        # deliberately gone: none of the six get full-text injection
+        # anymore, even if a value for one of their old filenames still
+        # shows up in root_context_files (e.g. a stale in-memory read of an
+        # orphaned pre-migration file) — it's treated as ordinary
+        # unrecognized "extra" content, listed by filename only in the Root
+        # Memory Index manifest, never injected verbatim. MEMORY.md keeps
+        # its index-only treatment; topic files stay on-demand only.
         bundle = compiler.build_sage_instruction_bundle(
             workspace_id="ws-1",
             message="hello",
@@ -167,7 +175,8 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         )
 
         system_prompt = bundle.system_prompt
-        # All six always-load instruction files' content is present verbatim.
+        # None of the six removed taxonomy files' content is injected
+        # verbatim anymore.
         for marker in (
             "SOUL_MARKER",
             "IDENTITY_MARKER",
@@ -176,19 +185,20 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
             "TOOLS_MARKER",
             "GOALS_MARKER",
         ):
-            self.assertIn(marker, system_prompt)
+            self.assertNotIn(marker, system_prompt)
+        # Their filenames are still listed (discoverable via memory_search/
+        # memory_get) under the "Legacy/extra root files" manifest section.
+        for filename in ("SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "GOALS.md"):
+            self.assertIn(filename, system_prompt)
         # MEMORY.md keeps its index-only treatment: content is still injected
-        # (capped), unlike the always-load tier's uncapped-per-call injection.
+        # (capped), unlike the old always-load tier's uncapped-per-call injection.
         self.assertIn("MEMORY_MARKER", system_prompt)
         # Topic files under memory/files/** stay on-demand: never injected in
         # full, only listed by path for memory_search/memory_get to fetch.
         self.assertNotIn("TOPIC_FILE_MARKER", system_prompt)
         self.assertIn("memory/files/customers/acme.md", system_prompt)
 
-        self.assertEqual(
-            bundle.diagnostics["included_official_root_files"],
-            ["SOUL.md", "IDENTITY.md", "USER.md", "GOALS.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"],
-        )
+        self.assertEqual(bundle.diagnostics["included_official_root_files"], ["MEMORY.md"])
 
     def test_capability_manifest_only_includes_currently_callable_tools(self) -> None:
         bundle = compiler.build_sage_instruction_bundle(

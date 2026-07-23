@@ -2191,6 +2191,59 @@ component was found that renders based on it, but this codebase has two
 apparent UI generations layered on top of each other and a negative grep
 result isn't proof no consumer exists anywhere.
 
+> **2026-07-23 update — the SOUL.md/IDENTITY.md/USER.md/GOALS.md/AGENTS.md/
+> TOOLS.md root-file taxonomy is REMOVED, not just hidden.** A prior commit
+> (`57ee98d82`) had already deleted the one paragraph of prompt text that
+> *taught the model the taxonomy's names* — but left the actual machinery
+> (auto-creation, full-file prompt injection on three separate generation
+> surfaces, and an always-on native model write tool) running unchanged.
+> This update finished the job: `workspace_context.ALLOWED_CONTEXT_FILENAMES`
+> now holds only `HEARTBEAT.md, MEMORY.md, PROCEDURES.md, REFLECTION.md` —
+> the six taxonomy names are rejected outright by `_validate_context_path`
+> (a new `LEGACY_TAXONOMY_FILENAMES` guard, `workspace_context.py`) rather
+> than silently remapped into a confusingly-named new topic file. Both
+> prompt compilers (`sage_instruction_compiler_service.
+> ALWAYS_LOAD_INSTRUCTION_FILES`, now empty; `workspace_context_memory_
+> adapter._ROOT_CONTEXT_FILE_ORDER`) stopped injecting the six. The
+> `memory_update`/`memory_stage_edit`/`memory_consolidate_daily_notes` tool
+> schemas (`skills_service.py`) no longer name them as valid targets.
+>
+> **What replaced each one:** static persona/operating-rule copy that lived
+> in `SOUL.md`/`AGENTS.md`/`TOOLS.md` belongs in the always-in-window
+> kernel/system prompt (unchanged by this update — it was already there).
+> The durable per-user facts `USER.md`/`IDENTITY.md`/`SOUL.md` held
+> (preferred name, role/focus, communication style, standing rules) now
+> live in one MEMORY.md-indexed topic file, `memory/files/profile.md`
+> (`sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE`), written through
+> `memory_service.update_memory_context_file` so it gets the same caps and
+> auto-index-upsert every other topic file gets. `GOALS.md`'s one live
+> writer (the daily-note auto-consolidation job, `memory_service.
+> consolidate_daily_memory_notes`) now targets `memory/files/goals.md` the
+> same way. `HEARTBEAT.md` is untouched — a system-written run log, never
+> part of the taxonomy in spirit.
+>
+> **Migration, not deletion.** Existing workspaces that had a live turn
+> before this change still have the ten old files on disk with real
+> content — never deleted (`delete_workspace_context_file` already refused
+> to remove root files, unchanged). `workspace_context.read_legacy_root_file`
+> is the one sanctioned read-only path back to that orphaned content, used
+> by the two live call sites that used to read `USER.md` directly
+> (`bounded_scheduler_service.build_wakeup_execution_bundle`'s scheduler
+> wake-decision context; `unified_memory_service._profile_layer`'s
+> memory-transparency payload) — both now try the new topic file first and
+> fall back to the legacy file only if the workspace predates the migration.
+>
+> **Left alone, deliberately:** `/api/sage-context-files` (the GET/PATCH
+> routes `sage_context_files_api.py` used to register) is deleted outright
+> — confirmed zero frontend callers before removal (the frontend's
+> `listSageContextFiles`/`updateSageContextFile` wrappers had zero call
+> sites in `frontend/`). The module's unrelated `/api/sage-chat/attachments`
+> routes stay, registered through the same function. `agent_memory_tools.py`'s
+> distinct `<agent_dir>/memory/` namespace (module 10 of the original
+> removal audit, `docs/design/root-taxonomy-removal-scope.md`) was already a
+> separate, pre-existing directory-mismatch bug and is untouched by this
+> change.
+
 ---
 
 ## Part 17: Sub-Agent Delegation

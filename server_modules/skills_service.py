@@ -879,7 +879,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             parameters={
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "Allowed context filename such as MEMORY.md, USER.md, IDENTITY.md, SOUL.md, GOALS.md, PROCEDURES.md, or REFLECTION.md."},
+                    "filename": {"type": "string", "description": "Allowed context filename such as MEMORY.md, PROCEDURES.md, REFLECTION.md, or a memory/files/*.md topic file."},
                     "content": {"type": "string", "description": "Complete revised Markdown content for the file."},
                     "description": {
                         "type": "string",
@@ -908,12 +908,12 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             action_id="stage_edit",
             description=(
                 "Stage a proposed root memory file edit under memory/.dreams/. Use when the user asks to "
-                "change durable behavior, identity, goals, procedures, tools, agents, or reflection files."
+                "change durable behavior, procedures, or reflection files."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "Root context filename such as IDENTITY.md, GOALS.md, PROCEDURES.md, TOOLS.md, AGENTS.md, REFLECTION.md, or MEMORY.md."},
+                    "filename": {"type": "string", "description": "Root context filename such as MEMORY.md, PROCEDURES.md, or REFLECTION.md."},
                     "content": {"type": "string", "description": "Complete proposed Markdown content for the target file."},
                     "reason": {"type": "string", "description": "Short reason for staging this memory edit."},
                     "source_refs": {
@@ -1008,9 +1008,10 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="memory",
             action_id="consolidate_daily_notes",
             description=(
-                "Read daily memory notes and produce safe consolidation proposals for curated root files "
-                "(MEMORY.md, GOALS.md, PROCEDURES.md, REFLECTION.md). Can apply merge only when explicitly approved "
-                "or policy allows; supports optional post-merge compaction with audit metadata."
+                "Read daily memory notes and produce safe consolidation proposals for curated targets "
+                "(MEMORY.md, PROCEDURES.md, REFLECTION.md, or the memory/files/goals.md topic file). Can apply "
+                "merge only when explicitly approved or policy allows; supports optional post-merge compaction "
+                "with audit metadata."
             ),
             parameters={
                 "type": "object",
@@ -5255,10 +5256,10 @@ def execute_single_direct_tool_call(
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
             # Attribution seam: same session_metadata["envelope"] snapshot
             # memory_write threads through -- daily notes are consolidated
-            # into MEMORY.md/GOALS.md/etc later (consolidate_daily_memory_
-            # notes), so an unattributed daily note was a real gap: a non-
-            # owner's statement could reach a root file with no attribution
-            # trail at all. Fixed by threading the same seam here.
+            # into MEMORY.md/memory/files/goals.md/etc later (consolidate_
+            # daily_memory_notes), so an unattributed daily note was a real
+            # gap: a non-owner's statement could reach a root file with no
+            # attribution trail at all. Fixed by threading the same seam here.
             source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
             attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
         )
