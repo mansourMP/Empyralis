@@ -77,8 +77,8 @@
 > just store credentials), **Tool-Honesty Guard** (§21, previously
 > undocumented — two independent runtime pipelines, both wired), **Hardware**
 > (§22, confirms the placement-resolver claim "`cli_subscription` reads
-> `gateway_binding`, not `hardware_access`" is TRUE and that
-> `docs/HARDWARE-BRAIN-REALITY-REPORT.md`'s contrary claims predate a real
+> `gateway_binding`, not `hardware_access`" is TRUE and that an earlier,
+> now-superseded hardware/brain audit's contrary claims predate a real
 > fix), **Landing Page, Invite Gating & Auth** (§23 — there is no marketing
 > landing page to gate; both invite-code mechanisms are OFF by default in
 > this repo, so signup is open as shipped here), and **Sage's Actual
@@ -742,7 +742,7 @@ Fleet components own their own data (no `useWorkspaceBoundary()` context).
 | File | Purpose |
 |------|---------|
 | `FleetShell.tsx` / `FleetShellDecider.tsx` / `FleetContentFrame.tsx` | Themed root (canvas), segment router, and bordered content panel + breadcrumbs. |
-| `PrimaryRail.tsx` | Persistent left rail (Inbox, Projects, Agents, Hardware, Billing, Settings) with keyboard chords. |
+| `PrimaryRail.tsx` | Persistent left rail — **4 nav items only** (Inbox, Projects, Agents, Hardware; `NAV_ITEMS`, `PrimaryRail.tsx:40-44`) with keyboard chords. Billing and Settings are **not** rail items — both live in the account-menu popover instead (`PrimaryRail.tsx:449`, comment: "a look-up-occasionally screen, not a nav destination"). |
 | `FleetHome.tsx` | Agent grid + status strip + "New agent" button. Opens wizard. |
 | `FleetAgentDetail.tsx` | **Routed, deep-linkable** agent detail (not a modal) — `/projects/[pid]/agents/[aid]/[tab]`. **2,132 lines.** 8 visible tabs (`TABS`, `FleetAgentDetail.tsx:101-110`): Overview, Work, Channels, Connectors, **Tools**, Hardware, Model (editable), Memory — confirmed as exactly 8 in the 2026-07-13 pass, re-verified against the live array, not assumed from the tab folder (see next row). **Plus a 9th, deliberately hidden tab: `chat`** — present in the `TabId` type (`:99`) and the route's `VALID_TABS` (`.../[agentId]/[tab]/page.tsx:11`), but excluded from the `TABS` pill array on purpose; reached only via the "Chat with this agent" CTA (`:362-365`) or a direct URL (`.../agents/{id}/chat`). Six of the 8+1 tab bodies (`OverviewTab` `:495`, `ChannelsTab` `:1032`, `ConnectorsTab` `:1387`, `ToolsTab` `:1476`, `ModelTab` `:1782`, `ChatTab` `:921`) are defined **inline inside this one file** — only Work/Hardware/Memory got broken out to `tabs/*.tsx` (see below), which is why a `*Tab.tsx` filename glob undercounts. Exports `ChannelsTab` for wizard reuse. Overview hosts `AgentTitle` (inline click-to-edit rename, `:596`) and `PersonaEditor` (instructions, `:692`) — the only places those fields are set post-creation. |
 | `tabs/WorkTab.tsx` | End-customer conversations, split-view. **Live** — 7s polling of the list + open transcript, unread dots, "{n} new" count (Phase 8 Part A). |
@@ -1347,7 +1347,7 @@ Auth: Bearer `empyralis_mcp_...` (SHA-256 hashed). Write tools gated behind `EMP
 
 1. `AgentTurnResponse.reply` conflates agent responses and platform errors — no flag to distinguish
 2. API contract mirrors the conflation — no `is_platform_error` field
-3. Intervention system exists but is underused — most errors use raw `reply` strings
+3. Intervention system exists but is underused — most errors use raw `reply` strings. **Still true as of 2026-07-23**: `platform_event.py` defines 67 `PlatformEvent` constants (each carrying a `severity` of `info`/`warning`/`error`), and `PlatformEvent.to_intervention()` exists specifically to surface them as UI cards — but it has zero call sites anywhere in `server_modules/` outside its own definition and a comment referencing it (confirmed by grep). Backend services call `build_intervention()` directly with raw strings instead. Frontend-side, no component reads `.severity` at all (zero matches under `frontend/lib`/`frontend/app`) — `PlatformNotification` (`frontend/lib/ui/platform-notification.tsx`) exists and is used in a few places (chat composer, hardware page) but only for hardcoded pathways, not generically wired to intervention severity. Net effect: **none of the 67 events reliably trigger a heads-up UI notification**, warning/error severity is metadata nobody reads.
 4. Frontend `ChannelProvider` type is hardcoded `'telegram' | 'whatsapp'`
 5. Frontend `CHANNEL_PROVIDER_DEFINITIONS` is static, not data-driven
 6. Frontend `visibleProviders` is a hardcoded array
@@ -1879,8 +1879,10 @@ to call INTO them from the live product: the entire
 workstation panes, and three backend files that had zero real callers
 (`channel_execution_service.py`, `deployed_agent_daily_quota_adapter.py`,
 `deployed_agent_rate_limit_service.py` — see the changelog at the top of this
-document). Full inventory and the ordered strangler-fig plan this cleanup
-followed: `docs/DEPLOYED-AGENT-CONSOLIDATION-MAP.md`.
+document). This cleanup followed an ordered strangler-fig plan against a
+point-in-time consolidation inventory (five independent research passes,
+every deletion target confirmed zero-caller by grep) that's now superseded
+by this section — the plan has been executed, not just proposed.
 
 **Practical implication for anyone touching agent code:** if you're adding a
 feature, it goes in the Fleet path (`fleet_tools.py`,
@@ -2642,20 +2644,20 @@ own comment narrates the bug this fixed: previously it only ever looked at
 was a **display** bug, not a dispatch bug — no evidence was found that the
 backend dispatcher itself ever fell back to `hardware_access`.
 
-**Correction to `docs/HARDWARE-BRAIN-REALITY-REPORT.md`.** That document's
-claims — that dispatch "fires unconditionally... never checks if a Gateway
-is online, never checks if the CLI is installed," and that
+**Correction to an earlier claim that this dispatch path was an unconditional
+stub.** A prior, now-superseded research pass (2026-07-10) found that
+`cli_subscription` dispatch "fires unconditionally... never checks if a
+Gateway is online, never checks if the CLI is installed," and that
 `fleet_configure_agent` "only type-checks `gateway_binding`" with a
-"confirmed bypass" for a blank/garbage value — are **false as of current
-code**. The current dispatcher does check online/installed/authenticated
+"confirmed bypass" for a blank/garbage value. Both are **false as of
+current code**. The current dispatcher does check online/installed/authenticated
 state and does call a real `llm.generate` WSS handler; the current
 `fleet_configure_agent` does reject an unresolvable, wrong-workspace,
-revoked, or CLI-not-ready `gateway_binding` at save time. The doc's own
+revoked, or CLI-not-ready `gateway_binding` at save time. That prior pass's
 findings are cited by name as the design rationale inside
-`HardwareTab.tsx`/`resolveHardwarePlacement` — strong evidence the doc was
-accurate when written and has since been acted on, not that it was simply
-wrong. Treat it as historical record of a bug that's now fixed, not a
-current defect list.
+`HardwareTab.tsx`/`resolveHardwarePlacement` — strong evidence the finding
+was accurate when made and has since been acted on, not that it was simply
+wrong. Treat this as a fixed historical bug, not a current defect.
 
 ---
 
@@ -3847,7 +3849,7 @@ pass's scope.
 
 ## Appendix A: Architecture Decisions (Why It's Built This Way)
 
-These are recorded in `docs/PLATFORM.md` Section 7. Do NOT reverse without explicit instruction.
+These are foundational product/architecture decisions. Do NOT reverse without explicit instruction.
 
 1. **Channels are pure transport (pigeon theory)** — stateless shells, normalize → deliver. No routing logic in channels.
 2. **WSS reverse tunnel, not SSH** — outbound WebSocket survives NAT/firewalls. No inbound holes.
@@ -3900,7 +3902,7 @@ Frontend channels:  frontend/lib/workspace/workspace-channel-pairing-surface.tsx
 Shared contracts:   shared/api-contract/
 Legacy (v1 ref):    legacy/
 Graph:              graphify-out/graph.json (117MB, 97,296 nodes)
-Platform doc:       docs/PLATFORM.md (prescriptive rulebook)
+Platform doc:       docs/PLATFORM-MAP.md (this document — the canonical, living architecture doc)
 Hardware tiers:     docs/HARDWARE_TIERS.md
 CLI subscription:   docs/CLI_SUBSCRIPTION_SPEC.md (not built)
 MCP client setup:   docs/MCP_CLIENT_SETUP.md

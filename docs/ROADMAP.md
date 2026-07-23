@@ -156,8 +156,8 @@ minutes" or "wake it at 9am" anywhere in the UI.
 **Status:** Planned, not built.
 
 **Motivation.** Empyralis already exposes itself as an MCP server
-(workspace-key auth, read+chat tools live — see `docs/PLATFORM.md`
-Phases S-V). That capability has no discovery surface in the product:
+(workspace-key auth, read+chat tools live — see `docs/PLATFORM-MAP.md`
+Part 6.6, "Empyralis IS an MCP Server"). That capability has no discovery surface in the product:
 a customer who wants to drive their workspace from Claude Desktop,
 Claude Code, or another MCP client has to already know this exists and
 find the setup instructions outside the app.

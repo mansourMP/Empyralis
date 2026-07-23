@@ -68,8 +68,8 @@ function friendlyTurnFailureMessage(status: number, rawBody: string): string {
 
 // Reuses chat-message.tsx's existing "activity_step" display_kind (already
 // rendered by ChatMessage for other producers) instead of building a new
-// component — see docs/PLACEMENT-EXECUTION-AUTHORITY-REPORT.md §6 on why a
-// second parallel renderer would be redundant here.
+// component — a second parallel renderer would be redundant here, since
+// ChatMessage already handles every producer's rendering path.
 function transparencyEventsToStepMessages(raw: unknown, baseId: string): WorkstationChatMessageRecord[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((event, index) => {

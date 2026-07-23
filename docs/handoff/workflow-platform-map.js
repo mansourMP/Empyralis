@@ -152,9 +152,9 @@ const finalDoc = await agent(
   'SYNTHESIZE all data from previous agents into ONE document at ' +
   '/Users/mansur/empyralis/docs/handoff/PLATFORM-MAP.md using the Write tool.\n\n' +
   'SECTIONS (in order):\n\n' +
-  '## 0. Reading Guide — what this is, relation to PLATFORM.md and Linear docs, graphify stats.\n\n' +
+  '## 0. Reading Guide — what this is, relation to docs/PLATFORM-MAP.md and Linear docs, graphify stats.\n\n' +
   '## 1. Architecture Overview — ASCII diagram: consumer surfaces, control plane, execution runtimes, ' +
-  'data flow arrows. Update PLATFORM.md Section 1 with anything new found during mapping.\n\n' +
+  'data flow arrows. Update docs/PLATFORM-MAP.md Part 1 with anything new found during mapping.\n\n' +
   '## 2. Complete File Map — EVERY file by directory, grouped by subsystem. ' +
   'Markdown tables: File | Purpose | Status | Key Dependencies. Subsections: 2.1 server_modules/ (by subsystem), ' +
   '2.2 server_modules/connectors/, 2.3 frontend/, 2.4 empyralis-gateway/, 2.5 empyralis-supervisor/, ' +
