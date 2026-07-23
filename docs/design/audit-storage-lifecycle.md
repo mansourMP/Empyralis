@@ -448,3 +448,167 @@ first (it's nearly free — the enforcement job already exists), then #2.**
   out from under a message that still links to it. Any artifact TTL needs
   to check `agent_trace_events`/`agent_turns` for live references first, or
   be paired with pruning those referencing rows in the same pass.
+
+---
+
+## 9. De-duplication follow-up (2026-07-23) — what was verified, what changed, what wasn't touched
+
+Scope: option #2 from §7 ("de-duplicate the redundant event logs at the
+write site"), restricted to changes with **zero deletion risk** — no row,
+table, or ledger removed, only a duplicated large field trimmed at the one
+write site that creates it. No files owned by the concurrent
+SOUL/IDENTITY-taxonomy removal (`workspace_context.py`,
+`sage_instruction_compiler_service.py`, `memory_service.py`,
+`skills_service.py`, `sage_profile_service.py`) were touched.
+
+### 9.1 `assistant.message.completed` vs `agent_turns.content` — CONFIRMED duplicate, fixed
+
+**Verification (file:line):** `direct_chat_generation_service.py:2569-2578`
+emits the `assistant.message.completed` trace event with
+`data={"text": final_reply, ...}` inside `stream_provider_backed_direct_chat()`.
+The same request then returns `final_reply` as `result["reply"]`, and
+`agent_turn.py:1788-1798` calls
+`thread_service.record_assistant_turn(reply=str(result.get("reply") or ""), ...)`
+→ `control_plane_repository.upsert_agent_turn(content=reply, ...)` — the
+exact same string, written into `agent_turns.content`, in the same turn.
+`agent_turn.py:317-326` (`_should_persist_direct_chat_result`) guarantees
+`record_assistant_turn` always runs whenever `reply` is non-empty, so there
+is no code path where the trace event carries real text but `agent_turns`
+doesn't — the fallback below is safe in every case, not just the common
+one.
+
+**Consumer check (the part that could have blocked this):**
+`frontend/lib/workspace/fleet/tabs/WorkTab.tsx:884-885` is the *only*
+reader of this event type anywhere in the frontend (confirmed by grepping
+both `frontend/app` and `frontend/lib` for the literal event name) — and it
+already does
+```
+const repliedEvent = effectiveEvents.find(e => e.event_type === "assistant.message.completed");
+const replyText = String(repliedEvent?.data?.text || assistantTurn?.content || "").trim();
+```
+`assistantTurn` is resolved independently from `selectedThread.turns` (i.e.
+straight from `agent_turns` via `/api/threads`, not from the trace event),
+so the fallback is already live code, not something added for this change.
+Emptying `data.text` on the stored row makes this fallback the only path,
+which was already correct.
+
+**Fix — `server_modules/agent_trace_service.py`:** added
+`TEXT_DEDUPED_TRACE_EVENT_TYPES = {"assistant.message.completed"}` and
+`_persisted_trace_event_payload()`, applied inside `emit_with_envelope()`
+**only** to the row handed to
+`control_plane_repository.append_agent_trace_event()`. The in-memory
+envelope returned to the caller — which is what the live in-request
+response stream actually consumes while the turn is running — is
+untouched, so nothing about the live chat experience changed. The stored
+row keeps `message_id`, `citation_refs`, `artifact_ids`, and ordering
+(`seq`/`ts`/`id`) exactly as before; only `text` is emptied, with
+`text_ref: "agent_turns.content"` and `text_bytes_deduped: <int>` added so
+the row is still self-describing about *why* the field is empty.
+
+**What was deliberately left alone:** the never-called helper
+`agent_trace_service.emit_assistant_message_completed()` (grepped — zero
+callers outside its own test) was not touched or removed; it routes through
+the same `emit()` → `emit_with_envelope()` path, so it inherits the fix for
+free if something starts calling it later.
+
+**Before/after bytes (same per-session model as §3 — 40 turns, 20
+assistant turns/session):** `assistant.message.completed` fires once per
+assistant turn (20/session). Assuming a ~1 KB average reply body (consistent
+with §2's `agent_turns` row-size estimate net of that row's own JSONB
+overhead), removing the duplicated text and replacing it with the ~45-byte
+marker (`text: ""`, `text_ref`, `text_bytes_deduped`) saves roughly:
+
+| | Before | After | Saved |
+|---|---:|---:|---:|
+| `agent_trace_events` bytes/session | 120 KB | ~100 KB | ~20 KB (~17%) |
+| `agent_trace_events` share of per-session total | 46% | ~42% | — |
+| Per-session total (all structured stores) | 260 KB | ~240 KB | ~20 KB (~8%) |
+| Per agent (100 sessions) | 26 MB | ~24 MB | ~2 MB |
+| Per account (20 agents) | 520 MB | ~480 MB | ~40 MB |
+| 1,000 accounts | ~570-600 GB | ~530-560 GB | ~40 GB |
+
+This is a real, permanent per-turn saving, not a one-time cleanup — every
+future assistant turn now writes the reply body once instead of twice. It
+is deliberately modest relative to the full §3 floor: `assistant.message.
+completed` is 1 of the 10 modeled event types per turn, and the other 9
+(trace.started/routed, 3×tool.started/result, trace.completed) were never
+duplicated data to begin with, so they're untouched. It does not address
+`agent_action_events` or the billing ledgers — see below for why.
+
+**Tests:** added
+`test_assistant_message_completed_dedupes_stored_text_only` to
+`server_modules/tests/test_agent_trace_service.py`, asserting (a) the
+stored payload has `text=""`, `text_ref="agent_turns.content"`,
+`text_bytes_deduped>0`, with `message_id`/`citation_refs`/`artifact_ids`
+unchanged, and (b) the envelope returned to the caller still has the full
+`text`. Ran clean: `test_agent_trace_service.py` (10 passed),
+`test_agent_trace_routes.py` + `test_agent_trace_repository.py` +
+`test_agent_trace_control_plane_rust_gate.py` +
+`test_personal_channel_trace_id.py` (20 passed),
+`test_direct_chat_generation_service.py` (24 passed, 3 subtests),
+`test_agent_turn.py` (44 passed / 3 pre-existing failures, see below).
+Ordering is untouched — `get_agent_trace_events()`
+(`control_plane_repository.py:10283-10319`) still sorts by
+`seq ASC, ts ASC, id ASC`, neither of which this change touches — so trace
+replay ordering and non-text metadata resolvability are unaffected.
+
+### 9.2 `agent_action_events` vs `agent_trace_events` (`tool.started`/`tool.result`) — REAL overlap, NOT a safe merge target, not changed
+
+**Verification:** for a direct-chat tool call, `direct_chat_generation_
+service.py:2068-2075` emits a persisted `tool.started` trace event with
+`args_preview` (full sanitized-args dict), then invokes
+`services.execute_single_direct_tool_call` — backed by
+`direct_tool_execution_service.py`, which separately calls
+`agent_action_metering_service.record_started_sync()` /
+`record_completed_sync()` (`direct_tool_execution_service.py:1076,1189`)
+with `input_summary`/`output_summary` (bounded to 1000 chars via
+`_bounded()`, `agent_action_metering_service.py:42-43,157-158`) for the
+*same* tool call. So yes — the same tool call really does get logged from
+two different subsystems, and some fields overlap conceptually
+(tool name, connector id, an args/result summary).
+
+**Why it isn't a safe merge/removal in this task:** `agent_action_events`
+(`control_plane_repository.py:932-976`) carries columns
+`agent_trace_events` has no equivalent for at all — `payer`,
+`billing_mode`, `credit_type`, `credits_debited`, `platform_cost_usd`,
+`approval_status`, `policy_decision`, `risk_level`, `source_table`/
+`source_event_id`, `idempotency_key`. Writing it isn't a passive log call:
+`direct_tool_execution_service.py` threads it through
+`_enforce_direct_tool_execution_transition()` (a governance state-machine
+gate) and `security_audit_service.emit_security_audit_event()` — i.e. this
+table's writes are load-bearing for tool-execution policy enforcement, not
+just observability. Collapsing it into `agent_trace_events` (or vice versa)
+would mean rebuilding that governance/billing plumbing on a
+differently-shaped table — exactly the "real migration, four write
+call-sites and whatever reads each table today" risk §7 option 2 already
+flagged, and squarely inside the founder's fear (a): a system that could
+break while a customer's agent is mid-run. Left unchanged, as instructed —
+reported here rather than forced.
+
+### 9.3 The four billing ledgers — reader-by-reader, not merged (per explicit instruction)
+
+Confirmed **real, distinct readers for all four** — none qualifies as "a
+pure duplicate with zero readers":
+
+| Ledger | Real reader (file:line) | What it uniquely provides |
+|---|---|---|
+| `usage_events` | `usage_events_repository.summarize_usage()` (`usage_events_repository.py:231-261`), called from `routes_fleet.py` — this is the literal backend of WorkTab's "Cost today" (`/api/w/{ws}/fleet/usage?scope=agent...`) | Per-call rows with `agent_install_id`/`project_id` attribution the monthly ledgers don't carry (own docstring, `usage_events_repository.py:1-11`) |
+| `credit_ledger_events` | `billing_service.unified_credit_usage_for_workspace()` (`billing_service.py:1257-1290`) | The single cross-surface (sage + studio + mini_app, AI + non-AI) canonical credit-debit history; upserted by `source_table`/`source_event_id` (`uq_credit_ledger_events_source`, `control_plane_repository.py:1542-1543`) — i.e. it's deliberately *fed from* the other tables via an idempotency key, not an independent duplicate write |
+| `workspace_hosted_ai_monthly_cost_ledger` | Also read inside `billing_service.unified_credit_usage_for_workspace()` (`billing_service.py:1291-1294`) and `billing_service.py:1072` | Hosted-direct-chat-specific monthly rollup joined alongside the unified ledger in the same response |
+| `deployed_agent_monthly_cost_ledger` | `deployed_agent_cost_cap_service.summarize_deployed_agent_monthly_cost_ledger()`, read inside `settle_deployed_agent_monthly_cost_cap()` (`deployed_agent_cost_cap_service.py:553`) | The actual monthly-cost-cap enforcement mechanism for marketplace-deployed agents — this is a live governance decision, not just a report |
+
+One real LLM call in the hosted-direct-chat path does write all three of
+`usage_events`, `workspace_hosted_ai_monthly_cost_ledger`, and
+`credit_ledger_events` (`direct_chat_hosted_usage_service.py:576,
+610-639, 645-653`) — confirmed 3x, not the 4x the intro estimated, because
+`deployed_agent_monthly_cost_ledger` is scoped to a different, mutually
+exclusive surface (marketplace-deployed agents) and never fires alongside
+the other three for the same call. Per instruction, **no ledger was
+merged, removed, or had a column dropped** — this is a report, not a
+change. Recommendation stands as written in §7 option 2: this is real,
+provable redundancy (the same provider/model/token/cost tuple, 3 times),
+but de-duplicating it means picking one canonical writer and re-pointing
+`unified_credit_usage_for_workspace()` and the cost-cap settlement job at
+it — a real migration with billing correctness on the line, appropriate
+for a dedicated task with its own test plan, not a bytes-per-session
+storage pass.
