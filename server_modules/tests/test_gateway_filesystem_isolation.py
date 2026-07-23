@@ -48,10 +48,16 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from server_modules import hardware_action_broker_service as broker
+from server_modules import sage_agent_runtime_service
 from server_modules import skills_service
 from server_modules import direct_tool_execution_service
 from server_modules import direct_chat_operator_binding_service
 from server_modules.hardware_runtime_adapters import gateway_adapter
+from server_modules.specialist_runtime_context import SpecialistRuntimeContext
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 
 def _registration(**overrides) -> dict:
@@ -541,6 +547,155 @@ class DirectToolConnectorIdentityGateTests(unittest.TestCase):
         asyncio.run(run_test())
         execute_mock.assert_awaited_once()
         self.assertEqual(execute_mock.await_args.kwargs["agent_install_id"], "agent-real")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Layer 0: sage_agent_runtime_service.handle_sage_chat / _run_sage_action_
+# loop_v3 — the STAMPING side of the invariant Layer 3 above assumes but
+# never itself proves. Every DirectToolConnectorIdentityGateTests case
+# constructs session_ctx BY HAND (e.g.
+# session_ctx={"authority_tier": "owner", "agent_install_id": "agent-a"}) —
+# that proves identity is threaded correctly ONCE it's already sitting in
+# session_ctx, but says nothing about whether the real turn-dispatch code
+# ever puts it there. A test that mocks the identity in like that proves
+# nothing about the stamping step itself: a future refactor that silently
+# dropped `session_ctx["active_agent_install_id"] = _acting_install_id`
+# inside _run_sage_action_loop_v3, or stopped passing
+# agent_install_id=_spec_install_id from handle_sage_chat into it (3 call
+# sites, verified above at sage_agent_runtime_service.py ~4607/4686), would
+# leave every Layer 3 test green while every real specialist turn silently
+# fell back to Sage's workspace-wide mount — exactly the residual risk this
+# class closes.
+#
+# Drives the REAL dispatch seam end to end, no mocked identity anywhere:
+# handle_sage_chat(specialist_context=...) -> _run_sage_action_loop_v3's own
+# session_ctx construction -> direct_chat_generation_service.
+# stream_provider_backed_direct_chat's session_ctx kwarg — the exact dict
+# instance skills_service.execute_single_direct_tool_call{,_async} reads via
+# _agent_install_id_from_direct_tool_context when a tool call actually
+# fires mid-turn. Only the LLM call itself (stream_provider_backed_direct_
+# chat) and unrelated I/O (profile/context-file/memory loads, cloud
+# provider/credential resolution, activity/audit logging) are mocked — the
+# specialist-context resolution and session_ctx stamping under test run for
+# real, unmocked. Mirrors the harness in
+# test_sage_agent_runtime_service.py's
+# SageAgentRuntimeSpecialistProviderResolutionTests, which proves the same
+# seam is a real, working path for a different invariant (credential
+# isolation).
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class SpecialistTurnStampsAgentInstallIdOntoSessionCtxTests(unittest.TestCase):
+    @staticmethod
+    def _spec(**overrides) -> SpecialistRuntimeContext:
+        base = dict(
+            agent_install_id="agent-specialist-1",
+            agent_label="Support Agent",
+            agent_kind="specialist",
+            persona="You are a support specialist.",
+        )
+        base.update(overrides)
+        return SpecialistRuntimeContext(**base)
+
+    @staticmethod
+    def _run_turn(*, specialist_context):
+        """Drives handle_sage_chat for real. Only the LLM call and unrelated
+        I/O are mocked — session_ctx construction inside
+        _run_sage_action_loop_v3 (the code under test) is never touched or
+        stood in for."""
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"})),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider",
+                new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}, "platform_credits")),
+            ),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=specialist_context,
+            ))
+        return mock_stream
+
+    def test_specialist_turn_stamps_non_empty_identity_reaching_the_dispatch_seam(self):
+        """THE invariant: a customer-facing (specialist) agent's turn must
+        reach skills_service's direct-tool dispatch with a non-empty
+        agent_install_id resolvable from session_ctx. Reads the call
+        with skills_service's OWN resolver
+        (_agent_install_id_from_direct_tool_context — the exact function
+        execute_single_direct_tool_call{,_async} calls at the real Gateway
+        dispatch site) against the SAME session_ctx dict instance
+        _run_sage_action_loop_v3 threads into the generation call, not a
+        hand-built stand-in."""
+        mock_stream = self._run_turn(specialist_context=self._spec(agent_install_id="agent-specialist-1"))
+
+        mock_stream.assert_called_once()
+        session_ctx = mock_stream.call_args.kwargs["session_ctx"]
+        self.assertIsInstance(session_ctx, dict)
+        resolved_identity = skills_service._agent_install_id_from_direct_tool_context(session_ctx)
+        self.assertEqual(resolved_identity, "agent-specialist-1")
+        self.assertEqual(session_ctx.get("active_agent_install_id"), "agent-specialist-1")
+
+    def test_a_second_specialist_stamps_its_own_distinct_identity(self):
+        """Not a fluke of one hardcoded id — a DIFFERENT specialist install
+        gets its OWN id stamped, proving the value flows end-to-end from the
+        SpecialistRuntimeContext actually passed in, rather than some
+        constant a broken refactor might hardcode to make the first test
+        alone pass."""
+        mock_stream = self._run_turn(specialist_context=self._spec(agent_install_id="agent-specialist-2"))
+
+        session_ctx = mock_stream.call_args.kwargs["session_ctx"]
+        self.assertEqual(
+            skills_service._agent_install_id_from_direct_tool_context(session_ctx),
+            "agent-specialist-2",
+        )
+
+    def test_owner_facing_agent_turn_keeps_the_empty_identity_that_is_valid_for_it(self):
+        """The other half of the invariant, asserted through the SAME real
+        seam: Sage's own turn (specialist_context=None) must NOT get an
+        agent_install_id stamped — an empty identity is deliberate and
+        correct here (gateway_adapter._agent_scoped_mount leaves the
+        pre-existing workspace-shared mount unchanged for it; see that
+        function's docstring and commit da6b36242's message). This must
+        stay true through the exact same code path the specialist tests
+        above drive, so a regression that starts stamping a real id onto
+        Sage's own turn — which would silently narrow Sage's own file/shell
+        access to a fresh, empty per-agent mount instead of its existing
+        workspace-wide one — is caught here too, not just the specialist
+        widening case."""
+        mock_stream = self._run_turn(specialist_context=None)
+
+        session_ctx = mock_stream.call_args.kwargs["session_ctx"]
+        resolved_identity = skills_service._agent_install_id_from_direct_tool_context(session_ctx)
+        self.assertEqual(resolved_identity, "")
+        self.assertNotIn("active_agent_install_id", session_ctx)
 
 
 if __name__ == "__main__":
