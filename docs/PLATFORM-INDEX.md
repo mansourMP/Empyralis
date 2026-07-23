@@ -145,9 +145,9 @@ product concept.
 
 - FleetShell — the only workspace UI surface (floating-panel chrome); the legacy workstation shell is fully removed
 - Fleet Home — agent grid, status strip, new-agent entry point
-- Agent detail — 8 visible tabs (Overview, Work, Channels, Connectors, Tools, Hardware, Model, Memory) plus one hidden `chat` tab reachable only via CTA or direct URL
+- Agent detail — 9 visible tabs (Overview, Model, Work, Channels, Connectors, Tools, Capabilities, Hardware, Memory) plus one hidden `chat` tab reachable only via CTA or direct URL
 - Create-agent wizard — 4 steps (Placement, Brain, Channels, Connections); agent is created on step 1, auto-named, later steps are optional PATCHes
-- Primary rail — 4 nav items only (Inbox, Projects, Agents, Hardware); Billing and Settings live in the account-menu popover
+- Primary rail — 5 nav items (Inbox, Conversations, Projects, Agents, Hardware); Billing and Settings live in the account-menu popover
 - Single `data-theme` attribute — one theming source of truth across every surface
 - Catch-all API proxy (`/api/*`) forwards every backend call from the frontend
 
