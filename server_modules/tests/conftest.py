@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import uuid
 import warnings
 from pathlib import Path
 
@@ -502,3 +503,86 @@ def _isolate_empyralis_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         )
     except Exception:
         pass
+
+
+@pytest.fixture
+def second_real_user_in_workspace():
+    """Factory fixture for multiplayer-correctness tests: register a REAL,
+    distinct second user and (by default) attach them to a target
+    workspace_id, all through the real repository/DB path -- never the
+    synthetic current_user dict pattern used elsewhere (e.g.
+    test_routes_fleet_delete_agent.py's _viewer_user()/_member_user(), which
+    hand-builds a workspace_access map and never touches a database).
+
+    Concretely, per call:
+      1. auth.register_user(email, password) -- the exact function
+         POST /auth/register calls -- persists a brand-new user row (and
+         its own bootstrap workspace) into the SAME per-test SQLite file
+         _isolate_empyralis_state above already points both auth.AUTH_DB_FILE
+         and control_plane_repository.LOCAL_IDENTITY_DB_FILE at.
+      2. auth.upsert_workspace_membership(user_id, workspace_id, role) --
+         which wraps control_plane_repository.ensure_workspace_membership,
+         the real repository write -- attaches that real user to the target
+         workspace_id as a second, distinct member.
+      3. auth._effective_workspace_access(...) reads the resulting
+         membership rows back out of the real DB (via
+         auth._list_workspace_memberships ->
+         control_plane_repository.list_workspace_memberships_for_user) the
+         same way auth.get_current_user builds workspace_access for a
+         genuine bearer session -- so the returned current_user dict is
+         DB-derived, not hand-typed.
+
+    Returns {"user_id", "email", "current_user"}; hand `current_user` to
+    app.dependency_overrides[get_current_user] = lambda: result["current_user"].
+
+    Pass join_workspace=False to get a real, authenticated user who is NOT
+    yet a member of workspace_id -- e.g. to drive the invite-accept endpoint
+    itself and assert IT is what creates the membership.
+    """
+
+    def _make(
+        workspace_id: str,
+        *,
+        role: str = "member",
+        email: str | None = None,
+        name: str | None = None,
+        password: str = "Sup3r-Secret-Passw0rd!",
+        join_workspace: bool = True,
+    ) -> dict:
+        from server_modules import auth
+
+        clean_email = (email or f"invitee-{uuid.uuid4().hex[:10]}@example.com").strip().lower()
+        auth.register_user(clean_email, password, name=name)
+        user = auth._find_user_by_email(clean_email)
+        assert isinstance(user, dict) and user.get("id"), (
+            "real registration did not persist a user row for " + clean_email
+        )
+        user_id = str(user["id"]).strip()
+
+        if join_workspace:
+            auth.upsert_workspace_membership(user_id, workspace_id, role)
+
+        workspace_access = auth._effective_workspace_access(
+            user_id=user_id,
+            email=clean_email,
+            role=role,
+            auth_type="bearer",
+            is_admin=False,
+            workspace_ids=[workspace_id] if join_workspace else [],
+        )
+        current_user = {
+            "user_id": user_id,
+            "auth_type": "bearer",
+            "email": clean_email,
+            "workspace_ids": list(workspace_access.keys()),
+            "workspace_roles": {
+                wid: entry.get("role") for wid, entry in workspace_access.items() if isinstance(entry, dict)
+            },
+            "workspace_access": workspace_access,
+            "role": (workspace_access.get(workspace_id) or {}).get("role", "viewer"),
+            "is_admin": False,
+            "auth_admin": False,
+        }
+        return {"user_id": user_id, "email": clean_email, "current_user": current_user}
+
+    return _make

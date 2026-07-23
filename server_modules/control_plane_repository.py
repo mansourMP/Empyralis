@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -19,6 +22,7 @@ from server_modules import billing_credit_config
 from server_modules import db as runtime_db
 from server_modules import credit_ledger_contract
 from server_modules import rust_runtime_kernel_client
+from server_modules.jwt_secret import resolve_jwt_secret
 from server_modules.sqlite_helpers import connect_sqlite_rw
 
 
@@ -147,7 +151,17 @@ def _enforce_control_plane_service_decision(
         "membership_update": {"apply_control_plane_write"},
         "membership_remove": {"apply_control_plane_destructive_write"},
         "invite_create": {"apply_control_plane_write"},
-        "invite_accept": {"apply_control_plane_write"},
+        # The invitee accepting their own invite has no admin/owner standing
+        # in the target workspace, so the Rust kernel deliberately leaves
+        # "invite_accept" out of ADMIN_REQUIRED_OPERATIONS/OWNER_REQUIRED_
+        # OPERATIONS (empyralis-runtime-kernel/src/control_plane_service.rs)
+        # -- its allow-path next_action is "allow_control_plane_read", not
+        # "apply_control_plane_write". Pre-existing bug found while wiring up
+        # the first real caller of accept_workspace_invite through this
+        # gate: this entry previously only accepted "apply_control_plane_write",
+        # so every allow decision for invite_accept raised "unexpected
+        # next_action" here before a single row could ever be written.
+        "invite_accept": {"apply_control_plane_write", "allow_control_plane_read"},
         "invite_revoke": {
             "apply_control_plane_destructive_write",
             "return_existing_control_plane_record",
@@ -4467,6 +4481,92 @@ async def list_workspace_memberships_for_user(user_id: str) -> List[Dict[str, An
     return records
 
 
+def _local_workspace_member_rows(connection: sqlite3.Connection, workspace_id: str) -> List[Dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+            wm.user_id,
+            wm.workspace_id,
+            wm.role,
+            wm.created_at,
+            wm.updated_at,
+            u.email,
+            u.name AS display_name,
+            u.avatar_url
+        FROM workspace_memberships wm
+        JOIN users u ON u.id = wm.user_id
+        WHERE wm.workspace_id = ?
+        ORDER BY wm.created_at ASC, wm.user_id ASC
+        """,
+        (str(workspace_id or "").strip(),),
+    ).fetchall()
+    return [
+        {
+            "user_id": str(row["user_id"] or "").strip(),
+            "workspace_id": str(row["workspace_id"] or "").strip(),
+            "email": str(row["email"] or "").strip().lower(),
+            "display_name": str(row["display_name"] or "").strip() or None,
+            "avatar_url": str(row["avatar_url"] or "").strip() or None,
+            "role": str(row["role"] or "").strip() or "member",
+            "status": "active",
+            "joined_at": _ts_or_none(row["created_at"]),
+            "updated_at": _ts_or_none(row["updated_at"]),
+        }
+        for row in rows
+    ]
+
+
+async def list_workspace_members(workspace_id: str) -> List[Dict[str, Any]]:
+    """The member USERS of a workspace -- the forward lookup missing next to
+    list_workspace_memberships_for_user (user -> workspaces). This goes the
+    other direction: workspace -> its member users, with id/email/display
+    name/role/joined-at, for the multiplayer roster UI ("who's already in
+    this workspace"). Only active memberships are returned.
+    """
+    clean_workspace_id = str(workspace_id or "").strip()
+    if not clean_workspace_id:
+        return []
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    return _local_workspace_member_rows(fallback, clean_workspace_id)
+        rows = await connection.fetch(
+            """
+            SELECT
+                wm.user_id,
+                wm.workspace_id,
+                wm.role,
+                wm.status,
+                wm.created_at,
+                wm.updated_at,
+                u.email,
+                u.display_name,
+                u.avatar_url
+            FROM workspace_memberships wm
+            JOIN users u ON u.id = wm.user_id
+            WHERE wm.workspace_id = $1
+              AND wm.status = 'active'
+            ORDER BY wm.created_at ASC, wm.user_id ASC
+            """,
+            clean_workspace_id,
+        )
+    return [
+        {
+            "user_id": str(row["user_id"] or "").strip(),
+            "workspace_id": str(row["workspace_id"] or "").strip(),
+            "email": str(row["email"] or "").strip().lower(),
+            "display_name": str(row["display_name"] or "").strip() or None,
+            "avatar_url": str(row["avatar_url"] or "").strip() or None,
+            "role": str(row["role"] or "").strip() or "member",
+            "status": str(row["status"] or "").strip() or "active",
+            "joined_at": _ts_or_none(row["created_at"]),
+            "updated_at": _ts_or_none(row["updated_at"]),
+        }
+        for row in rows
+    ]
+
+
 async def list_workspaces_for_user(user_id: str) -> List[Dict[str, Any]]:
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
@@ -4792,6 +4892,311 @@ async def update_workspace_profile(workspace_id: str, updates: Dict[str, Any]) -
         )
     _workspace_lookup_cache_drop(clean_workspace_id)
     return await get_workspace_by_id(clean_workspace_id)
+
+
+# ── Workspace invite links (Multiplayer Projects Phase 1) ────────────────────
+# The platform has no outbound email sender (no SMTP/SendGrid/SES anywhere in
+# this codebase), so a workspace invite is never emailed. create_workspace_invite
+# instead mints a signed, expiring token the owner copies/shares as a link;
+# the invitee's client POSTs that token back to accept it. The signing key is
+# the SAME platform JWT secret auth.py already uses for its own bearer
+# sessions (server_modules/jwt_secret.py::resolve_jwt_secret(), backed by
+# EMPYRALIS_JWT_SECRET_FILE / ORION_JWT_SECRET / JWT_SECRET) -- no new secret
+# or crypto scheme. The token format mirrors auth.py's own bearer-token shape
+# (header_segment.payload_segment.signature_segment, HMAC-SHA256) but a
+# dedicated "typ" claim keeps an invite token from being accepted anywhere a
+# bearer/session/other HMAC token is expected, and vice versa.
+
+_WORKSPACE_INVITE_TOKEN_TYPE = "workspace_invite_v1"
+
+# Mirrors auth.py:83's RBAC_ROLE_ORDER (viewer < member < owner). Duplicated
+# here rather than imported: auth.py imports control_plane_repository at
+# module load time, so importing back would be circular. This is a stable,
+# three-value ordinal -- keep in sync if auth.py's RBAC_ROLE_ORDER ever
+# changes shape.
+_WORKSPACE_INVITE_ROLE_ORDER = {"viewer": 0, "member": 1, "owner": 2}
+
+
+def _workspace_invite_token_secret() -> str:
+    secret = str(resolve_jwt_secret() or "").strip()
+    if not secret:
+        raise RuntimeError("JWT secret is not configured; cannot sign a workspace invite token.")
+    return secret
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("utf-8")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = "=" * ((4 - len(value) % 4) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}".encode("utf-8"))
+
+
+def _sign_workspace_invite_token(payload: Dict[str, Any]) -> str:
+    header = {"alg": "HS256", "typ": _WORKSPACE_INVITE_TOKEN_TYPE}
+    header_segment = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_segment = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_segment}.{payload_segment}".encode("utf-8")
+    signature = hmac.new(_workspace_invite_token_secret().encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{header_segment}.{payload_segment}.{_b64url_encode(signature)}"
+
+
+def verify_workspace_invite_token(token: str) -> Dict[str, Any]:
+    """Decode + validate a workspace invite token minted by
+    create_workspace_invite. Raises ValueError (never HTTPException -- this
+    module is FastAPI-agnostic) on any tamper, malformed, wrong-type, or
+    expired token; callers turn that into a 400/403 at the route layer.
+    """
+    try:
+        header_segment, payload_segment, signature_segment = str(token or "").split(".", 2)
+    except ValueError as exc:
+        raise ValueError("Invite token is malformed.") from exc
+    signing_input = f"{header_segment}.{payload_segment}".encode("utf-8")
+    expected_signature = hmac.new(_workspace_invite_token_secret().encode("utf-8"), signing_input, hashlib.sha256).digest()
+    try:
+        provided_signature = _b64url_decode(signature_segment)
+    except Exception as exc:
+        raise ValueError("Invite token signature is malformed.") from exc
+    if not hmac.compare_digest(expected_signature, provided_signature):
+        raise ValueError("Invite token signature is invalid.")
+    try:
+        payload = json.loads(_b64url_decode(payload_segment).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("Invite token payload is invalid.") from exc
+    if not isinstance(payload, dict) or payload.get("typ") != _WORKSPACE_INVITE_TOKEN_TYPE:
+        raise ValueError("Invite token type is invalid.")
+    expires_at = payload.get("exp")
+    if not isinstance(expires_at, (int, float)) or int(expires_at) < int(time.time()):
+        raise ValueError("Invite token has expired.")
+    if not str(payload.get("invite_id") or "").strip():
+        raise ValueError("Invite token is missing its invite id.")
+    return payload
+
+
+async def create_workspace_invite(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    email: str,
+    role: str,
+    invited_by_user_id: str,
+    invited_by_role: str,
+    ttl_seconds: int = 7 * 24 * 60 * 60,
+) -> Optional[Dict[str, Any]]:
+    """INSERTs a pending workspace_member_invites row and returns it together
+    with a signed, expiring `token` the caller turns into a shareable link.
+    No email is ever sent -- this repository has no mailer to send one with.
+    Creating is expected to be gated owner-only by the caller (route layer);
+    this function still independently refuses to mint a token for a role
+    above the inviter's own, so the guarantee holds even if a future caller
+    forgets the gate.
+    """
+    clean_workspace_id = str(workspace_id or "").strip()
+    clean_tenant_id = str(tenant_id or "").strip()
+    clean_email = str(email or "").strip().lower()
+    clean_role = str(role or "").strip().lower()
+    clean_inviter_role = str(invited_by_role or "").strip().lower()
+    clean_inviter_id = str(invited_by_user_id or "").strip()
+
+    if not clean_workspace_id:
+        raise ValueError("workspace_id is required.")
+    if not clean_tenant_id:
+        raise ValueError("tenant_id is required.")
+    if not clean_email or "@" not in clean_email:
+        raise ValueError("A valid email is required.")
+    if clean_role not in _WORKSPACE_INVITE_ROLE_ORDER:
+        raise ValueError(f"role must be one of: {', '.join(sorted(_WORKSPACE_INVITE_ROLE_ORDER))}.")
+    if clean_inviter_role not in _WORKSPACE_INVITE_ROLE_ORDER:
+        clean_inviter_role = "viewer"
+    if _WORKSPACE_INVITE_ROLE_ORDER[clean_role] > _WORKSPACE_INVITE_ROLE_ORDER[clean_inviter_role]:
+        raise ValueError("Cannot invite a role above the inviter's own role.")
+
+    invite_id = f"invite_{uuid.uuid4().hex}"
+    now_ts = int(time.time())
+    expires_at = now_ts + max(int(ttl_seconds or 0), 60)
+
+    _enforce_control_plane_service_decision(
+        operation="invite_create",
+        record_type="workspace_member_invite",
+        tenant_id=clean_tenant_id,
+        workspace_id=clean_workspace_id,
+        actor_id=clean_inviter_id or "system",
+        actor_role="owner",
+        target_actor_id=clean_inviter_id,
+        idempotency_key=invite_id,
+        target_status="pending",
+        source="workspace_invite",
+    )
+
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    fallback.execute(
+                        """
+                        INSERT INTO workspace_member_invites (
+                            id, tenant_id, workspace_id, email, role, status,
+                            invited_by_user_id, accepted_by_user_id, metadata_json,
+                            created_at, updated_at, accepted_at, revoked_at
+                        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, ?, ?, ?, NULL, NULL)
+                        """,
+                        (
+                            invite_id,
+                            clean_tenant_id,
+                            clean_workspace_id,
+                            clean_email,
+                            clean_role,
+                            clean_inviter_id or None,
+                            _to_json({}, default={}),
+                            now_ts,
+                            now_ts,
+                        ),
+                    )
+                    fallback.commit()
+        else:
+            now = _utc_now_ts()
+            await connection.execute(
+                """
+                INSERT INTO workspace_member_invites (
+                    id, tenant_id, workspace_id, email, role, status,
+                    invited_by_user_id, accepted_by_user_id, metadata, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, 'pending', $6, NULL, '{}'::jsonb, $7::timestamptz, $7::timestamptz
+                )
+                """,
+                invite_id,
+                clean_tenant_id,
+                clean_workspace_id,
+                clean_email,
+                clean_role,
+                clean_inviter_id or None,
+                now,
+            )
+
+    token = _sign_workspace_invite_token(
+        {
+            "typ": _WORKSPACE_INVITE_TOKEN_TYPE,
+            "invite_id": invite_id,
+            "workspace_id": clean_workspace_id,
+            "tenant_id": clean_tenant_id,
+            "email": clean_email,
+            "role": clean_role,
+            "iat": now_ts,
+            "exp": expires_at,
+        }
+    )
+    return {
+        "id": invite_id,
+        "tenant_id": clean_tenant_id,
+        "workspace_id": clean_workspace_id,
+        "email": clean_email,
+        "role": clean_role,
+        "status": "pending",
+        "invited_by_user_id": clean_inviter_id or None,
+        "created_at": now_ts,
+        "updated_at": now_ts,
+        "token": token,
+        "expires_at": expires_at,
+    }
+
+
+async def get_workspace_member_invite(invite_id: str) -> Optional[Dict[str, Any]]:
+    """Authoritative DB lookup of a single invite by id -- used by the accept
+    flow to confirm the invite is still 'pending' (not already accepted or
+    revoked) and that its stored email/role/workspace_id agree with the
+    signed token's claims, before any membership is granted.
+    """
+    clean_invite_id = str(invite_id or "").strip()
+    if not clean_invite_id:
+        return None
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    row = fallback.execute(
+                        "SELECT * FROM workspace_member_invites WHERE id = ? LIMIT 1",
+                        (clean_invite_id,),
+                    ).fetchone()
+            return _workspace_invite_record_from_row(row)
+        row = await connection.fetchrow(
+            "SELECT * FROM workspace_member_invites WHERE id = $1 LIMIT 1",
+            clean_invite_id,
+        )
+    if row is None:
+        return None
+    return {
+        "id": str(row["id"] or "").strip(),
+        "tenant_id": str(row["tenant_id"] or "").strip() or None,
+        "workspace_id": str(row["workspace_id"] or "").strip(),
+        "email": str(row["email"] or "").strip().lower(),
+        "role": str(row["role"] or "").strip() or "member",
+        "status": str(row["status"] or "").strip() or "pending",
+        "invited_by_user_id": str(row["invited_by_user_id"] or "").strip() or None,
+        "accepted_by_user_id": str(row["accepted_by_user_id"] or "").strip() or None,
+        "created_at": _ts_or_none(row["created_at"]),
+        "updated_at": _ts_or_none(row["updated_at"]),
+        "accepted_at": _ts_or_none(row["accepted_at"]),
+        "revoked_at": _ts_or_none(row["revoked_at"]),
+    }
+
+
+async def list_pending_workspace_invites(workspace_id: str) -> List[Dict[str, Any]]:
+    """The workspace-scoped counterpart to list_pending_workspace_invites_for_email
+    (email -> its pending invites): this goes workspace -> its own outstanding
+    invites, for the roster UI to show who's been invited but hasn't accepted.
+    """
+    clean_workspace_id = str(workspace_id or "").strip()
+    if not clean_workspace_id:
+        return []
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    rows = fallback.execute(
+                        """
+                        SELECT
+                            id, tenant_id, workspace_id, email, role, status,
+                            invited_by_user_id, accepted_by_user_id, metadata_json,
+                            created_at, updated_at, accepted_at, revoked_at
+                        FROM workspace_member_invites
+                        WHERE workspace_id = ?
+                          AND status = 'pending'
+                        ORDER BY created_at ASC, id ASC
+                        """,
+                        (clean_workspace_id,),
+                    ).fetchall()
+            return [item for item in (_workspace_invite_record_from_row(row) for row in rows) if item]
+        rows = await connection.fetch(
+            """
+            SELECT
+                id, tenant_id, workspace_id, email, role, status,
+                invited_by_user_id, accepted_by_user_id, metadata,
+                created_at, updated_at, accepted_at, revoked_at
+            FROM workspace_member_invites
+            WHERE workspace_id = $1
+              AND status = 'pending'
+            ORDER BY created_at ASC, id ASC
+            """,
+            clean_workspace_id,
+        )
+    return [
+        {
+            "id": str(row["id"] or "").strip(),
+            "tenant_id": str(row["tenant_id"] or "").strip() or None,
+            "workspace_id": str(row["workspace_id"] or "").strip(),
+            "email": str(row["email"] or "").strip().lower(),
+            "role": str(row["role"] or "").strip() or "member",
+            "status": str(row["status"] or "").strip() or "pending",
+            "invited_by_user_id": str(row["invited_by_user_id"] or "").strip() or None,
+            "accepted_by_user_id": str(row["accepted_by_user_id"] or "").strip() or None,
+            "created_at": _ts_or_none(row["created_at"]),
+            "updated_at": _ts_or_none(row["updated_at"]),
+            "accepted_at": _ts_or_none(row["accepted_at"]),
+            "revoked_at": _ts_or_none(row["revoked_at"]),
+        }
+        for row in rows
+    ]
 
 
 async def list_pending_workspace_invites_for_email(email: str) -> List[Dict[str, Any]]:
