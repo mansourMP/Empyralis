@@ -21,6 +21,13 @@ product concept.
 - AskAI — the third agent kind; live today as the "Ask Sage" launcher UI; rename to "Ask AI" `(planned)`
 - Deployed/Studio agents — a frozen, dormant reference implementation (marketplace, quotas, cost caps); not a live creation path `(built, not wired)`
 
+## Multiplayer / Workspace
+
+- Workspace invites — link-only; the platform has no outbound email sender at all, so the owner copies the returned link and shares it manually; invite bound to one email, role capped at the inviter's own, re-verified against the live DB row (not the token alone) on accept
+- `list_workspace_members` — real endpoint, viewer-role gated
+- Agent display-name uniqueness — DB-enforced unique index (guarded, self-healing dedupe) on top of the existing app-layer collision check on both create and rename
+- Numeric backstops: max wake-ups/task/day = 24; delegation depth cap = 30 (was an effectively-uncapped `999999` literal); the delegation retry path is now gated the same way the two creation paths already were
+
 ## Channels — Personal (require Agent Computer Gateway)
 
 - Telegram personal — GramJS via Gateway WSS
@@ -45,6 +52,12 @@ product concept.
 - GitHub, Linear, Notion, Dropbox, S3, SMTP, WeChat Work, Instagram Business — proven
 - Microsoft 365 — partial
 
+## Channels — Ingress Gates
+
+- One shared mention resolver (`mention_gating_service`) replaces four duplicated inline gates that used to live separately in WhatsApp, Telegram, local-bridge, and cloud code paths
+- `group_policy` (open / allowlist / disabled), `requireMention` defaults OFF — see-and-decide is the product default, not a hard mention gate; owner-configurable per agent per channel
+- Triage input-blocking gate removed entirely — every inbound message reaches the reasoning model, unconditionally; the model's own `[SILENT]` choice is unaffected
+
 ## Brains / Providers
 
 - Four payment modes on every agent's `model_config`: `platform_credits`, `byok_api`, `cli_subscription`, `local`
@@ -62,6 +75,10 @@ product concept.
 - `memory_read` / `memory_write` / `memory_list` — path-traversal-hardened LLM tools
 - Per-file caps (200 lines / 25KB) and per-agent file-count caps (40 hardware-backed / 20 cloud-only), enforced atomically
 - Self-maintaining `MEMORY.md` index — every write/delete upserts its own index line; index can never list a file that doesn't exist
+- Provenance + trust tiers (owner / non_owner_sender / unverified / agent_inferred), computed not stored; a non-owner or unverified write requires an `attribution_reason` or is rejected
+- `memory_search`/`memory_read` return a retrieval-honesty envelope (`status`/`files_searched`/`errors`) — a failed or incomplete search can never look like a confirmed-empty one
+- Secret redaction wired into all four native write seams (`memory_write_file`, `update_memory_context_file`, `memory_append_daily_note`, `apply_memory_consolidation_staging`) — previously wired to only one
+- No SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS root-file taxonomy — removed entirely, not hidden; `MEMORY.md` is the only official root memory file (durable profile facts live in an indexed `memory/files/profile.md` topic file instead)
 - Semantic/topic retrieval layer (SQLite `memory_entries`, optional embeddings) — gated, fires only when a message-heuristic says a query needs it
 - Cross-session continuity — old turns summarized and carried into the next session's metadata
 - Memory tab — per-agent file-tree browser, editable, live "starter scaffold" banner for untouched templates
@@ -76,6 +93,8 @@ product concept.
 - Identity always comes from the verified session, never from the tool call's own arguments — not model-forgeable
 - An empty agent id means the owner-facing agent's own turn (server-controlled signal, not a missing value)
 - Connector credentials are per-agent bound (`agent_connector_bindings`) on top of the project-scoped vault
+- MCP server-credential registry refuses a cross-agent overwrite instead of silently swapping whose account a provider resolves to (contained, not yet the full account-aware schema rework)
+- A subscribed (non-connecting) agent's connector reuse resolves its own enabled binding, not an unscoped "most recently connected" credential
 
 ## Skills
 
@@ -110,7 +129,9 @@ product concept.
 - 31 providers in the connections catalog (30 with a live MCP endpoint); 8 fully wired with an auto-registering bridge (Gmail, Calendar, GitHub, Notion, Linear, Slack, Figma, Dropbox); ~13 more wired via a frontend+backend bridge (ClickUp, Webflow, Monday.com, Box, Confluence, Miro, Intercom, DocuSign, Square, Typeform, Vercel, Calendly, Higgsfield); remainder OAuth-only at varying tool-completeness
 - Microsoft 365 — OAuth-only, no public MCP endpoint yet
 - Discord — has an OAuth config but no MCP-server entry by design; feeds the bot-token connector instead
-- Empyralis AS SERVER — 9 tools at `/mcp`, Bearer `empyralis_mcp_...` (SHA-256 hashed); 5 read tools live, 4 write tools gated behind `EMPYRALIS_MCP_WRITE_ENABLED`
+- Empyralis AS SERVER — 17 tools at `/mcp`, Bearer `empyralis_mcp_...` (SHA-256 hashed); 5 read + 4 task tools always live, 8 write tools gated behind `EMPYRALIS_MCP_WRITE_ENABLED`
+- The 4 task tools (list/get/update-status/comment on tasks) are deliberately NOT behind the write flag — gating self-status-reporting behind the same switch that unlocks agent creation would trade more privilege than the action needs
+- External agents (Codex/Claude Code sessions outside the platform) get a platform-minted identity at MCP-key mint, auto-named and collision-checked against platform agent labels too; `list_unified_roster` exposes one closed `{platform|external}` list for a future mention resolver
 
 ## Hardware & Gateway
 
@@ -166,3 +187,10 @@ product concept.
 - `vault_credentials` (Postgres) — BYOK secrets, Fernet-encrypted
 - Local JSON files (inconsistent with the Postgres-first pattern elsewhere): `mcp_servers.json` (MCP registry), `providers/profiles.json`, `automations/weekly_schedules.json`
 - `graphify-out/graph.json` — AST knowledge-graph cache, a dev artifact, not runtime storage
+- 18 of ~21 growing stores have no deletion path at all short of a full manual workspace wipe; a real, tested retention job exists and is never invoked in production; a full workspace wipe itself still misses 12 of the 21 stores
+
+## Known Defects — under active fix, verify against code before relying on it
+
+- Compaction (`compaction_service.py`, `sage_agent_runtime_service.py`) — the background auto-compaction job is a fire-and-forget `asyncio` task with no kept reference, wrapped in nested bare `except Exception: pass`, so it can silently never complete and never say why; 6 of 7 `compact_turns()` call sites never thread `previous_summary` through; `load_previous_summary` reads the OLDEST 10 turns in a thread, not the latest; a persisted compaction summary is filtered out by the very next reload (`role in {"user","assistant"}` excludes `compaction_summary`); the flat 16384-token reserve clamps `should_compact`'s threshold to 1 on small context windows (near-permanent compaction) while being disproportionately thin on 1M+ windows; `max_context_tokens=0` (documented as "use model default") silently becomes 128000 via a falsy-zero `or` bug
+- Billing — one real LLM call in the hosted-direct-chat path writes 3 ledgers, not the 4 a first-pass estimate assumed (the 4th, `deployed_agent_monthly_cost_ledger`, is scoped to a mutually exclusive surface); the assistant-reply-persisted-twice bug is already fixed (`text_ref` pointer replaces the duplicated text)
+- `normalize_model_tier()` — the Standard/Operator capability presets seed `model_tier: "standard"` and Knowledge seeds `"cheap"`; neither string is a real tier, so both silently resolve to the `"pro"` fallback with no error or log line

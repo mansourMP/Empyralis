@@ -23,6 +23,59 @@
 > fully swept; treat every remaining prose "Sage" as this stand-in, not as
 > a still-live named entity.
 >
+> **2026-07-24 refresh — memory hardening wave, isolation closures,
+> multiplayer Phase 1, channel see-and-decide restored, taxonomy removed,
+> Known Defects section added.** Six things landed in the ~3 days before
+> this refresh, none previously reflected here:
+> **Memory** (Part 16) — per-file caps (200 lines/25KB, same discipline as
+> the index), placement-aware file-count caps (40 hardware-backed / 20
+> cloud-only), a self-maintaining `MEMORY.md` index that can never list a
+> nonexistent file, provenance + trust tiers (owner/non_owner_sender/
+> unverified/agent_inferred) with non-owner writes requiring an
+> `attribution_reason`, a retrieval-honesty envelope on `memory_search`/
+> `memory_read` (a failed search can no longer look like a confirmed-empty
+> one), and secret redaction wired into all four native write seams (it was
+> previously wired to one).
+> **Isolation** (Part 27, new §27.9/§27.10) — Gateway on-box file/shell
+> mounts are now agent-scoped (`agent-<install_id>__<bucket>`), closing a
+> vector this map hadn't previously named; a tripwire test now guards the
+> invariant it depends on; MCP-registry credential collisions are refused
+> loudly instead of silently overwritten (contained, not the full
+> account-aware schema rework); connector-binding reuse now resolves a
+> subscribed agent's own bound credential instead of an unscoped
+> "most-recent" fallback.
+> **Multiplayer** (new Part 30) — workspace invites (link-only, no email —
+> the platform has no outbound email sender at all), `list_workspace_members`,
+> external-agent identity minted at MCP-key mint with auto-naming and a
+> unified `{platform|external}` roster, 4 MCP task tools deliberately not
+> behind `EMPYRALIS_MCP_WRITE_ENABLED`, agent label uniqueness enforced at
+> the DB level, and three numeric backstops (max wakes/task/day, delegation
+> depth 999999 → 30, gated retry path).
+> **Channels** (Part 5 §5.6) — one shared mention resolver replaces four
+> duplicated inline gates; `group_policy` (open/allowlist/disabled) with
+> `requireMention` defaulting OFF restores see-and-decide as the product
+> default; the triage input-blocking gate is deleted outright — every
+> inbound message reaches the model, unconditionally.
+> **Taxonomy removal** — see the 2026-07-23 update inside Part 16: the
+> SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS root-file taxonomy is gone, not
+> just hidden; `MEMORY.md` is the only official root memory file.
+> **New: Part 31, Known Defects** — compaction bugs (background job that
+> can silently never run, a keep-recent floor that no-ops on short
+> conversations, 6 of 7 call sites never threading `previous_summary`,
+> compaction summaries dropped by the next-turn loader, a flat 16384-token
+> reserve that breaks both small and huge context windows, `max_context_
+> tokens=0` silently becoming 128000) — **a build agent is actively
+> changing this code as this section is being written; verify against
+> current code before relying on any line number in it** — plus storage
+> lifecycle facts (18 of 21 growing stores have no deletion path; the
+> retention job is built but never invoked) and a live silent-default bug
+> in `normalize_model_tier()`.
+> Also corrected in this pass: `mcp_server.py` had grown from 9 tools to
+> **17** (this map still said 9 in five places); the storage audit's own
+> "4 billing ledgers" estimate was already corrected in-repo to a verified
+> **3x** for the one call shape that actually co-fires — carried through
+> here rather than repeating the older number.
+>
 > **2026-07-23 refresh — skill-catalog unification, commit `86d1f94c5`
 > (22/22 tests green).** **Skills** (§14) rewritten: the hardcoded
 > `_CURATED_SKILL_PACK` (1Password/Apple Notes/Apple Reminders/tmux, zero
@@ -183,7 +236,7 @@
 │  │   ├─ Gateway path ── gateway_execution_service.py → Gateway WSS       │
 │  │   └─ VPS path ── local_queue.py → VPS worker (HTTP poll)              │
 │  │                                                                       │
-│  ├─ MCP Server (Empyralis AS MCP) ── mcp_server.py (9 tools at /mcp)     │
+│  ├─ MCP Server (Empyralis AS MCP) ── mcp_server.py (17 tools at /mcp)    │
 │  ├─ MCP Auth ── mcp_server_auth.py (per-workspace API keys)             │
 │  ├─ OAuth Vault ── vault_store.py + connection_oauth_service.py          │
 │  └─ Preflight ── preflight.py (kernel, Postgres, Redis checks)           │
@@ -348,10 +401,11 @@ Empyralis has a DUAL MCP role:
 - Transport: streamable_http only (no stdio, no SSE)
 
 **2. Empyralis AS MCP SERVER** — external AI clients connect TO Empyralis at `/mcp`
-- Files: `mcp_server.py` (9 tools), `mcp_server_auth.py` (per-workspace API keys)
+- Files: `mcp_server.py` (858 lines, 17 tools — verified 2026-07-24, see Part 6.6 for the corrected table and Part 30 for the task tools/external-agent-identity work that grew it from 9), `mcp_server_auth.py` (per-workspace API keys)
 - Auth: Bearer token (`empyralis_mcp_...`) — SHA-256 hashed storage
-- 5 read tools (live): list_agents, get_agent_activity, memory_read, memory_list, chat
-- 4 write tools (gated behind `EMPYRALIS_MCP_WRITE_ENABLED=true`): create_agent, configure_agent, message_agent, memory_write
+- 5 read tools (always live): list_projects, list_agents, get_agent_activity, get_agent_conversations, chat
+- 4 task tools (always live, deliberately NOT behind the write flag — Part 30): list_my_tasks, get_task, update_task_status, comment_on_task
+- 8 write tools (gated behind `EMPYRALIS_MCP_WRITE_ENABLED=true`): create_project, create_agent, configure_agent, message_agent, assign_channel_bot, release_channel_bot, connect_connector, trigger_test_turn
 
 ---
 
@@ -366,7 +420,7 @@ This IS the production backend. Everything below lives at `server_modules/`.
 | File | Lines | Purpose |
 |------|-------|---------|
 | `server.py` | ~400 | FastAPI app, CORS, 21 router mounts, exception handlers, MCP mount, preflight |
-| `mcp_server.py` | 267 | Empyralis AS MCP server — 9 tools at `/mcp` for external AI clients |
+| `mcp_server.py` | 858 | Empyralis AS MCP server — 17 tools at `/mcp` for external AI clients (verified 2026-07-24; was 267 lines/9 tools before Part 30's task tools + external-agent identity) |
 | `mcp_server_auth.py` | ~120 | Per-workspace MCP API key creation, SHA-256 hashing, revocation, resolution |
 | `preflight.py` | 223 | Startup checks: kernel binary, Postgres (+stage_4b columns), Redis |
 | `runtime_config.py` | — | Env, paths, provider resolution |
@@ -1215,6 +1269,68 @@ Re-verified each of the six channels above against current code. What changed or
 - **iMessage** — the most complete of the three "bridge" channels: `empyralis-gateway/src/bridges/bluebubbles-bridge.ts` (421 lines) is a genuinely complete BlueBubbles HTTP bridge, and the UI (`LocalBridgeChannelStatus`, `FleetAgentDetail.tsx:987-1022`) honestly shows live bridge health rather than a faked "connected" state — its own comment explicitly rejects inventing a connected state. There is no in-app pairing *flow* by design (the UI tells the user to set two env vars manually), and — same pattern as Slack/Discord — no verified way for an agent other than the owner-facing agent to own an iMessage conversation.
 - **WeChat** — every layer's own code comments call it unbuilt: *"Personal WeChat has no official API to build a bridge against, so this isn't supported yet"* (`SageLauncher.tsx:53`); the connector catalog entry itself says *"Not launch-ready until the local bridge runtime is certified"* (`connection_catalog_service.py:272`). No bridge program exists anywhere under `empyralis-gateway/src/bridges/` (confirmed by directory listing — only BlueBubbles and signal-cli live there). The generic personal-channel HTTP route would accept and forward a `wechat_personal` send, but nothing at the far end can deliver it. (A separately-named, unrelated `wechat_work` connector — outbound-only enterprise WeCom webhooks — is real and marked "PROVEN" in §5.3; don't conflate the two.)
 
+### 5.6 Ingress gates — group policy, the shared mention resolver, and the triage-gate removal (2026-07-23)
+
+Two separate changes to what happens BEFORE a message reaches the model,
+both founder-ruled, both verified against current code.
+
+**One shared mention resolver replaces four duplicated inline gates.**
+`mention_gating_service.resolve_inbound_mention_decision()`
+(`mention_gating_service.py:46-103`) is now the single place the rule
+`shouldSkip = requireMention && canDetectMention && !wasMentioned` is
+evaluated — it used to be reimplemented separately for WhatsApp, Telegram,
+the local-bridge channels, and the cloud path. The gateway Telegram/WhatsApp
+runtimes no longer decide anything themselves; they compute and forward
+mention facts (`was_mentioned`, `can_detect_mention`) and the backend
+resolver is the one decision point.
+
+**`group_policy` — a new, owner-configurable axis, mirroring `dm_policy`'s
+storage pattern.** Stored per-agent per-channel at
+`install_metadata.group_policy[channel_key]`
+(`personal_channels_service.py:1236-1289`), three modes
+(`GROUP_POLICY_MODES = {open, allowlist, disabled}`,
+`personal_channels_service.py:1224`), **default `open`**
+(`DEFAULT_GROUP_POLICY_MODE`, `:1225`), with a `require_mention` flag
+**defaulting to `False`** (`DEFAULT_REQUIRE_MENTION`, `:1226`) — i.e.
+see-and-decide, not a hard mention gate, out of the box. An unresolved
+identity (e.g. Signal/iMessage/WeChat's permanently-empty `agent_id`) falls
+back to this same open default rather than a stricter one, deliberately —
+a stricter fallback here would have silently disabled every group for every
+local-bridge channel (`:1256-1269`, the function's own docstring explains
+why this differs from `dm_policy`'s owner-only fallback).
+
+**This is a restoration, not a new default.** An unconditional hard
+mention-gate had crept in over two prior commits (`0fe9ada19`, `c8b8fbed0`,
+after a family-group spam incident) — contradicting an existing
+2026-07-16 see-and-decide ruling. `requireMention=True` reproduces that old
+hard gate byte-for-byte (asserted by test); the founder-approved default is
+now `False` again, an owner-pullable lever rather than baked-in behavior.
+
+**A real bug fixed en route:** `_build_personal_channel_envelope` used to
+hardcode `addressed=True` for every group message, regardless of whether a
+mention actually occurred — harmless under the old hard gate (nothing
+downstream read the flag when everything was pre-filtered), but a lie under
+see-and-decide: it told the agent it was addressed directly by every single
+group message. Honest `was_addressed` facts now thread through the whole
+reply chain, so the see-and-decide judgment the model makes is based on
+real data, not a constant `True`.
+
+**The triage input-blocking gate is deleted outright, separately
+(`6d15bb05d`).** A prior "Phase P" gate — an LLM scope-classifier that, on a
+`"no"` verdict, blocked the turn entirely and substituted a canned decline,
+with no owner exemption — is removed at the `sage_turn_adapter` chokepoint.
+Founder ruling: **no filter may flag-and-withhold a message from the
+reasoning model, and no canned reply may speak for the agent.**
+`triage_service.py` was gutted from 548 to 84 lines, keeping only
+`resolve_sender_identity()` (`:30`) — genuine, still-live output-side
+identity classification (owner/audience/system), not an input gate. The
+now-dead `agent_presets.py` (its only payload was triage configs) was
+deleted outright; its sole importer was an unwired proof script, also
+deleted. The `[SILENT]`-by-reasoning output mechanism (the model's own
+choice not to reply) is untouched — this removal is specifically about a
+pre-reasoning filter that used to withhold the message from the model in
+the first place, never about the model's own output.
+
 ---
 
 ## Part 6: MCP/Apps Layer — Truth Table
@@ -1274,21 +1390,43 @@ canva, asana, zoom, airtable, stripe, salesforce, webhook, gitlab, and others �
 
 **Total:** 31 providers in catalog (30 with a live MCP endpoint; `microsoft_365` remains endpoint=null per §6.4). Honest status per provider (live/partial/preview). Single source: `GET /api/connections/mcp-catalog`. (Verified 2026-07-19 via `len(connection_oauth_service.OAUTH_PROVIDER_CONFIGS)` == 32 — the 31 above plus `discord`, which has an OAuth config but intentionally no `APP_MCP_SERVER_MAP` entry; its OAuth flow feeds the bot-token `discord_bot` connector instead, not an MCP server.)
 
-### 6.6 Empyralis IS an MCP Server (Phase U2)
+### 6.6 Empyralis IS an MCP Server (Phase U2, corrected + expanded 2026-07-24)
+
+**Corrected from a prior version of this table**, which listed 9 tools
+including `empyralis_memory_read`/`_memory_list`/`_memory_write` — none of
+which exist in `mcp_server.py` today; that version predates this map's own
+last verification and was never caught. Verified directly against
+`mcp_server.py`'s `EMPYRALIST_MCP_TOOLS` list (`:94-116`) — **17 tools**,
+in three groups:
 
 | Tool | Type | Description |
 |------|------|-------------|
-| `empyralis_list_agents` | Read | List all agents in workspace |
-| `empyralis_get_agent_activity` | Read | Recent ledger activity for a specific agent |
-| `empyralis_memory_read` | Read | Read memory entry by key |
-| `empyralis_memory_list` | Read | List all memory entries |
-| `empyralis_chat` | Read | Full turn through triage + reasoning |
+| `empyralis_list_projects` | Read (always live) | List projects in workspace |
+| `empyralis_list_agents` | Read (always live) | List all agents in workspace |
+| `empyralis_get_agent_activity` | Read (always live) | Recent ledger activity for a specific agent |
+| `empyralis_get_agent_conversations` | Read (always live) | Recent conversation turns for a specific agent |
+| `empyralis_chat` | Read (always live) | Full turn through the agent runtime (no separate "triage" gate remains — see Part 5 §5.6) |
+| `empyralis_list_my_tasks` | Task (always live, not write-gated) | Tasks assigned to this MCP key's caller (Part 30) |
+| `empyralis_get_task` | Task (always live, not write-gated) | Any task visible to this workspace key |
+| `empyralis_update_task_status` | Task (always live, not write-gated) | Status-only update on a task |
+| `empyralis_comment_on_task` | Task (always live, not write-gated) | Append a comment to a task |
+| `empyralis_create_project` | Write (gated) | Create new project |
 | `empyralis_create_agent` | Write (gated) | Create new specialist agent |
 | `empyralis_configure_agent` | Write (gated) | Configure agent settings |
 | `empyralis_message_agent` | Write (gated) | Send message to agent's fleet inbox |
-| `empyralis_memory_write` | Write (gated) | Write a memory entry |
+| `empyralis_assign_channel_bot` | Write (gated) | Assign a hosted/BYO channel bot to an agent |
+| `empyralis_release_channel_bot` | Write (gated) | Release a channel bot from an agent |
+| `empyralis_connect_connector` | Write (gated) | Start an OAuth connect flow, returns `authorization_url` |
+| `empyralis_trigger_test_turn` | Write (gated) | Fire a test turn for a deployed agent |
 
-Auth: Bearer `empyralis_mcp_...` (SHA-256 hashed). Write tools gated behind `EMPYRALIS_MCP_WRITE_ENABLED=true`. All calls ledgered with `event_class: mcp_inbound`, `actor: external_mcp_client`.
+Auth: Bearer `empyralis_mcp_...` (SHA-256 hashed), or an opt-in OAuth path
+(`EMPYRALIS_MCP_OAUTH_ENABLED`) that falls back to the same legacy
+bearer-key resolution when a token doesn't verify against the OAuth tables
+(`mcp_server.py:147-189`, `_resolve_workspace`). Write tools gated behind
+`EMPYRALIS_MCP_WRITE_ENABLED=true` (a **global** off-switch — `_WRITE_ENABLED_
+GLOBAL`, `:118-120` — plus a per-key `writes_enabled` flag); the 4 task tools
+are deliberately exempt from that gate (Part 30 explains why). All calls
+ledgered with `event_class: mcp_inbound`, `actor: external_mcp_client`.
 
 ---
 
@@ -1421,7 +1559,7 @@ Per the platform vision: the cure for doubt is ONE real user who finds it useful
 - ✅ Slack channel (PROVEN)
 - ✅ OAuth → MCP bridge for 8 providers
 - ✅ MCP catalog API with 30 honest statuses
-- ✅ Empyralis as MCP server (9 tools, per-workspace API keys)
+- ✅ Empyralis as MCP server (17 tools, per-workspace API keys)
 - ✅ Fleet tools: create, configure, list agents
 - ✅ **Fleet Home UI** — agent grid, status strip, "New agent" button
 - ✅ **4-step create-agent wizard (v2)** — Placement → Brain → Channels → Connections, agent created on Step 1, auto-named from a curated pool, inline click-to-edit rename from the Overview tab (Part 2.5, Part 13)
@@ -2191,6 +2329,90 @@ component was found that renders based on it, but this codebase has two
 apparent UI generations layered on top of each other and a negative grep
 result isn't proof no consumer exists anywhere.
 
+> **2026-07-23/24 update — the memory hardening wave: caps, a
+> self-maintaining index, provenance/trust tiers, a retrieval-honesty
+> envelope, and redaction on all four write seams.** Five commits
+> (`b06402bf1`, `5d982fb66`, `cdef2d363`, `58dda68a8`, plus the count-cap
+> tune in `65ee1c6ca`), verified against current code, not just the commit
+> messages.
+>
+> **Caps.** Every topic file (`memory/files/*.md`) and `MEMORY.md`'s own
+> index share the identical discipline: 200 lines / 25,000 bytes,
+> whichever hits first (`MEMORY_TOPIC_FILE_MAX_LINES`/`_MAX_BYTES`,
+> `workspace_context.py:150-151`; `MEMORY_MD_INDEX_MAX_LINES`/`_MAX_BYTES`,
+> `memory_service.py:988-989`) — an explicit `ValueError` telling the agent
+> to shorten/split, never silent truncation. File-COUNT is capped
+> separately and is placement-aware: **40 for hardware-backed agents**
+> (`MEMORY_TOPIC_FILE_MAX_COUNT`, `workspace_context.py:126`), **20 for
+> cloud-only agents** (`MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY`, `:136` —
+> this went 5→10 in `cdef2d363` then 10→20 in `65ee1c6ca`; 20 is the
+> current, verified value). A real bug was fixed en route:
+> `_count_existing_user_memory_files` used to scan only the top level via
+> `iterdir()`, so a categorized file (`memory/files/customers/acme.md`)
+> never counted toward the cap at all — unlimited files could be created
+> past the stated limit; it's `rglob`-based now, with the one-category-
+> level rule preserved.
+>
+> **Self-maintaining index.** Every memory write requires a description and
+> auto-upserts `MEMORY.md`'s own index line for that file; every delete
+> removes it. The index cap (above) is pre-validated so an overflow fails
+> the whole write atomically — never a partial save that could leave a
+> dangling index entry. The owner's manual editor and the agent's own
+> tools share one chokepoint, so this holds regardless of who's writing.
+>
+> **Provenance + trust tiers.** `derive_trust_tier()`
+> (`agent_memory.py:71-115`) computes — never stores stale — one of four
+> tiers from the write's own source columns: `owner`, `non_owner_sender`
+> (a named, confirmed-non-owner sender), `unverified` (real sender/platform
+> info recorded but ownership itself unconfirmed), `agent_inferred` (no
+> source recorded at all). A write filter
+> (`requires_attribution_reason()`/`MemoryAttributionRequiredError`,
+> `agent_memory.py:122-130,559-602`) now **requires** an
+> `attribution_reason` for any `non_owner_sender`/`unverified` write —
+> closing the "brother scenario" (a non-owner's claim getting stored as an
+> unqualified owner-grade fact) — while leaving `owner` and
+> `agent_inferred` writes byte-for-byte unaffected. The source marker is
+> baked into the stored text at write time, so every downstream
+> read/injection/consolidation carries attribution with zero loader
+> changes, and dedup comparison strips the marker so cross-sender
+> restatements still compare fairly. A new `memory_entries_history` audit
+> table records what changed and why on every update.
+>
+> **Retrieval-honesty envelope — the fix for silent-empty hallucination.**
+> `memory_search` (`agent_memory.py:1020-1145`) now returns
+> `{status, files_searched, errors, message}` where `status` is one of
+> `not_searched` ("the search never ran"), `no_matches` ("every file that
+> exists was checked — this is a confirmed result"), `incomplete` ("N files
+> could not be read and were NOT searched — do not conclude nothing is
+> saved"), or `matches_found`. Unreadable files now surface in an `errors`
+> list instead of being swallowed by a bare `except Exception: continue` —
+> a file holding the real answer can no longer vanish exactly like one that
+> never existed. `memory_read` gained an explicit `exists` field so
+> missing-file and curated-but-empty are finally distinguishable. The
+> isolation fix in §27.9 below separately flattened this envelope at the
+> dispatch site so `status`/`errors` actually reach the model instead of
+> being buried a level deeper.
+>
+> **Secret redaction — wired into all FOUR native write seams, not one.**
+> The originally-shipped redaction was wired only to
+> `agent_memory_tools.py` (reachable via `skill_invoke`) — but the kernel
+> prompt tells the model to call the **native** `memory_write` tool, which
+> dispatches to `memory_service.py` and had no redaction at all, so
+> "remember my API key is sk-…" was stored in cleartext in `MEMORY.md`,
+> re-injected every turn. `secret_redaction_service.redact_text` is now
+> wired into `update_memory_context_file` (`memory_service.py:763-806`),
+> `memory_write_file` (`:1231-1292`), `memory_append_daily_note`
+> (`:1423-1453`, replacing a weak 3-pattern local redactor), and
+> `apply_memory_consolidation_staging` (`:1641-1694` — found during
+> re-audit; it writes model-composed merged content straight to disk,
+> bypassing the other three seams entirely, and can target `MEMORY.md`
+> itself). Redaction runs before the attribution gate's effects, the
+> line/byte cap, the file-count cap, and the index upsert, so it composes
+> with all of them by construction — the attribution gate still blocks a
+> non-owner write regardless of secret content. When something is
+> redacted, the tool result says so, so the agent can tell the user the
+> note was saved without the secret; silent redaction would be its own lie.
+>
 > **2026-07-23 update — the SOUL.md/IDENTITY.md/USER.md/GOALS.md/AGENTS.md/
 > TOOLS.md root-file taxonomy is REMOVED, not just hidden.** A prior commit
 > (`57ee98d82`) had already deleted the one paragraph of prompt text that
@@ -3532,6 +3754,107 @@ account, agent A's tool call can silently execute against agent B's
 credential today. That is the one vector that needs an actual code fix,
 not just a test.**
 
+### 27.9 2026-07-23 — a new vector this audit hadn't named: Gateway on-box file/shell mounts, now closed
+
+Multiplayer plan §1 bug wave (MAN-70). The verdict table above (§27.8)
+covers memory, workspace files, conversation history, connector
+credentials, channel routing, and prompt-injection precedence — it does
+**not** cover the Gateway's own on-box `filesystem.read_write`/
+`shell.execute` tools, which turned out to have the identical leak shape as
+vector D, just for files instead of secrets.
+
+**The gap:** `empyralis-gateway/src/shell/runtime.ts`'s `ensureWorkspaceDir`
+(`:145-149`) computes the on-disk path as `mounts/<mount>/<workspace_id>/`
+for **both** capabilities — keyed on `(mount-bucket, workspace_id)` only,
+never on which agent is calling. Any two agent installs sharing a
+workspace and a Gateway box landed on the literal same directory.
+
+**The fix (`da6b36242`):** the mount name itself is now agent-scoped
+server-side, before it ever reaches the Gateway.
+`hardware_runtime_adapters/gateway_adapter.py`'s `_agent_scoped_mount()`
+folds the calling agent's install id into the mount as
+`agent-<scoped_id>__<base_mount>` for both `filesystem.*` (via
+`_resolve_file_mount_for_gateway_action`) and `shell.execute` (applied
+separately in `execute_gateway_action`, since shell has no single target
+path to resolve a mount grant against). `agent_install_id` is threaded
+through from verified session identity
+(`skills_service._agent_install_id_from_direct_tool_context`) down through
+`hardware_action_broker_service.execute_hardware_action` — **never** read
+from the tool call's own arguments. A deliberate, verified-before-choosing
+deviation from a blanket fail-closed guard: the owner-facing agent's own
+turn passes an empty install id by design (matching the memory precedent
+in §27.1) — fail-closed would have broken the highest-volume caller
+outright, so empty stays a server-controlled, non-forgeable signal for the
+owner's own agent, while every real specialist identity gets isolated.
+
+**The invariant is now tripwired (`61b187045`):** nothing previously
+guarded "a customer-facing turn always stamps a non-empty
+`agent_install_id`" — existing tests hand-built `session_ctx`, so a future
+refactor could silently drop the stamping in `_run_sage_action_loop_v3` and
+every test would stay green while specialists quietly inherited the wide,
+workspace-shared mount again. A new test drives `handle_sage_chat`
+end-to-end with a real `SpecialistRuntimeContext` (mocking only the LLM
+call and unrelated I/O, never identity itself), captures the actual
+`session_ctx` handed to generation, and resolves it through
+`skills_service`'s own resolver — covering two distinct specialists (ruling
+out a hardcoded constant) and asserting the owner-facing agent's empty
+identity stays valid through the identical path.
+
+### 27.10 2026-07-24 — connector credential leaks: §1.2 closed, §1.3 contained
+
+Same commit wave, same leak class as §27.9, this time for vector D
+(connector credentials) and a related MCP-registry gap the original audit
+hadn't separately named.
+
+**§1.2 — connector reuse now resolves the right credential, closed.**
+`secrets_broker.resolve_provider_secret`'s agent-identified branch used to
+raise outright when the calling agent held no `vault_credentials` row of
+its own. It now falls back to `_resolve_bound_connector_credential_id()`
+(`secrets_broker.py:574-607`), which checks for an **enabled**
+`agent_connector_bindings` row for `(workspace_id, agent_id,
+connector_key)` and resolves that credential id directly — never the
+unscoped "most recently updated in the workspace" fallback a different,
+milder-risk code path (`runs_execution.py`'s `_workflow_tool_connector_
+secret`) still uses. This closes the real case of a *subscribed* agent
+(one that didn't originally connect the credential, but was bound to reuse
+someone else's project-scoped one) resolving correctly instead of falling
+through to a wrong-owner guess. Owning agents (the ones with their own
+vault row) never hit this new path at all.
+
+**§1.3 — MCP registry silent overwrite: INTERIM CONTAINMENT, not the full
+fix, and said so in the commit itself.** The registry key is
+`(workspace_id, server_id)`, with `server_id` a static per-provider slug —
+it carries no account/credential discriminator, so a second agent
+connecting its own account of the same provider in the same workspace
+would silently overwrite the row every agent's tool calls resolve through.
+The real fix (making the key itself account-aware) ripples into
+`mcp_skill_id()`/`mcp_tool_name()`, the tool-listing/approval UI, and both
+tool-injection paths in `sage_agent_runtime_service.py` — too invasive to
+land in one pass without a migration. What shipped instead:
+`_assert_no_cross_agent_credential_collision()`
+(`mcp_registry_service.py:248-355`) refuses the upsert loudly
+(`McpServerCredentialCollisionError`) instead of silently swapping whose
+credential the row resolves to, migration-safe (same-agent reconnect /
+first assignment / legacy workspace-shared rows are all still allowed,
+unchanged); OAuth registration surfaces a collision in a `collisions` list
+instead of a swallowed warning; the specialist read path now filters out
+MCP tools whose credential belongs to a different agent (fails closed).
+**Remaining gap, reported not silently left:** primary-agent (owner-facing
+agent) tool injection still carries no per-call agent identity — a full
+account-aware server-id scheme needs identity threaded through four
+facade layers, tracked as follow-up, not forced into this pass.
+
+**§1.5 — account labels now real, not `"default"`.** The connect flow
+probes the provider profile (reusing the same `profile_probe` "Test
+connection" already used elsewhere) and writes the real account email into
+`account_label` — best-effort, never fabricates a label it can't confirm.
+
+**Net effect on the §27.8 verdict table:** vector D moves from "GAP —
+CRITICAL, confirmed & reproduced" to **partially closed** — the reuse path
+(§1.2) and the MCP-registry silent-overwrite shape (§1.3) are addressed;
+the primary-agent MCP-injection identity gap (§1.3's own "remaining gap")
+is still open and is the next real fix in this vector, not a new one.
+
 ---
 
 ## Part 28: Provider Resolution — Per-Agent `model_config` Audit (2026-07-14)
@@ -3900,6 +4223,351 @@ pass's scope.
 
 ---
 
+## Part 30: Multiplayer — Workspace Invites, External-Agent Identity & MCP Task Tools (2026-07-24)
+
+Multiplayer Projects Phase 1 (MAN-70) — a second human entering a
+workspace — plus wave one of a separate mentions/identity plan. Two
+commits, `fdbbc7b09` and `fbd3076b1`, verified against current code.
+
+### 30.1 Workspace invites — link-only, because there is no outbound email sender on the platform at all
+
+**The gap this closes:** the `workspace_member_invites`-shaped tables
+already existed; nothing created an invite and there was no
+list-members endpoint. Zero endpoints existed in `routes_workspaces.py`
+before this commit.
+
+**What it is.** `create_workspace_invite`
+(`control_plane_repository.py`) signs an expiring invite token by reusing
+the existing HMAC bearer-token utility (`jwt_secret.resolve_jwt_secret`)
+with a `typ=workspace_invite_v1` domain separator, so the token can never
+be replayed as a real session token. The invite is bound to a specific
+email at creation (`POST /workspaces/{id}/invites`,
+`routes_workspaces.py:904-955`, owner-only, role can never exceed the
+inviter's own — `:927-928`). **Accepting is genuinely link-only: no email
+is ever sent** — the owner copies the returned `token`/link and shares it
+however they want (Telegram, Slack, copy-paste). Accepting
+(`POST /workspaces/invites/accept`, `:1012-1058`) re-verifies the token
+signature, re-checks the underlying DB row is still `status="pending"`
+(not trusting the token's claims alone), and requires the authenticated
+caller's own account email to match the invite's email exactly
+(`:1045-1046`) before calling `ensure_workspace_membership`. Any
+authenticated user may call the accept route — there's no workspace-role
+gate on it, correctly, since the caller isn't a member of the target
+workspace yet by definition (`:1018-1020`).
+
+**`list_workspace_members`** (`GET /workspaces/{id}/members`,
+`:986-1009`) — the missing workspace→members forward lookup, viewer-role
+gated.
+
+**A real blocking bug was found and fixed en route.**
+`accept_workspace_invite`'s kernel policy gate only accepted the
+`apply_control_plane_write` decision — but the Rust kernel's actual
+decision for `invite_accept` is `allow_control_plane_read` (the invitee
+has no standing in the target workspace yet, so a write-tier decision
+was never going to be returned). Every real accept call raised a
+`RuntimeError` until the allowed set was widened to include both
+(`control_plane_repository.py`, `"invite_accept": {"apply_control_plane_
+write", "allow_control_plane_read"}`). This was masked because no
+pre-existing test drove a realistic kernel allow-decision for this
+operation — caught only once a real second-user fixture
+(`second_real_user_in_workspace`, real registration + membership against
+the DB path, not a synthetic user dict) was built for this pass.
+
+### 30.2 Agent label uniqueness — DB-enforced, not just app-layer
+
+**The gap:** `fleet_create_agent`'s auto-naming path was already
+collision-checked against every existing label in the workspace
+(case-insensitive, `agent_name_pool.assign_agent_name`) — but the manual
+rename path (`fleet_configure_agent`'s `display_name` PATCH,
+`fleet_tools.py`) wrote straight to `workspace_agent_installs.label`
+with **zero** collision checking, and no DB constraint backed either
+path. Two agents in the same workspace could end up sharing a display
+name — ambiguous both for a human reading the fleet roster and for a
+closed-roster mention resolver that has to map a typed name back to
+exactly one agent id.
+
+**The fix.** Rename now runs the identical case-insensitive collision
+check creation already did. A guarded unique index
+(`migrations/add_workspace_agent_installs_label_uniqueness.sql`) lands
+with a deterministic dedupe pass first: within any
+`(tenant_id, workspace_id, lower(label))` group with more than one
+member, the earliest-created row keeps its name and every later
+duplicate is renamed to the smallest non-colliding `"<label> N"` suffix
+— checked live against the whole table, so it can never manufacture a
+new collision against an unrelated agent. No row is deleted or disabled.
+Idempotent (safe to run more than once, safe on an empty table); the
+identical guarded logic also runs automatically on every process boot
+via `control_plane_repository.py`'s `ensure_control_plane_schema`, so a
+fresh deploy self-heals without the migration file needing to be run by
+hand.
+
+### 30.3 External-agent identity — minted by the platform at the MCP-key mint, never by the brain
+
+**The rule this enforces:** identity is minted by the PLATFORM at the
+connection boundary; brains never have identity of their own.
+
+- **Platform agent** identity = its existing `workspace_agent_installs.id`
+  (unchanged, unrelated to this module).
+- **External agent** — a Codex/Claude Code session run OUTSIDE the
+  platform, connected only through `/mcp` — has no such row. Its identity
+  is minted the moment its MCP bearer key is created
+  (`mcp_server_auth.create_workspace_mcp_api_key` →
+  `mcp_external_agent_roster_service.register_external_agent`). The
+  bearer key's SHA-256 hash IS its authentication of identity — `key_hash`
+  is UNIQUE and is the exact hash `resolve_workspace_from_api_key` already
+  computes on every call, so identity resolution never needs a second
+  auth path. Storage is a dedicated table, `mcp_external_agent_roster`
+  (`migrations/add_mcp_external_agent_roster.sql`), scoped like `projects`/
+  `project_tasks` (no RLS; every query filters by `tenant_id`+`workspace_id`
+  explicitly).
+- **Auto-naming, collision-checked against the UNION of both kinds** —
+  `_existing_roster_names()` (`mcp_external_agent_roster_service.py:63-70`)
+  checks names already taken across both `mcp_external_agent_roster` and
+  `workspace_agent_installs`, so a platform agent named "Atlas" and an
+  external agent auto-named "Atlas" can never both exist — ambiguous the
+  moment a mention resolver has to pick one. Pre-existing MCP keys are
+  lazily self-healing-backfilled with an identity the first time they're
+  seen post-migration.
+- **`list_unified_roster()`** (`:245+`) is the ONE interface a future
+  @-mention resolver is meant to read — it merges the external table
+  (`kind="external"`) with `workspace_agent_installs` (`kind="platform"`)
+  so the model/UI always chooses from one closed roster, never a
+  free-typed id, regardless of which kind of agent it's addressing.
+- **OAuth-path sessions explicitly return `external_agent_id: None`**,
+  not a silent omission — Step 2 of this plan only integrated the legacy
+  bearer-key path; an OAuth-issued Connector session has its own client
+  identity in the OAuth tables that this pass deliberately left untouched
+  (OAuth is opt-in and off by default — see Part 6.6).
+
+### 30.4 The 4 MCP task tools — the founder's own daily loop (open Codex → check Empyralis → pull a task → work → comment back)
+
+`empyralis_list_my_tasks`, `empyralis_get_task`, `empyralis_update_task_
+status`, `empyralis_comment_on_task` (Part 6.6 has the full tool table).
+Workspace is always derived from the bearer key, **never** from a tool
+argument — the module docstring documents explicit cross-tenant leak
+proofs. Comments live in the task's own `metadata` via one atomic
+`jsonb_set` (no read-modify-write race); a real threaded-comment surface
+is future work, not shipped here.
+
+**Deliberately NOT behind `EMPYRALIS_MCP_WRITE_ENABLED`, reasoned in the
+module docstring, not an oversight:** that flag also unlocks agent
+creation and channel takeover — gating an agent's own self-status
+reporting behind the same switch would trade far more privilege than the
+action actually needs, especially since `empyralis_chat` (also
+free-form) is already ungated. Trivially reversible if this reasoning is
+ever revisited.
+
+### 30.5 Numeric backstops — every cap a loud error, never a silent clamp
+
+Three separate literal-or-missing caps were replaced with real, named
+constants in this pass, part of the same "reasoning-completion needs a
+numeric backstop" doctrine documented in
+`docs/design/multi-agent-coordination-research.md`:
+
+- **`DEFAULT_MAX_WAKES_PER_TASK_PER_DAY = 24`**
+  (`bounded_scheduler_service.py:33`, tunable via
+  `EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY`) — enforced in
+  `schedule_task_assigned_wakeup`, raising loudly rather than silently
+  dropping a wake. This is the ceiling a future wake-on-mention trigger is
+  meant to reuse rather than invent its own.
+- **Delegation depth: `999999` literal → `MAX_WORKFLOW_TURN_DEPTH_DEFAULT
+  = 30`** (`run_service.py:36`), now the real governed cap
+  `runtime_run_delegation_service.py` reads (`:79`) instead of an
+  effectively-uncapped placeholder.
+- **`retry_failed_delegation_runs` now gated** — it used to create child
+  runs the exact same way the two real creation paths did, without ever
+  calling `assert_subagent_spawn_allowed` like they do
+  (`runtime_run_delegation_service.py:478,611,776` — all three call sites
+  now call the same gate).
+
+Every one of these caps fails with a loud, agent-facing error when hit —
+never a silent clamp to the ceiling.
+
+---
+
+## Part 31: Known Defects
+
+**This section is being actively fixed as it is written.** A build agent
+is concurrently editing `compaction_service.py`, `sage_agent_runtime_
+service.py`, `direct_chat_generation_service.py`, `sage_command_
+dispatcher.py`, `sage_instruction_compiler_service.py`, and
+`provider_profiles.py` — the same files this section cites. **Every line
+number below was correct at verification time (2026-07-24, working tree
+clean on these files at that moment) but may already be stale by the time
+you read this — re-grep the named function/constant, don't trust the line
+number alone**, same convention `docs/design/audit-storage-lifecycle.md`
+already uses for the same reason.
+
+### 31.1 Compaction — six distinct, verified bugs
+
+**1. The background auto-compaction job can silently never run.**
+`sage_agent_runtime_service.py`'s "B1" block (currently `:5567-5633`)
+schedules `_auto_compact_background()` via
+`asyncio.ensure_future(_auto_compact_background())` with **no reference
+to the returned Task kept anywhere** — the classic asyncio footgun where
+the event loop holds only a weak reference to a fire-and-forget task, so
+it can be garbage-collected mid-flight with no warning. On top of that,
+the coroutine's own body is wrapped in a bare `except Exception: pass`
+(`:5629-5630`), and the outer setup block that creates it is wrapped in a
+second bare `except Exception: pass` (`:5632-5633`) — so even a real,
+still-running failure inside it produces zero log line, zero trace event,
+nothing. Two independent ways for this job to do nothing and leave no
+trace.
+
+**2. The pre-flight keep-recent floor silently no-ops on short
+conversations, even when a threshold check says compaction is needed.**
+`find_cut_point()` (`compaction_service.py:92-115`) only returns a
+non-zero cut index once accumulated tokens, walking backward from the
+newest turn, reach `keep_recent_tokens` (proportional, ~15% of the
+context window, `keep_recent_tokens_for_window`, `:49-56`). For a short
+conversation whose total tokens never reach that floor, the loop falls
+through and returns `0` — every caller treats `cut_idx <= 0` as "nothing
+old enough to cut" and returns the input unchanged
+(`sage_agent_runtime_service.py:3606-3608`,
+`direct_chat_generation_service.py:388-392`). This interacts with bug #6
+below: for a small context-window agent (e.g. the Knowledge preset's
+8,000-token policy cap), `should_compact()`'s threshold clamps to `1`
+(`max(1, 8000-16384)`), so it claims compaction is needed almost
+immediately — but `find_cut_point` then finds nothing to cut anyway,
+because the conversation is still shorter than the keep-recent floor. Net
+effect: the preflight fires, does nothing, and nothing downstream is told
+compaction was skipped.
+
+**3. `load_previous_summary` reads the OLDEST 10 turns, not the most
+recent.** `compaction_service.py:335-352` calls
+`control_plane_repository.list_agent_turns(..., limit=10)`. That function's
+SQL is `ORDER BY created_at ASC LIMIT $N`
+(`control_plane_repository.py:11922-11979`) — ascending order with a
+`LIMIT` returns the EARLIEST rows in the thread, not the latest. In any
+thread with more than ~10 turns total, the most recent
+`compaction_summary` row (written well after those first 10) is
+structurally unreachable by this query — `load_previous_summary` will
+return `""` (no prior summary found) even when one demonstrably exists
+later in the same thread.
+
+**4. 6 of 7 `compact_turns()` call sites never pass `previous_summary`.**
+Verified by grepping the literal keyword across every call site:
+`direct_chat_generation_service.py:396`, `sage_agent_runtime_
+service.py:3615` (direct), `:3706` (aliased `_ct`), `:5134` (aliased
+`_compact_now_proactive`), `:5254` (aliased `_compact_now`), `:5615`
+(aliased `_auto_compact`) — **none** of these six pass
+`previous_summary=`. The **one** call site that does it correctly is
+`sage_command_dispatcher.py:365-378` (the manual `/compact` slash
+command), which calls `load_previous_summary()` first and threads the
+result through. Every other call path re-summarizes each compaction round
+with no memory of the previous round's summary — each new summary can
+silently drop facts the prior summary preserved.
+
+**5. Compaction summaries are dropped by the next-turn loader, in the
+paths that reload from storage.** Self-documented in the code's own
+comment (`sage_agent_runtime_service.py:3532-3538`): the reload-after-
+compact pattern used in the B2 proactive-preflight and reactive-overflow
+paths (currently `:5127-5162`, `:5246-5288`) re-reads turns and filters to
+`role in {"user","assistant"}` — which excludes the `role="compaction_
+summary"` row `compact_turns` just persisted, in the same reload. The
+summary is written to `agent_turns`, then immediately excluded from the
+very next read of that same table. (One preflight path,
+`_action_loop_context_budget_preflight`, `:3503-3561`, deliberately avoids
+this specific reload-based approach for exactly this reason — its own
+docstring cites the bug — but the other two paths still exhibit it.)
+
+**6. The flat `COMPACTION_RESERVE_TOKENS = 16384` breaks both small and
+huge context windows.** (`compaction_service.py:42`, used in
+`should_compact`'s `threshold = max(1, context_window - reserve_tokens)`,
+`:74-89`.) For a small window — e.g. the Knowledge capability preset's
+`max_context_tokens=8000` (`capability_presets.py:72`) — the subtraction
+goes negative and clamps to `1`, meaning `should_compact` returns `True`
+for virtually any conversation at all, however short (see #2's
+interaction). For a very large window (1M+ token models), reserving a
+fixed 16,384 tokens is a disproportionately tiny margin that doesn't scale
+the way `keep_recent_tokens_for_window`'s already-proportional (~15%,
+capped 30,000) approach does — the reserve and the keep-recent budget
+were fixed independently and now disagree on whether window size should
+matter.
+
+**7. `max_context_tokens=0` silently becomes 128,000 via a falsy-zero
+bug — contradicts the field's own documented meaning.**
+`capability_presets.py:89,101` set `"max_context_tokens": 0` on the
+Standard and Operator presets with an explicit inline comment, `# 0 = use
+model default`. But `sage_agent_runtime_service.py:3808` resolves it as
+`int(_acting_ctx_policy.get("max_context_tokens") or _DEFAULT_CTX_POLICY_
+MAX)` — Python's `or` treats `0` as falsy, so an explicit, intentional `0`
+is silently replaced by `_DEFAULT_CTX_POLICY_MAX`
+(`compaction_service.DEFAULT_CONTEXT_WINDOW = 128_000`,
+`compaction_service.py:44`) every time, regardless of the model's real
+window. A model with a genuine 1M-token window, run under one of these
+two presets, is silently capped at 128K instead of "using the model
+default" as the field's own comment promises.
+
+### 31.2 Storage lifecycle — uncapped growth, a dead retention job, redundant billing writes
+
+Full detail: `docs/design/audit-storage-lifecycle.md` (450 lines,
+2026-07-23, plus a same-day §9 follow-up). Headline facts, verified:
+
+- **18 of ~21 identified growing stores have no deletion path at all**
+  short of a full manual workspace wipe (`agent_turns`, `agent_traces`,
+  `agent_trace_events`, `agent_action_events`, both monthly cost ledgers,
+  `credit_ledger_events`, `usage_events`, `knowledge_*`,
+  `personal_context_events`, `agent_scheduler_wake_requests`,
+  `agent_egress_events`/`agent_secret_access_events`/
+  `security_control_events`, `run_archive`/`run_transitions`,
+  `gateway_events`, personal-channel inbound/outbound messages,
+  `memory_entries_history`, and artifacts).
+- **A real, tested retention enforcement job
+  (`retention_enforcement_job.py`) exists and is never called from
+  anywhere in production** — no route, no scheduler entry, no systemd
+  timer. Of the 10 stores its catalog even knows about (all
+  marketplace/external-customer data — none of the owner's own workspace
+  stores), it only ever actually deletes one, `sage_memory`; every other
+  declared TTL is decorative (`eligible_count` is never actually computed,
+  always defaults to `0`).
+- **A full workspace wipe (`delete_workspace_scope_data`) covers 9 of the
+  21 stores — 12 are still left holding the customer's data** even after
+  an explicit delete-my-workspace action.
+- **Billing-write redundancy: corrected to a verified 3x, not the 4x this
+  map's task brief assumed.** One real LLM call in the hosted-direct-chat
+  path writes to three ledgers simultaneously — `usage_events`,
+  `workspace_hosted_ai_monthly_cost_ledger`, `credit_ledger_events`
+  (`direct_chat_hosted_usage_service.py:576,610-639,645-653`) — each with a
+  real, distinct reader (WorkTab's cost display, the unified credit-usage
+  aggregator, and the cost-cap settlement job, respectively — none is a
+  pure unread duplicate). `deployed_agent_monthly_cost_ledger` is a
+  **fourth**, but scoped to a mutually exclusive surface (marketplace-
+  deployed agents) that never co-fires with the other three for the same
+  call — so "4 ledgers exist" is true, "one LLM call writes to 4" is not;
+  it writes to 3.
+- **The assistant-reply-persisted-twice bug is FIXED, not live.**
+  `assistant.message.completed` used to re-store the entire final reply
+  text a second time, duplicating `agent_turns.content` — commit
+  `2a07f65cf` replaced the stored trace-event row's `text` with a
+  `text_ref: "agent_turns.content"` pointer (the in-memory, live-response
+  envelope is untouched; the one frontend reader already fell back to
+  `agent_turns.content` when the trace event's own text was empty). ~40MB
+  saved per 20-agent/100-session account, permanently, going forward.
+
+### 31.3 `normalize_model_tier()` silently substitutes "pro" for an invalid tier string — live, not hypothetical
+
+`empyralis_model_tier_contract.EMPYRALIS_MODEL_TIERS` is exactly six
+values: `light`, `pro`, `local_ai`, `my_api_key`, `my_ai_account` (plus the
+legacy `max`, itself remapped to `pro`). `normalize_model_tier()`
+(`:142-152`) falls back to `fallback="pro"` for anything else, silently.
+But `capability_presets.py` seeds **two of its three presets** with a
+`model_tier` value that isn't in that list at all: `PRESET_STANDARD`
+(the actual default preset — `normalize_capability_preset(default=
+PRESET_STANDARD)`) and `PRESET_OPERATOR` both set `"model_tier":
+"standard"` (`:87,99`); `PRESET_KNOWLEDGE` sets `"model_tier": "cheap"`
+(`:70`) — neither `"standard"` nor `"cheap"` is a real tier. Every one of
+these silently resolves to `"pro"` the moment
+`infer_migrated_public_tier_from_legacy_selection()`
+(`empyralis_model_tier_routing_service.py:176`) calls
+`normalize_model_tier(explicit_tier, fallback="pro")` on it — meaning an
+agent created via the Knowledge preset, whose entire point is a
+deliberately cheap/small model, is silently routed onto the same "pro"
+tier as an agent created via Standard, contradicting the preset's own
+stated intent. No error, no log line — just a quiet substitution.
+
+---
+
 ## Appendix A: Architecture Decisions (Why It's Built This Way)
 
 These are foundational product/architecture decisions. Do NOT reverse without explicit instruction.
@@ -3920,7 +4588,7 @@ Turn engine:        server_modules/agent_turn.py → turn_runtime.py
 Owner-facing agent: server_modules/sage_agent_runtime_service.py (3,417 lines)
 Tool broker:        server_modules/tool_broker.py
 MCP client:         server_modules/mcp_registry_service.py
-MCP server:         mcp_server.py (267 lines, 9 tools)
+MCP server:         mcp_server.py (858 lines, 17 tools — verified 2026-07-24)
 MCP auth:           server_modules/mcp_server_auth.py
 OAuth provider map: server_modules/connection_oauth_service.py → APP_MCP_SERVER_MAP
 Fleet tools:        server_modules/fleet_tools.py
@@ -3947,6 +4615,12 @@ BYOK encryption:    server_modules/vault_store.py (Fernet+PBKDF2) (Part 25)
 cli_subscription wire trace: server_modules/gateway_protocol_service.py (_PendingInvoke, durable flush) + empyralis-gateway/src/llm/{runtime.ts,cli-runner.ts,codex-app-server.ts} (Part 26)
 Event-loop-freeze fix (the real root cause): server_modules/direct_chat_stream_response_service.py `run_in_threadpool` (Part 26.2)
 Warm Codex daemon (Phase 1, flag-gated): empyralis-gateway/src/llm/codex-app-server.ts (Part 26.4)
+Gateway on-box mount isolation: server_modules/hardware_runtime_adapters/gateway_adapter.py `_agent_scoped_mount` + empyralis-gateway/src/shell/runtime.ts `ensureWorkspaceDir` (Part 27.9)
+MCP/connector credential isolation: server_modules/mcp_registry_service.py, secrets_broker.py `_resolve_bound_connector_credential_id` (Part 27.10)
+Workspace invites (link-only, no email): server_modules/routes_workspaces.py, control_plane_repository.py `create_workspace_invite`/`list_workspace_members` (Part 30.1)
+External-agent identity + MCP task tools: server_modules/mcp_external_agent_roster_service.py, project_tasks_service.py, mcp_server.py (Part 30.3-30.4)
+Mention resolver + group policy: server_modules/mention_gating_service.py, personal_channels_service.py `_enforce_group_policy` (Part 5.6)
+Compaction (Known Defects — being actively fixed): server_modules/compaction_service.py, sage_agent_runtime_service.py (Part 31.1)
 Gateway (Node.js):  empyralis-gateway/src/
 Supervisor (Rust):  ARCHIVED — _archive/supervisor/empyralis-supervisor/src/ (owner decision 2026-07-04, see §2.3)
 Kernel (Rust CLI):  empyralis-runtime-kernel/src/
