@@ -865,6 +865,10 @@ class FleetConfigureAgentRecommendationTests(unittest.TestCase):
                 "server_modules.agent_registry_repository.update_workspace_agent_install",
                 new=AsyncMock(return_value=self._bundle()),
             ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[{"id": "agent-x", "label": "Old Name"}]),
+            ),
             patch.object(fleet_tools, "recommended_model_config_for_gateway", new=exploding),
         ):
             result = _run(
@@ -877,6 +881,149 @@ class FleetConfigureAgentRecommendationTests(unittest.TestCase):
             )
         self.assertTrue(result["ok"])
         self.assertNotIn("recommended_model_config", result)
+
+
+class FleetConfigureAgentRenameCollisionTests(unittest.TestCase):
+    """STEP 5 (agent-identity plan): fleet_create_agent's auto-naming path
+    was already collision-checked against every existing label in the
+    workspace, but the manual rename path (this display_name PATCH) did zero
+    checking and wrote straight to the label column. Two agents could end up
+    sharing a name with nothing to catch it -- ambiguous for a human AND for
+    the closed-roster mention autocomplete. These tests hold the rename path
+    to the same bar as auto-naming."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    def test_renaming_to_an_existing_label_is_rejected(self):
+        exploding_update = AsyncMock(side_effect=AssertionError("must not persist a colliding rename"))
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=exploding_update,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[
+                    {"id": "agent-x", "label": "Atlas"},
+                    {"id": "agent-y", "label": "Nova"},
+                ]),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "Nova"},
+                )
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("already the name of another agent", result["error"])
+        exploding_update.assert_not_called()
+
+    def test_collision_check_is_case_insensitive(self):
+        exploding_update = AsyncMock(side_effect=AssertionError("must not persist a colliding rename"))
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=exploding_update,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[
+                    {"id": "agent-x", "label": "Atlas"},
+                    {"id": "agent-y", "label": "Nova"},
+                ]),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "nOVA"},
+                )
+            )
+        self.assertFalse(result["ok"])
+        exploding_update.assert_not_called()
+
+    def test_renaming_to_its_own_current_name_is_not_a_collision(self):
+        update_mock = AsyncMock(return_value=self._bundle())
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=update_mock,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[
+                    {"id": "agent-x", "label": "Atlas"},
+                    {"id": "agent-y", "label": "Nova"},
+                ]),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "Atlas"},
+                )
+            )
+        self.assertTrue(result["ok"])
+        update_mock.assert_called_once()
+
+    def test_renaming_to_a_free_name_succeeds(self):
+        update_mock = AsyncMock(return_value=self._bundle())
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=update_mock,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[
+                    {"id": "agent-x", "label": "Atlas"},
+                    {"id": "agent-y", "label": "Nova"},
+                ]),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "Ember"},
+                )
+            )
+        self.assertTrue(result["ok"])
+        update_mock.assert_called_once_with(
+            "agent-x",
+            tenant_id="system",
+            workspace_id="ws-1",
+            label="Ember",
+            metadata={},
+            tool_toggles=None,
+            hardware_access=None,
+        )
 
 
 class FleetListAgentsHardwareStatusIntegrationTests(unittest.TestCase):

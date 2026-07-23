@@ -100,6 +100,10 @@ from server_modules.run_service import (
     LegacyRunRequestServices,
     RunPreparedResultServices,
     WorkflowRecursionError,
+    assert_subagent_spawn_allowed,
+    SubagentDepthError,
+    MAX_SUBAGENT_DEPTH_DEFAULT,
+    max_subagent_depth,
     safe_int,
     build_run_start_request_from_turn,
     build_schedule_bound_create_run_from_request,
@@ -1526,6 +1530,35 @@ class RunServiceTests(unittest.TestCase):
                 execution_target_local_companion="local_companion",
                 trust_mode_auto="auto",
             )
+
+    def test_assert_subagent_spawn_allowed_permits_root_to_spawn_depth_one(self):
+        """depth 0 (root/operator turn) may spawn depth-1 subagents -- the
+        documented, default-enabled case."""
+        child_depth = assert_subagent_spawn_allowed({"subagent_depth": 0})
+        self.assertEqual(child_depth, 1)
+
+    def test_assert_subagent_spawn_allowed_blocks_depth_two_by_default(self):
+        """STEP 6 / §1.4 (agent-identity plan): MAX_SUBAGENT_DEPTH_DEFAULT is
+        1 -- a depth-1 subagent (already a subagent) may NOT spawn a depth-2
+        subagent. This was ZERO-coverage before (repo-wide grep for
+        assert_subagent_spawn_allowed/SubagentDepthError in tests/ found
+        nothing); it is the load-bearing unit test for the numeric backstop
+        every delegation creation path (delegate_run_children,
+        auto_delegate_run_children, and now retry_failed_delegation_runs)
+        relies on via this exact function."""
+        with self.assertRaises(SubagentDepthError):
+            assert_subagent_spawn_allowed({"subagent_depth": 1})
+
+    def test_assert_subagent_spawn_allowed_default_constant_is_one(self):
+        self.assertEqual(MAX_SUBAGENT_DEPTH_DEFAULT, 1)
+        self.assertEqual(max_subagent_depth(), MAX_SUBAGENT_DEPTH_DEFAULT)
+
+    @patch.dict("os.environ", {"EMPYRALIS_MAX_SUBAGENT_DEPTH": "2"})
+    def test_assert_subagent_spawn_allowed_respects_env_override(self):
+        """A raised ceiling (ops-tunable via EMPYRALIS_MAX_SUBAGENT_DEPTH)
+        permits the deeper spawn the default would have blocked above."""
+        child_depth = assert_subagent_spawn_allowed({"subagent_depth": 1})
+        self.assertEqual(child_depth, 2)
 
     def test_wait_for_workflow_child_run_emits_wait_and_resume_callbacks(self):
         runs_by_id = [

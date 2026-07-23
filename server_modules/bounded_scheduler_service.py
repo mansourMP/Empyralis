@@ -14,6 +14,23 @@ DEFAULT_QUIET_HOURS_START = 23
 DEFAULT_QUIET_HOURS_END = 7
 DEFAULT_MAX_EVENT_TRIGGERS_PER_HOUR = 4
 DEFAULT_MAX_SELF_PROPOSED_PER_HOUR = 2
+# STEP 6 (agent-identity plan) / numeric backstops on multi-agent chains:
+# every framework studied (OpenAI max_turns, Claude Code subagent depth/
+# concurrency caps, AutoGen termination conditions, CrewAI iteration/RPM
+# limits) backstops agent reasoning with a hard numeric ceiling, never
+# reasoning alone -- see docs/design/multi-agent-coordination-research.md.
+# task_assigned wakeups (schedule_task_assigned_wakeup, below) are the one
+# per-task wake path that is live today; the wake-on-mention trigger lands
+# a future wave and will reuse the exact same per-task counter and error
+# shape rather than inventing its own. This constant is the ceiling for
+# BOTH: a single task_id can generate at most this many wake requests in a
+# rolling 24h window, regardless of how many distinct triggers (assignment,
+# future mentions, retries) fire it. Deliberately looser than the
+# workspace-wide hourly caps above it (4/hr event-triggers, 2/hr
+# self-proposed) -- this exists to stop ONE task from looping/re-triggering
+# itself into an unbounded wake storm, not to replace those broader caps.
+# Tunable via EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY without a code change.
+DEFAULT_MAX_WAKES_PER_TASK_PER_DAY = 24
 DEFAULT_MAX_RUNTIME_SECONDS = 20
 DEFAULT_MINIMUM_BATTERY_PERCENT = 20
 DEFAULT_WAKE_BATCH_LIMIT = 5
@@ -673,6 +690,27 @@ async def schedule_task_assigned_wakeup(
         raise SchedulerPolicyError(
             "agent_id, task_id, and title are required to schedule a task-assigned wakeup."
         )
+    # STEP 6 numeric backstop: a single task_id may not generate more than
+    # max_wakes_per_task_per_day() wake requests in a rolling 24h window --
+    # loud and explicit (SchedulerPolicyError), never a silent clamp/drop.
+    # This is the enforcement point the future wake-on-mention trigger reuses
+    # rather than inventing its own per-task cap; task_assigned is simply the
+    # first live trigger kind that can fire repeatedly for the same task_id
+    # (re-assignment, re-triggering) today.
+    _daily_wake_cap = max_wakes_per_task_per_day()
+    _recent_task_wake_count = await control_plane_repository.count_agent_scheduler_wake_requests_since(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        since=_utc_now() - timedelta(hours=24),
+        task_id=resolved_task_id,
+    )
+    if _recent_task_wake_count >= _daily_wake_cap:
+        raise SchedulerPolicyError(
+            f"Task {resolved_task_id} has already reached its wake ceiling of "
+            f"{_daily_wake_cap} wake requests in the last 24 hours. Wait for the "
+            "window to roll over, or reduce how often this task re-triggers, "
+            "before requesting another wakeup."
+        )
     workspace, master_install, policy = await _load_scheduler_scope(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
@@ -832,6 +870,13 @@ def wake_request_scan_enabled() -> bool:
 
 def wake_request_scan_poll_seconds() -> int:
     return max(5, config_int("EMPYRALIS_WAKE_SCAN_POLL_SECONDS", DEFAULT_WAKE_SCAN_POLL_SECONDS))
+
+
+def max_wakes_per_task_per_day() -> int:
+    """The numeric backstop for STEP 6 -- see DEFAULT_MAX_WAKES_PER_TASK_PER_DAY
+    above. Env-overridable, floored at 1 so a misconfigured 0/negative value
+    can never mean "unlimited"."""
+    return max(1, config_int("EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY", DEFAULT_MAX_WAKES_PER_TASK_PER_DAY))
 
 
 def _run_sync(coro: Any) -> Any:

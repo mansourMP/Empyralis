@@ -690,6 +690,38 @@ CREATE TABLE IF NOT EXISTS project_tasks (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Mentions + identity for platform AND external agents, Step 2: identity is
+-- minted by the PLATFORM at the connection boundary, never by the brain. A
+-- platform agent's identity is its workspace_agent_installs.id; an EXTERNAL
+-- agent (a Codex/Claude Code session connecting through /mcp with a bearer
+-- key, never hosted on Empyralis hardware) gets this roster row the moment
+-- its key is minted (server_modules/mcp_server_auth.py:
+-- create_workspace_mcp_api_key) — the bearer key's SHA-256 hash IS its
+-- authentication of identity, so key_hash is UNIQUE and is the lookup key
+-- resolve_workspace_from_api_key already hashes on every call. Deliberately
+-- its own small table rather than reusing vault_credentials+
+-- agent_connector_bindings (the repo's other "shared resource + subscription"
+-- pair): those model N agents subscribing to ONE shared credential; this is
+-- the opposite shape, one identity minted per bearer key, 1:1, nothing to
+-- subscribe to. No RLS — scoped like `projects`/`project_tasks`, every query
+-- filters by (tenant_id, workspace_id) explicitly (see
+-- mcp_external_agent_roster_service.py). `kind` is fixed to 'external' here;
+-- the unified {platform, external} roster view a future @-mention resolver
+-- reads is a Python-level merge with workspace_agent_installs, not a SQL kind
+-- column spanning two tables.
+CREATE TABLE IF NOT EXISTS mcp_external_agent_roster (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    mcp_key_id TEXT NULL,
+    revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(key_hash)
+);
+
 CREATE TABLE IF NOT EXISTS workspace_inventory_items (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -1462,6 +1494,7 @@ CREATE INDEX IF NOT EXISTS idx_workspace_inventory_items_vehicle ON workspace_in
 CREATE INDEX IF NOT EXISTS idx_workspace_inventory_items_product_name ON workspace_inventory_items(tenant_id, workspace_id, product_name);
 CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(tenant_id, workspace_id, project_id, status);
 CREATE INDEX IF NOT EXISTS idx_project_tasks_assignee ON project_tasks(tenant_id, workspace_id, assignee_agent_id) WHERE assignee_agent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mcp_external_agent_roster_workspace ON mcp_external_agent_roster(tenant_id, workspace_id, revoked);
 CREATE INDEX IF NOT EXISTS idx_agent_manifests_scope ON agent_manifests(tenant_id, workspace_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_bible_versions_install_number ON agent_bible_versions(tenant_id, workspace_id, agent_install_id, version_number DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_skill_bindings_install ON agent_skill_bindings(tenant_id, workspace_id, agent_install_id, enabled);
@@ -3812,6 +3845,105 @@ async def ensure_control_plane_schema() -> Any:
             LOGGER.warning(
                 "one-tenant-per-workspace EXCLUSION constraint not applied (%s); "
                 "relying on the app-level tenant-scoped idempotent seed instead.",
+                exc,
+            )
+        # ── STEP 5 (agent-identity plan): AGENT NAMES ARE UNIQUE PER WORKSPACE.
+        # fleet_create_agent's auto-naming path was already collision-checked
+        # against every existing label (agent_name_pool.assign_agent_name),
+        # but the manual rename path (fleet_configure_agent's display_name
+        # PATCH — see fleet_tools.py) wrote straight to the label column with
+        # zero checking, and no DB constraint backed either path. Two agents
+        # in the same workspace could end up sharing a name — ambiguous for a
+        # human reading the fleet roster AND for the closed-roster mention
+        # autocomplete that has to resolve a typed name to exactly one
+        # agent_id. fleet_tools.py now rejects a colliding rename at the app
+        # layer; this is the DB-level backstop so a raw API PATCH, a future
+        # direct-SQL path, or a bug elsewhere can't bypass it.
+        #
+        # This is a BRAND NEW index (unlike
+        # uq_agent_channel_bindings_inbound_owner_v2 above, which reuses an
+        # existing index name and is therefore a guaranteed no-op on an
+        # already-provisioned DB) — so a bare `CREATE UNIQUE INDEX IF NOT
+        # EXISTS` baked into CONTROL_PLANE_SCHEMA_SQL would attempt REAL
+        # enforcement on every process boot, including prod's
+        # already-provisioned DB, and would crash bootstrap outright if any
+        # duplicate labels already exist there (a known live gap per
+        # docs/design/audit-agent-to-agent.md — "Two agents in the same
+        # workspace can share a display name today"). So, like the
+        # EXCLUSION constraint just above, this runs as a guarded step here
+        # instead: dedupe first, then attempt the constraint, with a
+        # try/except so an unexpected failure degrades to a loud warning
+        # rather than taking bootstrap down.
+        #
+        # Dedupe is deterministic and collision-proof by construction: repeatedly
+        # pick the oldest non-first row within any (tenant, workspace,
+        # case-insensitive label) group that has more than one member (the
+        # earliest-created row keeps its name unchanged), then rename it to
+        # the smallest "<label> N" that does not already collide with ANY
+        # other label currently in that workspace (checked live against the
+        # table, not just the duplicate group, so this can never manufacture
+        # a NEW collision against an unrelated agent that already happens to
+        # be named e.g. "Atlas 2"). Loops until no duplicates remain, so it
+        # converges even if there are 3+ copies of the same name. Idempotent:
+        # a second run finds zero duplicate rows and is a no-op.
+        # migrations/add_workspace_agent_installs_label_uniqueness.sql applies
+        # the identical logic by hand to a DB that never re-runs this path.
+        try:
+            await pool.execute(
+                """
+                DO $$
+                DECLARE
+                    dup RECORD;
+                    candidate_label TEXT;
+                    suffix INTEGER;
+                BEGIN
+                    LOOP
+                        SELECT id, tenant_id, workspace_id, label
+                        INTO dup
+                        FROM (
+                            SELECT id, tenant_id, workspace_id, label,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY tenant_id, workspace_id, lower(label)
+                                       ORDER BY created_at ASC, id ASC
+                                   ) AS label_rank
+                            FROM workspace_agent_installs
+                            WHERE label IS NOT NULL AND label <> ''
+                        ) ranked
+                        WHERE label_rank > 1
+                        ORDER BY tenant_id, workspace_id, lower(label), id
+                        LIMIT 1;
+
+                        EXIT WHEN NOT FOUND;
+
+                        suffix := 2;
+                        LOOP
+                            candidate_label := dup.label || ' ' || suffix;
+                            EXIT WHEN NOT EXISTS (
+                                SELECT 1 FROM workspace_agent_installs w
+                                WHERE w.tenant_id = dup.tenant_id
+                                  AND w.workspace_id = dup.workspace_id
+                                  AND lower(w.label) = lower(candidate_label)
+                            );
+                            suffix := suffix + 1;
+                        END LOOP;
+
+                        UPDATE workspace_agent_installs
+                        SET label = candidate_label, updated_at = NOW()
+                        WHERE id = dup.id;
+                    END LOOP;
+                END $$;
+                """
+            )
+            await pool.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_agent_installs_label "
+                "ON workspace_agent_installs(tenant_id, workspace_id, lower(label)) "
+                "WHERE label IS NOT NULL AND label <> ''"
+            )
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.warning(
+                "workspace_agent_installs label-uniqueness dedupe/constraint not "
+                "applied (%s); relying on fleet_configure_agent's app-level rename "
+                "collision check instead.",
                 exc,
             )
         # ── Phase 1C: auth-store tables (sessions, devices, policies, etc.) ──
@@ -12803,6 +12935,7 @@ async def count_agent_scheduler_wake_requests_since(
     workspace_id: str,
     since: Any,
     trigger_kind: Optional[str] = None,
+    task_id: Optional[str] = None,
 ) -> int:
     resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
     resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
@@ -12819,6 +12952,14 @@ async def count_agent_scheduler_wake_requests_since(
     if trigger_kind:
         params.append(str(trigger_kind or "").strip().lower())
         conditions.append(f"trigger_kind = ${len(params)}")
+    if task_id:
+        # STEP 6 numeric backstop: per-task wake ceiling. task_id is stamped
+        # into `metadata` (not a dedicated column -- this table serves every
+        # trigger_kind, most of which have no task at all) by every
+        # task-scoped wake, starting with schedule_task_assigned_wakeup and,
+        # per the plan, the future wake-on-mention trigger too.
+        params.append(str(task_id or "").strip())
+        conditions.append(f"metadata->>'task_id' = ${len(params)}")
     async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
         if connection is None:
             return 0

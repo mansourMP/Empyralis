@@ -228,6 +228,119 @@ class ProjectTasksCrudTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"title": "Step 1"', args[-1])
 
 
+class ListMyTasksTests(unittest.IsolatedAsyncioTestCase):
+    """list_my_tasks backs the MCP `empyralis_list_my_tasks` tool: tasks
+    assigned to the caller (external_agent_id or agent_id) OR unassigned
+    (backlog) tasks -- and, same as list_tasks, always scoped to
+    (tenant_id, workspace_id) so a caller from one workspace can never see
+    another's rows."""
+
+    async def test_filters_by_external_agent_id_or_unassigned(self):
+        pool = _QueuedFakePool(fetch_results=[[_task_row(assignee_agent_id="ext_agent_aaa")]])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            rows = await project_tasks_service.list_my_tasks(
+                tenant_id="tenant-1", workspace_id="ws-1", external_agent_id="ext_agent_aaa",
+            )
+        self.assertEqual(len(rows), 1)
+        query, args = pool.fetch_calls[0]
+        self.assertIn("WHERE tenant_id = $1 AND workspace_id = $2", query)
+        self.assertIn("(assignee_agent_id = $3 OR assignee_agent_id IS NULL)", query)
+        self.assertEqual(args, ("tenant-1", "ws-1", "ext_agent_aaa"))
+
+    async def test_no_caller_identity_still_scopes_to_unassigned_only(self):
+        """No external_agent_id/agent_id -- e.g. an OAuth session that hasn't
+        minted a roster identity -- must degrade to "unassigned only", never
+        raise and never silently return every task in the workspace."""
+        pool = _QueuedFakePool(fetch_results=[[]])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.list_my_tasks(tenant_id="tenant-1", workspace_id="ws-1")
+        query, args = pool.fetch_calls[0]
+        self.assertIn("(FALSE OR assignee_agent_id IS NULL)", query)
+        self.assertEqual(args, ("tenant-1", "ws-1"))
+
+    async def test_optional_project_and_status_filters(self):
+        pool = _QueuedFakePool(fetch_results=[[]])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.list_my_tasks(
+                tenant_id="tenant-1", workspace_id="ws-1", external_agent_id="ext_agent_aaa",
+                project_id="proj-1", status="OPEN",
+            )
+        query, args = pool.fetch_calls[0]
+        self.assertIn("project_id = $4", query)
+        self.assertIn("status = $5", query)
+        self.assertEqual(args[-2:], ("proj-1", "open"))
+
+    async def test_no_postgres_returns_empty_list_not_error(self):
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=None),
+        ):
+            rows = await project_tasks_service.list_my_tasks(tenant_id="tenant-1", workspace_id="ws-1")
+        self.assertEqual(rows, [])
+
+
+class AddTaskCommentTests(unittest.IsolatedAsyncioTestCase):
+    """add_task_comment backs the MCP `empyralis_comment_on_task` tool.
+    Comments live in task.metadata.comments (no new table -- see the
+    function's own docstring) via a single atomic jsonb-append UPDATE."""
+
+    async def test_requires_non_empty_body(self):
+        with self.assertRaises(ValueError):
+            await project_tasks_service.add_task_comment(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                author_type="external_agent", author_id="ext_agent_aaa", body="   ",
+            )
+
+    async def test_without_postgres_raises_durable_config_error(self):
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=None),
+        ):
+            with self.assertRaises(project_tasks_service.control_plane_repository.runtime_db.DurableRuntimeConfigurationError):
+                await project_tasks_service.add_task_comment(
+                    tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                    author_type="external_agent", author_id="ext_agent_aaa", body="hello",
+                )
+
+    async def test_appends_comment_via_atomic_jsonb_update_and_scopes_by_workspace(self):
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(metadata={"comments": [{"body": "hello"}]})])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.add_task_comment(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                author_type="external_agent", author_id="ext_agent_aaa", body="hello",
+            )
+        self.assertEqual(task["metadata"]["comments"], [{"body": "hello"}])
+        query, args = pool.fetchrow_calls[0]
+        self.assertIn("WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3", query)
+        self.assertIn("jsonb_set", query)
+        self.assertEqual(args[:3], ("tenant-1", "ws-1", "task-1"))
+        self.assertIn("ext_agent_aaa", args[3])  # the appended comment JSON carries the author id
+
+    async def test_missing_task_returns_none(self):
+        pool = _QueuedFakePool(fetchrow_results=[None])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.add_task_comment(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="ghost",
+                author_type="external_agent", author_id="ext_agent_aaa", body="hello",
+            )
+        self.assertIsNone(task)
+
+
 class AssignTaskTests(unittest.IsolatedAsyncioTestCase):
     """assign_task is the ONE shared code path (docs/design/tasks-to-agents-
     research.md §2 pitfall #2) -- the API and a future @-mention resolver
@@ -384,6 +497,79 @@ class ScheduleTaskAssignedWakeupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["task_title"], "Ship the widget")
         self.assertEqual(payload["task_description"], "Build and ship it.")
         trigger_mock.assert_called_once_with("ws-1")
+
+    async def test_task_wake_ceiling_rejects_loudly_at_the_limit(self):
+        """STEP 6 numeric backstop (agent-identity plan): once a task_id has
+        already logged max_wakes_per_task_per_day() wake requests in the
+        trailing 24h, the next request must be refused with a loud, explicit
+        SchedulerPolicyError -- never a silent clamp/drop -- and must never
+        reach _load_scheduler_scope/_persist_wakeup at all."""
+        with (
+            patch(
+                "server_modules.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=bounded_scheduler_service.DEFAULT_MAX_WAKES_PER_TASK_PER_DAY),
+            ) as count_mock,
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(side_effect=AssertionError("must not proceed past the wake ceiling")),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                new=AsyncMock(side_effect=AssertionError("must not persist a wake past the ceiling")),
+            ),
+        ):
+            with self.assertRaises(bounded_scheduler_service.SchedulerPolicyError) as raised:
+                await bounded_scheduler_service.schedule_task_assigned_wakeup(
+                    tenant_id="tenant-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-1",
+                    task_id="task-1",
+                    title="Ship the widget",
+                )
+        self.assertIn("wake ceiling", str(raised.exception))
+        self.assertEqual(count_mock.await_args.kwargs["task_id"], "task-1")
+
+    async def test_task_wake_ceiling_allows_one_below_the_limit(self):
+        """Sanity check for the ceiling above: strictly below the cap still
+        proceeds and persists normally."""
+        policy = bounded_scheduler_service.SchedulerPolicyBounds(
+            quiet_hours_start=0,
+            quiet_hours_end=0,
+            max_event_triggers_per_hour=4,
+            max_self_proposed_per_hour=2,
+            max_runtime_seconds=20,
+            minimum_battery_percent=20,
+            require_network_online=False,
+            require_owner_approval_for_privileged_wakeups=True,
+            plan_tier="standard",
+        )
+        with (
+            patch(
+                "server_modules.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=bounded_scheduler_service.DEFAULT_MAX_WAKES_PER_TASK_PER_DAY - 1),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, policy)),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                new=AsyncMock(return_value={"id": "wake-4", "status": "pending"}),
+            ) as persist_mock,
+            patch(
+                "server_modules.bounded_scheduler_service._trigger_ambient_monitor",
+                return_value={"ok": True},
+            ),
+        ):
+            record = await bounded_scheduler_service.schedule_task_assigned_wakeup(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                agent_id="agent-1",
+                task_id="task-1",
+                title="Ship the widget",
+            )
+        self.assertEqual(record, {"id": "wake-4", "status": "pending"})
+        persist_mock.assert_awaited_once()
 
 
 class BuildHeartbeatTurnRequestTaskThreadingTests(unittest.TestCase):

@@ -5,6 +5,10 @@
 (c) Key creation and revocation
 (d) Write tools blocked when EMPYRALIS_MCP_WRITE_ENABLED=false
 (e) Cross-workspace key isolation
+(f) External-agent roster identity is minted at key creation, backfilled
+    lazily at resolve time if missing, and a mint failure is surfaced (never
+    silently swallowed) -- Step 2 of "Mentions + identity for platform AND
+    external agents"
 """
 
 from __future__ import annotations
@@ -177,6 +181,165 @@ class MCPCrossWorkspaceIsolationTests(unittest.TestCase):
             self.assertIsNotNone(resolved)
             self.assertEqual(resolved["workspace_id"], "ws-alpha")
             self.assertNotEqual(resolved["workspace_id"], "ws-beta")
+
+        import asyncio
+        asyncio.run(_run())
+
+
+# ── (f) External-agent roster identity minted at key creation ──────────
+
+class MCPExternalAgentRosterMintTests(unittest.TestCase):
+    """mcp_server_auth.py <-> mcp_external_agent_roster_service.py wiring.
+    The roster service's own behavior (auto-naming, idempotency, unified
+    listing) is covered in test_mcp_external_agent_roster.py -- these tests
+    only prove the two integration points: key creation mints, and resolve
+    backfills + never silently drops a mint failure."""
+
+    def test_key_creation_mints_roster_identity(self):
+        """create_workspace_mcp_api_key mints an external-agent identity in
+        the same call, and returns it on the response."""
+        async def _run():
+            from server_modules import mcp_server_auth as auth_mod
+
+            mock_register = AsyncMock(return_value={
+                "ok": True, "id": "ext_agent_xyz", "kind": "external",
+                "display_name": "Atlas", "revoked": False,
+            })
+            with patch(
+                "server_modules.mcp_external_agent_roster_service.register_external_agent",
+                mock_register,
+            ), patch(
+                "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+                AsyncMock(return_value="tenant-mint-1"),
+            ):
+                result = await auth_mod.create_workspace_mcp_api_key(
+                    workspace_id="ws-mint-1", label="Codex Session",
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["external_agent_id"], "ext_agent_xyz")
+            self.assertEqual(result["external_agent_display_name"], "Atlas")
+            self.assertNotIn("roster_warning", result)
+            mock_register.assert_awaited_once()
+            kwargs = mock_register.await_args.kwargs
+            self.assertEqual(kwargs["workspace_id"], "ws-mint-1")
+            self.assertEqual(kwargs["tenant_id"], "tenant-mint-1")
+            self.assertTrue(kwargs["key_hash"])  # the SHA-256 hash, not the plaintext
+
+            await auth_mod.revoke_workspace_mcp_api_key(result["key_id"])
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_roster_mint_failure_does_not_fail_key_creation_but_is_surfaced(self):
+        """A roster-mint failure (e.g. Postgres unreachable) must never break
+        key creation -- but it must never be silently swallowed either. It
+        shows up as an explicit `roster_warning` on the response."""
+        async def _run():
+            from server_modules import mcp_server_auth as auth_mod
+
+            mock_register = AsyncMock(return_value={"ok": False, "error": "Postgres unreachable"})
+            with patch(
+                "server_modules.mcp_external_agent_roster_service.register_external_agent",
+                mock_register,
+            ), patch(
+                "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+                AsyncMock(return_value="tenant-mint-2"),
+            ):
+                result = await auth_mod.create_workspace_mcp_api_key(
+                    workspace_id="ws-mint-2", label="Flaky",
+                )
+            self.assertTrue(result["ok"])  # key creation itself still succeeds
+            self.assertIsNone(result["external_agent_id"])
+            self.assertIn("roster_warning", result)
+            self.assertIn("Postgres unreachable", result["roster_warning"])
+
+            await auth_mod.revoke_workspace_mcp_api_key(result["key_id"])
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_resolve_backfills_missing_roster_identity(self):
+        """A key resolved with no roster row (predates Step 2, or its
+        mint-time insert failed) gets one minted lazily right here, instead
+        of staying identity-less for its whole lifetime."""
+        async def _run():
+            from server_modules import mcp_server_auth as auth_mod
+
+            # Create the key with roster minting itself mocked out, so this
+            # test controls exactly when the roster row "appears".
+            with patch(
+                "server_modules.mcp_external_agent_roster_service.register_external_agent",
+                AsyncMock(return_value={"ok": False, "error": "simulated mint-time failure"}),
+            ):
+                created = await auth_mod.create_workspace_mcp_api_key(workspace_id="ws-backfill-1", label="x")
+            self.assertIsNone(created["external_agent_id"])
+
+            mock_get = AsyncMock(return_value=None)  # no roster row exists yet
+            mock_register = AsyncMock(return_value={
+                "ok": True, "id": "ext_agent_backfilled", "display_name": "Nova",
+            })
+            with patch("server_modules.mcp_external_agent_roster_service.get_external_agent_by_key_hash", mock_get), \
+                 patch("server_modules.mcp_external_agent_roster_service.register_external_agent", mock_register), \
+                 patch("server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+                       AsyncMock(return_value="tenant-backfill-1")):
+                resolved = await auth_mod.resolve_workspace_from_api_key(created["key"])
+
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved["external_agent_id"], "ext_agent_backfilled")
+            self.assertEqual(resolved["external_agent_display_name"], "Nova")
+            mock_register.assert_awaited_once()
+
+            await auth_mod.revoke_workspace_mcp_api_key(created["key_id"])
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_resolve_reuses_existing_roster_identity_without_reregistering(self):
+        async def _run():
+            from server_modules import mcp_server_auth as auth_mod
+
+            with patch(
+                "server_modules.mcp_external_agent_roster_service.register_external_agent",
+                AsyncMock(return_value={"ok": False, "error": "simulated"}),
+            ):
+                created = await auth_mod.create_workspace_mcp_api_key(workspace_id="ws-existing-1", label="x")
+
+            mock_get = AsyncMock(return_value={
+                "id": "ext_agent_existing", "display_name": "Ember", "revoked": False,
+            })
+            mock_register = AsyncMock()
+            with patch("server_modules.mcp_external_agent_roster_service.get_external_agent_by_key_hash", mock_get), \
+                 patch("server_modules.mcp_external_agent_roster_service.register_external_agent", mock_register):
+                resolved = await auth_mod.resolve_workspace_from_api_key(created["key"])
+
+            self.assertEqual(resolved["external_agent_id"], "ext_agent_existing")
+            self.assertEqual(resolved["external_agent_display_name"], "Ember")
+            mock_register.assert_not_awaited()  # already had an identity -- no re-mint
+
+            await auth_mod.revoke_workspace_mcp_api_key(created["key_id"])
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_resolve_treats_revoked_roster_entry_as_no_identity(self):
+        async def _run():
+            from server_modules import mcp_server_auth as auth_mod
+
+            with patch(
+                "server_modules.mcp_external_agent_roster_service.register_external_agent",
+                AsyncMock(return_value={"ok": False, "error": "simulated"}),
+            ):
+                created = await auth_mod.create_workspace_mcp_api_key(workspace_id="ws-revoked-1", label="x")
+
+            mock_get = AsyncMock(return_value={
+                "id": "ext_agent_revoked", "display_name": "Ridge", "revoked": True,
+            })
+            with patch("server_modules.mcp_external_agent_roster_service.get_external_agent_by_key_hash", mock_get):
+                resolved = await auth_mod.resolve_workspace_from_api_key(created["key"])
+
+            self.assertIsNone(resolved["external_agent_id"])
+
+            await auth_mod.revoke_workspace_mcp_api_key(created["key_id"])
 
         import asyncio
         asyncio.run(_run())

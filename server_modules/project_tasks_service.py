@@ -207,6 +207,123 @@ async def list_tasks(
     return [t for t in (_row_to_task(r) for r in rows) if t]
 
 
+async def list_my_tasks(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    external_agent_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    status: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """The MCP `empyralis_list_my_tasks` tool's backing query: tasks assigned
+    to the caller (an external agent's roster id, or a platform agent's
+    install id) OR unassigned (backlog) tasks -- still visible/actionable
+    work the caller can pick up.
+
+    IMPORTANT scoping note: `assignee_agent_id` is FK'd to
+    `workspace_agent_installs` only today (see
+    migrations/add_project_tasks.sql) -- external agents cannot yet BE the
+    assignee of a task; that needs the @-mention resolver's schema change,
+    explicitly deferred to the next wave (docs/design/tasks-to-agents-
+    research.md Section 4.6 step 4). `external_agent_id` is accepted and
+    matched here anyway so this function already returns the right rows the
+    moment that lands, with zero changes to this query -- until then it
+    simply never matches anything (no task can carry an external id yet) and
+    the caller falls back to seeing unassigned/backlog tasks only, which is
+    honest: today an external agent genuinely has no assigned tasks.
+    """
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return []
+    caller_id = str(external_agent_id or agent_id or "").strip()
+    params: List[Any] = [str(tenant_id or "").strip(), str(workspace_id or "").strip()]
+    clauses = ["tenant_id = $1", "workspace_id = $2"]
+    if caller_id:
+        params.append(caller_id)
+        mine_clause = f"assignee_agent_id = ${len(params)}"
+    else:
+        mine_clause = "FALSE"
+    clauses.append(f"({mine_clause} OR assignee_agent_id IS NULL)")
+    if project_id:
+        params.append(str(project_id).strip())
+        clauses.append(f"project_id = ${len(params)}")
+    if status:
+        params.append(_normalize_status(status))
+        clauses.append(f"status = ${len(params)}")
+    query = f"""
+        SELECT id, tenant_id, workspace_id, project_id, title, description, status,
+               assignee_agent_id, created_by, due_at, plan, metadata, created_at, updated_at
+        FROM project_tasks
+        WHERE {' AND '.join(clauses)}
+        ORDER BY (assignee_agent_id IS NOT NULL) DESC, created_at DESC
+    """
+    rows = await pool.fetch(query, *params)
+    return [t for t in (_row_to_task(r) for r in rows) if t]
+
+
+async def add_task_comment(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    author_type: str,
+    author_id: str,
+    body: str,
+) -> Optional[Dict[str, Any]]:
+    """Append a comment to `task.metadata.comments` -- the MCP
+    `empyralis_comment_on_task` tool's backing write.
+
+    Deliberately NOT a new `task_comments` table: comments are a small,
+    append-mostly, read-mostly log, exactly the "metadata JSONB: free-form
+    extensibility" seam every sibling table already carries (see
+    migrations/add_project_tasks.sql's own rationale for that column). A
+    first-class threaded comment table + UI feed is real future work
+    (docs/design/tasks-to-agents-research.md Section 4.5) -- this unblocks
+    the pull -> work -> report-back loop today without it.
+
+    The append is one atomic UPDATE (jsonb_set + `||` computed server-side in
+    a single statement), not a read-modify-write in application code, so two
+    concurrent commenters (the owner dashboard and an agent, or two agents)
+    can never clobber each other's comment under a race.
+    """
+    body_text = str(body or "").strip()
+    if not body_text:
+        raise ValueError("Comment body is required.")
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
+            "Postgres is required to comment on a task."
+        )
+    comment = {
+        "id": f"comment_{uuid.uuid4().hex[:12]}",
+        "author_type": str(author_type or "").strip() or "unknown",
+        "author_id": str(author_id or "").strip() or "unknown",
+        "body": body_text[:4000],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    row = await pool.fetchrow(
+        """
+        UPDATE project_tasks
+        SET metadata = jsonb_set(
+                COALESCE(metadata, '{}'::jsonb),
+                '{comments}',
+                COALESCE(metadata->'comments', '[]'::jsonb) || $4::jsonb,
+                true
+            ),
+            updated_at = NOW()
+        WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+        RETURNING id, tenant_id, workspace_id, project_id, title, description, status,
+                  assignee_agent_id, created_by, due_at, plan, metadata, created_at, updated_at
+        """,
+        str(tenant_id or "").strip(),
+        str(workspace_id or "").strip(),
+        str(task_id or "").strip(),
+        json.dumps([comment]),
+    )
+    return _row_to_task(row)
+
+
 async def update_task(
     *,
     tenant_id: str,

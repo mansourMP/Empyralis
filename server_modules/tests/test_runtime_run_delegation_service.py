@@ -53,6 +53,15 @@ def _parent_snapshot(agent_role: str = "orchestrator") -> dict:
     }
 
 
+def _parent_snapshot_at_subagent_depth(depth: int, agent_role: str = "orchestrator") -> dict:
+    return {
+        "run_id": "parent-1",
+        "agent_role": agent_role,
+        "delegation_root_run_id": None,
+        "context": {"metadata": {"agent_role": agent_role, "subagent_depth": depth}},
+    }
+
+
 class RuntimeRunDelegationServiceTests(unittest.TestCase):
     @staticmethod
     def _rust_decision_side_effect(command, payload, allow_approval_required=False):
@@ -115,6 +124,45 @@ class RuntimeRunDelegationServiceTests(unittest.TestCase):
                 normalize_run_id_token=lambda value: str(value or "").strip() or None,
                 refresh_parent_delegation_state=lambda run_id: None,
             )
+
+    def test_delegate_run_children_blocked_at_depth_two(self):
+        """STEP 6 / §1.4 (agent-identity plan): a run already at
+        subagent_depth=1 (itself a subagent) may not delegate further --
+        child_depth would be 2, over MAX_SUBAGENT_DEPTH_DEFAULT=1. Verifies
+        the block happens BEFORE the Rust run-routing gate is even
+        consulted and before any child run is created."""
+        rust_gate_called = {"called": False}
+
+        def _exploding_rust_call(command, payload, allow_approval_required=False):
+            rust_gate_called["called"] = True
+            raise AssertionError("Rust run-routing gate must not be reached once the depth cap denies")
+
+        executed = {"called": False}
+        with patch.object(
+            runtime_run_delegation_service.rust_runtime_kernel_client,
+            "run_runtime_kernel_enforced",
+            side_effect=_exploding_rust_call,
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                runtime_run_delegation_service.delegate_run_children(
+                    "parent-1",
+                    body=_DelegationPayload([_Child(agent_role="researcher", user_goal="good")]),
+                    current_user={"user_id": "user-1"},
+                    lookup_run_snapshot=lambda run_id: _parent_snapshot_at_subagent_depth(1),
+                    enforce_run_owner_access=lambda current_user, snapshot: None,
+                    normalize_agent_role=lambda role: str(role or "").strip().lower(),
+                    build_delegated_run_request=lambda *args, **kwargs: {},
+                    execute_system_run_start_request_via_turn_runtime=lambda *args, **kwargs: executed.update({"called": True}),
+                    stamp_request_owner_fn=lambda payload: payload,
+                    run_execution_services=lambda: object(),
+                    normalize_run_id_token=lambda value: str(value or "").strip() or None,
+                    refresh_parent_delegation_state=lambda run_id: None,
+                )
+
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertIn("depth", str(raised.exception.detail).lower())
+        self.assertFalse(rust_gate_called["called"])
+        self.assertFalse(executed["called"])
 
     def test_auto_delegate_run_children_emits_routing_log_and_returns_created_items(self):
         routing_logs = []
@@ -427,6 +475,134 @@ class RuntimeRunDelegationServiceTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 423)
         self.assertIn("unexpected next_action", str(raised.exception.detail))
         self.assertFalse(built["called"])
+
+
+    def test_retry_failed_delegation_runs_blocked_at_max_subagent_depth(self):
+        """§1.4 cleanup: retry_failed_delegation_runs used to skip
+        assert_subagent_spawn_allowed entirely, unlike delegate_run_children /
+        auto_delegate_run_children -- so a depth-2+ retry could slip through
+        even though a fresh delegate call at the same parent depth would be
+        refused outright. Verifies the retry path is now equally gated, and
+        that it is blocked BEFORE find_run_relationships is even consulted
+        (a denied depth means the child relationships are irrelevant)."""
+        relationships_called = {"called": False}
+
+        def _find_run_relationships(parent_run_id, snapshot):
+            relationships_called["called"] = True
+            return snapshot, []
+
+        with self.assertRaises(HTTPException) as raised:
+            runtime_run_delegation_service.retry_failed_delegation_runs(
+                "parent-1",
+                request_payload=_RetryPayload(),
+                current_user={"user_id": "user-1"},
+                lookup_run_snapshot=lambda run_id: _parent_snapshot_at_subagent_depth(1),
+                enforce_run_owner_access=lambda current_user, snapshot: None,
+                normalize_agent_role=lambda role: str(role or "").strip().lower(),
+                find_run_relationships=_find_run_relationships,
+                normalize_run_id_token=lambda value: str(value or "").strip() or None,
+                parse_utc_ts=lambda value: None,
+                build_retry_child_payload=lambda parent_snapshot, child, note=None: {},
+                build_delegated_run_request=lambda *args, **kwargs: {},
+                execute_system_run_start_request_via_turn_runtime=lambda *args, **kwargs: {},
+                stamp_request_owner_fn=lambda payload: payload,
+                run_execution_services=lambda: object(),
+                refresh_parent_delegation_state=lambda run_id: None,
+            )
+
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertIn("depth", str(raised.exception.detail).lower())
+        self.assertFalse(relationships_called["called"])
+
+    def test_retry_failed_delegation_runs_allowed_at_depth_zero(self):
+        """Sanity check for the depth-cap fix above: a depth-0 (root)
+        orchestrator's retry must still go through -- the new gate only
+        denies once the CHILD depth would exceed max_subagent_depth()."""
+        with patch.object(
+            runtime_run_delegation_service.rust_runtime_kernel_client,
+            "run_runtime_kernel_enforced",
+            side_effect=self._rust_decision_side_effect,
+        ):
+            payload = runtime_run_delegation_service.retry_failed_delegation_runs(
+                "parent-1",
+                request_payload=_RetryPayload(),
+                current_user={"user_id": "user-1"},
+                lookup_run_snapshot=lambda run_id: _parent_snapshot_at_subagent_depth(0),
+                enforce_run_owner_access=lambda current_user, snapshot: None,
+                normalize_agent_role=lambda role: str(role or "").strip().lower(),
+                find_run_relationships=lambda parent_run_id, snapshot: (
+                    snapshot,
+                    [
+                        {
+                            "run_id": "child-3",
+                            "retry_root_run_id": "root-2",
+                            "status": "timeout",
+                            "updated_at": "2026-04-05T02:00:00Z",
+                            "created_at": "2026-04-05T02:00:00Z",
+                        },
+                    ],
+                ),
+                normalize_run_id_token=lambda value: str(value or "").strip() or None,
+                parse_utc_ts=lambda value: datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None,
+                build_retry_child_payload=lambda parent_snapshot, child, note=None: {
+                    "agent_role": "researcher",
+                    "user_goal": f"Retry {child['run_id']}",
+                    "metadata": {
+                        "retry_of_run_id": child["run_id"],
+                        "retry_root_run_id": child.get("retry_root_run_id") or child["run_id"],
+                        "retry_sequence": 1,
+                    },
+                },
+                build_delegated_run_request=lambda snapshot, child, note=None: {"child": child, "note": note},
+                execute_system_run_start_request_via_turn_runtime=lambda delegated_req, **kwargs: {"run_id": "new-child-3"},
+                stamp_request_owner_fn=lambda payload: payload,
+                run_execution_services=lambda: object(),
+                refresh_parent_delegation_state=lambda run_id: None,
+            )
+        self.assertEqual(payload["count"], 1)
+
+    def test_delegation_child_decision_defaults_workflow_turn_depth_to_governed_constant(self):
+        """§1.4 cleanup: max_workflow_turn_depth used to hard-fall back to
+        the literal 999999 in _enforce_delegation_child_decision, which made
+        the Rust run-routing gate's depth check a no-op for delegation (a
+        999999-turn ceiling never triggers). Confirms the fallback is now
+        run_service.MAX_WORKFLOW_TURN_DEPTH_DEFAULT (30), reused rather than
+        another made-up literal."""
+        from server_modules import run_service
+
+        captured_payloads = []
+
+        def _capture(command, payload, allow_approval_required=False):
+            captured_payloads.append(payload)
+            return self._rust_decision_side_effect(command, payload, allow_approval_required)
+
+        with patch.object(
+            runtime_run_delegation_service.rust_runtime_kernel_client,
+            "run_runtime_kernel_enforced",
+            side_effect=_capture,
+        ):
+            runtime_run_delegation_service.delegate_run_children(
+                "parent-1",
+                body=_DelegationPayload([_Child(agent_role="researcher", user_goal="good")]),
+                current_user={"user_id": "user-1"},
+                lookup_run_snapshot=lambda run_id: _parent_snapshot(),
+                enforce_run_owner_access=lambda current_user, snapshot: None,
+                normalize_agent_role=lambda role: str(role or "").strip().lower(),
+                build_delegated_run_request=lambda *args, **kwargs: {},
+                execute_system_run_start_request_via_turn_runtime=lambda *args, **kwargs: {"run_id": "child-1"},
+                stamp_request_owner_fn=lambda payload: payload,
+                run_execution_services=lambda: object(),
+                normalize_run_id_token=lambda value: str(value or "").strip() or None,
+                refresh_parent_delegation_state=lambda run_id: None,
+            )
+
+        child_decision_payloads = [p for p in captured_payloads if p["operation"] == "delegation_child"]
+        self.assertEqual(len(child_decision_payloads), 1)
+        self.assertEqual(
+            child_decision_payloads[0]["max_workflow_turn_depth"],
+            run_service.MAX_WORKFLOW_TURN_DEPTH_DEFAULT,
+        )
+        self.assertNotEqual(child_decision_payloads[0]["max_workflow_turn_depth"], 999999)
 
 
 if __name__ == "__main__":

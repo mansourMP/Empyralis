@@ -1369,6 +1369,38 @@ async def fleet_configure_agent(
             requested_label = str(clean_patch["display_name"] or "").strip()[:200]
             if not requested_label:
                 return {"ok": False, "error": "Name can't be empty."}
+            # Collision check (STEP 5, agent-identity plan). fleet_create_agent's
+            # auto-naming path already collision-checks every generated name
+            # against every existing label in the workspace
+            # (agent_name_pool.assign_agent_name, case-insensitive) — but a
+            # manual rename through this PATCH never did, and no DB constraint
+            # backed it either, so two agents could silently end up sharing a
+            # display name. Names are the display layer only (routing is
+            # always by agent_id, never label — see fleet_message_agent /
+            # get_workspace_agent_install_bundle), but a collision still
+            # breaks two real things: a human scanning the fleet roster, and
+            # the closed-roster mention autocomplete that has to resolve a
+            # typed name back to exactly one agent_id. Held to the same bar
+            # as auto-naming: case-insensitive, and excludes this agent's own
+            # current row (re-submitting the same name, or only changing
+            # case, is a no-op — never a collision with itself).
+            _rename_existing_installs = await repo.list_workspace_agent_installs(
+                tenant_id=tenant_id, workspace_id=workspace_id, include_master=True,
+            )
+            _requested_label_lower = requested_label.lower()
+            for _existing_install in (_rename_existing_installs or []):
+                _existing_agent_id = str(_existing_install.get("id") or "").strip()
+                if _existing_agent_id == agent_id:
+                    continue
+                if str(_existing_install.get("label") or "").strip().lower() == _requested_label_lower:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"'{requested_label}' is already the name of another agent in this "
+                            "workspace. Names must be unique so mentions and the fleet roster can "
+                            "tell agents apart — pick a different name."
+                        ),
+                    }
             _next_label = requested_label
         if "telegram_first_contact_reply" in clean_patch:
             meta["telegram_first_contact_reply"] = bool(clean_patch["telegram_first_contact_reply"])

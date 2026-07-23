@@ -31,6 +31,29 @@ Read + chat (always live):
   - ``empyralis_get_agent_conversations`` → deployed_agent_service.list_deployed_agent_conversations
   - ``empyralis_chat`` → full turn through normal chat path (triage, ledger, AI)
 
+Tasks (always live — see "Write-gate decision" below):
+  - ``empyralis_list_my_tasks`` → project_tasks_service.list_my_tasks (assigned to
+    this key's external_agent_id, OR unassigned/backlog)
+  - ``empyralis_get_task`` → project_tasks_service.get_task
+  - ``empyralis_update_task_status`` → project_tasks_service.update_task (status only)
+  - ``empyralis_comment_on_task`` → project_tasks_service.add_task_comment
+
+Write-gate decision (task tools): NOT behind ``EMPYRALIS_MCP_WRITE_ENABLED``.
+The 8 gated tools below are workspace-wide configuration mutations (create/
+reconfigure an agent, take over a channel, start an OAuth grant) — exactly
+what a read-only key must never be able to do by accident. Task status/
+comments are bounded to tasks already visible through this same key
+(``empyralis_list_my_tasks``/``empyralis_get_task``) and are the founder's
+core loop itself ("check Empyralis → pull task → work → comment back").
+Gating them would force operators to grant the SAME ``writes_enabled=true``
+that also unlocks channel takeover and agent creation just to let an agent
+report its own progress — there is no granular per-tool scope today, so that
+coupling is a worse privilege trade than leaving them ungated. It's also
+consistent with the existing precedent: ``empyralis_chat`` already runs a
+full AI turn (with whatever side effects Sage's own tools cause) without
+being writes_enabled-gated; task status/comments are a narrower, more
+bounded mutation than that, not a broader one.
+
 Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true`` + per-key writes_enabled):
   - ``empyralis_create_project`` → projects_repository.create_project
   - ``empyralis_create_agent`` → fleet_create_agent (+ projects_repository.assign_install_to_project)
@@ -75,6 +98,12 @@ EMPYRALIST_MCP_TOOLS = [
     "empyralis_get_agent_activity",
     "empyralis_get_agent_conversations",
     "empyralis_chat",
+    # Tasks (always live — bounded to tasks already visible through this key;
+    # see the write-gate rationale in the module docstring)
+    "empyralis_list_my_tasks",
+    "empyralis_get_task",
+    "empyralis_update_task_status",
+    "empyralis_comment_on_task",
     # Write (gated behind EMPYRALIS_MCP_WRITE_ENABLED + per-key writes_enabled)
     "empyralis_create_project",
     "empyralis_create_agent",
@@ -116,7 +145,8 @@ def _resolve_public_base_url() -> str:
 
 
 async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
-    """Extract ``{workspace_id, writes_enabled}`` from the authenticated MCP request.
+    """Extract ``{workspace_id, writes_enabled, external_agent_id,
+    external_agent_display_name}`` from the authenticated MCP request.
 
     Prefers the mcp SDK's verified access token (populated by its
     AuthContextMiddleware whenever ``_build_mcp_server`` wired an
@@ -130,6 +160,16 @@ async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
     Falls back to manually parsing the Authorization header (this function's
     entire pre-OAuth behavior, unchanged) when no auth_server_provider is
     configured at all — e.g. ``EMPYRALIS_MCP_OAUTH_ENABLED`` unset.
+
+    ``external_agent_id``: the bearer-key path always carries one (Step 2 of
+    "Mentions + identity for platform AND external agents" mints/backfills it
+    in ``resolve_workspace_from_api_key`` itself). The OAuth path does NOT
+    mint one yet — an OAuth-issued Connector session has its own client
+    identity in the OAuth tables that Step 2 deliberately did not touch (out
+    of scope: OAuth is opt-in, disabled by default, and needs its own
+    integration pass) — so it explicitly returns ``None`` here rather than
+    silently omitting the key, and every task tool that reads it must treat
+    ``None`` as a real, traceable state ("no identity yet"), not an error.
     """
     try:
         from mcp.server.auth.middleware.auth_context import get_access_token
@@ -148,6 +188,9 @@ async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
                 "workspace_id": workspace_id,
                 "writes_enabled": SCOPE_WRITE in scopes,
                 "scopes": scopes,
+                # Not minted for the OAuth path yet — see docstring above.
+                "external_agent_id": None,
+                "external_agent_display_name": None,
             }
 
     auth = ""
@@ -448,6 +491,117 @@ if empyralist_mcp is not None:
         reply = str(payload.get("reply") or "").strip()
         await _ledger_mcp_call(ws, "empyralis_chat", True, message_len=len(message), reply_len=len(reply))
         return {"ok": True, "reply": reply, "agent_id": agent_id or "(sage)"}
+
+    # ── Task tools (always live — see module docstring for the write-gate
+    # decision: bounded to tasks already visible through this key, not a
+    # workspace-wide configuration mutation, so not behind
+    # EMPYRALIS_MCP_WRITE_ENABLED) ─────────────────────────────────────
+
+    @empyralist_mcp.tool(
+        title="List My Tasks",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    async def empyralis_list_my_tasks(
+        project_id: str = "", status: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """List tasks assigned to you (this key's external-agent identity) or
+        unassigned/backlog tasks still open for anyone in the workspace.
+        Optionally filter to one project_id or one status
+        (open|in_progress|blocked|awaiting_input|done)."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        external_agent_id = r.get("external_agent_id") or None
+        from server_modules import project_tasks_service as tasks
+        try:
+            rows = await tasks.list_my_tasks(
+                tenant_id=tenant, workspace_id=ws,
+                external_agent_id=external_agent_id,
+                project_id=project_id or None,
+                status=status or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(ws, "empyralis_list_my_tasks", False, error=str(exc))
+            return {"ok": False, "error": str(exc), "tasks": []}
+        await _ledger_mcp_call(
+            ws, "empyralis_list_my_tasks", True,
+            task_count=len(rows), external_agent_id=external_agent_id,
+        )
+        result: Dict[str, Any] = {"ok": True, "tasks": rows, "external_agent_id": external_agent_id}
+        if not external_agent_id:
+            result["note"] = (
+                "This session has no external-agent identity yet (an OAuth Connector "
+                "session, which does not mint one — see mcp_server.py's module "
+                "docstring), so only unassigned/backlog tasks are shown, not "
+                "anything specifically assigned to you."
+            )
+        return result
+
+    @empyralist_mcp.tool(
+        title="Get Task",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    async def empyralis_get_task(task_id: str, ctx: Context = None) -> Dict[str, Any]:
+        """Get one task by id. Scoped like every other tool here — any task in
+        your workspace, not only ones assigned to you (same precedent as
+        empyralis_configure_agent: any agent in the workspace, not only yours).
+        Comments live under task.metadata.comments."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import project_tasks_service as tasks
+        task = await tasks.get_task(tenant_id=tenant, workspace_id=ws, task_id=task_id)
+        await _ledger_mcp_call(ws, "empyralis_get_task", task is not None, task_id=task_id)
+        if task is None:
+            return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
+        return {"ok": True, "task": task}
+
+    @empyralist_mcp.tool(
+        title="Update Task Status",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_update_task_status(
+        task_id: str, status: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Update a task's status: open | in_progress | blocked | awaiting_input
+        | done. Workspace-scoped like empyralis_get_task — any task in your
+        workspace. An invalid status is rejected with a clear, agent-facing
+        error naming the valid set; it is never silently coerced."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import project_tasks_service as tasks
+        try:
+            task = await tasks.update_task(tenant_id=tenant, workspace_id=ws, task_id=task_id, status=status)
+        except ValueError as exc:
+            await _ledger_mcp_call(ws, "empyralis_update_task_status", False, task_id=task_id, status=status)
+            return {"ok": False, "error": str(exc), "task_id": task_id}
+        if task is None:
+            await _ledger_mcp_call(ws, "empyralis_update_task_status", False, task_id=task_id, status=status)
+            return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
+        await _ledger_mcp_call(ws, "empyralis_update_task_status", True, task_id=task_id, status=status)
+        return {"ok": True, "task": task}
+
+    @empyralist_mcp.tool(
+        title="Comment On Task",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_comment_on_task(
+        task_id: str, body: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Post a progress note/comment on a task — visible to the owner and
+        any other agent that reads the task afterward (task.metadata.comments).
+        Workspace-scoped like empyralis_get_task — any task in your workspace."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        author_id = r.get("external_agent_id") or "external_mcp_client"
+        from server_modules import project_tasks_service as tasks
+        try:
+            task = await tasks.add_task_comment(
+                tenant_id=tenant, workspace_id=ws, task_id=task_id,
+                author_type="external_agent", author_id=author_id, body=body,
+            )
+        except ValueError as exc:
+            await _ledger_mcp_call(ws, "empyralis_comment_on_task", False, task_id=task_id)
+            return {"ok": False, "error": str(exc), "task_id": task_id}
+        if task is None:
+            await _ledger_mcp_call(ws, "empyralis_comment_on_task", False, task_id=task_id)
+            return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
+        await _ledger_mcp_call(ws, "empyralis_comment_on_task", True, task_id=task_id)
+        return {"ok": True, "task": task}
 
     # ── Write tools (gated per-key + global off-switch) ──────────────
 
