@@ -3565,10 +3565,17 @@ async def _action_loop_context_budget_preflight(
         return prior_messages
 
     from server_modules.compaction_service import (
-        estimate_tokens, COMPACTION_RESERVE_TOKENS, resolve_context_window,
-        compact_turns, find_cut_point, build_context_from_compaction,
+        estimate_tokens, effective_compaction_threshold, resolve_context_window,
+        compact_turns, find_cut_point_with_fallback, build_context_from_compaction,
+        load_previous_summary, should_use_structural_truncation, structural_truncate,
     )
 
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    # BUG 6 (model switching): resolved fresh from the CURRENT provider/
+    # model on every call — never cached — so a same-thread downgrade is
+    # measured against the smaller window before the request is built.
     window = resolve_context_window(provider, model or None)
     if ctx_policy_max and ctx_policy_max > 0:
         window = min(window, ctx_policy_max)
@@ -3577,17 +3584,36 @@ async def _action_loop_context_budget_preflight(
     for _pm in (prior_messages or []):
         if isinstance(_pm, dict):
             text += str(_pm.get("content") or "")
-    estimated = estimate_tokens(text) + COMPACTION_RESERVE_TOKENS
-    if estimated <= window:
+    estimated = estimate_tokens(text)
+    # BUG 5 fix: compare against the real per-model threshold (subtract
+    # reserves, then ratio) instead of a flat COMPACTION_RESERVE_TOKENS
+    # add-then-compare — see effective_compaction_threshold's docstring.
+    threshold = effective_compaction_threshold(window, provider=provider, model=model)
+    if estimated <= threshold:
         return prior_messages
 
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
     _log.warning(
         "sage_agent_runtime: action-loop token preflight triggered — "
-        "estimated %d tokens > window %d (provider=%s, model=%s)",
-        estimated, window, provider, model,
+        "estimated %d tokens > threshold %d (window=%d, provider=%s, model=%s)",
+        estimated, threshold, window, provider, model,
     )
+
+    # BUG 5 policy: small windows never get an LLM summary — structural
+    # truncation only (channel-origin turns already got plain truncation
+    # below regardless of window size; this additionally applies it to the
+    # non-channel case for small windows).
+    if should_use_structural_truncation(window):
+        source = list(prior_messages or [])
+        truncated = structural_truncate(source, context_window=window)
+        if len(truncated) < len(source):
+            used_context.append("action_loop_prior_messages_structurally_truncated")
+            _log.info(
+                "sage_agent_runtime: action-loop preflight used structural "
+                "truncation (window=%d <= small-window threshold) instead of "
+                "an LLM summary — dropped %d of %d prior messages",
+                window, len(source) - len(truncated), len(source),
+            )
+        return truncated
 
     try:
         flush_ok = await _run_memory_flush_before_compaction(
@@ -3602,21 +3628,60 @@ async def _action_loop_context_budget_preflight(
             return prior_messages
 
         source = list(prior_messages or [])
-        cut_idx = find_cut_point(source, context_window=window)
+        # BUG 2 fix: find_cut_point's normal ~15%-of-window keep-recent
+        # budget can exceed this ENTIRE prior_messages list for a lightly-
+        # used agent, always returning cut_idx=0 ("nothing to cut") even
+        # though the estimate above just proved the turn breaches its
+        # threshold — no threshold value could ever make this fire for a
+        # short conversation. find_cut_point_with_fallback retries with a
+        # much smaller forced floor instead of silently doing nothing.
+        cut_idx, forced = find_cut_point_with_fallback(source, context_window=window)
         if cut_idx <= 0:
-            # Nothing old enough to be worth cutting.
+            # Even the aggressive forced floor found nothing cuttable
+            # (0-1 prior messages) — the breach is coming from something
+            # other than prior_messages (an oversized system_prompt, a
+            # tiny window's reserve on a huge current user_message, etc).
+            # Compaction genuinely cannot address this; say so explicitly
+            # rather than a silent no-op.
+            _log.warning(
+                "sage_agent_runtime: action-loop preflight CANNOT compact — "
+                "even the forced floor found nothing cuttable in %d prior "
+                "messages (estimated=%d threshold=%d window=%d) — breach is "
+                "not coming from turn history; proceeding uncompacted",
+                len(source), estimated, threshold, window,
+            )
             return prior_messages
+        if forced:
+            _log.warning(
+                "sage_agent_runtime: action-loop preflight used the FORCED "
+                "keep-recent floor (normal ~15%%-of-window budget exceeded "
+                "the entire %d-message prior_messages list) to still shed "
+                "some history instead of silently skipping compaction",
+                len(source),
+            )
 
         if channel_prior_messages is not None:
             compacted = source[cut_idx:]
             used_context.append("action_loop_prior_messages_compacted")
             return compacted
 
+        # BUG 3b fix: thread the prior summary through so this compaction
+        # carries forward whatever came before it (BUG 3c's prompt
+        # instruction only has something to work with if this is passed).
+        previous_summary = ""
+        try:
+            previous_summary = await load_previous_summary(
+                workspace_id=workspace_id, tenant_id=tenant_id, thread_id=thread_id,
+            )
+        except Exception:
+            previous_summary = ""
+
         summary = await compact_turns(
             turns=source[:cut_idx],
             workspace_id=workspace_id,
             tenant_id=tenant_id,
             thread_id=thread_id,
+            previous_summary=previous_summary,
             # Thread the turn's own provider/model through (same fix as
             # _apply_fresh_session_context_policy's _ct call below) so the
             # summary is produced on the model this turn is actually paying
@@ -3691,6 +3756,7 @@ async def _apply_fresh_session_context_policy(
     persists across sessions, so continuity is preserved. Returns the carried
     summary as prior_messages for the current turn."""
     from server_modules.compaction_service import compact_turns as _ct
+    from server_modules.compaction_service import load_previous_summary as _load_prev_summary
     from server_modules import session_service
 
     _thread_rec = await thread_service.get_thread(
@@ -3699,13 +3765,25 @@ async def _apply_fresh_session_context_policy(
     _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
     summary = ""
     try:
+        # BUG 3b fix: thread the prior compaction summary through so chained
+        # fresh_session rounds carry cumulative history forward instead of
+        # each one only summarizing the segment since the last (see
+        # COMPACTION_PROMPT's carry-forward instruction — BUG 3c).
+        _prev_summary = ""
+        try:
+            _prev_summary = await _load_prev_summary(
+                workspace_id=workspace_id, tenant_id=tenant_id, thread_id=thread_id,
+            )
+        except Exception:
+            _prev_summary = ""
         # Forward the turn's provider/model so compaction summarizes with the
         # SAME provider the agent runs on — otherwise it defaults to deepseek and
         # produces an empty summary (continuity loss) on any non-deepseek agent.
         summary = str(
             await _ct(
                 turns=_raw_turns, workspace_id=workspace_id, tenant_id=tenant_id,
-                thread_id=thread_id, provider=provider, model=model,
+                thread_id=thread_id, previous_summary=_prev_summary,
+                provider=provider, model=model,
             ) or ""
         ).strip()
     except Exception:
@@ -3736,12 +3814,220 @@ async def _apply_fresh_session_context_policy(
 
     prior_messages: list = []
     if summary:
-        prior_messages = [{"role": "system", "content": f"[Carried summary from previous session]\n{summary}"}]
+        # BUG 4 fix: role="user" not "system" — see build_context_from_
+        # compaction's docstring in compaction_service.py for why a
+        # "system"-role prior_messages entry is silently dropped by every
+        # cloud-provider transport (scripts/orion_local_worker_llm.py's
+        # _normalize_prior_messages) before it ever reaches the model.
+        prior_messages = [{
+            "role": "user",
+            "content": (
+                "[Automated note — carried summary from previous session, "
+                f"not something the user actually said]:\n{summary}"
+            ),
+        }]
     logging.getLogger(__name__).warning(
         "context_policy fresh_session: thread=%s new_session=%s summary_chars=%d",
         thread_id, new_session_id, len(summary),
     )
     return {"prior_messages": prior_messages, "new_session_id": new_session_id, "summary": summary}
+
+
+async def _run_post_turn_auto_compaction(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    thread_id: str,
+    provider: str,
+    model: str,
+    ctx_policy_max: int,
+    ctx_policy_action: str,
+    session_id: str,
+    trace_id: str = "",
+) -> None:
+    """BUG 1 fix (root cause #1 — placement): this job used to be defined
+    as a closure inline at the tail of handle_sage_chat, AFTER the
+    `if action_result is not None: ... return {...}` block (~line 4670 in
+    the pre-fix file). _run_sage_action_loop_v3 "always runs" (its own call
+    site's comment) and returns a non-None dict for essentially every real
+    turn (it returns None only when the model produced literally no reply
+    AND no tool activity at all) — so that early return fired first on
+    nearly every live turn, and this code was never reached. Verified live
+    via a repro harness (asyncio.new_event_loop + explicit post-await
+    sleep so a fire-and-forget task gets real scheduling time, not
+    asyncio.run()'s tear-down-on-return): instrumented print statements
+    placed at the top of the old inline block never fired on a normal
+    tool-using turn, only on the rare all-else-failed fallback path. This
+    is a control-flow/placement bug, independent of any exception — it
+    would have stayed silent even with perfect logging, because the code
+    was simply never executed.
+
+    Extracted to a module-level function (no closure capture) so it can be
+    called from BOTH of handle_sage_chat's exit points — the action-loop
+    success return AND the fallback-path return — restoring the "after
+    turn completion" semantics the old inline comment already claimed but
+    never delivered for the common case.
+
+    BUG 1 root cause #2 — the exception swallow: the old inline version
+    wrapped its ENTIRE body (should_compact/compact_turns/
+    _apply_fresh_session_context_policy/memory-flush, everything) in a
+    bare `except Exception: pass` with zero logging — on the rare turns
+    that DID reach it, any failure was invisible too. Fixed here: every
+    exception is logged with full context (workspace/thread/provider/
+    model, exc_info=True) AND recorded as a durable, queryable
+    security-audit event (this module's existing "something happened this
+    turn" channel — see security_audit_service.emit_security_audit_event,
+    already used elsewhere in handle_sage_chat) instead of vanishing.
+    """
+    _log = logging.getLogger(__name__)
+    try:
+        from server_modules.compaction_service import should_compact as _should_compact
+        from server_modules.compaction_service import compact_turns as _auto_compact
+        from server_modules.compaction_service import resolve_context_window as _resolve_ctx_window
+        from server_modules.compaction_service import load_previous_summary as _load_prev_summary
+        from server_modules.compaction_service import (
+            should_use_structural_truncation as _should_truncate_only,
+        )
+
+        # BUG 6 (model switching): resolved fresh from the CURRENT
+        # provider/model every call — never cached from session start —
+        # so a same-thread downgrade (e.g. 1M -> 200k window) is measured
+        # against the smaller window on the very next turn.
+        _ctx_window = _resolve_ctx_window(provider, model)
+        # Phase 5C: honor a per-install threshold (e.g. knowledge agents
+        # compact early) — take the smaller of the model window and policy.
+        if ctx_policy_max and ctx_policy_max > 0:
+            _ctx_window = min(_ctx_window, ctx_policy_max)
+
+        # Reload turns from DB for accurate token count
+        _thread_rec = await thread_service.get_thread(
+            thread_id, tenant_id=tenant_id, workspace_id=workspace_id, include_turns=True,
+        )
+        _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
+
+        if not _should_compact(_raw_turns, context_window=_ctx_window, provider=provider, model=model):
+            return
+
+        if ctx_policy_action == "fresh_session":
+            await _apply_fresh_session_context_policy(
+                workspace_id=workspace_id, tenant_id=tenant_id, thread_id=thread_id,
+                current_session_id=session_id, provider=provider, model=model,
+            )
+            return
+
+        if _should_truncate_only(_ctx_window):
+            # BUG 5 policy: small windows never get an LLM summary. The
+            # background job's only role is upkeep of the persisted
+            # compaction_summary artifact, which truncation doesn't
+            # produce (truncation only ever applies at request-assembly
+            # time — see _action_loop_context_budget_preflight). Log why
+            # this is a no-op instead of leaving it silent.
+            _log.info(
+                "sage_agent_runtime: background auto-compact skipped for "
+                "workspace=%s thread=%s — window %d tokens is at/below the "
+                "structural-truncation threshold; handled at request-"
+                "assembly time instead of via LLM summary",
+                workspace_id, thread_id, _ctx_window,
+            )
+            return
+
+        # B3: Memory flush before compaction
+        _flush_ok = await _run_memory_flush_before_compaction(
+            workspace_id=workspace_id, tenant_id=tenant_id, thread_id=thread_id,
+            provider=provider, model=model,
+        )
+        if not _flush_ok:
+            # flush failed after retry — skip compaction this round, try
+            # again next turn. Do NOT discard turns we couldn't save.
+            _log.warning(
+                "sage_agent_runtime: background auto-compact skipped for "
+                "workspace=%s thread=%s — memory flush failed (facts "
+                "preserved in raw turns, retried next turn)",
+                workspace_id, thread_id,
+            )
+            return
+
+        # BUG 3b fix: thread the prior summary through so chaining doesn't
+        # lose everything before the last compaction (BUG 3c's prompt
+        # instruction only has something to work with if this is passed).
+        _prev_summary = ""
+        try:
+            _prev_summary = await _load_prev_summary(
+                workspace_id=workspace_id, tenant_id=tenant_id, thread_id=thread_id,
+            )
+        except Exception:
+            _prev_summary = ""
+
+        await _auto_compact(
+            turns=_raw_turns,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            thread_id=thread_id,
+            previous_summary=_prev_summary,
+            # Thread the turn's own provider/model through instead of
+            # compact_turns' no-fallback skip on an unresolved provider.
+            provider=provider,
+            model=model,
+        )
+    except Exception as exc:
+        _log.error(
+            "sage_agent_runtime: background auto-compaction job FAILED for "
+            "workspace=%s thread=%s provider=%s model=%s: %s",
+            workspace_id, thread_id, provider, model, exc, exc_info=True,
+        )
+        try:
+            security_audit_service.emit_security_audit_event(
+                action="compaction.background_job_failed",
+                status="failure",
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                trace_id=trace_id,
+                detail=f"background auto-compaction raised: {exc}",
+                metadata={"provider": provider, "model": model, "thread_id": thread_id},
+            )
+        except Exception:
+            pass  # observability must never break the calling turn
+
+
+def _schedule_post_turn_auto_compaction(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    thread_id: str,
+    provider: str,
+    model: str,
+    ctx_policy_max: int,
+    ctx_policy_action: str,
+    session_id: str,
+    trace_id: str = "",
+) -> None:
+    """Fire-and-forget scheduling wrapper around _run_post_turn_auto_
+    compaction — called from BOTH of handle_sage_chat's exit points (BUG 1
+    fix). Any failure to even SCHEDULE the task (vs. a failure inside it,
+    which the task itself now logs) is logged here rather than swallowed —
+    matches the "never silent" fix the inline setup+dispatch code used to
+    violate.
+    """
+    try:
+        import asyncio as _asyncio
+
+        _asyncio.ensure_future(_run_post_turn_auto_compaction(
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            thread_id=thread_id,
+            provider=provider,
+            model=model,
+            ctx_policy_max=ctx_policy_max,
+            ctx_policy_action=ctx_policy_action,
+            session_id=session_id,
+            trace_id=trace_id,
+        ))
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "sage_agent_runtime: failed to SCHEDULE background auto-compaction "
+            "for workspace=%s thread=%s: %s",
+            workspace_id, thread_id, exc, exc_info=True,
+        )
 
 
 async def handle_sage_chat(
@@ -3804,10 +4090,31 @@ async def handle_sage_chat(
             _mm = (_master or {}).get("metadata") if isinstance((_master or {}).get("metadata"), dict) else {}
             if isinstance(_mm.get("context_policy"), dict):
                 _acting_ctx_policy = dict(_mm["context_policy"])
-        try:
-            _ctx_policy_max = max(0, int(_acting_ctx_policy.get("max_context_tokens") or _DEFAULT_CTX_POLICY_MAX))
-        except (TypeError, ValueError):
+        # BUG 5 fix (falsy-zero): `.get("max_context_tokens") or _DEFAULT_CTX_
+        # POLICY_MAX` treated an EXPLICIT 0 identically to "key absent" —
+        # both silently became the 128K safety default. But 0 is a real,
+        # documented value: capability_presets.py's PRESET_STANDARD and
+        # PRESET_OPERATOR — the two most common agent presets — both set
+        # `context_policy: {"max_context_tokens": 0, ...}  # 0 = use model
+        # default` (fleet_tools.py's own validator also explicitly allows
+        # 0: "must be ≥ 0"). The bug silently clamped EVERY Standard/
+        # Operator-preset agent to 128K regardless of its actual model's
+        # real window — an agent on a 1M-window model would compact 8x too
+        # early. Fixed by checking presence (`is None`) instead of
+        # truthiness: only a genuinely UNSET policy (no context_policy dict,
+        # or the key missing) falls back to the safety default; an explicit
+        # 0 stays 0. The downstream check three call sites below
+        # (`if _ctx_policy_max and _ctx_policy_max > 0: window = min(...)`)
+        # already treats 0 as "no clamp" correctly — this was the only
+        # place that got the None-vs-0 distinction wrong.
+        _raw_max_ctx = _acting_ctx_policy.get("max_context_tokens")
+        if _raw_max_ctx is None:
             _ctx_policy_max = _DEFAULT_CTX_POLICY_MAX
+        else:
+            try:
+                _ctx_policy_max = max(0, int(_raw_max_ctx))
+            except (TypeError, ValueError):
+                _ctx_policy_max = _DEFAULT_CTX_POLICY_MAX
         _act = str(_acting_ctx_policy.get("on_context_full") or "compact").strip().lower()
         _ctx_policy_action = _act if _act in {"compact", "fresh_session"} else "compact"
         _usage_repo.set_usage_attribution(
@@ -4142,6 +4449,29 @@ async def handle_sage_chat(
                 and str(t.get("role") or "").strip().lower() in {"user", "assistant"}
                 and str(t.get("content") or "").strip()
             ][-SAGE_THREAD_MAX_TURNS:]
+            # BUG 4 fix: the [-SAGE_THREAD_MAX_TURNS:] slice above only ever
+            # looked at user/assistant turns — a compaction_summary row
+            # (persisted by an earlier turn's background auto-compaction)
+            # was filtered out before the slice even ran, so a summary an
+            # earlier turn paid an LLM call to produce never reached a
+            # single ORDINARY next turn (only the turn that produced it, if
+            # anything). Scanned across the FULL raw_turns (not just the
+            # last SAGE_THREAD_MAX_TURNS window) because the summary can be
+            # legitimately older than that window and still be the only
+            # durable memory of everything before it. _normalize_recent_
+            # messages (sage_instruction_compiler_service.py) recognizes
+            # this role explicitly and carries it through as a role="user"
+            # tagged note — never "system" (silently dropped by every
+            # cloud-provider transport's prior_messages normalizer).
+            for _t in reversed(raw_turns):
+                if isinstance(_t, dict) and str(_t.get("role") or "").strip().lower() == "compaction_summary":
+                    _summary_content = str(_t.get("content") or "").strip()
+                    if _summary_content:
+                        recent_messages.append({
+                            "role": "compaction_summary",
+                            "content": sanitize_history_turn(_summary_content),
+                        })
+                    break
     except Exception as _thread_load_err:
         import logging as _logging
         _logging.getLogger(__name__).warning(
@@ -4991,6 +5321,26 @@ async def handle_sage_chat(
             except Exception:
                 pass
 
+        # ── B1: Auto-compaction after turn completion (background, non-blocking) ──
+        # BUG 1 fix: this is the primary exit point for nearly every real
+        # turn (the action loop "always runs" and returns a result here in
+        # all but the rare no-reply-no-tool-activity case) — the OLD B1
+        # job lived only after the fallback path's own return, hundreds of
+        # lines below, and was therefore never reached from here. Same call
+        # fires again at the fallback path's own return, so a turn ending
+        # either way always gets a post-turn compaction check.
+        _schedule_post_turn_auto_compaction(
+            workspace_id=normalized_workspace_id,
+            tenant_id=effective_tenant_id,
+            thread_id=thread_id,
+            provider=provider,
+            model=requested_model,
+            ctx_policy_max=_ctx_policy_max,
+            ctx_policy_action=_ctx_policy_action,
+            session_id=str(request_id or "").strip(),
+            trace_id=trace_id,
+        )
+
         return {
             "message": reply or "",
             "error": None,
@@ -5033,11 +5383,17 @@ async def handle_sage_chat(
     # window, compact first so the call is likely to succeed. The reactive
     # overflow recovery below remains as a backstop for edge cases.
     from server_modules.compaction_service import (
-        estimate_tokens, COMPACTION_RESERVE_TOKENS,
+        estimate_tokens, effective_compaction_threshold,
         resolve_context_window as _resolve_ctx_window,
         compact_turns as _compact_now_proactive,
-        find_cut_point as _find_cut_point_proactive,
+        find_cut_point_with_fallback as _find_cut_point_proactive,
+        load_previous_summary as _load_prev_summary_proactive,
+        build_context_from_compaction as _build_ctx_from_compaction_proactive,
+        should_use_structural_truncation as _should_truncate_proactive,
+        structural_truncate as _structural_truncate_proactive,
     )
+    # BUG 6 (model switching): resolved fresh from the CURRENT provider/
+    # model on every call — never cached from session start.
     _proactive_ctx_window = _resolve_ctx_window(provider, requested_model or None)
     # Phase 5C: a per-install context policy can set a smaller threshold than the
     # model window (e.g. knowledge agents compact early). The policy's action
@@ -5049,8 +5405,13 @@ async def handle_sage_chat(
     for _pm in (prior_messages or []):
         if isinstance(_pm, dict):
             _proactive_input_text += str(_pm.get("content") or "")
-    _proactive_estimated = estimate_tokens(_proactive_input_text) + COMPACTION_RESERVE_TOKENS
-    if _proactive_estimated > _proactive_ctx_window and _ctx_policy_action == "fresh_session":
+    # BUG 5 fix: real per-model threshold (subtract reserves, ratio) instead
+    # of a flat COMPACTION_RESERVE_TOKENS add-then-compare.
+    _proactive_estimated = estimate_tokens(_proactive_input_text)
+    _proactive_threshold = effective_compaction_threshold(
+        _proactive_ctx_window, provider=provider, model=requested_model,
+    )
+    if _proactive_estimated > _proactive_threshold and _ctx_policy_action == "fresh_session":
         # Phase 5C: fresh_session — close the current session and open a new one
         # carrying a summary, instead of compacting in place. The thread persists
         # across sessions, so the conversation stays coherent.
@@ -5070,106 +5431,168 @@ async def handle_sage_chat(
             import logging as _lg_fs
             _lg_fs.getLogger(__name__).warning("fresh_session context policy failed; falling back to compaction", exc_info=True)
             _ctx_policy_action = "compact"  # fall back to compaction below
-    if _proactive_estimated > _proactive_ctx_window and _ctx_policy_action != "fresh_session":
+    if _proactive_estimated > _proactive_threshold and _ctx_policy_action != "fresh_session":
         import logging as _logging
         _log = _logging.getLogger(__name__)
         _log.warning(
             "sage_agent_runtime: proactive compaction triggered — "
-            "estimated %d tokens > window %d (provider=%s, model=%s)",
-            _proactive_estimated, _proactive_ctx_window, provider, requested_model,
+            "estimated %d tokens > threshold %d (window=%d, provider=%s, model=%s)",
+            _proactive_estimated, _proactive_threshold, _proactive_ctx_window, provider, requested_model,
         )
-        try:
-            _flush_ok = await _run_memory_flush_before_compaction(
-                workspace_id=normalized_workspace_id,
-                tenant_id=effective_tenant_id,
-                thread_id=thread_id,
-                provider=provider,
-                model=requested_model,
+        # BUG 5 policy: small windows never get an LLM summary — structural
+        # truncation only, for BOTH the channel and non-channel case.
+        if _should_truncate_proactive(_proactive_ctx_window):
+            _proactive_source = list(prior_messages or [])
+            _proactive_truncated = _structural_truncate_proactive(
+                _proactive_source, context_window=_proactive_ctx_window,
             )
-            if _flush_ok:
-                if channel_prior_messages is not None:
-                    # fix/unified-owner-memory reliability fix: a channel
-                    # turn carries its OWN durable history via
-                    # agent_conversation_memory (prior_messages was already
-                    # set to list(channel_prior_messages) above) —
-                    # thread_service/control_plane_repository is dead under
-                    # SQLite-fallback prod for these turns (they never write
-                    # there in the first place), and for a master/Sage
-                    # channel turn thread_id is frequently a shared, UNSCOPED
-                    # value (e.g. "sage-main" — see sage_turn_adapter's
-                    # thread resolution) rather than one keyed to this
-                    # specific remote_jid/conversation. Falling through to
-                    # thread_service.get_thread(thread_id, ...) here would
-                    # either silently WIPE prior_messages (an empty read from
-                    # a store this conversation never wrote to) or
-                    # CROSS-CONTAMINATE it (splice in a different
-                    # conversation's turns via that shared thread_id) —
-                    # exactly the two failure modes a compaction pass must
-                    # never introduce. Compact the ALREADY-CORRECT
-                    # channel_prior_messages directly instead, reusing
-                    # find_cut_point's own "keep the most recent
-                    # keep_recent_tokens-worth of turns" policy (the same
-                    # sizing the thread_service path targets) — no store
-                    # round-trip, no risk of touching the wrong
-                    # conversation. This is a plain truncation, not an LLM
-                    # summary of the dropped older turns (unlike the
-                    # thread_service path below) — strictly safer than a
-                    # wipe or cross-contamination, and this channel's own
-                    # history is bounded/continuously appended anyway
-                    # (agent_conversation_memory's own MAX_TURNS_RETAINED).
-                    _channel_prior_list = list(prior_messages or [])
-                    _channel_cut_idx = _find_cut_point_proactive(
-                        _channel_prior_list, context_window=_proactive_ctx_window,
-                    )
-                    prior_messages = _channel_prior_list[_channel_cut_idx:]
-                    used_context.append("channel_prior_messages_compacted")
-                else:
-                    _thread_rec = await thread_service.get_thread(
-                        thread_id,
-                        tenant_id=effective_tenant_id,
-                        workspace_id=normalized_workspace_id,
-                        include_turns=True,
-                    )
-                    _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
-                    await _compact_now_proactive(
-                        turns=_raw_turns,
-                        workspace_id=normalized_workspace_id,
-                        tenant_id=effective_tenant_id,
-                        thread_id=thread_id,
-                        # Thread the turn's own provider/model through (same
-                        # fix as _apply_fresh_session_context_policy's _ct
-                        # call) instead of compact_turns' silent "deepseek"
-                        # default.
-                        provider=provider,
-                        model=requested_model,
-                    )
-                    # Reload prior_messages from compacted thread so the
-                    # subsequent LLM call uses the post-compaction context.
-                    _thread_rec2 = await thread_service.get_thread(
-                        thread_id,
-                        tenant_id=effective_tenant_id,
-                        workspace_id=normalized_workspace_id,
-                        include_turns=True,
-                    )
-                    _raw_turns2 = list((_thread_rec2 or {}).get("turns") or []) if isinstance(_thread_rec2, dict) else []
-                    prior_messages = [
-                        {"role": str(t.get("role") or "").strip().lower(),
-                         "content": str(t.get("content") or "").strip()}
-                        for t in _raw_turns2
-                        if isinstance(t, dict)
-                        and str(t.get("role") or "").strip().lower() in {"user", "assistant"}
-                        and str(t.get("content") or "").strip()
-                    ][-50:]  # keep last 50 turns post-compaction
-            else:
-                _log.warning(
-                    "sage_agent_runtime: proactive compaction skipped — "
-                    "memory flush failed (facts preserved in raw turns)"
+            if len(_proactive_truncated) < len(_proactive_source):
+                prior_messages = _proactive_truncated
+                used_context.append("proactive_prior_messages_structurally_truncated")
+                _log.info(
+                    "sage_agent_runtime: proactive preflight used structural "
+                    "truncation (window=%d <= small-window threshold) instead "
+                    "of an LLM summary — dropped %d of %d prior messages",
+                    _proactive_ctx_window,
+                    len(_proactive_source) - len(_proactive_truncated),
+                    len(_proactive_source),
                 )
-        except Exception as _proactive_err:
-            _log.warning(
-                "sage_agent_runtime: proactive compaction failed: %s — falling through to reactive path",
-                _proactive_err,
-            )
+        else:
+            try:
+                _flush_ok = await _run_memory_flush_before_compaction(
+                    workspace_id=normalized_workspace_id,
+                    tenant_id=effective_tenant_id,
+                    thread_id=thread_id,
+                    provider=provider,
+                    model=requested_model,
+                )
+                if _flush_ok:
+                    if channel_prior_messages is not None:
+                        # fix/unified-owner-memory reliability fix: a channel
+                        # turn carries its OWN durable history via
+                        # agent_conversation_memory (prior_messages was already
+                        # set to list(channel_prior_messages) above) —
+                        # thread_service/control_plane_repository is dead under
+                        # SQLite-fallback prod for these turns (they never write
+                        # there in the first place), and for a master/Sage
+                        # channel turn thread_id is frequently a shared, UNSCOPED
+                        # value (e.g. "sage-main" — see sage_turn_adapter's
+                        # thread resolution) rather than one keyed to this
+                        # specific remote_jid/conversation. Falling through to
+                        # thread_service.get_thread(thread_id, ...) here would
+                        # either silently WIPE prior_messages (an empty read from
+                        # a store this conversation never wrote to) or
+                        # CROSS-CONTAMINATE it (splice in a different
+                        # conversation's turns via that shared thread_id) —
+                        # exactly the two failure modes a compaction pass must
+                        # never introduce. Compact the ALREADY-CORRECT
+                        # channel_prior_messages directly instead, reusing
+                        # find_cut_point's own "keep the most recent
+                        # keep_recent_tokens-worth of turns" policy (the same
+                        # sizing the thread_service path targets) — no store
+                        # round-trip, no risk of touching the wrong
+                        # conversation. This is a plain truncation, not an LLM
+                        # summary of the dropped older turns (unlike the
+                        # thread_service path below) — strictly safer than a
+                        # wipe or cross-contamination, and this channel's own
+                        # history is bounded/continuously appended anyway
+                        # (agent_conversation_memory's own MAX_TURNS_RETAINED).
+                        _channel_prior_list = list(prior_messages or [])
+                        # BUG 2 fix: forced-floor fallback (see the sibling
+                        # action-loop preflight for the full rationale) instead
+                        # of a plain find_cut_point that can silently return 0
+                        # forever on a short conversation.
+                        _channel_cut_idx, _channel_forced = _find_cut_point_proactive(
+                            _channel_prior_list, context_window=_proactive_ctx_window,
+                        )
+                        if _channel_cut_idx <= 0:
+                            _log.warning(
+                                "sage_agent_runtime: proactive preflight CANNOT "
+                                "compact channel prior_messages — even the forced "
+                                "floor found nothing cuttable in %d messages; "
+                                "proceeding uncompacted",
+                                len(_channel_prior_list),
+                            )
+                        else:
+                            if _channel_forced:
+                                _log.warning(
+                                    "sage_agent_runtime: proactive preflight used "
+                                    "the FORCED keep-recent floor for channel "
+                                    "prior_messages (%d messages)",
+                                    len(_channel_prior_list),
+                                )
+                            prior_messages = _channel_prior_list[_channel_cut_idx:]
+                            used_context.append("channel_prior_messages_compacted")
+                    else:
+                        _thread_rec = await thread_service.get_thread(
+                            thread_id,
+                            tenant_id=effective_tenant_id,
+                            workspace_id=normalized_workspace_id,
+                            include_turns=True,
+                        )
+                        _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
+                        _proactive_cut_idx, _proactive_forced = _find_cut_point_proactive(
+                            _raw_turns, context_window=_proactive_ctx_window,
+                        )
+                        if _proactive_cut_idx <= 0:
+                            _log.warning(
+                                "sage_agent_runtime: proactive preflight CANNOT "
+                                "compact — even the forced floor found nothing "
+                                "cuttable in %d raw turns; proceeding uncompacted",
+                                len(_raw_turns),
+                            )
+                        else:
+                            if _proactive_forced:
+                                _log.warning(
+                                    "sage_agent_runtime: proactive preflight used "
+                                    "the FORCED keep-recent floor (%d raw turns)",
+                                    len(_raw_turns),
+                                )
+                            # BUG 3b fix: thread the prior summary through.
+                            _proactive_prev_summary = ""
+                            try:
+                                _proactive_prev_summary = await _load_prev_summary_proactive(
+                                    workspace_id=normalized_workspace_id,
+                                    tenant_id=effective_tenant_id,
+                                    thread_id=thread_id,
+                                )
+                            except Exception:
+                                _proactive_prev_summary = ""
+                            _proactive_summary = await _compact_now_proactive(
+                                turns=_raw_turns[:_proactive_cut_idx],
+                                workspace_id=normalized_workspace_id,
+                                tenant_id=effective_tenant_id,
+                                thread_id=thread_id,
+                                previous_summary=_proactive_prev_summary,
+                                # Thread the turn's own provider/model through (same
+                                # fix as _apply_fresh_session_context_policy's _ct
+                                # call) instead of compact_turns' silent "deepseek"
+                                # default.
+                                provider=provider,
+                                model=requested_model,
+                            )
+                            # BUG 4 fix: reassemble from the summary we just
+                            # produced + the kept raw tail IN MEMORY instead of
+                            # reloading from the DB and re-filtering to
+                            # role in {"user","assistant"} — that reload used to
+                            # silently drop the compaction_summary row it had
+                            # just persisted, making the summary write-only.
+                            if _proactive_summary:
+                                _kept_raw = _raw_turns[_proactive_cut_idx:]
+                                prior_messages = _build_ctx_from_compaction_proactive(
+                                    _proactive_summary, _kept_raw,
+                                )
+                                used_context.append("proactive_prior_messages_compacted")
+                else:
+                    _log.warning(
+                        "sage_agent_runtime: proactive compaction skipped — "
+                        "memory flush failed (facts preserved in raw turns)"
+                    )
+            except Exception as _proactive_err:
+                _log.warning(
+                    "sage_agent_runtime: proactive compaction failed: %s — falling through to reactive path",
+                    _proactive_err,
+                )
     # ── End pre-flight ──
 
     while True:
@@ -5189,8 +5612,12 @@ async def handle_sage_chat(
                 from server_modules.compaction_service import (
                     is_context_overflow_error,
                     compact_turns as _compact_now,
-                    find_cut_point as _find_cut_point_reactive,
+                    find_cut_point_with_fallback as _find_cut_point_reactive,
                     resolve_context_window as _resolve_ctx_window_reactive,
+                    load_previous_summary as _load_prev_summary_reactive,
+                    build_context_from_compaction as _build_ctx_from_compaction_reactive,
+                    should_use_structural_truncation as _should_truncate_reactive,
+                    structural_truncate as _structural_truncate_reactive,
                 )
                 if is_context_overflow_error(_exc_msg) and _compaction_retries < _MAX_COMPACTION_RETRIES:
                     _compaction_retries += 1
@@ -5218,6 +5645,9 @@ async def handle_sage_chat(
                                 "overflow error will propagate"
                             )
                             raise  # re-raise the original overflow exception
+                        _reactive_ctx_window = _resolve_ctx_window_reactive(provider, requested_model or None)
+                        if _ctx_policy_max and _ctx_policy_max > 0:
+                            _reactive_ctx_window = min(_reactive_ctx_window, _ctx_policy_max)
                         if channel_prior_messages is not None:
                             # Same reliability fix as the proactive pre-flight path
                             # above (see the long comment there for the full
@@ -5233,15 +5663,35 @@ async def handle_sage_chat(
                             # bug this replaces, actually reassign prior_messages
                             # so the retried call below uses the shrunk list
                             # instead of the exact same oversized one.
-                            _reactive_ctx_window = _resolve_ctx_window_reactive(provider, requested_model or None)
-                            if _ctx_policy_max and _ctx_policy_max > 0:
-                                _reactive_ctx_window = min(_reactive_ctx_window, _ctx_policy_max)
                             _channel_prior_list = list(prior_messages or [])
-                            _channel_cut_idx = _find_cut_point_reactive(
+                            # BUG 2 fix: forced-floor fallback — an actual
+                            # overflow just happened, so a plain find_cut_point
+                            # returning 0 here would retry with the EXACT same
+                            # oversized list (guaranteed to overflow again,
+                            # burning through _MAX_COMPACTION_RETRIES for
+                            # nothing — the "thrashing" pattern the ALSO-ADOPT
+                            # section warns about).
+                            _channel_cut_idx, _channel_forced = _find_cut_point_reactive(
                                 _channel_prior_list, context_window=_reactive_ctx_window,
                             )
-                            prior_messages = _channel_prior_list[_channel_cut_idx:]
-                            used_context.append("channel_prior_messages_compacted")
+                            if _channel_cut_idx > 0:
+                                if _channel_forced:
+                                    _log.warning(
+                                        "sage_agent_runtime: reactive overflow recovery used "
+                                        "the FORCED keep-recent floor for channel prior_messages "
+                                        "(%d messages)",
+                                        len(_channel_prior_list),
+                                    )
+                                prior_messages = _channel_prior_list[_channel_cut_idx:]
+                                used_context.append("channel_prior_messages_compacted")
+                            else:
+                                _log.error(
+                                    "sage_agent_runtime: reactive overflow recovery CANNOT "
+                                    "compact channel prior_messages — even the forced floor "
+                                    "found nothing cuttable in %d messages; retry will likely "
+                                    "overflow again",
+                                    len(_channel_prior_list),
+                                )
                         else:
                             # Reload turns from DB for compaction (recent_messages is {role,content} only)
                             _thread_rec = await thread_service.get_thread(
@@ -5251,39 +5701,74 @@ async def handle_sage_chat(
                                 include_turns=True,
                             )
                             _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
-                            await _compact_now(
-                                turns=_raw_turns,
-                                workspace_id=normalized_workspace_id,
-                                tenant_id=effective_tenant_id,
-                                thread_id=thread_id,
-                                # Thread the turn's own provider/model through
-                                # (same fix as the proactive pre-flight path
-                                # above) instead of compact_turns' silent
-                                # "deepseek" default.
-                                provider=provider,
-                                model=requested_model,
-                            )
-                            # Reload prior_messages from the compacted thread so
-                            # the retried call below actually uses the
-                            # post-compaction context. The bug this replaces
-                            # never reloaded here, so it retried with the exact
-                            # same oversized prior_messages and reliably
-                            # overflowed again until retries were exhausted.
-                            _thread_rec2 = await thread_service.get_thread(
-                                thread_id,
-                                tenant_id=effective_tenant_id,
-                                workspace_id=normalized_workspace_id,
-                                include_turns=True,
-                            )
-                            _raw_turns2 = list((_thread_rec2 or {}).get("turns") or []) if isinstance(_thread_rec2, dict) else []
-                            prior_messages = [
-                                {"role": str(t.get("role") or "").strip().lower(),
-                                 "content": str(t.get("content") or "").strip()}
-                                for t in _raw_turns2
-                                if isinstance(t, dict)
-                                and str(t.get("role") or "").strip().lower() in {"user", "assistant"}
-                                and str(t.get("content") or "").strip()
-                            ][-50:]  # keep last 50 turns post-compaction
+                            if _should_truncate_reactive(_reactive_ctx_window):
+                                # BUG 5 policy: small windows never get an LLM
+                                # summary — structural truncation only.
+                                _kept_raw = _structural_truncate_reactive(
+                                    _raw_turns, context_window=_reactive_ctx_window,
+                                )
+                                prior_messages = [
+                                    {"role": str(t.get("role") or "").strip().lower(),
+                                     "content": str(t.get("content") or "").strip()}
+                                    for t in _kept_raw
+                                    if isinstance(t, dict)
+                                    and str(t.get("role") or "").strip().lower() in {"user", "assistant"}
+                                    and str(t.get("content") or "").strip()
+                                ]
+                                used_context.append("reactive_prior_messages_structurally_truncated")
+                            else:
+                                _reactive_cut_idx, _reactive_forced = _find_cut_point_reactive(
+                                    _raw_turns, context_window=_reactive_ctx_window,
+                                )
+                                if _reactive_cut_idx <= 0:
+                                    _log.error(
+                                        "sage_agent_runtime: reactive overflow recovery CANNOT "
+                                        "compact — even the forced floor found nothing cuttable "
+                                        "in %d raw turns; retry will likely overflow again",
+                                        len(_raw_turns),
+                                    )
+                                else:
+                                    if _reactive_forced:
+                                        _log.warning(
+                                            "sage_agent_runtime: reactive overflow recovery used "
+                                            "the FORCED keep-recent floor (%d raw turns)",
+                                            len(_raw_turns),
+                                        )
+                                    # BUG 3b fix: thread the prior summary through.
+                                    _reactive_prev_summary = ""
+                                    try:
+                                        _reactive_prev_summary = await _load_prev_summary_reactive(
+                                            workspace_id=normalized_workspace_id,
+                                            tenant_id=effective_tenant_id,
+                                            thread_id=thread_id,
+                                        )
+                                    except Exception:
+                                        _reactive_prev_summary = ""
+                                    _reactive_summary = await _compact_now(
+                                        turns=_raw_turns[:_reactive_cut_idx],
+                                        workspace_id=normalized_workspace_id,
+                                        tenant_id=effective_tenant_id,
+                                        thread_id=thread_id,
+                                        previous_summary=_reactive_prev_summary,
+                                        # Thread the turn's own provider/model through
+                                        # (same fix as the proactive pre-flight path
+                                        # above) instead of compact_turns' silent
+                                        # "deepseek" default.
+                                        provider=provider,
+                                        model=requested_model,
+                                    )
+                                    # BUG 4 fix: reassemble in memory from the
+                                    # summary + kept raw tail instead of
+                                    # reloading from the DB and re-filtering to
+                                    # role in {"user","assistant"} (which used
+                                    # to silently drop the compaction_summary
+                                    # row just persisted — write-only summary).
+                                    if _reactive_summary:
+                                        _kept_raw2 = _raw_turns[_reactive_cut_idx:]
+                                        prior_messages = _build_ctx_from_compaction_reactive(
+                                            _reactive_summary, _kept_raw2,
+                                        )
+                                        used_context.append("reactive_prior_messages_compacted")
                     except Exception as _compact_err:
                         _log.warning("sage_agent_runtime: compaction during overflow recovery failed: %s", _compact_err)
                     continue  # retry the LLM call
@@ -5565,72 +6050,23 @@ async def handle_sage_chat(
             pass
 
     # ── B1: Auto-compaction after turn completion (background, non-blocking) ──
-    try:
-        from server_modules.compaction_service import should_compact as _should_compact
-        from server_modules.compaction_service import compact_turns as _auto_compact
-        from server_modules.compaction_service import resolve_context_window as _resolve_ctx_window
-        import asyncio as _asyncio
-        _ws = normalized_workspace_id
-        _tid = effective_tenant_id
-        _thid = thread_id
-        _prov = provider
-        _mod = requested_model
-        # Phase 5C: carry the per-install context policy into the background job.
-        _cp_max = _ctx_policy_max
-        _cp_action = _ctx_policy_action
-        _cp_session_id = str(request_id or "").strip()
-        async def _auto_compact_background():
-            try:
-                _ctx_window = _resolve_ctx_window(_prov, _mod)
-                # Phase 5C: honor a per-install threshold (e.g. knowledge agents
-                # compact early) — take the smaller of the model window and policy.
-                if _cp_max and _cp_max > 0:
-                    _ctx_window = min(_ctx_window, _cp_max)
-                # Reload turns from DB for accurate token count
-                _thread_rec = await thread_service.get_thread(
-                    thread_id,
-                    tenant_id=_tid,
-                    workspace_id=_ws,
-                    include_turns=True,
-                )
-                _raw_turns = list((_thread_rec or {}).get("turns") or []) if isinstance(_thread_rec, dict) else []
-                if _should_compact(_raw_turns, context_window=_ctx_window):
-                    # Phase 5C: fresh_session action closes + reopens the session
-                    # carrying a summary, instead of in-place compaction.
-                    if _cp_action == "fresh_session":
-                        await _apply_fresh_session_context_policy(
-                            workspace_id=_ws, tenant_id=_tid, thread_id=_thid,
-                            current_session_id=_cp_session_id, provider=_prov, model=_mod,
-                        )
-                        return
-                    # B3: Memory flush before compaction
-                    _flush_ok = await _run_memory_flush_before_compaction(
-                        workspace_id=_ws,
-                        tenant_id=_tid,
-                        thread_id=_thid,
-                        provider=_prov,
-                        model=_mod,
-                    )
-                    if _flush_ok:
-                        await _auto_compact(
-                            turns=_raw_turns,
-                            workspace_id=_ws,
-                            tenant_id=_tid,
-                            thread_id=_thid,
-                            # Thread the turn's own provider/model through
-                            # (same fix as the other compact_turns call sites
-                            # in this file) instead of compact_turns' silent
-                            # "deepseek" default.
-                            provider=_prov,
-                            model=_mod,
-                        )
-                    # else: flush failed after retry — skip compaction this round,
-                    # try again next turn. Do NOT discard turns we couldn't save.
-            except Exception:
-                pass
-        _asyncio.ensure_future(_auto_compact_background())
-    except Exception:
-        pass
+    # See _run_post_turn_auto_compaction's docstring for the BUG 1 fix this
+    # replaces (this used to be an inline closure defined ONLY here, after
+    # the action-loop-success early return above — structurally unreachable
+    # for nearly every real turn). Same call also fires right before that
+    # earlier return, so background auto-compaction now runs after every
+    # turn, not just the rare fallback-path one.
+    _schedule_post_turn_auto_compaction(
+        workspace_id=normalized_workspace_id,
+        tenant_id=effective_tenant_id,
+        thread_id=thread_id,
+        provider=provider,
+        model=requested_model,
+        ctx_policy_max=_ctx_policy_max,
+        ctx_policy_action=_ctx_policy_action,
+        session_id=str(request_id or "").strip(),
+        trace_id=trace_id,
+    )
 
     return {
         "message": reply or "",

@@ -677,6 +677,42 @@ def _normalize_recent_messages(
     value: Sequence[Mapping[str, Any]] | None,
     current_channel: str = "",
 ) -> list[dict[str, str]]:
+    # BUG 4 fix (compaction summary was write-only): a `role ==
+    # "compaction_summary"` entry used to fall straight through the
+    # `role not in {"user", "assistant"}` filter below and vanish —
+    # confirmed by running this exact function with one in the input. A
+    # summary an earlier turn paid an LLM call to produce would then never
+    # reach a single subsequent ordinary turn. Scanned across the WHOLE
+    # input (not just the last-16 slice below) because a compaction_summary
+    # row can be older than the 16 most recent raw turns and still be the
+    # only durable memory of everything before it.
+    #
+    # Kept as role="user" (never "system") once extracted: every
+    # downstream cloud-provider transport this list eventually reaches
+    # (scripts/orion_local_worker_llm.py's _normalize_prior_messages,
+    # allowed_roles={"user", assistant_role}) silently drops a "system"-
+    # role prior_messages entry — "user" is the only role guaranteed to
+    # survive every transport. Tagged unambiguously as an automated note,
+    # not the user's own words.
+    summary_entry: dict[str, str] | None = None
+    for item in list(value or []):
+        if not isinstance(item, Mapping):
+            continue
+        if _coerce_text(item.get("role")).lower() != "compaction_summary":
+            continue
+        _summary_content = _coerce_text(item.get("content"))
+        if _summary_content:
+            summary_entry = {
+                "role": "user",
+                "content": (
+                    "[Automated note — compacted summary of earlier "
+                    "conversation, not something the user actually said]:\n"
+                    + _summary_content
+                )[:4000],
+            }
+        # Keep scanning — a later compaction_summary row (if more than one
+        # somehow made it into `value`) should win as the most current one.
+
     normalized: list[dict[str, str]] = []
     for item in list(value or [])[-16:]:
         if not isinstance(item, Mapping):
@@ -700,11 +736,17 @@ def _normalize_recent_messages(
     # Aggregate budget on top of the per-message cap above (SAGE_RECENT_
     # HISTORY_TOTAL_CHAR_LIMIT, see its definition for why) — drop the
     # oldest messages first until the whole block fits, always keeping at
-    # least the single most recent message.
+    # least the single most recent message. Applied BEFORE the summary is
+    # prepended (below) so the summary itself is never the thing this loop
+    # discards to make room — it is the one thing here that summarizes
+    # everything the budget squeeze is dropping.
     total_chars = sum(len(m["content"]) for m in normalized)
     while total_chars > SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT and len(normalized) > 1:
         dropped = normalized.pop(0)
         total_chars -= len(dropped["content"])
+
+    if summary_entry is not None:
+        normalized.insert(0, summary_entry)
     return normalized
 
 

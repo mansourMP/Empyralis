@@ -320,7 +320,7 @@ async def dispatch_command(
 async def _handle_compact(workspace_id: str, thread_id: str) -> str:
     try:
         from server_modules.compaction_service import (
-            compact_turns, find_cut_point, should_compact,
+            compact_turns, find_cut_point_with_fallback, should_compact,
             load_previous_summary, resolve_context_window,
         )
         from server_modules import thread_service
@@ -359,23 +359,53 @@ async def _handle_compact(workspace_id: str, thread_id: str) -> str:
             include_turns=True,
         )
         raw_turns = list(thread_record.get("turns") or []) if isinstance(thread_record, dict) else []
-        if raw_turns and should_compact(raw_turns, context_window=_ctx_window):
-            cut_idx = find_cut_point(raw_turns, context_window=_ctx_window)
-            if cut_idx > 0:
-                prev = await load_previous_summary(
-                    workspace_id=workspace_id,
-                    tenant_id=tenant_id,
-                    thread_id=thread_id,
+        # BUG 5 fix: pass provider/model so should_compact uses the real
+        # per-model threshold formula instead of the old flat reserve.
+        if raw_turns and should_compact(
+            raw_turns, context_window=_ctx_window, provider=_ws_provider or None, model=_ws_model or None,
+        ):
+            # BUG 2 fix: forced-floor fallback — a plain find_cut_point can
+            # return 0 ("nothing to cut") for a short conversation even
+            # though should_compact just said the turn is over threshold.
+            # The old code silently reported SAGE_COMPACTED in that case
+            # despite compact_turns() never having been called — exactly
+            # the "returns ok while doing nothing" pattern that's
+            # prohibited. Now honest: only claims success when a cut point
+            # (forced or not) was actually found and compact_turns ran.
+            cut_idx, forced = find_cut_point_with_fallback(raw_turns, context_window=_ctx_window)
+            if cut_idx <= 0:
+                _logger.warning(
+                    "compact: /sage compact for workspace=%s found nothing "
+                    "cuttable even with the forced floor (%d raw turns) — "
+                    "reporting honestly instead of a false 'compacted'",
+                    workspace_id, len(raw_turns),
                 )
-                await compact_turns(
-                    turns=raw_turns[:cut_idx],
-                    workspace_id=workspace_id,
-                    tenant_id=tenant_id,
-                    thread_id=thread_id,
-                    previous_summary=prev,
-                    provider=_ws_provider or None,
-                    model=_ws_model or None,
+                return SAGE_COMPACT_NOT_NEEDED
+            if forced:
+                _logger.info(
+                    "compact: /sage compact for workspace=%s used the forced "
+                    "keep-recent floor (normal budget exceeded the entire "
+                    "%d-turn history)",
+                    workspace_id, len(raw_turns),
                 )
+            prev = await load_previous_summary(
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+            )
+            summary = await compact_turns(
+                turns=raw_turns[:cut_idx],
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+                previous_summary=prev,
+                provider=_ws_provider or None,
+                model=_ws_model or None,
+            )
+            if not summary:
+                # compact_turns already logs/traces WHY (no provider, empty
+                # summary, overflow) — don't compound it with a false claim.
+                return SAGE_COMPACT_NOT_NEEDED
             return SAGE_COMPACTED
         return SAGE_COMPACT_NOT_NEEDED
     except Exception as exc:

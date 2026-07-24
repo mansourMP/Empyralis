@@ -395,5 +395,80 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertNotIn("msg00-", surviving_content)
 
 
+class NormalizeRecentMessagesCompactionSummaryTests(unittest.TestCase):
+    """BUG 4 (compaction end-to-end fix pass, 2026-07-24): a
+    role="compaction_summary" turn used to fall straight through the
+    `role not in {"user", "assistant"}` filter and vanish — confirmed by
+    running this exact function with one in the input. A summary an
+    earlier turn paid an LLM call to produce would then never reach a
+    single subsequent ordinary turn."""
+
+    def test_compaction_summary_is_surfaced_not_dropped(self) -> None:
+        recent = [
+            {"role": "user", "content": "old message 1"},
+            {"role": "assistant", "content": "old reply 1"},
+            {"role": "compaction_summary", "content": "Summary of everything before."},
+            {"role": "user", "content": "new message"},
+            {"role": "assistant", "content": "new reply"},
+        ]
+        out = compiler._normalize_recent_messages(recent, current_channel="chat")
+        self.assertTrue(
+            any("Summary of everything before." in m["content"] for m in out),
+            f"summary missing from {out!r}",
+        )
+
+    def test_compaction_summary_never_uses_system_role(self) -> None:
+        # Every downstream cloud-provider transport this list eventually
+        # reaches (scripts/orion_local_worker_llm.py's _normalize_prior_
+        # messages, allowed_roles={"user", assistant_role}) silently drops
+        # a "system"-role prior_messages entry.
+        recent = [
+            {"role": "compaction_summary", "content": "Summary text."},
+            {"role": "user", "content": "hi"},
+        ]
+        out = compiler._normalize_recent_messages(recent)
+        self.assertFalse(any(m["role"] == "system" for m in out))
+        summary_entries = [m for m in out if "Summary text." in m["content"]]
+        self.assertEqual(len(summary_entries), 1)
+        self.assertEqual(summary_entries[0]["role"], "user")
+
+    def test_summary_survives_even_when_older_than_the_last_16_messages(self) -> None:
+        # A compaction_summary row can legitimately be older than the last
+        # 16 raw turns and still be the only durable memory of everything
+        # before it — must not be sliced away by the [-16:] windowing that
+        # applies to ordinary user/assistant turns.
+        recent = [{"role": "compaction_summary", "content": "Old but important summary."}]
+        recent += [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+            for i in range(20)
+        ]
+        out = compiler._normalize_recent_messages(recent)
+        self.assertTrue(any("Old but important summary." in m["content"] for m in out))
+
+    def test_summary_is_never_the_thing_dropped_by_the_char_budget_squeeze(self) -> None:
+        # The aggregate char-budget squeeze (SAGE_RECENT_HISTORY_TOTAL_CHAR_
+        # LIMIT) drops the OLDEST normal messages first — the summary must
+        # never be sacrificed to that squeeze itself (it's inserted AFTER
+        # the squeeze runs).
+        recent = [{"role": "compaction_summary", "content": "Important summary."}]
+        recent += [
+            {"role": "user", "content": "x" * 2000} for _ in range(20)
+        ]
+        out = compiler._normalize_recent_messages(recent)
+        total_chars = sum(len(m["content"]) for m in out)
+        self.assertTrue(any("Important summary." in m["content"] for m in out))
+
+    def test_no_summary_present_behaves_exactly_as_before(self) -> None:
+        recent = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        out = compiler._normalize_recent_messages(recent)
+        self.assertEqual(out, [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+from server_modules import compaction_service
 from server_modules import sage_agent_runtime_service
 from server_modules.specialist_runtime_context import SpecialistRuntimeContext
 
@@ -2789,6 +2790,326 @@ class SageAgentRuntimeSpecialistCapabilityManifestTests(unittest.TestCase):
         system_prompt = mock_stream.call_args.kwargs["system_prompt"]
         self.assertNotIn("fleet__list_agents", system_prompt)
         self.assertNotIn("some-other-skill", system_prompt)
+
+
+# ── 2026-07-24 compaction end-to-end fix pass: BUG 1 (placement + swallow),
+# BUG 5 (falsy-zero max_context_tokens), BUG 6 (model downgrade) ───────────
+
+class PostTurnAutoCompactionPlacementTests(unittest.TestCase):
+    """BUG 1 root cause: _schedule_post_turn_auto_compaction (the extracted
+    B1 background-compaction dispatch) used to be defined ONLY after the
+    action-loop-success `if action_result is not None: ... return {...}`
+    block — a branch _run_sage_action_loop_v3's own call site comment says
+    "always runs" and which returns non-None for every turn except total
+    failure. Live-repro-confirmed: instrumentation on the old inline block
+    never fired on a normal tool-using turn. This proves the fix: the call
+    now fires from BOTH of handle_sage_chat's exit points."""
+
+    def _run_with_mocked_schedule(self, *, stream_events):
+        schedule_mock = MagicMock()
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test"})),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch.object(sage_agent_runtime_service, "_schedule_post_turn_auto_compaction", new=schedule_mock),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            result = _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+            ))
+        return result, schedule_mock
+
+    def test_fires_on_the_action_loop_success_path_not_just_the_fallback(self):
+        # A normal tool-using turn: the action loop produces a real reply.
+        # This is the "always runs" common case the old inline B1 block was
+        # structurally unreachable from.
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Here you go.", "actions": [], "error": None},
+        }]
+        result, schedule_mock = self._run_with_mocked_schedule(stream_events=stream_events)
+
+        self.assertEqual(result["message"], "Here you go.")
+        schedule_mock.assert_called_once()
+        call_kwargs = schedule_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["workspace_id"], "ws-1")
+        self.assertEqual(call_kwargs["provider"], "deepseek")
+
+
+class PostTurnAutoCompactionExceptionLoggingTests(unittest.TestCase):
+    """BUG 1's second root cause: the old inline background job wrapped its
+    entire body in `except Exception: pass` with zero logging. Any failure
+    on the rare turns that DID reach it was invisible. Now logged with full
+    context AND recorded as a durable security-audit event."""
+
+    def test_failure_inside_the_background_job_is_logged_not_swallowed(self):
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event",
+            ) as mock_audit,
+            self.assertLogs("server_modules.sage_agent_runtime_service", level="ERROR") as log_ctx,
+        ):
+            _run(sage_agent_runtime_service._run_post_turn_auto_compaction(
+                workspace_id="ws-1", tenant_id="default", thread_id="sage-main",
+                provider="deepseek", model="deepseek-chat",
+                ctx_policy_max=0, ctx_policy_action="compact",
+                session_id="sess-1", trace_id="trace-1",
+            ))
+
+        self.assertTrue(any("FAILED" in m for m in log_ctx.output))
+        self.assertTrue(any("boom" in m for m in log_ctx.output))
+        mock_audit.assert_called_once()
+        self.assertEqual(mock_audit.call_args.kwargs["action"], "compaction.background_job_failed")
+        self.assertEqual(mock_audit.call_args.kwargs["status"], "failure")
+
+    def test_failed_schedule_itself_is_logged(self):
+        # If even scheduling the fire-and-forget task blows up (e.g.
+        # asyncio.ensure_future itself raising), that must be logged too —
+        # not just failures inside the task body. _run_post_turn_auto_
+        # compaction is mocked to a plain MagicMock (not AsyncMock) so
+        # calling it here doesn't create a real coroutine object that would
+        # otherwise be left dangling (unawaited, uncancelled) once
+        # ensure_future raises before ever consuming it.
+        with (
+            patch.object(
+                sage_agent_runtime_service, "_run_post_turn_auto_compaction", new=MagicMock(),
+            ),
+            patch("asyncio.ensure_future", side_effect=RuntimeError("no loop")),
+            self.assertLogs("server_modules.sage_agent_runtime_service", level="ERROR") as log_ctx,
+        ):
+            sage_agent_runtime_service._schedule_post_turn_auto_compaction(
+                workspace_id="ws-1", tenant_id="default", thread_id="sage-main",
+                provider="deepseek", model="deepseek-chat",
+                ctx_policy_max=0, ctx_policy_action="compact",
+                session_id="sess-1", trace_id="trace-1",
+            )
+        self.assertTrue(any("failed to SCHEDULE" in m for m in log_ctx.output))
+
+
+class ContextPolicyFalsyZeroTests(unittest.TestCase):
+    """BUG 5 falsy-zero: capability_presets.PRESET_STANDARD and
+    PRESET_OPERATOR (the two most common agent presets) both set
+    `context_policy: {"max_context_tokens": 0, ...}  # 0 = use model
+    default`. The old `.get("max_context_tokens") or _DEFAULT_CTX_POLICY_
+    MAX` silently coerced that explicit 0 into the 128K safety default,
+    clamping every Standard/Operator-preset agent to 128K regardless of its
+    real model window."""
+
+    def test_explicit_zero_max_context_tokens_is_not_promoted_to_the_128k_default(self):
+        spec = SpecialistRuntimeContext(
+            agent_install_id="agent-1",
+            agent_label="Standard Agent",
+            agent_kind="specialist",
+            persona="You are a helpful agent.",
+            provider="anthropic",
+            model="claude-opus-4-8",
+            context_policy={"max_context_tokens": 0, "on_context_full": "compact"},
+        )
+        schedule_mock = MagicMock()
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply.", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider",
+                new=AsyncMock(return_value=("anthropic", {"api_key": "sk-agent-key"}, "platform_credits")),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                return_value=("anthropic", {"api_key": "sk-agent-key"}),
+            ),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch.object(sage_agent_runtime_service, "_schedule_post_turn_auto_compaction", new=schedule_mock),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=spec,
+            ))
+
+        schedule_mock.assert_called_once()
+        # The fix: ctx_policy_max must be exactly 0 (an explicit "no
+        # per-install clamp — trust the model's real window"), never
+        # silently promoted to compaction_service.DEFAULT_CONTEXT_WINDOW
+        # (128000).
+        self.assertEqual(schedule_mock.call_args.kwargs["ctx_policy_max"], 0)
+        self.assertNotEqual(
+            schedule_mock.call_args.kwargs["ctx_policy_max"],
+            compaction_service.DEFAULT_CONTEXT_WINDOW,
+        )
+
+    def test_unset_context_policy_still_falls_back_to_the_safety_default(self):
+        # No context_policy at all (the field defaults to {}) must still
+        # land on the 128K safety default — only an EXPLICIT 0 is special.
+        spec = SpecialistRuntimeContext(
+            agent_install_id="agent-2",
+            agent_label="Bare Agent",
+            agent_kind="specialist",
+            persona="You are a helpful agent.",
+            provider="anthropic",
+            model="claude-opus-4-8",
+        )
+        schedule_mock = MagicMock()
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply.", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider",
+                new=AsyncMock(return_value=("anthropic", {"api_key": "sk-agent-key"}, "platform_credits")),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                return_value=("anthropic", {"api_key": "sk-agent-key"}),
+            ),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch.object(sage_agent_runtime_service, "_schedule_post_turn_auto_compaction", new=schedule_mock),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=spec,
+            ))
+
+        schedule_mock.assert_called_once()
+        self.assertEqual(
+            schedule_mock.call_args.kwargs["ctx_policy_max"],
+            compaction_service.DEFAULT_CONTEXT_WINDOW,
+        )
+
+
+class ModelDowngradeFiresPreflightTests(unittest.TestCase):
+    """BUG 6 (the founder's explicit question): if a conversation at ~800k
+    tokens switches from a 1M-window model to a 200k-window model, the
+    threshold must be recomputed against the NEW model BEFORE the next
+    request is built — sending 800k tokens to a 200k-window model
+    hard-errors rather than degrading gracefully."""
+
+    @staticmethod
+    def _big_prior_messages(total_tokens: int) -> list[dict]:
+        # Many turns approximating the given total token count (estimate_
+        # tokens is chars // 4) — spread across enough separate messages
+        # that find_cut_point_with_fallback has real turns to cut between
+        # (a single giant message can't be split at all, which is BUG 2's
+        # own "nothing cuttable" case, not what this test is after).
+        per_message_tokens = 5_000
+        count = max(1, total_tokens // per_message_tokens)
+        return [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * (per_message_tokens * 4)}
+            for i in range(count)
+        ]
+
+    def test_no_compaction_needed_on_the_original_1m_window_model(self):
+        prior = self._big_prior_messages(700_000)
+        with patch.object(
+            sage_agent_runtime_service, "_run_memory_flush_before_compaction",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "server_modules.compaction_service.compact_turns", new=AsyncMock(),
+        ) as compact_mock:
+            result = _run(sage_agent_runtime_service._action_loop_context_budget_preflight(
+                workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                # Real 1M-window model.
+                provider="anthropic", model="claude-opus-4-8",
+                system_prompt="sys", user_message="hi",
+                prior_messages=prior, channel_prior_messages=None,
+                ctx_policy_max=0, ctx_policy_action="compact",
+                used_context=[],
+            ))
+        self.assertIs(result, prior)
+        compact_mock.assert_not_called()
+
+    def test_same_history_fires_compaction_before_dispatch_after_downgrade(self):
+        # SAME prior_messages, but the thread's model has switched (mid-
+        # conversation) to a 200k-window model — resolve_context_window
+        # must reflect THIS call's model, not anything cached from when
+        # the conversation started on the 1M model.
+        prior = self._big_prior_messages(700_000)
+        with patch.object(
+            sage_agent_runtime_service, "_run_memory_flush_before_compaction",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "server_modules.compaction_service.compact_turns",
+            new=AsyncMock(return_value="Summary of the downgrade-triggered compaction."),
+        ) as compact_mock:
+            result = _run(sage_agent_runtime_service._action_loop_context_budget_preflight(
+                workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                # Real 200k-window model — a downgrade from claude-opus-4-8.
+                provider="anthropic", model="claude-haiku-4-5-20251001",
+                system_prompt="sys", user_message="hi",
+                prior_messages=prior, channel_prior_messages=None,
+                ctx_policy_max=0, ctx_policy_action="compact",
+                used_context=[],
+            ))
+        # Compaction fired BEFORE any dispatch — this function's entire
+        # purpose is to run ahead of _run_sage_action_loop_v3.
+        compact_mock.assert_called_once()
+        self.assertIsInstance(result, list)
+        self.assertTrue(
+            any("Summary of the downgrade-triggered compaction." in str(m.get("content") or "") for m in result)
+        )
 
 
 if __name__ == "__main__":

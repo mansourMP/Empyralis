@@ -292,16 +292,18 @@ def _continuous_work_budget_allows_more(
 ) -> bool:
     """The actual ceiling on continuous work: the SAME token-budget primitives
     the proactive preflight already uses (sage_agent_runtime_service.py's
-    B2 pre-flight check, ~line 4956-5049 — estimate_tokens +
-    COMPACTION_RESERVE_TOKENS against resolve_context_window), applied here
-    as the per-iteration continuation gate instead of a once-per-turn
-    preflight. Once the turn's own accumulated context (system prompt +
-    everything exchanged so far) would leave no room under the model's real
-    context window, the loop stops extending past max_iterations exactly as
-    if the plan were finished — the model never gets a call that's likely to
-    overflow anyway, and the existing reactive-overflow-retry path
-    (sage_agent_runtime_service.py ~line 5089-5233) remains the backstop for
-    whatever this estimate misses on the call that does go out.
+    B2 pre-flight check, ~line 4956-5049 — estimate_tokens against
+    effective_compaction_threshold/resolve_context_window — BUG 5's
+    per-model formula, not a flat COMPACTION_RESERVE_TOKENS add-then-
+    compare), applied here as the per-iteration continuation gate instead
+    of a once-per-turn preflight. Once the turn's own accumulated context
+    (system prompt + everything exchanged so far) would leave no room
+    under the model's real context window, the loop stops extending past
+    max_iterations exactly as if the plan were finished — the model never
+    gets a call that's likely to overflow anyway, and the existing
+    reactive-overflow-retry path (sage_agent_runtime_service.py
+    ~line 5089-5233) remains the backstop for whatever this estimate
+    misses on the call that does go out.
     """
     try:
         window = compaction_service.resolve_context_window(provider, model)
@@ -309,11 +311,11 @@ def _continuous_work_budget_allows_more(
         for message in conversation_messages or []:
             if isinstance(message, dict):
                 text_parts.append(str(message.get("content") or ""))
-        estimated = (
-            compaction_service.estimate_tokens("".join(text_parts))
-            + compaction_service.COMPACTION_RESERVE_TOKENS
+        estimated = compaction_service.estimate_tokens("".join(text_parts))
+        threshold = compaction_service.effective_compaction_threshold(
+            window, provider=provider, model=model,
         )
-        return estimated <= window
+        return estimated <= threshold
     except Exception:
         # Fail closed: any error estimating the budget must not be allowed to
         # extend the loop past the pre-existing max_iterations cap.
@@ -382,16 +384,71 @@ def _compact_conversation_messages_in_place(
     or any failure — always fails safe, never raises, never leaves the
     caller worse off than before the call).
     """
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
     try:
         window = compaction_service.resolve_context_window(provider, model)
-        cut_idx = compaction_service.find_cut_point(conversation_messages, context_window=window)
+
+        # BUG 5 policy: small windows never get an LLM summary — structural
+        # truncation only (drop oldest turns / prune tool results, no model
+        # call, nothing persisted).
+        if compaction_service.should_use_structural_truncation(window):
+            truncated = compaction_service.structural_truncate(
+                conversation_messages, context_window=window,
+            )
+            if len(truncated) >= len(conversation_messages):
+                return False
+            _log.info(
+                "direct_chat: structural truncation used instead of an LLM "
+                "summary for thread=%s — window %d tokens is at/below the "
+                "small-window threshold; dropped %d of %d messages",
+                thread_id, window, len(conversation_messages) - len(truncated), len(conversation_messages),
+            )
+            conversation_messages[:] = truncated
+            return True
+
+        # BUG 2 fix: find_cut_point's normal ~15%-of-window keep-recent
+        # budget can exceed this ENTIRE conversation_messages list for a
+        # short conversation, always returning cut_idx=0 regardless of how
+        # far over threshold the turn actually is. find_cut_point_with_
+        # fallback retries with a much smaller forced floor instead of
+        # silently doing nothing — and if even that finds nothing cuttable,
+        # this logs why instead of returning False silently indistinguishable
+        # from "nothing needed compacting" (this docstring's own prior
+        # framing of that case).
+        cut_idx, forced = compaction_service.find_cut_point_with_fallback(
+            conversation_messages, context_window=window,
+        )
         if cut_idx <= 0:
-            # Nothing old enough to be worth summarizing — either everything
-            # already fits inside the "keep recent" allowance, or find_cut_
-            # point found no split point at all.
+            _log.warning(
+                "direct_chat: cannot compact thread=%s — even the forced "
+                "keep-recent floor found nothing cuttable in %d messages "
+                "(window=%d); proceeding uncompacted",
+                thread_id, len(conversation_messages), window,
+            )
             return False
+        if forced:
+            _log.warning(
+                "direct_chat: thread=%s used the FORCED keep-recent floor "
+                "(normal budget exceeded the entire %d-message list)",
+                thread_id, len(conversation_messages),
+            )
         turns_to_summarize = conversation_messages[:cut_idx]
         kept_turns = conversation_messages[cut_idx:]
+
+        # BUG 3b fix: thread the prior compaction summary through so
+        # chaining doesn't lose everything before the last compaction.
+        previous_summary = ""
+        try:
+            previous_summary = run_async_tool_call(
+                compaction_service.load_previous_summary(
+                    workspace_id=workspace_id, tenant_id="default", thread_id=thread_id,
+                )
+            )
+        except Exception:
+            previous_summary = ""
+
         summary = run_async_tool_call(
             compaction_service.compact_turns(
                 turns=turns_to_summarize,
@@ -405,6 +462,7 @@ def _compact_conversation_messages_in_place(
                 # mismatched tenant_id here can never break this turn.
                 tenant_id="default",
                 thread_id=thread_id,
+                previous_summary=previous_summary,
                 # Thread the turn's own provider/model through (already
                 # resolved by both callers below via actual_provider/
                 # actual_model, and already used two lines above for
@@ -436,14 +494,16 @@ def _estimated_context_tokens(
     current_prompt: str,
     conversation_messages: List[Dict[str, Any]],
 ) -> int:
+    """Raw token estimate — NO reserve baked in (BUG 5: the old version
+    added a flat COMPACTION_RESERVE_TOKENS here and compared the result
+    directly against the raw context window at the call site; callers now
+    compare this against compaction_service.effective_compaction_threshold
+    instead, which applies the real per-model formula)."""
     text_parts = [str(system_prompt or ""), str(current_prompt or "")]
     for message in conversation_messages or []:
         if isinstance(message, dict):
             text_parts.append(str(message.get("content") or ""))
-    return (
-        compaction_service.estimate_tokens("".join(text_parts))
-        + compaction_service.COMPACTION_RESERVE_TOKENS
-    )
+    return compaction_service.estimate_tokens("".join(text_parts))
 
 
 def _tool_result_context_is_local_private(provider: Any, credentials: Any) -> bool:
@@ -1564,30 +1624,35 @@ def stream_provider_backed_direct_chat(
         # loop starts — tool results accumulate into conversation_messages as
         # the loop runs, so a turn that started well under budget can still
         # grow past it mid-loop. Reuses the exact same estimate-tokens-vs-
-        # window primitives _continuous_work_budget_allows_more already uses
-        # above (compaction_service.estimate_tokens/COMPACTION_RESERVE_TOKENS/
-        # resolve_context_window) — no new estimation logic, just acting on
-        # the estimate instead of only gating a loop extension with it. Off
+        # threshold primitives _continuous_work_budget_allows_more already
+        # uses above (compaction_service.estimate_tokens/
+        # effective_compaction_threshold/resolve_context_window — BUG 5's
+        # per-model formula) — no new estimation logic, just acting on the
+        # estimate instead of only gating a loop extension with it. Off
         # (_primary_compaction_enabled() == False) or nothing over budget:
         # falls through unchanged.
         if _primary_compaction_enabled():
+            _proactive_provider = str(actual_provider or context.get("provider") or "").strip() or None
+            _proactive_model = str(actual_model or "").strip() or None
             _proactive_estimated = _estimated_context_tokens(
                 system_prompt=system_prompt,
                 current_prompt=current_prompt,
                 conversation_messages=conversation_messages,
             )
             _proactive_window = compaction_service.resolve_context_window(
-                str(actual_provider or context.get("provider") or "").strip() or None,
-                str(actual_model or "").strip() or None,
+                _proactive_provider, _proactive_model,
             )
-            if _proactive_estimated > _proactive_window:
-                print(f"[DG_PROACTIVE_COMPACTION] iteration={_loop_iteration} estimated={_proactive_estimated} window={_proactive_window} — compacting", flush=True)
+            _proactive_threshold = compaction_service.effective_compaction_threshold(
+                _proactive_window, provider=_proactive_provider, model=_proactive_model,
+            )
+            if _proactive_estimated > _proactive_threshold:
+                print(f"[DG_PROACTIVE_COMPACTION] iteration={_loop_iteration} estimated={_proactive_estimated} threshold={_proactive_threshold} window={_proactive_window} — compacting", flush=True)
                 _compact_conversation_messages_in_place(
                     conversation_messages=conversation_messages,
                     workspace_id=normalized_workspace_id,
                     thread_id=normalized_thread_id,
-                    provider=str(actual_provider or context.get("provider") or "").strip() or None,
-                    model=str(actual_model or "").strip() or None,
+                    provider=_proactive_provider,
+                    model=_proactive_model,
                     trace_context=trace_context,
                 )
 
