@@ -90,7 +90,7 @@ def _default_specialist_persona(label: str) -> str:
         "configured yet — instead of asking who they are. "
         "You handle only the work you were configured for. You do NOT manage the "
         "fleet, create or reconfigure other agents, or take workspace-operator "
-        "actions — those belong to Sage, the operator. If a request falls outside "
+        "actions — those belong to the operator. If a request falls outside "
         "your scope, escalate it to the operator instead of acting."
     )
 

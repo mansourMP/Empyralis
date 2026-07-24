@@ -187,6 +187,65 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
 // per-page (agent detail), not per-account, preference.
 const PROPERTIES_COLLAPSED_KEY = "fleet:agent-detail-properties-collapsed";
 
+// ── Cost period (Day/Week/Month) — shared by the Properties panel's "Cost
+// today" stat and the Model tab's own identical row. summarize_usage
+// (usage_events_repository.py) already pre-aggregates period=week|month —
+// every caller here used to hardcode period=day, so there was never a way
+// to see this week's or this month's spend without doing the arithmetic
+// yourself. ─────────────────────────────────────────────────────────────────
+type CostPeriod = "day" | "week" | "month";
+
+/** The bucket key `summarize_usage` would date_trunc the CURRENT period down
+ *  to, in the same UTC-midnight-anchored YYYY-MM-DD shape the API already
+ *  returns for `buckets[].bucket` — so a plain string-slice comparison finds
+ *  "this period"'s bucket the same way the pre-existing day-only logic did.
+ *  Postgres date_trunc('week', …) anchors to the ISO week's Monday; month
+ *  anchors to the 1st. */
+function currentPeriodBucketKey(period: CostPeriod, now: Date): string {
+  if (period === "month") {
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  }
+  if (period === "week") {
+    const utcDay = now.getUTCDay(); // 0=Sun..6=Sat
+    const diffToMonday = utcDay === 0 ? -6 : 1 - utcDay;
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + diffToMonday))
+      .toISOString()
+      .slice(0, 10);
+  }
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString().slice(0, 10);
+}
+
+function costPeriodLabel(period: CostPeriod): string {
+  if (period === "month") return "Cost this month";
+  if (period === "week") return "Cost this week";
+  return "Cost today";
+}
+
+const COST_PERIOD_OPTIONS: { id: CostPeriod; label: string }[] = [
+  { id: "day", label: "Day" },
+  { id: "week", label: "Week" },
+  { id: "month", label: "Month" },
+];
+
+function CostPeriodToggle({ period, onChange }: { period: CostPeriod; onChange: (period: CostPeriod) => void }) {
+  return (
+    <div className="fleet-usage-period-toggle" role="tablist" aria-label="Cost period">
+      {COST_PERIOD_OPTIONS.map((opt) => (
+        <button
+          key={opt.id}
+          type="button"
+          role="tab"
+          aria-selected={period === opt.id}
+          className={`fleet-usage-period-btn${period === opt.id ? " is-active" : ""}`}
+          onClick={() => onChange(opt.id)}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /**
  * Agent detail — a routed page (top tabs + a permanent properties panel that
  * never reflows the content column). Every tab has real data or an
@@ -295,35 +354,34 @@ export function FleetAgentDetail({
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
   const { channels, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
+  const [costPeriod, setCostPeriod] = useState<CostPeriod>("day");
   const [costToday, setCostToday] = useState<number | null>(null);
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
   const [costMatrix, setCostMatrix] = useState<UsageMatrixRow[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
+    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=${costPeriod}`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d) return;
         // `totals` isn't date-filtered by the backend (summarize_usage only
         // date_trunc's `buckets`) — it's an all-time sum, so using it here
-        // would silently mislabel all-time spend as "today's". Match the
-        // bucket whose UTC day is actually today instead; no match (an agent
-        // with no usage yet today) correctly reads as $0, not all-time spend.
+        // would silently mislabel all-time spend as "today's"/"this week's"/
+        // "this month's". Match the bucket the CURRENT period truncates to
+        // instead; no match (nothing billed yet this period) correctly reads
+        // as $0, not all-time spend.
         if (Array.isArray(d.buckets)) {
           setCostBuckets(d.buckets);
-          const now = new Date();
-          const todayKey = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-            .toISOString()
-            .slice(0, 10);
-          const todayBucket = d.buckets.find((b: UsageBucket) => String(b.bucket || "").slice(0, 10) === todayKey);
-          setCostToday(Number(todayBucket?.usd_cost ?? 0));
+          const periodKey = currentPeriodBucketKey(costPeriod, new Date());
+          const currentBucket = d.buckets.find((b: UsageBucket) => String(b.bucket || "").slice(0, 10) === periodKey);
+          setCostToday(Number(currentBucket?.usd_cost ?? 0));
         }
         if (Array.isArray(d.matrix)) setCostMatrix(d.matrix);
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [workspaceId, agentId]);
+  }, [workspaceId, agentId, costPeriod]);
 
   const connectedChannels = channels.filter((c) => isChannelConnected(c, slackChannelBinding, telegramBotConnected)).length;
   const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
@@ -395,6 +453,15 @@ export function FleetAgentDetail({
     activeTabRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Whichever tab is active always scrolls fully into view within the
+  // horizontal strip — not just on first mount. Without this, following a
+  // direct link into a tab past the fold (e.g. Hardware) left the highlight
+  // correct but invisible until the user found the strip scrollable; this
+  // keeps "the highlighted tab" and "the tab you can see" the same claim on
+  // every navigation, mouse or keyboard.
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeTab]);
 
   // Permanent — space is ALWAYS reserved, a real flex sibling of the tab
   // body, never an overlay/toggle (that pattern stays on LIST pages only;
@@ -420,6 +487,17 @@ export function FleetAgentDetail({
           hint="Everyone who messages this agent is a customer at support-tier — they can request, not command. You, the owner, keep full access."
         />
       )}
+      {/* Read-only fact for now — subagents_enabled is already in every
+          FleetAgent API response and was read by nothing. The functional
+          on/off control is being wired separately (backend tool registry +
+          delegation engine); this row exists so the current value is at
+          least visible, and is a straight swap for that real toggle later. */}
+      <PanelRow
+        label="Sub-agents"
+        value={agent?.subagents_enabled ? "Enabled" : "Disabled"}
+        tone={agent?.subagents_enabled ? "default" : "muted"}
+        hint="Whether this agent can delegate work to sub-agents it spins up itself."
+      />
       {/* Not a plain PanelRow: the value is a real picker trigger (opens
           AgentModelPickerRow's popover), which needs `overflow: visible` on
           its wrapper to avoid getting clipped by the generic value span's
@@ -440,10 +518,11 @@ export function FleetAgentDetail({
         </span>
       </div>
       <UsageStat
-        label="Cost today"
+        label={costPeriodLabel(costPeriod)}
         total={costToday ?? 0}
         formattedTotal={costToday === null ? "…" : `$${costToday.toFixed(4)}`}
         values={bucketSeries(costBuckets, "usd_cost")}
+        action={<CostPeriodToggle period={costPeriod} onChange={setCostPeriod} />}
       />
       {/* Full attribution, not just a total: every real model/source this
           agent has actually billed against, all-time — real tokens at that
@@ -495,25 +574,36 @@ export function FleetAgentDetail({
           Chat tab (see propertiesContent above) — CSS keeps it hidden except
           at <=768px, where it replaces the rail toggle for that one tab. */}
       <div className="fleet-detail-tabbar">
-        <nav className="fleet-detail-toptabs" aria-label="Agent sections">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                ref={isActive ? activeTabRef : undefined}
-                type="button"
-                className={`fleet-detail-toptab${isActive ? " is-active" : ""}`}
-                onClick={() => selectTab(tab.id)}
-                aria-current={isActive ? "page" : undefined}
-              >
-                <Icon size={15} strokeWidth={1.75} />
-                <span>{tab.label}</span>
-              </button>
-            );
-          })}
-        </nav>
+        {/* Wrap is the non-scrolling fade anchor — .fleet-detail-toptabs
+            itself is the horizontal scroller (overflow-x:auto). The old
+            fade lived on .fleet-detail-tabbar::after (the WHOLE bar,
+            properties-toggle icon included), so on a real 375px phone it
+            sat on top of that icon button instead of the actual cut-off
+            edge of Hardware/Memory — the tester saw no fade at all where
+            the tabs cut off, which read as "no scroll affordance". Anchoring
+            it to this wrap instead puts it exactly at the scroller's own
+            right edge, before the toggle button starts. */}
+        <div className="fleet-detail-toptabs-wrap">
+          <nav className="fleet-detail-toptabs" aria-label="Agent sections">
+            {TABS.map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  ref={isActive ? activeTabRef : undefined}
+                  type="button"
+                  className={`fleet-detail-toptab${isActive ? " is-active" : ""}`}
+                  onClick={() => selectTab(tab.id)}
+                  aria-current={isActive ? "page" : undefined}
+                >
+                  <Icon size={15} strokeWidth={1.75} />
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
         <button
           type="button"
           className="fleet-icon-btn fleet-detail-properties-rail-toggle"
@@ -594,11 +684,23 @@ export function FleetAgentDetail({
     <>
       {(activeTab === "overview" || activeTab === "work") && (
         <HeaderAction>
-          <StopAgentControl workspaceId={workspaceId} agentId={agentId} agent={agent} onChanged={onRenamed} />
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => onChat(agentId)}>
-            <MessageSquare size={14} strokeWidth={1.75} />
-            Chat with this agent
-          </button>
+          {/* Wrapped (not just two bare portaled children) so the mobile
+              overlap fix below can scope its icon-only collapse to exactly
+              these two controls — .fleet-topbar-action is a shared portal
+              slot every fleet page reuses (e.g. AgentsList's "+ New agent"),
+              so a bare `.fleet-topbar-action .fleet-btn` rule would have
+              iconified those too. See UI-CONTRACT §4 + fleet-theme.css's
+              .fleet-detail-header-actions block for why this exists at all:
+              two full-label buttons here left the mobile breadcrumb only
+              ~33px wide, so its non-shrinking back-link overflowed straight
+              under "Stop agent" — cutting "‹ Drift" to "‹ Dri" on every tab. */}
+          <div className="fleet-detail-header-actions">
+            <StopAgentControl workspaceId={workspaceId} agentId={agentId} agent={agent} onChanged={onRenamed} />
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => onChat(agentId)}>
+              <MessageSquare size={14} strokeWidth={1.75} />
+              <span className="fleet-btn-label">Chat with this agent</span>
+            </button>
+          </div>
         </HeaderAction>
       )}
       <div
@@ -703,11 +805,11 @@ function StopAgentControl({
       <div className="fleet-stop-control">
         <span className="fleet-stop-chip" title={stopped.reason || undefined}>
           <Square size={12} strokeWidth={2} />
-          Stopped by {stopped.stopped_by_label || "an owner"}
+          <span className="fleet-btn-label">Stopped by {stopped.stopped_by_label || "an owner"}</span>
         </span>
-        <button type="button" className="fleet-btn" disabled={busy} onClick={handleResume}>
+        <button type="button" className="fleet-btn" disabled={busy} onClick={handleResume} aria-label="Resume agent" title="Resume agent">
           {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={14} strokeWidth={1.75} />}
-          Resume
+          <span className="fleet-btn-label">Resume</span>
         </button>
         {error && <span className="fleet-stop-error">{error}</span>}
       </div>
@@ -721,9 +823,11 @@ function StopAgentControl({
         className="fleet-btn"
         disabled={busy}
         onClick={() => { setError(null); setConfirmOpen(true); }}
+        aria-label="Stop agent"
+        title="Stop agent"
       >
         <Square size={14} strokeWidth={1.75} />
-        Stop agent
+        <span className="fleet-btn-label">Stop agent</span>
       </button>
       {error && !confirmOpen && <span className="fleet-stop-error">{error}</span>}
 
@@ -1822,7 +1926,7 @@ export function ChannelsTab({
                         <button key={door.key} type="button" disabled className="fleet-wizard-option fleet-wizard-option--soon">
                           <span className="fleet-wizard-option-label">{door.label}</span>
                           <span className="fleet-wizard-option-body">{door.body}</span>
-                          <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> Coming soon</span>
+                          <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> Not available on this deployment yet</span>
                         </button>
                       );
                     }
@@ -2498,7 +2602,14 @@ function CapabilityRow({
           <div className="fleet-toggle-row-desc">
             {capability.available
               ? `Ready — ${CAPABILITY_MODE_LABELS[capability.mode]} · ${selectedOption?.label || capability.provider}${priceText ? ` · ${priceText}` : ""}`
-              : capability.message || "Not configured yet."}
+              // Founder's standing rule: no "coming soon" anywhere in
+              // Capabilities. `capability.message` is server-authored and,
+              // for a stubbed (not-yet-wired) provider, literally reads
+              // "... is coming soon — not wired up yet." — deliberately not
+              // trusted here for that case; a stubbed row always gets this
+              // neutral, non-time-promising line instead, same words a
+              // genuinely absent capability already used lower down.
+              : stubbed ? "Not available on this deployment yet." : capability.message || "Not configured yet."}
           </div>
           {!capability.tool_gated && (
             <div className="fleet-toggle-row-desc">Used automatically — no separate tool to enable.</div>
@@ -2508,7 +2619,7 @@ function CapabilityRow({
           className={`fleet-badge${capability.available ? "" : " fleet-badge--muted"}`}
           style={{ marginLeft: 0, flexShrink: 0 }}
         >
-          {capability.available ? "Ready" : stubbed ? "Coming soon" : "Not configured"}
+          {capability.available ? "Ready" : "Not configured"}
         </span>
       </div>
 
@@ -2528,9 +2639,13 @@ function CapabilityRow({
             >
               {platformOptions.map((p) => {
                 const price = formatCapabilityPrice(p.platform_price_usd, p.platform_price_unit);
+                // No "(coming soon)" suffix (founder's rule — see the
+                // stubbed-message note above) — a not-yet-wired option just
+                // shows its plain label with no price, same as any other
+                // option this catalog can't yet quote a price for.
                 return (
                   <option key={p.id} value={p.id}>
-                    {p.label}{!p.live ? " (coming soon)" : price ? ` — ${price}` : ""}
+                    {p.label}{p.live && price ? ` — ${price}` : ""}
                   </option>
                 );
               })}
@@ -2783,33 +2898,31 @@ function resolveDisplayMode(config: Record<string, any>): ProviderMode {
 // Phase 7B: preset / hardware-lock / context-policy / today's cost, shown at
 // the top of the Model tab so the agent's governance + spend are visible.
 function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
+  const [costPeriod, setCostPeriod] = useState<CostPeriod>("day");
   const [cost, setCost] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=day`, { credentials: "include" })
+    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=${costPeriod}`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d) return;
-        // Same bug, same fix as the Properties panel's identical "Cost
-        // today" stat (see FleetAgentDetail's own usage-fetch effect above):
-        // `totals` isn't date-filtered by the backend (summarize_usage only
+        // Same bug, same fix as the Properties panel's identical cost stat
+        // (see FleetAgentDetail's own usage-fetch effect above): `totals`
+        // isn't date-filtered by the backend (summarize_usage only
         // date_trunc's `buckets`), so it's an all-time sum — using it here
-        // silently mislabels all-time spend as "today's". Match the bucket
-        // whose UTC day is actually today instead.
+        // silently mislabels all-time spend as the selected period's. Match
+        // the bucket the current period truncates to instead.
         if (Array.isArray(d.buckets)) {
-          const now = new Date();
-          const todayKey = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-            .toISOString()
-            .slice(0, 10);
-          const todayBucket = d.buckets.find((b: UsageBucket) => String(b.bucket || "").slice(0, 10) === todayKey);
-          setCost(Number(todayBucket?.usd_cost ?? 0));
+          const periodKey = currentPeriodBucketKey(costPeriod, new Date());
+          const currentBucket = d.buckets.find((b: UsageBucket) => String(b.bucket || "").slice(0, 10) === periodKey);
+          setCost(Number(currentBucket?.usd_cost ?? 0));
         } else {
           setCost(0);
         }
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [workspaceId, agentId]);
+  }, [workspaceId, agentId, costPeriod]);
   const preset = (agent?.capability_preset || "standard").toLowerCase();
   const locked = !!agent?.hardware_access_locked;
   const pol = agent?.context_policy || {};
@@ -2831,7 +2944,10 @@ function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: strin
         </span>
       </div>
       <div className="fleet-config-row">
-        <span className="fleet-config-label">Cost today</span>
+        <span className="fleet-config-label" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          {costPeriodLabel(costPeriod)}
+          <CostPeriodToggle period={costPeriod} onChange={setCostPeriod} />
+        </span>
         <span className="fleet-config-value">{cost === null ? "…" : `$${cost.toFixed(4)}`}</span>
       </div>
     </div>

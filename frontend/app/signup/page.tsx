@@ -210,8 +210,8 @@ export default function SignupPage() {
           </div>
           <div className="app-auth-hero__rail">
             <div className="app-auth-hero__point">
-              <strong>Chat first</strong>
-              <span>Fresh accounts land directly in Ask AI instead of a setup maze.</span>
+              <strong>No setup maze</strong>
+              <span>Fresh accounts land straight in your Agents list — nothing to configure first.</span>
             </div>
             <div className="app-auth-hero__point">
               <strong>Cheap default AI</strong>

@@ -91,7 +91,7 @@ CAPABILITY_PRESETS: Dict[str, Dict[str, Any]] = {
     PRESET_OPERATOR: {
         "id": PRESET_OPERATOR,
         "label": "Operator",
-        "description": "Sage-class operator (fleet tools, full access). Reserved.",
+        "description": "Operator-class (fleet tools, full access). Reserved.",
         "hardware_access": "all",
         "hardware_locked": False,
         "subagents_enabled": True,

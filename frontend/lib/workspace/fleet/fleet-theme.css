@@ -141,6 +141,19 @@
   gap: 8px;
 }
 
+/* The agent-detail page's own two header actions (Stop/Resume + Chat),
+   wrapped so the mobile icon-only collapse below (UI Contract §4 fix) can
+   target JUST these two controls — .fleet-topbar-action is a shared portal
+   slot every fleet page reuses (e.g. AgentsList's "+ New agent"), so
+   scoping the collapse to the slot itself would have iconified those other
+   pages' buttons too. Plain flex row on desktop/tablet, identical to how
+   these two rendered as bare portal children before this wrapper existed. */
+.fleet-detail-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Owner stop control — the header-level "Stop agent" button / "Stopped by
    X" chip, portaled into .fleet-topbar-action alongside "Chat with this
    agent". */
@@ -260,7 +273,13 @@ a.fleet-breadcrumb:hover {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  flex-shrink: 0;
+  /* Was flex-shrink:0 — that's exactly what let this overflow straight
+     underneath the header's action buttons instead of eliding: shrink:0
+     refuses to give an inch even when the topbar has no room, so its own
+     text just spilled out of the (near-0-width) breadcrumb container and
+     under whatever sat to its right. It shrinks like everything else in
+     this row now; the label span below ellipses instead of overflowing. */
+  min-width: 0;
   padding: 6px 6px 6px 2px;
   margin-left: -2px;
   border-radius: var(--radius-control);
@@ -272,6 +291,12 @@ a.fleet-breadcrumb:hover {
 .fleet-breadcrumb-mobile-back:hover {
   color: var(--text-primary);
   background: var(--bg-card-hover);
+}
+.fleet-breadcrumb-mobile-back-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .fleet-breadcrumb-mobile-current {
   display: inline-flex;
@@ -1894,9 +1919,49 @@ a.fleet-breadcrumb:hover {
   justify-content: space-between;
   gap: 8px;
 }
+.fleet-usage-stat-label-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .fleet-usage-stat-label {
   font-size: var(--text-sm);
   color: var(--text-secondary);
+}
+
+/* Day/Week/Month period toggle — same "selected = neutral fill + weight
+   bump, never accent" rule the contract already applies to every other
+   picker (§10: "Selected/active ... is a neutral fill plus a font-weight
+   bump (400→500), never accent text or background"). Text-only otherwise,
+   no border/background at rest — the lightest control this file has, since
+   it sits inline with a label, not as its own toolbar row. */
+.fleet-usage-period-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.fleet-usage-period-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+.fleet-usage-period-btn:hover {
+  color: var(--text-secondary);
+}
+.fleet-usage-period-btn.is-active {
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-weight: 500;
 }
 .fleet-usage-stat-total {
   font-size: var(--text-sm);
@@ -3138,17 +3203,36 @@ a.fleet-breadcrumb:hover {
   background: var(--bg-card);
 }
 
+/* Non-scrolling fade anchor — see the fade rule itself (mobile block below)
+   for why this wrap exists instead of putting ::after directly on
+   .fleet-detail-tabbar: that anchored the fade to the WHOLE bar's right
+   edge, which is the properties-toggle icon, not the scroller's own cut-off
+   edge. This wrap is the scroller's non-scrolling frame, so a fade anchored
+   to ITS edges stays visually fixed at the true cut-off point while the
+   tabs scroll underneath. */
+.fleet-detail-toptabs-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .fleet-detail-toptabs {
   display: flex;
   align-items: center;
   gap: 2px;
+  width: 100%;
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x proximity;
+  touch-action: pan-x;
 }
 .fleet-detail-toptabs::-webkit-scrollbar { display: none; }
 
 .fleet-detail-toptab {
+  scroll-snap-align: start;
   /* Explicit native-chrome reset (same fix as .fleet-badge--action above) —
      a bare <button> keeps `appearance: auto` unless told otherwise, and
      Safari's heuristic for suppressing the native pushbutton bevel is far
@@ -5065,6 +5149,19 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   white-space: nowrap;
 }
 
+/* Secondary-emphasis column value — Linear discipline (rail feedback,
+   2026-07): a row with every column at full --text-primary strength reads
+   as noise, not a hierarchy. Exactly ONE value per row (the Projects
+   table's Cost this month) stays --text-primary; every other numeric/status
+   column dims to --text-secondary instead, same weight (contract never
+   distinguishes emphasis by font-weight — 400/500 only). Distinct from
+   .fleet-cell-muted below (which means "this specific value is zero/absent",
+   not "this column is secondary") — a populated-but-secondary cell can still
+   drop further to muted when its own value is empty; defined before that
+   rule so a tie in specificity resolves in muted's favor, matching the
+   zero-value dimming this file already used everywhere else. */
+.fleet-cell-secondary { color: var(--text-secondary); }
+
 /* Muted in-cell placeholder — same size as the value it replaces, so the
    column keeps its shape when empty. */
 .fleet-cell-muted { color: var(--text-muted); }
@@ -6622,21 +6719,54 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     display: none;
   }
 
+  /* Blocker: "Stop agent" + "Chat with this agent" together ran ~295px wide
+     — on a 375px phone that alone forced the breadcrumb's flex:1/min-width:0
+     column down to ~33px, and its non-shrinking back-link (see
+     .fleet-breadcrumb-mobile-back above) overflowed straight underneath
+     them, cutting "‹ Drift" to "‹ Dri" on every tab. Collapsing both to
+     icon-only (34px square, UI Contract §2) here — labels still exist in
+     the DOM/aria for a11y (aria-label/title), just visually hidden — frees
+     enough width that the breadcrumb never has to fight for room again. */
+  .fleet-detail-header-actions .fleet-btn-label {
+    display: none;
+  }
+  .fleet-detail-header-actions .fleet-btn,
+  .fleet-detail-header-actions .fleet-stop-chip {
+    width: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+
   .fleet-detail-tabbar {
-    position: relative;
     padding-right: 0;
   }
   /* Static fade cue rather than a scroll-position-tracked one — sufficient
-     at "nothing broken" fidelity and needs no JS. */
-  .fleet-detail-tabbar::after {
+     at "nothing broken" fidelity and needs no JS. Anchored to the WRAP
+     (.fleet-detail-toptabs-wrap, a non-scrolling frame — see its own comment
+     above), not .fleet-detail-tabbar itself: the bar's right edge is the
+     properties-toggle icon button, a fixed control that sits AFTER this
+     scroller, so a fade anchored there used to sit on top of that icon
+     instead of the tab strip's real cut-off edge — invisible where it
+     actually needed to read as "more tabs this way". Both edges fade (not
+     just trailing) since the strip scrolls in either direction once past
+     the first screenful. */
+  .fleet-detail-toptabs-wrap::before,
+  .fleet-detail-toptabs-wrap::after {
     content: "";
     position: absolute;
     top: 0;
-    right: 0;
     bottom: 0;
-    width: 28px;
-    background: linear-gradient(to right, transparent, var(--bg-card));
+    width: 24px;
     pointer-events: none;
+    z-index: 1;
+  }
+  .fleet-detail-toptabs-wrap::before {
+    left: 0;
+    background: linear-gradient(to left, transparent, var(--bg-card));
+  }
+  .fleet-detail-toptabs-wrap::after {
+    right: 0;
+    background: linear-gradient(to right, transparent, var(--bg-card));
   }
   .fleet-detail-toptab {
     height: 44px;

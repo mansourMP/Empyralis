@@ -241,7 +241,7 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
         {parent && (
           <Link href={parent.href} className="fleet-breadcrumb-mobile-back" aria-label={`Back to ${parent.label}`}>
             <ChevronLeft size={16} strokeWidth={2} aria-hidden />
-            {parent.label}
+            <span className="fleet-breadcrumb-mobile-back-label">{parent.label}</span>
           </Link>
         )}
         {current.pending ? (
