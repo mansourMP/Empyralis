@@ -1452,7 +1452,14 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             label="Message Agent",
             connector_id="fleet",
             action_id="message_agent",
-            description="Enqueue a message for another agent to process on its next turn.",
+            description=(
+                "Not implemented -- always returns ok: false. Agent-to-agent "
+                "messaging has no delivery path yet (nothing ever reads it "
+                "back); calling this only gets you an explicit error telling "
+                "you to create/assign a task to the target agent instead. "
+                "Do not call this tool to hand off work -- use fleet tasks "
+                "or ask the owner."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -1463,7 +1470,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             },
             risk_level="moderate",
             audience_safe=False,
-            audience_note="Operator-only: messages another agent. Owner/operator access.",
+            audience_note="Operator-only: not implemented, always fails (see description).",
         ),
         ToolDescriptor(
             tool_name="fleet__schedule_task",

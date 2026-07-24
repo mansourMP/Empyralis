@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -1465,6 +1466,42 @@ def _boolish(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+# Holds strong references to the fire-and-forget asyncio.Task objects
+# _ensure_agent_channel_binding_enabled schedules below -- asyncio only
+# weakly tracks a bare create_task() via the event loop, so without this
+# set the task can be garbage-collected mid-run with no warning (the same
+# footgun documented for the compaction background job,
+# docs/PLATFORM-MAP.md Part 31.1). Entries remove themselves via
+# add_done_callback the moment each task finishes, so this never grows
+# unbounded. See docs/design/audit-silent-failures.md C2.
+_CHANNEL_BINDING_ENABLE_TASKS: set[asyncio.Task] = set()
+
+
+def _track_channel_binding_enable_task(task: asyncio.Task) -> None:
+    _CHANNEL_BINDING_ENABLE_TASKS.add(task)
+
+    def _on_done(finished: asyncio.Task) -> None:
+        _CHANNEL_BINDING_ENABLE_TASKS.discard(finished)
+        if finished.cancelled():
+            return
+        exc = finished.exception()
+        if exc is not None:
+            # Defense in depth: _enable()'s own try/except below already
+            # logs+audits every failure it can see. This callback only
+            # fires if something escapes that (e.g. a bug in the handler
+            # itself, or a CancelledError-adjacent edge case) -- so a
+            # background-task crash still can never vanish with zero trace.
+            from server_modules import durability_signal
+
+            durability_signal.capture_durability_failure(
+                "channel binding enable task (uncaught)",
+                exc=exc,
+                event_class="channel_binding_enable_task_crashed",
+            )
+
+    task.add_done_callback(_on_done)
+
+
 def _ensure_agent_channel_binding_enabled(
     *,
     agent_id: str,
@@ -1481,30 +1518,72 @@ def _ensure_agent_channel_binding_enabled(
     never did. Fire-and-forget from here, the moment a real (non-legacy)
     agent's session reaches "connected" — pairing an account for an agent
     should be sufficient to enable it for that agent, no separate manual
-    toggle. Best-effort: a failure here must never break the state sync
-    that's actually reporting the real session status."""
+    toggle.
+
+    Best-effort: a failure here must never break the state sync that's
+    actually reporting the real session status -- but "best-effort" no
+    longer means silent. `agent_bindings_repository.py` documents a live
+    DB-level unique constraint (uq_agent_channel_bindings_inbound_owner_v2)
+    that can genuinely fire here (re-pairing the same WhatsApp/Telegram
+    account to a different agent is the ordinary way to trigger it); until
+    this fix, that exception vanished into a bare `except Exception: pass`
+    with zero logging, permanently stranding the Channels-tab pill in a
+    not-connected state with no diagnostics and no manual recovery path
+    (docs/design/audit-silent-failures.md C2). Every failure here is now
+    logged with full context (exc_info=True) and raised as a durability
+    signal (ERROR log + Sentry + an operator-visible activity-ledger
+    dead-letter event via durability_signal.capture_durability_failure), and
+    the scheduling task is tracked so it can't be GC'd mid-flight either.
+    """
     normalized_agent_id = str(agent_id or "").strip()
     if not normalized_agent_id:
         return
     try:
-        loop = __import__("asyncio").get_running_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         return  # no running loop — nothing to schedule onto (shouldn't happen; all callers are async)
+
+    tenant_id = str(registration.get("tenant_id") or "").strip() or "default"
+    workspace_id = str(registration.get("workspace_id") or "").strip() or "default"
 
     async def _enable() -> None:
         try:
             from server_modules import agent_bindings_repository as bindings
             await bindings.upsert_channel_binding(
-                tenant_id=str(registration.get("tenant_id") or "").strip() or "default",
-                workspace_id=str(registration.get("workspace_id") or "").strip() or "default",
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
                 agent_install_id=normalized_agent_id,
                 channel_key=channel_key,
                 enabled=True,
             )
-        except Exception:
-            pass  # best-effort — see docstring
+        except Exception as exc:
+            from server_modules import durability_signal
 
-    loop.create_task(_enable())
+            _logger.exception(
+                "_ensure_agent_channel_binding_enabled: upsert_channel_binding failed "
+                "agent_id=%s channel_key=%s tenant_id=%s workspace_id=%s -- the "
+                "Channels-tab pill for this agent will misreport as not-connected "
+                "until this binding is enabled.",
+                normalized_agent_id, channel_key, tenant_id, workspace_id,
+            )
+            durability_signal.capture_durability_failure(
+                f"channel binding enable for agent={normalized_agent_id} channel={channel_key}",
+                exc=exc,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                channel=channel_key,
+                event_class="channel_binding_enable_failed",
+                action="upsert_channel_binding",
+                summary=(
+                    f"Session for agent {normalized_agent_id} on channel {channel_key} "
+                    "connected, but enabling its agent_channel_bindings row failed "
+                    f"({exc.__class__.__name__}) -- the Channels-tab pill will show "
+                    "not-connected until this is manually retried."
+                ),
+            )
+
+    task = loop.create_task(_enable())
+    _track_channel_binding_enable_task(task)
 
 
 def _claim_agent_channel_state(

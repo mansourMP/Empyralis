@@ -58,7 +58,10 @@ Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true`` + per-key writes_enable
   - ``empyralis_create_project`` → projects_repository.create_project
   - ``empyralis_create_agent`` → fleet_create_agent (+ projects_repository.assign_install_to_project)
   - ``empyralis_configure_agent`` → fleet_configure_agent
-  - ``empyralis_message_agent`` → fleet_message_agent
+  - ``empyralis_message_agent`` → fleet_message_agent (ALWAYS returns
+    ``ok: false`` -- agent-to-agent messaging has no delivery path yet;
+    see docs/design/audit-silent-failures.md C1 and the tool's own
+    docstring below)
   - ``empyralis_assign_channel_bot`` → hosted_bot_provisioning_service / discord_bot_provisioning_service
   - ``empyralis_release_channel_bot`` → hosted_bot_provisioning_service / discord_bot_provisioning_service
   - ``empyralis_connect_connector`` → connection_oauth_service.start_oauth (returns authorization_url)
@@ -681,7 +684,10 @@ if empyralist_mcp is not None:
     async def empyralis_message_agent(
         agent_id: str, message: str, ctx: Context = None,
     ) -> Dict[str, Any]:
-        """Send message to agent's fleet inbox. Requires writes_enabled on the API key."""
+        """Not implemented -- always returns ok: false. Agent-to-agent
+        messaging has no delivery path today (nothing ever reads it back);
+        the error explains this and tells you to create/assign a task to
+        the target agent instead. Do not retry this tool."""
         r = await _resolve(ctx); _check_write(r); ws = _ws(r)
         from server_modules.fleet_tools import fleet_message_agent
         result = await fleet_message_agent(

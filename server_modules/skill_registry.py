@@ -1216,7 +1216,12 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
     SkillDefinition(
         id="fleet-message-agent",
         label="Message Agent",
-        description="Enqueue a message/turn for another agent. Operator only.",
+        description=(
+            "Not implemented -- always fails. Agent-to-agent messaging has "
+            "no delivery path yet; calling this returns an explicit error "
+            "telling you to create/assign a task to the target agent "
+            "instead. Operator only."
+        ),
         permission_label="Fleet management",
         execution_mode="live",
         action_class="write",
