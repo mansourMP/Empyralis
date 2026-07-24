@@ -187,6 +187,11 @@ def _llm_runtime_summary(metadata: Dict[str, Any]) -> Dict[str, Any]:
         "ollama": ollama,
         "claude_code": _runtime("claude_cli"),
         "codex": _runtime("codex_cli"),
+        # xAI Grok Build / Cursor CLI addition (2026-07-24) — same shape,
+        # sourced from service-inventory.ts's probeGrokBuildCli/probeCursorCli
+        # ("grok_cli"/"cursor_cli" service_inventory ids).
+        "grok_build": _runtime("grok_cli"),
+        "cursor_cli": _runtime("cursor_cli"),
         "local_model_ready": bool(local_model_ready),
     }
 

@@ -26,7 +26,17 @@ const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const DEFAULT_MODEL = "llama3.2";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
-const CLI_SUBSCRIPTION_RUNTIMES = new Set(["claude_code", "codex"]);
+const CLI_SUBSCRIPTION_RUNTIMES = new Set(["claude_code", "codex", "grok_build", "cursor_cli"]);
+
+/** Human label per cli_subscription runtime — every error message and usage
+ *  `source` tag below reads off this instead of a hardcoded claude_code/codex
+ *  ternary, so adding a runtime is one entry here, not N call sites. */
+const CLI_RUNTIME_LABEL: Record<string, string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  grok_build: "Grok Build",
+  cursor_cli: "Cursor CLI",
+};
 
 export interface OllamaChatMessage {
   role: string;
@@ -164,7 +174,7 @@ function buildCliPrompt(
  *  the distinct phrases below ("not installed", "not signed in", "timed
  *  out", "exited unexpectedly") matter, not just the human readability. */
 function cliErrorMessage(runtime: CliSubscriptionRuntime, error: unknown): string {
-  const label = runtime === "claude_code" ? "Claude Code" : "Codex";
+  const label = CLI_RUNTIME_LABEL[runtime] || runtime;
   if (error instanceof CliRunError) {
     if (error.kind === "not_installed") {
       return `${label} is not installed on this Gateway (${error.message}).`;
@@ -271,7 +281,7 @@ export class GatewayLLMRuntime {
       });
     }
     throw new Error(
-      `llm.generate runtime "${runtime}" is not supported on this Gateway (expected "ollama", "claude_code", or "codex").`,
+      `llm.generate runtime "${runtime}" is not supported on this Gateway (expected "ollama", "claude_code", "codex", "grok_build", or "cursor_cli").`,
     );
   }
 
@@ -369,9 +379,13 @@ export class GatewayLLMRuntime {
     // prewarm pool when enabled (see claude-cli-prewarm.ts for why this is a
     // pool of one-shot processes, not a reused multi-turn daemon like codex's).
     const useClaudePrewarm = params.runtime === "claude_code" && claudeCliPrewarmEnabled();
-    const { systemPrompt, promptText } = buildCliPrompt(params.messages, {
-      includeSystemInline: params.runtime === "codex" && !useCodexDaemon,
-    });
+    // cursor_cli has no system-prompt-equivalent CLI flag documented (see
+    // cli-runner.ts's buildInvocation doc comment) — inlined the same way
+    // codex's non-daemon path already is, so a configured system prompt is
+    // never silently dropped. grok_build DOES have one (`--rules <TEXT>`),
+    // so it stays on the "kept separate" side like claude_code.
+    const includeSystemInline = (params.runtime === "codex" && !useCodexDaemon) || params.runtime === "cursor_cli";
+    const { systemPrompt, promptText } = buildCliPrompt(params.messages, { includeSystemInline });
     if (!promptText) {
       throw new Error("llm.generate requires a non-empty prompt (messages, or system + prompt).");
     }
@@ -447,7 +461,7 @@ export class GatewayLLMRuntime {
       // to us — "default" here describes OUR request, not a real model id.
       model: params.model || "default",
       usage: result.usage,
-      source: params.runtime === "claude_code" ? "gateway_claude_code" : "gateway_codex",
+      source: `gateway_${params.runtime}`,
     };
   }
 }

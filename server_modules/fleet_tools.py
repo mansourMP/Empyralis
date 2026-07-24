@@ -40,7 +40,7 @@ _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local
 # Storage passes the whole model_config dict through unchanged (see
 # fleet_configure_agent below), so these persist WITHOUT a schema/storage
 # change — we only validate their VALUES here so a typo can't be stored.
-_VALID_MODEL_RUNTIMES = {"claude_code", "codex", "ollama"}
+_VALID_MODEL_RUNTIMES = {"claude_code", "codex", "grok_build", "cursor_cli", "ollama"}
 # Reasoning-effort picker (Fleet Model tab, model_config.reasoning_effort;
 # also what /thinking now persists — see command_registry.py's
 # _handle_thinking). Kept in sync with sage_agent_runtime_service.py's own
@@ -62,6 +62,12 @@ _VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME = {
     "claude_code": {"low", "medium", "high", "xhigh", "max"},
     "codex": {"off", "minimal", "low", "medium", "high", "xhigh", "max"},
+    # xAI Grok Build's own canonical vocabulary (docs.x.ai/build's headless-
+    # mode guide, fetched 2026-07-24). Cursor CLI has no reasoning-effort
+    # flag documented at all, so it gets an empty set (no value is ever
+    # valid), same treatment "local" (Ollama) already gets.
+    "grok_build": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
+    "cursor_cli": set(),
 }
 _VALID_PURPOSE_PRESETS = {"customer_facing", "internal_assistant", "operator"}
 _PURPOSE_PRESET_INSTRUCTIONS = {
@@ -242,6 +248,7 @@ _FLEET_ACTION_TITLES: Dict[str, str] = {
     "configure_agent_failed": "Configuration failed",
     "message_agent": "Received a message",
     "message_agent_failed": "Message delivery failed",
+    "message_agent_refused": "Message not deliverable (not implemented)",
     "hardware_grant_denied": "Hardware access denied",
     "operator_bootstrap": "Operator set up",
     "operator_bootstrap_failed": "Operator setup failed",
@@ -469,11 +476,11 @@ def recommended_model_config_for_gateway(
     workspace_id: str,
 ) -> Optional[Dict[str, str]]:
     """BYO-brain creation-flow hint (§29 per-agent-provider): when the box an
-    agent is being placed on already has an authenticated Claude Code or
-    Codex CLI, recommend reusing it as a cli_subscription binding instead of
-    steering the create-agent wizard's Brain step toward Empyralis credits
-    by default — "you already have Codex on this box, use it" rather than
-    making the owner reconfigure or re-login.
+    agent is being placed on already has an authenticated subscription CLI
+    (Claude Code, Codex, Grok Build, or Cursor CLI), recommend reusing it as
+    a cli_subscription binding instead of steering the create-agent wizard's
+    Brain step toward Empyralis credits by default — "you already have Codex
+    on this box, use it" rather than making the owner reconfigure or re-login.
 
     Reuses gateway_registry_service.gateway_registration_public_payload's
     llm_runtimes — the SAME installed+authenticated signal
@@ -483,9 +490,10 @@ def recommended_model_config_for_gateway(
 
     Returns a ready-to-patch model_config dict — {mode, provider, runtime,
     gateway_binding} — when a subscription is ready to reuse, else None.
-    Claude Code wins when a box happens to have both ready, matching the
-    create-agent wizard's own default subscriptionProvider. Best-effort:
-    any lookup failure returns None — this is a UX hint, never a gate.
+    Claude Code wins when a box happens to have several ready (checked in the
+    order below), matching the create-agent wizard's own default
+    subscriptionProvider. Best-effort: any lookup failure returns None — this
+    is a UX hint, never a gate.
     """
     gid = str(gateway_id or "").strip()
     if not gid:
@@ -504,7 +512,12 @@ def recommended_model_config_for_gateway(
     except Exception:
         return None
 
-    for runtime, provider_id in (("claude_code", "claude_code_cli"), ("codex", "openai-codex")):
+    for runtime, provider_id in (
+        ("claude_code", "claude_code_cli"),
+        ("codex", "openai-codex"),
+        ("grok_build", "xai_grok_cli"),
+        ("cursor_cli", "cursor_cli"),
+    ):
         entry = llm_runtimes.get(runtime)
         if isinstance(entry, dict) and bool(entry.get("installed")) and bool(entry.get("authenticated")):
             return {
@@ -1304,14 +1317,19 @@ async def fleet_configure_agent(
             # checks client-side — this is the server-side enforcement so
             # a raw API PATCH can't bypass it.
             _runtime = str(mc.get("runtime") or "").strip().lower() or "claude_code"
-            if _runtime in {"claude_code", "codex"}:
+            if _runtime in {"claude_code", "codex", "grok_build", "cursor_cli"}:
                 _payload = gateway_registry_service.gateway_registration_public_payload(_registration)
                 _llm_runtimes = _payload.get("llm_runtimes") if isinstance(_payload.get("llm_runtimes"), dict) else {}
                 _entry = _llm_runtimes.get(_runtime) if isinstance(_llm_runtimes.get(_runtime), dict) else {}
                 _installed = bool(_entry.get("installed"))
                 _authenticated = bool(_entry.get("authenticated"))
                 if not _installed or not _authenticated:
-                    _label = "Codex" if _runtime == "codex" else "Claude Code"
+                    _label = {
+                        "claude_code": "Claude Code",
+                        "codex": "Codex",
+                        "grok_build": "Grok Build",
+                        "cursor_cli": "Cursor CLI",
+                    }.get(_runtime, _runtime)
                     # display_name is a top-level registration column (set by
                     # pairing/rename — see gateway_registry_service.rename_
                     # gateway_registration), never nested under metadata. Reading
@@ -1601,66 +1619,52 @@ async def fleet_message_agent(
     agent_id: str = "",
     message: str = "",
 ) -> Dict[str, Any]:
-    """Enqueue a message for the target agent.
+    """Agent-to-agent messaging is NOT implemented. This always fails.
 
-    The message is stored in the target agent's install_metadata.fleet_inbox.
-    The target agent's next turn may read and process it.
-    Reply routing back to the operator is handled by the fleet caller.
+    Historically this wrote the message into the target agent's
+    ``install_metadata.fleet_inbox`` and unconditionally returned
+    ``{"ok": True, "status": "enqueued"}``. Nothing in the turn-building
+    pipeline ever reads ``fleet_inbox`` back -- not
+    ``sage_agent_runtime_service.py``, not
+    ``sage_instruction_compiler_service.py``, not
+    ``direct_chat_generation_service.py``, not ``agent_turn.py`` -- so every
+    prior call silently discarded its message while reporting success. See
+    docs/design/audit-silent-failures.md C1 for the full verification.
+
+    The platform's decided design for real agent-to-agent handoff is
+    task/mention-based delivery through the scheduler -- a separate, later
+    build (do NOT resurrect fleet_inbox as a stopgap; fix the real delivery
+    path instead). Until that ships, this function fails loudly and
+    explicitly instead of lying, per the platform's no-silent-failure rule:
+    every caller -- the internal fleet skill, the tool-broker's
+    ``fleet__message_agent`` action, and the external ``empyralis_message_agent``
+    MCP tool -- gets an explicit, model-facing error telling it what to do
+    instead, rather than a false ``ok: true`` for a message that will never
+    be read.
     """
-    from server_modules import agent_registry_repository as repo
-
     if not str(agent_id or "").strip():
         return {"ok": False, "error": "agent_id is required"}
     if not str(message or "").strip():
         return {"ok": False, "error": "message is required"}
 
-    try:
-        bundle = await repo.get_workspace_agent_install_bundle(
-            agent_id,
-            tenant_id=tenant_id,
-            workspace_id=workspace_id,
-        )
-        if not bundle:
-            return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
-
-        bundle_dict = dict(bundle) if isinstance(bundle, dict) else {}
-        meta = dict(bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {})
-        inbox: List[Dict[str, Any]] = list(meta.get("fleet_inbox") or [])
-
-        inbox.append({
-            "from_agent_id": actor_id,
-            "message": str(message).strip(),
-            "enqueued_at": datetime.now(timezone.utc).isoformat(),
-            "message_id": f"fleet_msg_{len(inbox):06d}",
-        })
-        # Cap inbox at 20 messages
-        meta["fleet_inbox"] = inbox[-20:]
-
-        await repo.update_workspace_agent_install(
-            agent_id,
-            tenant_id=tenant_id,
-            workspace_id=workspace_id,
-            metadata=meta,
-        )
-    except Exception as exc:
-        await _ledger_fleet_action(
-            action="message_agent_failed",
-            actor_id=actor_id,
-            workspace_id=workspace_id,
-            target_agent_id=agent_id,
-            status="failed",
-            metadata={"error": str(exc)[:200]},
-        )
-        return {"ok": False, "error": str(exc)}
-
+    error = (
+        "Agent-to-agent messaging is not implemented -- this message will "
+        "NOT be delivered and will NOT be read by the target agent (there "
+        "is no delivery path; see docs/design/audit-silent-failures.md C1). "
+        "Do not retry this tool. Instead, ask the workspace owner to create "
+        "a task and assign it to the target agent, or route the instruction "
+        "through the owner directly, so the work is durable and visible "
+        "instead of an unread message."
+    )
     await _ledger_fleet_action(
-        action="message_agent",
+        action="message_agent_refused",
         actor_id=actor_id,
         workspace_id=workspace_id,
         target_agent_id=agent_id,
-        metadata={"message_length": len(str(message))},
+        status="failed",
+        metadata={"reason": "no_delivery_path", "message_length": len(str(message))},
     )
-    return {"ok": True, "agent_id": agent_id, "status": "enqueued"}
+    return {"ok": False, "error": error}
 
 
 # ── Owner-only stop control ────────────────────────────────────────────────

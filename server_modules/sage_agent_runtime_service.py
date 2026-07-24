@@ -476,12 +476,24 @@ async def _resolve_cloud_provider(
 
 # ── Phase L: Per-agent AI provider binding ──────────────────────────────────
 
-# cli_subscription (BYO-brain Phase 3): the two CLIs the Gateway can spawn
-# under the owner's own subscription login. Kept in sync with
-# empyralis-gateway/src/llm/cli-runner.ts's CliSubscriptionRuntime union and
-# fleet_tools.py's _VALID_MODEL_RUNTIMES (which also allows "ollama" for
-# local mode — this set is the cli_subscription-only subset of that one).
-_VALID_CLI_SUBSCRIPTION_RUNTIMES = {"claude_code", "codex"}
+# cli_subscription (BYO-brain Phase 3): the CLIs the Gateway can spawn under
+# the owner's own subscription login. Kept in sync with empyralis-gateway/
+# src/llm/cli-runner.ts's CliSubscriptionRuntime union and fleet_tools.py's
+# _VALID_MODEL_RUNTIMES (which also allows "ollama" for local mode — this set
+# is the cli_subscription-only subset of that one). xAI Grok Build
+# (docs.x.ai/build) and Cursor CLI (cursor.com/docs/cli) added 2026-07-24 —
+# both run on the owner's own hardware under their own subscription login,
+# same as Claude Code/Codex; Empyralis never holds either credential.
+_VALID_CLI_SUBSCRIPTION_RUNTIMES = {"claude_code", "codex", "grok_build", "cursor_cli"}
+
+# Human label per cli_subscription runtime — every error-message helper below
+# reads off this instead of a hardcoded is_codex-style boolean ternary.
+_CLI_SUBSCRIPTION_RUNTIME_LABEL: Dict[str, str] = {
+    "claude_code": "Claude Code",
+    "codex": "Codex",
+    "grok_build": "Grok Build",
+    "cursor_cli": "Cursor CLI",
+}
 
 # Reasoning-effort picker (Fleet Model tab, model_config.reasoning_effort).
 # Matches scripts/orion_local_worker_llm.py's resolve_requested_reasoning_effort
@@ -495,19 +507,28 @@ _VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 
 # cli_subscription's OWN reasoning-effort vocabulary (Phase 1: reasoning-
 # effort control) — DIFFERENT from _VALID_REASONING_EFFORTS above and
-# DIFFERENT per runtime, verified live against each CLI's own --help. Never
-# flattened to one shared set:
+# DIFFERENT per runtime, verified live against each CLI's own --help/docs.
+# Never flattened to one shared set:
 #   - claude_code: `claude --effort <level>` — low/medium/high/xhigh/max.
 #     No "off"/"minimal" — the flag has no such value.
 #   - codex: `codex exec -c model_reasoning_effort=<level>` — codex's own
 #     ReasoningEffort enum (off/minimal/low/medium/high/xhigh/max — see
 #     empyralis-gateway/src/llm/codex-app-server.ts's identical comment).
+#   - grok_build: `grok --reasoning-effort <level>` — Grok's own canonical
+#     vocabulary (none/minimal/low/medium/high/xhigh/max — docs.x.ai/build's
+#     headless-mode guide, fetched 2026-07-24).
+#   - cursor_cli: empty set — no reasoning-effort flag is documented for
+#     cursor-agent at all (verified against cursor.com/docs/cli/reference/
+#     parameters, fetched 2026-07-24), so no value is ever valid for it; this
+#     mirrors "local" (Ollama), which also has no reasoning-effort control.
 # Kept in sync with fleet_tools.py's _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME
 # (same duplicate-but-documented-across-layers pattern as
 # _VALID_CLI_SUBSCRIPTION_RUNTIMES above, not a shared import).
 _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME: Dict[str, set] = {
     "claude_code": {"low", "medium", "high", "xhigh", "max"},
     "codex": {"off", "minimal", "low", "medium", "high", "xhigh", "max"},
+    "grok_build": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
+    "cursor_cli": set(),
 }
 
 
@@ -986,7 +1007,25 @@ def _friendly_cli_subscription_error(reason: str, *, runtime: str) -> str:
     from server_modules import platform_event as _pe
 
     r = str(reason or "").strip().lower()
-    is_codex = str(runtime or "").strip().lower() == "codex"
+    normalized_runtime = str(runtime or "").strip().lower()
+    # Runtime-keyed lookups — one row per runtime, not a growing is_codex-
+    # style boolean ternary. Falls back to the claude_code event for an
+    # unrecognized runtime (never raised in practice: _resolve_agent_cloud_
+    # provider/_dispatch_cli_subscription_gateway_brain both already reject
+    # anything outside _VALID_CLI_SUBSCRIPTION_RUNTIMES before this function
+    # is reached with a bogus value).
+    not_installed_event_by_runtime = {
+        "claude_code": _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_INSTALLED,
+        "codex": _pe.CLI_SUBSCRIPTION_CODEX_NOT_INSTALLED,
+        "grok_build": _pe.CLI_SUBSCRIPTION_GROK_BUILD_NOT_INSTALLED,
+        "cursor_cli": _pe.CLI_SUBSCRIPTION_CURSOR_NOT_INSTALLED,
+    }
+    not_authenticated_event_by_runtime = {
+        "claude_code": _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_AUTHENTICATED,
+        "codex": _pe.CLI_SUBSCRIPTION_CODEX_NOT_AUTHENTICATED,
+        "grok_build": _pe.CLI_SUBSCRIPTION_GROK_BUILD_NOT_AUTHENTICATED,
+        "cursor_cli": _pe.CLI_SUBSCRIPTION_CURSOR_NOT_AUTHENTICATED,
+    }
 
     def _say(event: _pe.PlatformEvent) -> str:
         return f"Heads up: {event.channel_text}"
@@ -994,18 +1033,21 @@ def _friendly_cli_subscription_error(reason: str, *, runtime: str) -> str:
     if "no_gateway_bound" in r:
         return _say(_pe.CLI_SUBSCRIPTION_NO_GATEWAY)
     if "unsupported_runtime" in r or "unsupported cli_subscription runtime" in r:
-        return f"Heads up: {runtime or 'this runtime'} is not a supported cli_subscription runtime. Use claude_code or codex."
+        return (
+            f"Heads up: {runtime or 'this runtime'} is not a supported cli_subscription runtime. "
+            f"Use one of: {', '.join(sorted(_VALID_CLI_SUBSCRIPTION_RUNTIMES))}."
+        )
     if (
         "registration_missing" in r or "registration_inactive" in r
         or "device_revoked" in r or "workspace_mismatch" in r
     ):
         return _say(_pe.CLI_SUBSCRIPTION_GATEWAY_NOT_PAIRED)
     if "not_installed" in r or "not installed" in r:
-        return _say(_pe.CLI_SUBSCRIPTION_CODEX_NOT_INSTALLED if is_codex else _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_INSTALLED)
+        return _say(not_installed_event_by_runtime.get(normalized_runtime, _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_INSTALLED))
     if "not_authenticated" in r or "not signed in" in r or "not authenticated" in r:
-        return _say(_pe.CLI_SUBSCRIPTION_CODEX_NOT_AUTHENTICATED if is_codex else _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_AUTHENTICATED)
+        return _say(not_authenticated_event_by_runtime.get(normalized_runtime, _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_AUTHENTICATED))
     if "capability_not_ready" in r or "capability_missing" in r:
-        return _say(_pe.CLI_SUBSCRIPTION_CODEX_NOT_INSTALLED if is_codex else _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_INSTALLED)
+        return _say(not_installed_event_by_runtime.get(normalized_runtime, _pe.CLI_SUBSCRIPTION_CLAUDE_NOT_INSTALLED))
     if "offline" in r or "heartbeat_stale" in r or "unhealthy" in r:
         return _say(_pe.CLI_SUBSCRIPTION_GATEWAY_OFFLINE)
     if "timed out" in r or "timeout" in r:
@@ -1022,13 +1064,13 @@ def _friendly_cli_subscription_error(reason: str, *, runtime: str) -> str:
         # silently replace it. Fall back to the generic event only when there
         # is no wrapped detail to show.
         detail = _extract_cli_gateway_detail(reason)
-        label = "Codex" if is_codex else "Claude Code"
+        label = _CLI_SUBSCRIPTION_RUNTIME_LABEL.get(normalized_runtime, runtime or "This runtime")
         if detail:
             return f"Heads up: {label} exited unexpectedly — {detail}"
         return _say(_pe.CLI_SUBSCRIPTION_CRASH)
     # Fallback — still honest (includes the raw reason), never a silently
     # generic string per this repo's fail-loud convention.
-    label = "Codex" if is_codex else "Claude Code"
+    label = _CLI_SUBSCRIPTION_RUNTIME_LABEL.get(normalized_runtime, runtime or "This runtime")
     return f"Heads up: {label} generation failed on the bound Gateway ({reason})."
 
 
@@ -1038,9 +1080,10 @@ def _cli_subscription_readiness_reason(
     workspace_id: str,
     runtime: str,
 ) -> str:
-    """Returns "" when the requested runtime (claude_code | codex) is
-    installed AND authenticated on this Gateway registration, else a short
-    machine-readable reason consumed by _friendly_cli_subscription_error.
+    """Returns "" when the requested runtime (claude_code | codex | grok_build
+    | cursor_cli) is installed AND authenticated on this Gateway registration,
+    else a short machine-readable reason consumed by
+    _friendly_cli_subscription_error.
 
     This is deliberately narrower than
     gateway_execution_service.gateway_registration_execution_readiness: that
@@ -1064,7 +1107,8 @@ def _cli_subscription_readiness_reason(
     from server_modules import gateway_registry_service
     public_payload = gateway_registry_service.gateway_registration_public_payload(registration)
     llm_runtimes = public_payload.get("llm_runtimes") if isinstance(public_payload.get("llm_runtimes"), dict) else {}
-    key = "codex" if str(runtime or "").strip().lower() == "codex" else "claude_code"
+    normalized_runtime = str(runtime or "").strip().lower()
+    key = normalized_runtime if normalized_runtime in _VALID_CLI_SUBSCRIPTION_RUNTIMES else "claude_code"
     entry = llm_runtimes.get(key) if isinstance(llm_runtimes.get(key), dict) else {}
     if not entry.get("installed"):
         return f"{key}_not_installed"

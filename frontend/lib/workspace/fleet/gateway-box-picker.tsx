@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
 import { deriveStatus, type AgentStatusTone } from "./fleet-presentation";
+import { normalizeCliRuntime, type CliSubscriptionRuntime } from "./fleet-provider-constants";
 
 /** Per-box AI-runtime detection (BYO-brain Phase 1), surfaced so users don't
  *  pick a box that can't run the brain. */
@@ -11,6 +12,8 @@ export type LlmRuntimeSummary = {
   ollama?: { detected?: boolean; status?: string; installed?: boolean; authenticated?: boolean };
   claude_code?: { detected?: boolean; status?: string; installed?: boolean; authenticated?: boolean };
   codex?: { detected?: boolean; status?: string; installed?: boolean; authenticated?: boolean };
+  grok_build?: { detected?: boolean; status?: string; installed?: boolean; authenticated?: boolean };
+  cursor_cli?: { detected?: boolean; status?: string; installed?: boolean; authenticated?: boolean };
   local_model_ready?: boolean;
 };
 
@@ -124,7 +127,7 @@ export function gatewayIsOnline(g: FleetGateway): boolean {
  *  is the single source of truth this function exists to provide. */
 export type RuntimeState = "ready" | "unauthenticated" | "missing";
 
-export function gatewayRuntimeState(g: FleetGateway, runtime: "claude_code" | "codex"): RuntimeState {
+export function gatewayRuntimeState(g: FleetGateway, runtime: CliSubscriptionRuntime): RuntimeState {
   const entry = g.llm_runtimes?.[runtime];
   if (!entry || entry.installed === false) return "missing";
   if (entry.authenticated) return "ready";
@@ -151,7 +154,7 @@ export function runtimeStateTone(state: RuntimeState): AgentStatusTone {
 /** Whether this box has the given subscription CLI installed + authenticated
  *  — collapses gatewayRuntimeState to the fully-"ready" case, for the one
  *  caller (cliSubscriptionHint) that only needs a yes/no. */
-export function gatewayRuntimeReady(g: FleetGateway, runtime: "claude_code" | "codex"): boolean {
+export function gatewayRuntimeReady(g: FleetGateway, runtime: CliSubscriptionRuntime): boolean {
   return gatewayRuntimeState(g, runtime) === "ready";
 }
 
@@ -279,7 +282,7 @@ export function deriveAgentStatus(
       return { tone: "degraded", label: "Model not loaded" };
     }
     if (mode === "cli_subscription") {
-      const runtime = agent.model_config?.runtime === "codex" ? "codex" : "claude_code";
+      const runtime = normalizeCliRuntime(agent.model_config?.runtime);
       const rs = gatewayRuntimeState(gw, runtime);
       if (rs === "missing") return { tone: "degraded", label: "CLI not installed" };
       if (rs === "unauthenticated") return { tone: "degraded", label: "Needs sign-in" };
@@ -337,9 +340,11 @@ export function useWorkspaceGateways(workspaceId: string) {
   return { gateways, loading, refresh };
 }
 
-export const RUNTIME_LABELS: Record<"claude_code" | "codex", string> = {
+export const RUNTIME_LABELS: Record<CliSubscriptionRuntime, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
+  grok_build: "Grok Build",
+  cursor_cli: "Cursor CLI",
 };
 
 /** Box-picker: choose which paired Gateway runs the agent's brain.
@@ -363,7 +368,7 @@ export function GatewayBoxPicker({
   /** When set (mode = "Your subscription"), annotate each box with whether
    *  that specific CLI is installed + authenticated there, and warn if the
    *  selected box doesn't have it. */
-  requireRuntime?: "claude_code" | "codex";
+  requireRuntime?: CliSubscriptionRuntime;
 }) {
   const { gateways, loading } = useWorkspaceGateways(workspaceId);
   const selected = gateways.find((g) => gatewayId(g) === value);

@@ -468,3 +468,143 @@ test("Claude Code's paste-back prompt is unaffected: no follow-up line is mis-ca
   assert.equal(codePromptEvents.length, 1, "claude_code must not gain the codex-only follow-up-line capture");
   assert.match(codePromptEvents[0].text, /Paste code here/);
 });
+
+// ---- xAI Grok Build (device-code flow) ------------------------------------
+// docs.x.ai/build's authentication guide (fetched live 2026-07-24): `grok
+// login --device-auth` "prints a URL and code to the terminal... Grok polls
+// until the login is confirmed" — same URL-then-bare-code shape as Codex's
+// device_auth, so it reuses the identical follow-up-code capture path.
+
+test("grok_build defaults to device_auth and spawns the right argv", async () => {
+  const fake = makeFakeChild();
+  let capturedCommand = "";
+  let capturedArgs: string[] = [];
+  const manager = new CliLoginSessionManager({
+    spawnImpl: (command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return fake.child;
+    },
+    commandExists: (command) => (command === "grok" ? "/usr/bin/grok" : null),
+  });
+  const result = await manager.start({ runId: "run-grok-device", runtime: "grok_build" });
+  assert.equal(result.method, "device_auth");
+  assert.equal(result.awaits_secret, false);
+  assert.equal(capturedCommand, "/usr/bin/grok");
+  assert.deepEqual(capturedArgs, ["login", "--device-auth"]);
+});
+
+test("grok_build: a device-code login surfaces BOTH the URL and the bare device code to the owner — this is the actual 'surfaces the code to the owner' behavior the cli_setup rail exists for", async () => {
+  const fake = makeFakeChild();
+  const { events, publish } = collectingPublisher();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    commandExists: () => "/usr/bin/grok",
+  });
+  manager.setEventPublisher(publish);
+
+  await manager.start({ runId: "run-grok-code-value", runtime: "grok_build" });
+  // Shape per docs.x.ai/build: a URL, then an instruction line, then the bare
+  // code on its own line — modeled on the same two-line-after-prompt shape
+  // Codex's real captured output uses (see the codex device-code tests above).
+  fake.emitStdout("Open this URL to sign in: https://accounts.x.ai/device\n");
+  fake.emitStdout("Enter this device code: \n");
+  fake.emitStdout("GX7K-QP2M\n");
+
+  const outputEvents = events.filter((e): e is CliLoginOutputEvent => e.event === "output");
+  const urlEvents = outputEvents.filter((e) => e.kind === "url");
+  const codePromptEvents = outputEvents.filter((e) => e.kind === "code_prompt");
+  assert.equal(urlEvents.length, 1, "the sign-in URL must reach the owner");
+  assert.equal(urlEvents[0].text, "https://accounts.x.ai/device");
+  assert.equal(codePromptEvents.length, 2, "both the instruction line and the bare code value must reach the owner");
+  assert.equal(codePromptEvents[1].text, "GX7K-QP2M", "the bare device code itself must be forwarded verbatim");
+});
+
+test("grok_build:api_key is not a supported method (XAI_API_KEY is an env-var fallback, not a persisting login-session subcommand)", async () => {
+  const manager = new CliLoginSessionManager({
+    spawnImpl: () => {
+      throw new Error("must not spawn for an unsupported method");
+    },
+    commandExists: () => "/usr/bin/grok",
+  });
+  await assert.rejects(
+    manager.start({ runId: "run-grok-no-api-key", runtime: "grok_build", method: "api_key" as never }),
+    (err: unknown) => {
+      assert.ok(err instanceof CliLoginError);
+      assert.equal(err.kind, "unsupported_method");
+      return true;
+    },
+  );
+});
+
+// ---- Cursor CLI (browser OAuth, URL-only) ----------------------------------
+// cursor.com/docs/cli/reference/authentication (fetched live 2026-07-24):
+// `agent login` opens a browser by default; NO_OPEN_BROWSER=1 makes it print
+// the URL instead. Unlike Codex/Grok, there is no documented bare device
+// code to capture — this is a URL-only flow, same shape as Claude Code's
+// claudeai/console methods.
+
+test("cursor_cli defaults to login and spawns the right argv with NO_OPEN_BROWSER=1 merged into env", async () => {
+  const fake = makeFakeChild();
+  let capturedCommand = "";
+  let capturedArgs: string[] = [];
+  let capturedEnv: NodeJS.ProcessEnv = {};
+  const manager = new CliLoginSessionManager({
+    env: { PATH: "/usr/bin", SOME_OTHER_VAR: "kept" },
+    spawnImpl: (command, args, options) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      capturedEnv = options.env;
+      return fake.child;
+    },
+    commandExists: (command) => (command === "cursor-agent" ? "/usr/bin/cursor-agent" : null),
+  });
+  const result = await manager.start({ runId: "run-cursor-login", runtime: "cursor_cli" });
+  assert.equal(result.method, "login");
+  assert.equal(result.awaits_secret, false);
+  assert.equal(capturedCommand, "/usr/bin/cursor-agent");
+  assert.deepEqual(capturedArgs, ["login"]);
+  assert.equal(capturedEnv.NO_OPEN_BROWSER, "1", "NO_OPEN_BROWSER=1 must be merged in so `agent login` prints the URL instead of trying to open a browser on the headless Gateway");
+  assert.equal(capturedEnv.SOME_OTHER_VAR, "kept", "extraEnv must be MERGED on top of the session's own env, not replace it");
+});
+
+test("cursor_cli: the sign-in URL reaches the owner; no bare device code is expected or mis-captured", async () => {
+  const fake = makeFakeChild();
+  const { events, publish } = collectingPublisher();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    commandExists: () => "/usr/bin/cursor-agent",
+  });
+  manager.setEventPublisher(publish);
+
+  await manager.start({ runId: "run-cursor-url", runtime: "cursor_cli" });
+  fake.emitStdout("Sign in to Cursor: https://cursor.com/auth/device?code=ABC123\n");
+  // A bare short code on its own line must NOT be mis-captured for cursor_cli
+  // the way it correctly IS for codex/grok_build — cursor_cli is deliberately
+  // excluded from URL_CODE_FOLLOWUP_RUNTIMES.
+  fake.emitStdout("ABCD-1234\n");
+
+  const outputEvents = events.filter((e): e is CliLoginOutputEvent => e.event === "output");
+  const urlEvents = outputEvents.filter((e) => e.kind === "url");
+  const codePromptEvents = outputEvents.filter((e) => e.kind === "code_prompt");
+  assert.equal(urlEvents.length, 1, "the sign-in URL must reach the owner");
+  assert.equal(urlEvents[0].text, "https://cursor.com/auth/device?code=ABC123");
+  assert.equal(codePromptEvents.length, 0, "a bare code line must not be mis-captured as a device code for cursor_cli");
+});
+
+test("cursor_cli:api_key is not a supported method (CURSOR_API_KEY is an env-var fallback, not a persisting login-session subcommand)", async () => {
+  const manager = new CliLoginSessionManager({
+    spawnImpl: () => {
+      throw new Error("must not spawn for an unsupported method");
+    },
+    commandExists: () => "/usr/bin/cursor-agent",
+  });
+  await assert.rejects(
+    manager.start({ runId: "run-cursor-no-api-key", runtime: "cursor_cli", method: "api_key" as never }),
+    (err: unknown) => {
+      assert.ok(err instanceof CliLoginError);
+      assert.equal(err.kind, "unsupported_method");
+      return true;
+    },
+  );
+});

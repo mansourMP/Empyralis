@@ -90,7 +90,7 @@ function resolveAgentModelSummary(modelConfig: Record<string, any> | undefined |
     ? String(config.reasoning_effort || "")
     : "";
   if (mode === "cli_subscription") {
-    const runtime: "claude_code" | "codex" = config.runtime === "codex" ? "codex" : "claude_code";
+    const runtime = normalizeCliRuntime(config.runtime);
     const provider = config.provider ? providerLabel(config.provider) : RUNTIME_LABELS[runtime];
     return { provider, model: config.model || "CLI default", isPlatformDefault: false, reasoningEffort };
   }
@@ -2757,7 +2757,7 @@ function CapabilitiesTab({
 
 import {
   BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, MODE_LABELS,
-  COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, type ProviderMode,
+  COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, normalizeCliRuntime, type ProviderMode,
   FREEFORM_MODEL_PROVIDERS, modelsForProvider, defaultModelForProvider,
   REASONING_EFFORT_OPTIONS, REASONING_EFFORT_SUPPORTED_MODES, reasoningEffortLabel,
   CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME, type CliSubscriptionRuntime,
@@ -2918,15 +2918,15 @@ function ContextPolicySection({
  *  real hardware state instead of a static note. cli_subscription is real
  *  and savable (BYO-brain Phase 3), but still needs a paired Gateway with
  *  the CLI installed and signed in — this names what's actually missing
- *  rather than a generic lock message. We don't know which CLI (Claude Code
- *  vs Codex) they'll pick until the option is expanded, so this checks for
- *  either. */
+ *  rather than a generic lock message. We don't know which CLI (Claude Code,
+ *  Codex, Grok Build, or Cursor CLI) they'll pick until the option is
+ *  expanded, so this checks for any of the four. */
 function cliSubscriptionHint(gateways: FleetGateway[]): string {
   if (gateways.length === 0) return "Needs a paired computer — none paired yet";
   const anyReady = gateways.some(
-    (g) => gatewayRuntimeReady(g, "claude_code") || gatewayRuntimeReady(g, "codex"),
+    (g) => (["claude_code", "codex", "grok_build", "cursor_cli"] as const).some((r) => gatewayRuntimeReady(g, r)),
   );
-  return anyReady ? "A paired computer has a CLI ready" : "No paired computer has Claude Code or Codex ready";
+  return anyReady ? "A paired computer has a CLI ready" : "No paired computer has a subscription CLI ready";
 }
 
 /** A pending (unsaved) edit to an agent's model_config — the shape both the
@@ -3093,7 +3093,7 @@ function AgentModelPickerRow({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { gateways: cliGateways } = useWorkspaceGateways(workspaceId);
-  const cliRuntime = runtimeForProvider(provider) === "codex" ? "codex" : "claude_code";
+  const cliRuntime = normalizeCliRuntime(runtimeForProvider(provider));
   const ref = useRef<HTMLDivElement | null>(null);
 
   // Re-seed the draft from the agent's real current config every time the
@@ -3363,7 +3363,7 @@ function ModelTab({
   const [provider, setProvider] = useState<string>(config.provider || "");
   const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
   const { gateways: cliGateways } = useWorkspaceGateways(workspaceId);
-  const cliRuntime = runtimeForProvider(provider) === "codex" ? "codex" : "claude_code";
+  const cliRuntime = normalizeCliRuntime(runtimeForProvider(provider));
   const [selectedModel, setSelectedModel] = useState<string>(config.model || "");
   const [apiKey, setApiKey] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState<string>(config.reasoning_effort || "");
@@ -3484,15 +3484,25 @@ function ModelTab({
 
   // cli_subscription's own picker (Phase 1: reasoning-effort control) — the
   // paired Gateway's llm.generate now forwards this into the CLI's own
-  // --effort (claude_code) / -c model_reasoning_effort= (codex) flag, so
-  // unlike platform_credits/byok_api this can't share REASONING_EFFORT_
-  // OPTIONS: the two CLIs accept genuinely different value sets (verified
-  // live against each CLI's own --help — see CLI_REASONING_EFFORT_OPTIONS_
-  // BY_RUNTIME's own docstring). Gated by cliRuntime, which already tracks
-  // the Subscription <select> above (claude_code_cli vs openai-codex), so
-  // switching the subscription provider swaps the option list live.
+  // --effort (claude_code) / -c model_reasoning_effort= (codex) /
+  // --reasoning-effort (grok_build) flag, so unlike platform_credits/byok_api
+  // this can't share REASONING_EFFORT_OPTIONS: each CLI accepts a genuinely
+  // different value set (verified live against each CLI's own --help/docs —
+  // see CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME's own docstring). Cursor CLI
+  // has no reasoning-effort control at all (empty options list), so this
+  // falls back to the same unsupported note "local" gets rather than
+  // rendering an empty, misleading <select>. Gated by cliRuntime, which
+  // already tracks the Subscription <select> above, so switching the
+  // subscription provider swaps the option list (or the note) live.
   function renderCliReasoningEffortPicker() {
     const options = CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime];
+    if (options.length === 0) {
+      return (
+        <p className="fleet-channel-expand-hint">
+          {RUNTIME_LABELS[cliRuntime]} has no reasoning-effort control today.
+        </p>
+      );
+    }
     return (
       <>
         <label className="fleet-wizard-label">Reasoning effort</label>
@@ -3506,7 +3516,7 @@ function ModelTab({
           ))}
         </select>
         <p className="fleet-channel-expand-hint">
-          Higher effort can solve harder problems but costs more and replies slower. Passed straight to {cliRuntime === "codex" ? "Codex’s" : "Claude Code’s"} own reasoning control.
+          Higher effort can solve harder problems but costs more and replies slower. Passed straight to {RUNTIME_LABELS[cliRuntime]}’s own reasoning control.
         </p>
       </>
     );

@@ -30,7 +30,7 @@ import { spawn } from "child_process";
 // non-interactive path to observe a credential the CLI silently refreshed on
 // its own between attempts.
 
-export type CliSubscriptionRuntime = "claude_code" | "codex";
+export type CliSubscriptionRuntime = "claude_code" | "codex" | "grok_build" | "cursor_cli";
 
 export interface CliUsage {
   input_tokens: number;
@@ -215,6 +215,12 @@ function binaryFor(runtime: CliSubscriptionRuntime, env: NodeJS.ProcessEnv): str
   if (runtime === "claude_code") {
     return String(env.CLAUDE_CLI_PATH || "").trim() || "claude";
   }
+  if (runtime === "grok_build") {
+    return String(env.GROK_CLI_PATH || "").trim() || "grok";
+  }
+  if (runtime === "cursor_cli") {
+    return String(env.CURSOR_CLI_PATH || "").trim() || "cursor-agent";
+  }
   return String(env.CODEX_CLI_PATH || "").trim() || "codex";
 }
 
@@ -234,13 +240,36 @@ function binaryFor(runtime: CliSubscriptionRuntime, env: NodeJS.ProcessEnv): str
  *  --sandbox read-only is the closest safety net: this capability is a text
  *  completion, not a license to mutate the box's filesystem.
  *
- *  Reasoning effort (verified against each CLI's own --help — two distinct
- *  flags/enums, never flattened to one): Claude Code takes a top-level
- *  `--effort <level>` flag; Codex takes a config override,
- *  `-c model_reasoning_effort=<level>`, since it has no dedicated CLI flag
- *  for this on the `exec` subcommand. Both are appended ONLY when
- *  params.reasoningEffort is set — an unset value means "let the CLI use
- *  its own configured default", same convention as `model` above. */
+ *  Grok Build (xAI): `-p <prompt> --output-format json`. Verified live
+ *  against docs.x.ai/build's headless-mode guide (crates/codegen/xai-grok-
+ *  pager/docs/user-guide/14-headless-mode.md, fetched 2026-07-24): `-p,
+ *  --single <PROMPT>` triggers headless mode, `--output-format json` emits
+ *  one JSON object after the response completes. Grok has no documented
+ *  "disable tools" flag either (same coding-agent-by-design shape as
+ *  Codex) and no dedicated read-only sandbox flag was found in the fetched
+ *  docs, so — unlike Codex — this capability does not attempt to sandbox
+ *  it; that is a real, narrower guarantee than the Codex path and is called
+ *  out here rather than silently assumed equivalent.
+ *
+ *  Cursor CLI: `-p <prompt> --output-format json`. Verified live against
+ *  cursor.com/docs/cli/reference/parameters + .../output-format (fetched
+ *  2026-07-24). Cursor's `-p`/`--print` is documented with a real,
+ *  independently-reported reliability issue (its own community forum has
+ *  reports of `-p` hanging indefinitely in some environments) — this
+ *  module's existing timeoutMs + no-output watchdog are the only backstop;
+ *  see cliErrorMessage's runtime.ts caller for how that surfaces.
+ *
+ *  Reasoning effort (verified against each CLI's own --help/docs — never
+ *  flattened to one shape): Claude Code takes a top-level `--effort <level>`
+ *  flag; Codex takes a config override, `-c model_reasoning_effort=<level>`,
+ *  since it has no dedicated CLI flag for this on the `exec` subcommand;
+ *  Grok Build takes `--reasoning-effort`/`--effort <level>` directly (its own
+ *  canonical vocabulary is none/minimal/low/medium/high/xhigh/max — see
+ *  sage_agent_runtime_service.py's _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME).
+ *  Cursor CLI's documented flag reference has no reasoning-effort control at
+ *  all, so params.reasoningEffort is never appended for it — an unset value
+ *  everywhere means "let the CLI use its own configured default", same
+ *  convention as `model` above. */
 function buildInvocation(
   params: CliRunParams,
   env: NodeJS.ProcessEnv,
@@ -257,6 +286,42 @@ function buildInvocation(
     if (params.reasoningEffort) {
       args.push("--effort", params.reasoningEffort);
     }
+    return { command, args };
+  }
+  if (params.runtime === "grok_build") {
+    const args = ["-p", params.prompt, "--output-format", "json"];
+    // `--rules <TEXT>` is Grok Build's own system-prompt-equivalent flag —
+    // "Custom rules for the system prompt", confirmed live in docs.x.ai/
+    // build's headless-mode flag reference, 2026-07-24. Without this, a
+    // configured system prompt/instructions would be silently dropped for
+    // every grok_build turn (runtime.ts's generateViaCli keeps systemPrompt
+    // SEPARATE from promptText for every runtime except codex's non-daemon
+    // path — see includeSystemInline there — so this flag is the only place
+    // it can still reach the CLI).
+    if (params.systemPrompt) {
+      args.push("--rules", params.systemPrompt);
+    }
+    if (params.model) {
+      args.push("--model", params.model);
+    }
+    if (params.reasoningEffort) {
+      args.push("--reasoning-effort", params.reasoningEffort);
+    }
+    return { command, args };
+  }
+  if (params.runtime === "cursor_cli") {
+    const args = ["-p", params.prompt, "--output-format", "json"];
+    if (params.model) {
+      args.push("--model", params.model);
+    }
+    // No reasoningEffort flag: Cursor CLI's documented parameter reference
+    // has no reasoning-effort control (see this function's doc comment).
+    // Also no system-prompt-equivalent flag was found for cursor-agent
+    // either — runtime.ts's generateViaCli therefore folds systemPrompt
+    // INLINE into promptText for this runtime (includeSystemInline: true),
+    // same treatment as codex's non-daemon path, so it's never silently
+    // dropped; params.systemPrompt is expected to already be empty by the
+    // time it reaches this function for cursor_cli.
     return { command, args };
   }
   const args = ["exec", params.prompt, "--json", "--skip-git-repo-check", "--sandbox", "read-only"];
@@ -619,6 +684,122 @@ function parseCodexOutput(outcome: RawSpawnOutcome): CliRunResult {
   );
 }
 
+const GROK_AUTH_MARKERS = [
+  "authentication failed", "invalid or expired api key", "not authenticated",
+  "401 unauthorized", "please sign in", "run `grok login`", "run 'grok login'",
+];
+
+/** Grok Build's `--output-format json` emits ONE JSON object after the
+ *  response completes (not JSONL like Claude Code/Codex) — verified live
+ *  against docs.x.ai/build's headless-mode guide, 2026-07-24: `{text,
+ *  stopReason, sessionId, requestId, usage:{input_tokens, output_tokens,
+ *  ...}, ...}` on success, `{"type":"error","message":"..."}` on failure
+ *  (process exits non-zero). parseJsonLines still applies here (it's
+ *  line-oriented, and a single JSON object is the degenerate one-line case
+ *  of that) so a stray banner line printed before the real object doesn't
+ *  corrupt parsing — same defensive shape as the other three parsers. */
+function parseGrokBuildOutput(outcome: RawSpawnOutcome): CliRunResult {
+  const events = parseJsonLines(outcome.stdout);
+  const errorEvent = [...events].reverse().find((e) => e.type === "error");
+  const resultEvent = [...events].reverse().find((e) => typeof e.text === "string");
+  const haystack = `${outcome.stdout}\n${outcome.stderr}`.toLowerCase();
+  const looksLikeAuthFailure = GROK_AUTH_MARKERS.some((marker) => haystack.includes(marker));
+
+  if (resultEvent && !errorEvent) {
+    const text = String(resultEvent.text || "").trim();
+    if (!text) {
+      throw new CliRunError("crash", "grok completed the turn but produced no text", {
+        failureClass: classifyFailureText(haystack),
+      });
+    }
+    const usage = (resultEvent.usage && typeof resultEvent.usage === "object")
+      ? (resultEvent.usage as Record<string, unknown>)
+      : {};
+    return {
+      text,
+      usage: {
+        input_tokens: Number(usage.input_tokens) || 0,
+        output_tokens: Number(usage.output_tokens) || 0,
+      },
+    };
+  }
+
+  if (looksLikeAuthFailure) {
+    throw new CliRunError(
+      "not_authenticated",
+      errorEvent ? String(errorEvent.message || "grok reported an authentication failure") : "grok reported an authentication failure",
+    );
+  }
+  if (errorEvent) {
+    throw new CliRunError("crash", String(errorEvent.message || "grok reported an error"), {
+      failureClass: classifyFailureText(haystack),
+    });
+  }
+  throw new CliRunError(
+    "crash",
+    `grok exited with code ${outcome.exitCode ?? "null"} and no parsable result`
+    + (outcome.stderr ? ` (stderr: ${truncate(outcome.stderr)})` : ""),
+    { failureClass: classifyFailureText(haystack) },
+  );
+}
+
+// Exact confirmed wording from real unauthenticated cursor-agent runs: "Error:
+// Authentication required. Please run 'agent login' first, or set
+// CURSOR_API_KEY environment variable." (exit code 1). Kept as several
+// narrower markers rather than one long string so close variants still match.
+const CURSOR_AUTH_MARKERS = [
+  "authentication required", "not authenticated", "please run 'agent login'",
+  "please run \"agent login\"", "cursor_api_key environment variable",
+];
+
+/** Cursor CLI's `--output-format json` emits one object after the response
+ *  completes on success — verified live against cursor.com/docs/cli/
+ *  reference/output-format, 2026-07-24: `{type:"result", subtype:"success",
+ *  is_error:false, duration_ms, duration_api_ms, result:"<full assistant
+ *  text>", session_id, request_id}`. Unlike Claude Code/Codex, Cursor's own
+ *  docs say a hard failure commonly produces NO well-formed JSON object at
+ *  all — just a non-zero exit and an error line on stderr — so the
+ *  no-parsable-result fallback below is this runtime's PRIMARY failure path,
+ *  not a rare edge case. No token-usage fields are documented for either
+ *  output format, so usage is always {0, 0} here — a genuinely unknown
+ *  count, not a fabricated real zero (see sage_agent_runtime_service.py's
+ *  tokens_known handling downstream, which already exists for exactly this
+ *  cli_subscription case). */
+function parseCursorOutput(outcome: RawSpawnOutcome): CliRunResult {
+  const events = parseJsonLines(outcome.stdout);
+  const resultEvent = [...events].reverse().find((e) => e.type === "result");
+  const haystack = `${outcome.stdout}\n${outcome.stderr}`.toLowerCase();
+  const looksLikeAuthFailure = CURSOR_AUTH_MARKERS.some((marker) => haystack.includes(marker));
+
+  if (resultEvent && !resultEvent.is_error) {
+    const text = String(resultEvent.result || "").trim();
+    if (!text) {
+      throw new CliRunError("crash", "cursor-agent completed the turn but produced no result text", {
+        failureClass: classifyFailureText(haystack),
+      });
+    }
+    return { text, usage: { input_tokens: 0, output_tokens: 0 } };
+  }
+
+  if (looksLikeAuthFailure) {
+    throw new CliRunError(
+      "not_authenticated",
+      resultEvent ? String(resultEvent.result || "cursor-agent reported an authentication failure") : "cursor-agent reported an authentication failure",
+    );
+  }
+  if (resultEvent && resultEvent.is_error) {
+    throw new CliRunError("crash", String(resultEvent.result || "cursor-agent reported an error"), {
+      failureClass: classifyFailureText(haystack),
+    });
+  }
+  throw new CliRunError(
+    "crash",
+    `cursor-agent exited with code ${outcome.exitCode ?? "null"} and no parsable result`
+    + (outcome.stderr ? ` (stderr: ${truncate(outcome.stderr)})` : ""),
+    { failureClass: classifyFailureText(haystack) },
+  );
+}
+
 // EAGAIN/EMFILE/ENFILE/ENOMEM are local resource-exhaustion errors from the
 // OS's own process-spawn syscall (too many open file descriptors, momentarily
 // out of memory, etc.) — genuinely transient conditions distinct from
@@ -667,7 +848,10 @@ function evaluateOutcome(
     // session after the hard overall timeout").
     throw new CliRunError("timeout", `no response within ${timeoutMs}ms (SIGTERM/SIGKILL sent)`, { failureClass: "fatal" });
   }
-  return runtime === "claude_code" ? parseClaudeCodeOutput(outcome) : parseCodexOutput(outcome);
+  if (runtime === "claude_code") return parseClaudeCodeOutput(outcome);
+  if (runtime === "grok_build") return parseGrokBuildOutput(outcome);
+  if (runtime === "cursor_cli") return parseCursorOutput(outcome);
+  return parseCodexOutput(outcome);
 }
 
 function backoffMsFor(failureClass: CliFailureClass, retryIndex: number): number {

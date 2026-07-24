@@ -419,3 +419,186 @@ test("claude_cli reports ready on macOS when the Keychain item exists (metadata-
   assert.ok(securityArgs, "the security CLI must have been invoked");
   assert.ok(!(securityArgs as unknown as string[]).includes("-w"), "must never request the secret value, existence only");
 });
+
+// ---- xAI Grok Build / Cursor CLI addition ---------------------------------
+// Same installed-vs-authenticated distinction as claude_cli/codex_cli above —
+// this is what flips grok_cli/cursor_cli service_inventory rows from
+// "degraded" (installed, not signed in) to "ready", which is the SAME signal
+// _cli_subscription_readiness_reason (Python) and gatewayRuntimeState
+// (frontend) key off to decide whether a turn — or an "already ready, reuse
+// it" recommendation — is safe.
+
+function baseCommandExistsGrok(extra: Record<string, string> = {}) {
+  return (command: string): string | null => {
+    if (command in extra) return extra[command];
+    if (command === "grok") return "/usr/bin/grok";
+    return null;
+  };
+}
+async function baseRunCommandGrok(command: string): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  if (command.endsWith("grok")) return { exitCode: 0, stdout: "0.12.3 (Grok Build)", stderr: "" };
+  return { exitCode: 1, stdout: "", stderr: "not present" };
+}
+
+test("grok_cli reports missing when the binary isn't on PATH", async () => {
+  const snapshot = await collectPassiveInventorySnapshot({
+    deps: {
+      platform: "linux",
+      now: () => new Date("2026-07-24T00:00:00Z"),
+      commandExists: () => null,
+      runCommand: baseRunCommandGrok,
+      httpGetJson: async () => ({ ok: false, status: 0 }),
+      env: { HOME: "/nonexistent-home-for-this-test" },
+    },
+  });
+  const grokItem = snapshot.service_inventory.find((item) => item.id === "grok_cli");
+  assert.equal(grokItem?.status, "missing");
+  assert.equal(grokItem?.metadata?.installed, false);
+  assert.equal(grokItem?.metadata?.authenticated, false);
+});
+
+test("grok_cli reports degraded (installed, not signed in) when neither ~/.grok/auth.json nor XAI_API_KEY is present", async () => {
+  const snapshot = await collectPassiveInventorySnapshot({
+    deps: {
+      platform: "linux",
+      now: () => new Date("2026-07-24T00:00:00Z"),
+      commandExists: baseCommandExistsGrok(),
+      runCommand: baseRunCommandGrok,
+      httpGetJson: async () => ({ ok: false, status: 0 }),
+      env: { HOME: "/nonexistent-home-for-this-test" },
+    },
+  });
+  const grokItem = snapshot.service_inventory.find((item) => item.id === "grok_cli");
+  assert.equal(grokItem?.status, "degraded");
+  assert.equal(grokItem?.metadata?.installed, true);
+  assert.equal(grokItem?.metadata?.authenticated, false);
+});
+
+test("grok_cli reports ready when XAI_API_KEY is present", async () => {
+  const snapshot = await collectPassiveInventorySnapshot({
+    deps: {
+      platform: "linux",
+      now: () => new Date("2026-07-24T00:00:00Z"),
+      commandExists: baseCommandExistsGrok(),
+      runCommand: baseRunCommandGrok,
+      httpGetJson: async () => ({ ok: false, status: 0 }),
+      env: { HOME: "/nonexistent-home-for-this-test", XAI_API_KEY: "xai-not-a-real-key" },
+    },
+  });
+  const grokItem = snapshot.service_inventory.find((item) => item.id === "grok_cli");
+  assert.equal(grokItem?.status, "ready");
+  assert.equal(grokItem?.metadata?.authenticated, true);
+});
+
+test("grok_cli reports ready when ~/.grok/auth.json exists (a completed `grok login --device-auth` session)", async (t) => {
+  const home = await mkdtemp(path.join(tmpdir(), "empyralis-grok-cred-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(path.join(home, ".grok"), { recursive: true });
+  await writeFile(path.join(home, ".grok", "auth.json"), "{}");
+
+  const snapshot = await collectPassiveInventorySnapshot({
+    deps: {
+      platform: "linux",
+      now: () => new Date("2026-07-24T00:00:00Z"),
+      commandExists: baseCommandExistsGrok(),
+      runCommand: baseRunCommandGrok,
+      httpGetJson: async () => ({ ok: false, status: 0 }),
+      env: { HOME: home },
+    },
+  });
+  const grokItem = snapshot.service_inventory.find((item) => item.id === "grok_cli");
+  assert.equal(grokItem?.status, "ready");
+  assert.equal(grokItem?.metadata?.authenticated, true);
+});
+
+function baseCommandExistsCursor(extra: Record<string, string> = {}) {
+  return (command: string): string | null => {
+    if (command in extra) return extra[command];
+    if (command === "cursor-agent") return "/usr/bin/cursor-agent";
+    return null;
+  };
+}
+
+test("cursor_cli reports missing when the binary isn't on PATH", async () => {
+  const snapshot = await collectPassiveInventorySnapshot({
+    deps: {
+      platform: "linux",
+      now: () => new Date("2026-07-24T00:00:00Z"),
+      commandExists: () => null,
+      runCommand: async () => ({ exitCode: 1, stdout: "", stderr: "not present" }),
+      httpGetJson: async () => ({ ok: false, status: 0 }),
+      env: { HOME: "/nonexistent-home-for-this-test" },
+    },
+  });
+  const cursorItem = snapshot.service_inventory.find((item) => item.id === "cursor_cli");
+  assert.equal(cursorItem?.status, "missing");
+  assert.equal(cursorItem?.metadata?.installed, false);
+  assert.equal(cursorItem?.metadata?.authenticated, false);
+});
+
+test("cursor_cli reports ready when CURSOR_API_KEY is present (no `status` probe needed)", async () => {
+  let statusInvoked = false;
+  const snapshot = await collectPassiveInventorySnapshot({
+    deps: {
+      platform: "linux",
+      now: () => new Date("2026-07-24T00:00:00Z"),
+      commandExists: baseCommandExistsCursor(),
+      runCommand: async (command, args) => {
+        if (args?.[0] === "status") statusInvoked = true;
+        if (command.endsWith("cursor-agent")) return { exitCode: 0, stdout: "2026.07.23", stderr: "" };
+        return { exitCode: 1, stdout: "", stderr: "not present" };
+      },
+      httpGetJson: async () => ({ ok: false, status: 0 }),
+      env: { HOME: "/nonexistent-home-for-this-test", CURSOR_API_KEY: "not-a-real-key" },
+    },
+  });
+  const cursorItem = snapshot.service_inventory.find((item) => item.id === "cursor_cli");
+  assert.equal(cursorItem?.status, "ready");
+  assert.equal(cursorItem?.metadata?.authenticated, true);
+  assert.equal(statusInvoked, false, "CURSOR_API_KEY alone should short-circuit the extra `status` probe");
+});
+
+test("cursor_cli reports degraded (installed, not signed in) when `cursor-agent status` reports the documented not-authenticated wording", async () => {
+  const snapshot = await collectPassiveInventorySnapshot({
+    deps: {
+      platform: "linux",
+      now: () => new Date("2026-07-24T00:00:00Z"),
+      commandExists: baseCommandExistsCursor(),
+      runCommand: async (command, args) => {
+        if (command.endsWith("cursor-agent") && args?.[0] === "status") {
+          return { exitCode: 1, stdout: "", stderr: "Not authenticated. Run 'agent login' to sign in." };
+        }
+        if (command.endsWith("cursor-agent")) return { exitCode: 0, stdout: "2026.07.23", stderr: "" };
+        return { exitCode: 1, stdout: "", stderr: "not present" };
+      },
+      httpGetJson: async () => ({ ok: false, status: 0 }),
+      env: { HOME: "/nonexistent-home-for-this-test" },
+    },
+  });
+  const cursorItem = snapshot.service_inventory.find((item) => item.id === "cursor_cli");
+  assert.equal(cursorItem?.status, "degraded");
+  assert.equal(cursorItem?.metadata?.installed, true);
+  assert.equal(cursorItem?.metadata?.authenticated, false);
+});
+
+test("cursor_cli reports ready when `cursor-agent status` exits 0 with no not-authenticated wording (best-effort — no officially published status schema exists to parse instead)", async () => {
+  const snapshot = await collectPassiveInventorySnapshot({
+    deps: {
+      platform: "linux",
+      now: () => new Date("2026-07-24T00:00:00Z"),
+      commandExists: baseCommandExistsCursor(),
+      runCommand: async (command, args) => {
+        if (command.endsWith("cursor-agent") && args?.[0] === "status") {
+          return { exitCode: 0, stdout: "Logged in as owner@example.com", stderr: "" };
+        }
+        if (command.endsWith("cursor-agent")) return { exitCode: 0, stdout: "2026.07.23", stderr: "" };
+        return { exitCode: 1, stdout: "", stderr: "not present" };
+      },
+      httpGetJson: async () => ({ ok: false, status: 0 }),
+      env: { HOME: "/nonexistent-home-for-this-test" },
+    },
+  });
+  const cursorItem = snapshot.service_inventory.find((item) => item.id === "cursor_cli");
+  assert.equal(cursorItem?.status, "ready");
+  assert.equal(cursorItem?.metadata?.authenticated, true);
+});

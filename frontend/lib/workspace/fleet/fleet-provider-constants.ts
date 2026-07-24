@@ -24,6 +24,8 @@ export const BYOK_PROVIDERS: ProviderOption[] = [
 export const SUBSCRIPTION_PROVIDERS: ProviderOption[] = [
   { id: "claude_code_cli", label: "Claude Code", detail: "Runs on your own hardware, using your own Claude Pro subscription." },
   { id: "openai-codex", label: "OpenAI Codex", detail: "Runs on your own hardware, using your own ChatGPT/Codex subscription." },
+  { id: "xai_grok_cli", label: "Grok Build", detail: "Runs on your own hardware, using your own SuperGrok/X Premium+ subscription." },
+  { id: "cursor_cli", label: "Cursor CLI", detail: "Runs on your own hardware, using your own Cursor Pro/Pro+/Ultra subscription." },
 ];
 
 export const LOCAL_PROVIDERS: ProviderOption[] = [
@@ -63,11 +65,25 @@ export const COMING_SOON_NOTE = "Coming soon — requires a paired box";
 export const RUNTIME_FOR_PROVIDER: Record<string, string> = {
   claude_code_cli: "claude_code",
   "openai-codex": "codex",
+  xai_grok_cli: "grok_build",
+  cursor_cli: "cursor_cli",
   ollama: "ollama",
 };
 
 export function runtimeForProvider(providerId: string): string {
   return RUNTIME_FOR_PROVIDER[providerId] || "";
+}
+
+/** Normalizes any raw model_config.runtime string into one of the four known
+ *  cli_subscription runtimes, defaulting to "claude_code" only when the
+ *  value is genuinely empty/unrecognized (an agent created before this
+ *  runtime existed, or with a typo'd value). Replaces the old hardcoded
+ *  `=== "codex" ? "codex" : "claude_code"` ternaries that used to silently
+ *  coerce grok_build/cursor_cli agents into rendering as Claude Code. */
+export function normalizeCliRuntime(value: string | null | undefined): CliSubscriptionRuntime {
+  const v = String(value || "").trim();
+  if (v === "codex" || v === "grok_build" || v === "cursor_cli") return v;
+  return "claude_code";
 }
 
 /** Static mirror of provider_profiles.py PROVIDER_MODEL_CATALOG (model ids +
@@ -160,6 +176,7 @@ export const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }
 // changed to one with a narrower picker.
 const REASONING_EFFORT_LABELS: Record<string, string> = {
   "": "Model default",
+  none: "None",
   off: "Off",
   minimal: "Minimal",
   low: "Low",
@@ -190,18 +207,23 @@ export const REASONING_EFFORT_SUPPORTED_MODES: ReadonlySet<ProviderMode> = new S
 ]);
 
 // cli_subscription's reasoning-effort picker — the owner's own Claude Code /
-// Codex CLI, spawned on their paired Gateway (BYO-brain Phase 3). Verified
-// live against each CLI's own --help — two genuinely different vocabularies,
-// never flattened to one shared list:
+// Codex / Grok Build / Cursor CLI, spawned on their paired Gateway (BYO-brain
+// Phase 3). Verified live against each CLI's own --help/docs — genuinely
+// different vocabularies, never flattened to one shared list:
 //   - claude_code: `claude --effort <level>` — low/medium/high/xhigh/max.
 //     No "off"/"minimal" — the flag has no such value.
 //   - codex: `codex exec -c model_reasoning_effort=<level>` — codex's own
 //     ReasoningEffort enum (off/minimal/low/medium/high/xhigh/max — see
 //     empyralis-gateway/src/llm/codex-app-server.ts's identical comment).
+//   - grok_build: `grok --reasoning-effort <level>` — Grok's own canonical
+//     vocabulary (none/minimal/low/medium/high/xhigh/max — docs.x.ai/build's
+//     headless-mode guide, fetched 2026-07-24).
+//   - cursor_cli: no reasoning-effort control documented at all (empty list
+//     — the picker hides for it, same treatment "local" already gets).
 // Mirrors sage_agent_runtime_service.py's and fleet_tools.py's
 // _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME (same duplicate-but-documented-
 // across-layers pattern as RUNTIME_FOR_PROVIDER, not a shared import).
-export type CliSubscriptionRuntime = "claude_code" | "codex";
+export type CliSubscriptionRuntime = "claude_code" | "codex" | "grok_build" | "cursor_cli";
 
 export const CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME: Record<CliSubscriptionRuntime, { value: string; label: string }[]> = {
   claude_code: [
@@ -222,4 +244,15 @@ export const CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME: Record<CliSubscriptionRunt
     { value: "xhigh", label: "Extra high" },
     { value: "max", label: "Max" },
   ],
+  grok_build: [
+    { value: "", label: "Model default" },
+    { value: "none", label: "None" },
+    { value: "minimal", label: "Minimal" },
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
+    { value: "xhigh", label: "Extra high" },
+    { value: "max", label: "Max" },
+  ],
+  cursor_cli: [],
 };

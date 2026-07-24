@@ -16,8 +16,15 @@ export const CLI_LOGIN_INPUT_CAPABILITY = "cli.login.input";
 
 const SUPPORTED_CAPABILITIES = [CLI_INSTALL_CAPABILITY, CLI_LOGIN_START_CAPABILITY, CLI_LOGIN_INPUT_CAPABILITY];
 
-const RUNTIMES = new Set(["claude_code", "codex"]);
+const RUNTIMES = new Set(["claude_code", "codex", "grok_build", "cursor_cli"]);
 const DEFAULT_INSTALL_TIMEOUT_MS = 180_000;
+
+const RUNTIME_LABEL: Record<string, string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  grok_build: "Grok Build",
+  cursor_cli: "Cursor CLI",
+};
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -33,7 +40,9 @@ function token(value: unknown): string {
 function requireRuntime(value: unknown): CliInstallRuntime & CliLoginRuntime {
   const runtime = token(value);
   if (!RUNTIMES.has(runtime)) {
-    throw new Error(`Unsupported cli_setup runtime "${runtime || "unknown"}" (expected "claude_code" or "codex").`);
+    throw new Error(
+      `Unsupported cli_setup runtime "${runtime || "unknown"}" (expected "claude_code", "codex", "grok_build", or "cursor_cli").`,
+    );
   }
   return runtime as CliInstallRuntime & CliLoginRuntime;
 }
@@ -42,7 +51,7 @@ function requireRuntime(value: unknown): CliInstallRuntime & CliLoginRuntime {
  *  role as llm/runtime.ts's cliErrorMessage, for the control plane's
  *  platform-voice error mapper to pattern-match on. */
 function setupErrorMessage(action: "install" | "login", runtime: string, error: unknown): string {
-  const label = runtime === "claude_code" ? "Claude Code" : "Codex";
+  const label = RUNTIME_LABEL[runtime] || runtime;
   if (error instanceof CliInstallError) {
     return `${label} install failed on this Gateway (${error.kind}): ${error.message}`;
   }

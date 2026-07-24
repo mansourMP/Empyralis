@@ -534,6 +534,41 @@ CLI_SUBSCRIPTION_CRASH = PlatformEvent(
     severity="error",
 )
 
+# xAI Grok Build / Cursor CLI addition — same shape as the Claude/Codex pairs
+# above, one distinct event per failure mode.
+
+CLI_SUBSCRIPTION_GROK_BUILD_NOT_INSTALLED = PlatformEvent(
+    code="cli_subscription_grok_build_not_installed",
+    title="Grok Build not installed",
+    detail="Grok Build is not installed on the bound Gateway. Install it with `curl -fsSL https://x.ai/cli/install.sh | bash`.",
+    channel_text="Grok Build is not installed on the Gateway. Run `curl -fsSL https://x.ai/cli/install.sh | bash` on that machine.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_CURSOR_NOT_INSTALLED = PlatformEvent(
+    code="cli_subscription_cursor_not_installed",
+    title="Cursor CLI not installed",
+    detail="Cursor CLI is not installed on the bound Gateway. Install it with `curl https://cursor.com/install -fsS | bash`.",
+    channel_text="Cursor CLI is not installed on the Gateway. Run `curl https://cursor.com/install -fsS | bash` on that machine.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_GROK_BUILD_NOT_AUTHENTICATED = PlatformEvent(
+    code="cli_subscription_grok_build_not_authenticated",
+    title="Grok Build not signed in",
+    detail="Grok Build on the bound Gateway is not signed in. Run `grok login --device-auth` on that machine.",
+    channel_text="Grok Build on the Gateway is not logged in. Run `grok login --device-auth` on that machine.",
+    severity="error",
+)
+
+CLI_SUBSCRIPTION_CURSOR_NOT_AUTHENTICATED = PlatformEvent(
+    code="cli_subscription_cursor_not_authenticated",
+    title="Cursor CLI not signed in",
+    detail="Cursor CLI on the bound Gateway is not signed in. Run `cursor-agent login` on that machine.",
+    channel_text="Cursor CLI on the Gateway is not logged in. Run `cursor-agent login` on that machine.",
+    severity="error",
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # cli_setup (BYO-brain install + sign-in) — the one-click install and the
@@ -565,6 +600,14 @@ CLI_SETUP_INSTALL_NPM_MISSING = PlatformEvent(
     title="npm not found",
     detail="npm was not found on the Gateway's PATH, so the CLI could not be installed. Install Node.js/npm on that machine and retry.",
     channel_text="npm isn't on the Gateway's PATH, so nothing could be installed. Install Node.js on that machine and retry.",
+    severity="error",
+)
+
+CLI_SETUP_INSTALL_DEPENDENCY_MISSING = PlatformEvent(
+    code="cli_setup_install_dependency_missing",
+    title="A required tool was not found",
+    detail="curl or a POSIX shell was not found on the Gateway's PATH, so the install script could not run. Install curl/sh on that machine and retry.",
+    channel_text="curl or a shell isn't on the Gateway's PATH, so nothing could be installed. Install curl on that machine and retry.",
     severity="error",
 )
 
@@ -608,6 +651,22 @@ CLI_SETUP_CODEX_INSTALL_FAILED = PlatformEvent(
     severity="error",
 )
 
+CLI_SETUP_GROK_BUILD_INSTALL_FAILED = PlatformEvent(
+    code="cli_setup_grok_build_install_failed",
+    title="Grok Build install failed",
+    detail="Installing Grok Build on the Gateway failed. Check Gateway logs for the underlying install-script error.",
+    channel_text="installing Grok Build on the Gateway failed. Check Gateway logs for details.",
+    severity="error",
+)
+
+CLI_SETUP_CURSOR_INSTALL_FAILED = PlatformEvent(
+    code="cli_setup_cursor_install_failed",
+    title="Cursor CLI install failed",
+    detail="Installing Cursor CLI on the Gateway failed. Check Gateway logs for the underlying install-script error.",
+    channel_text="installing Cursor CLI on the Gateway failed. Check Gateway logs for details.",
+    severity="error",
+)
+
 CLI_SETUP_CLAUDE_LOGIN_NOT_INSTALLED = PlatformEvent(
     code="cli_setup_claude_login_not_installed",
     title="Claude Code not installed",
@@ -621,6 +680,22 @@ CLI_SETUP_CODEX_LOGIN_NOT_INSTALLED = PlatformEvent(
     title="Codex not installed",
     detail="Codex is not installed on this Gateway yet. Install it first, then sign in.",
     channel_text="Codex isn't installed on the Gateway yet. Install it first, then sign in.",
+    severity="error",
+)
+
+CLI_SETUP_GROK_BUILD_LOGIN_NOT_INSTALLED = PlatformEvent(
+    code="cli_setup_grok_build_login_not_installed",
+    title="Grok Build not installed",
+    detail="Grok Build is not installed on this Gateway yet. Install it first, then sign in.",
+    channel_text="Grok Build isn't installed on the Gateway yet. Install it first, then sign in.",
+    severity="error",
+)
+
+CLI_SETUP_CURSOR_LOGIN_NOT_INSTALLED = PlatformEvent(
+    code="cli_setup_cursor_login_not_installed",
+    title="Cursor CLI not installed",
+    detail="Cursor CLI is not installed on this Gateway yet. Install it first, then sign in.",
+    channel_text="Cursor CLI isn't installed on the Gateway yet. Install it first, then sign in.",
     severity="error",
 )
 
@@ -645,6 +720,29 @@ CLI_SETUP_CODEX_LOGIN_FAILED = PlatformEvent(
     title="Codex sign-in failed",
     detail="The Codex sign-in session on the Gateway exited unexpectedly. Check Gateway logs and retry.",
     channel_text="Codex sign-in on the Gateway failed unexpectedly. Check Gateway logs and retry.",
+    severity="error",
+)
+
+CLI_SETUP_GROK_BUILD_LOGIN_FAILED = PlatformEvent(
+    code="cli_setup_grok_build_login_failed",
+    title="Grok Build sign-in failed",
+    detail="The Grok Build sign-in session on the Gateway exited unexpectedly. Check Gateway logs and retry.",
+    channel_text="Grok Build sign-in on the Gateway failed unexpectedly. Check Gateway logs and retry.",
+    severity="error",
+)
+
+CLI_SETUP_CURSOR_LOGIN_FAILED = PlatformEvent(
+    code="cli_setup_cursor_login_failed",
+    title="Cursor CLI sign-in failed",
+    detail=(
+        "The Cursor CLI sign-in session on the Gateway exited unexpectedly or timed out. Cursor's own "
+        "browser-login flow has known reliability issues over SSH/headless connections — if this keeps "
+        "failing, set CURSOR_API_KEY directly in the Gateway's own environment instead."
+    ),
+    channel_text=(
+        "Cursor CLI sign-in on the Gateway failed unexpectedly. If this keeps failing over a remote "
+        "connection, set CURSOR_API_KEY directly on that machine instead."
+    ),
     severity="error",
 )
 

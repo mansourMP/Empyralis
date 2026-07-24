@@ -27,21 +27,35 @@ import {
   type ServiceInventoryItem,
   type RuntimeState,
 } from "@/lib/workspace/fleet/gateway-box-picker";
+import { type CliSubscriptionRuntime } from "@/lib/workspace/fleet/fleet-provider-constants";
 
 /** Non-subscription capabilities read straight off the raw heartbeat
  *  inventory (metadata.service_inventory) — already flowing in the same
  *  /gateway/registrations response the box picker uses, just never rendered
- *  anywhere before this page. claude_cli/codex_cli are handled separately
- *  below via gatewayRuntimeState, since their generic `status` field can't
- *  by itself tell "missing" apart from "installed, not signed in". */
-const CAPABILITY_ORDER = ["claude_cli", "codex_cli", "docker", "ollama", "postgres", "gpu"] as const;
+ *  anywhere before this page. claude_cli/codex_cli/grok_cli/cursor_cli are
+ *  handled separately below via gatewayRuntimeState, since their generic
+ *  `status` field can't by itself tell "missing" apart from "installed, not
+ *  signed in". */
+const CAPABILITY_ORDER = ["claude_cli", "codex_cli", "grok_cli", "cursor_cli", "docker", "ollama", "postgres", "gpu"] as const;
 const CAPABILITY_LABEL: Record<string, string> = {
   claude_cli: "Claude Code",
   codex_cli: "Codex",
+  grok_cli: "Grok Build",
+  cursor_cli: "Cursor CLI",
   docker: "Docker",
   ollama: "Ollama",
   postgres: "PostgreSQL",
   gpu: "GPU",
+};
+
+/** Maps a service_inventory row id to its cli_subscription runtime key —
+ *  the one place this mapping lives, so CAPABILITY_ORDER's isCli branch below
+ *  and CliSetupControl's runtime prop never drift apart. */
+const CLI_ROW_RUNTIME: Record<string, CliSubscriptionRuntime> = {
+  claude_cli: "claude_code",
+  codex_cli: "codex",
+  grok_cli: "grok_build",
+  cursor_cli: "cursor_cli",
 };
 
 function serviceItemPresentation(status: string | undefined): { tone: AgentStatusTone; label: string } {
@@ -272,14 +286,14 @@ type CliLoginPhase = "idle" | "picking" | "starting" | "active" | "submitting" |
  *  Field `inputKind` tells the picker what to collect after the user picks
  *  a stdin-secret method (null = URL-and-code flow, submits nothing back). */
 type CliAuthMethod = {
-  key: "device_auth" | "api_key" | "access_token" | "claudeai" | "console";
+  key: "device_auth" | "api_key" | "access_token" | "claudeai" | "console" | "login";
   label: string;
   description: string;
   inputKind: null | "api_key" | "access_token";
   recommended?: boolean;
 };
 
-const CLI_AUTH_METHODS: Record<"claude_code" | "codex", CliAuthMethod[]> = {
+const CLI_AUTH_METHODS: Record<CliSubscriptionRuntime, CliAuthMethod[]> = {
   codex: [
     {
       key: "device_auth",
@@ -322,6 +336,35 @@ const CLI_AUTH_METHODS: Record<"claude_code" | "codex", CliAuthMethod[]> = {
       inputKind: "api_key",
     },
   ],
+  // xAI Grok Build — docs.x.ai/build, verified live 2026-07-24. `grok login
+  // --device-auth` is the only login-session method wired on the Gateway
+  // side (see cli-login-session.ts's grok_build comment for why an api_key
+  // method isn't — XAI_API_KEY is an env-var fallback with no persisting
+  // login subcommand, so it's set directly in the Gateway's own environment
+  // instead of through this picker).
+  grok_build: [
+    {
+      key: "device_auth",
+      label: "Your SuperGrok / X Premium+ subscription (device code)",
+      description: "Uses your SuperGrok/X Premium+ plan quota. Sign in on any browser — no callback needed.",
+      inputKind: null,
+      recommended: true,
+    },
+  ],
+  // Cursor CLI — cursor.com/docs/cli, verified live 2026-07-24. `agent login`
+  // is the only login-session method wired here; see cli-login-session.ts's
+  // cursor_cli comment for the real, documented SSH/headless reliability
+  // caveat and why CURSOR_API_KEY (like XAI_API_KEY above) is set directly
+  // in the Gateway's own environment instead of through this picker.
+  cursor_cli: [
+    {
+      key: "login",
+      label: "Your Cursor subscription (Pro / Pro+ / Ultra)",
+      description: "Uses your Cursor plan quota. Sign in on any browser — if this doesn't complete over a remote connection, set CURSOR_API_KEY on the Gateway's own machine instead.",
+      inputKind: null,
+      recommended: true,
+    },
+  ],
 };
 
 /** Real install + sign-in for one subscription CLI, wired to Build F's
@@ -343,7 +386,7 @@ function CliSetupControl({
   refresh,
   isCloud,
 }: {
-  runtime: "claude_code" | "codex";
+  runtime: CliSubscriptionRuntime;
   state: RuntimeState;
   gatewayId: string;
   workspaceId: string;
@@ -356,7 +399,7 @@ function CliSetupControl({
   isCloud: boolean;
 }) {
   const label = RUNTIME_LABELS[runtime];
-  const capabilityLabel = runtime === "claude_code" ? "Claude Code" : "Codex";
+  const capabilityLabel = label;
   const methods = CLI_AUTH_METHODS[runtime];
   const recommendedMethod = methods.find((m) => m.recommended) || methods[0];
 
@@ -1590,9 +1633,9 @@ export default function GatewayDetailPage() {
           <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Capabilities</div>
           <div className="fleet-hw-card">
             {CAPABILITY_ORDER.map((id) => {
-              const isCli = id === "claude_cli" || id === "codex_cli";
+              const runtime = CLI_ROW_RUNTIME[id];
+              const isCli = Boolean(runtime);
               if (isCli) {
-                const runtime: "claude_code" | "codex" = id === "claude_cli" ? "claude_code" : "codex";
                 const state = gatewayRuntimeState(gateway, runtime);
                 // A CLI row with state==="ready" collapses to nothing extra —
                 // the CliSetupControl returns null and we render just the

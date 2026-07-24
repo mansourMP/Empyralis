@@ -202,7 +202,7 @@ export interface GatewayChannelInboundPayload {
  *  module doc comment for why. */
 export interface GatewayCliLoginOutputPayload {
   run_id: string;
-  runtime: "claude_code" | "codex";
+  runtime: "claude_code" | "codex" | "grok_build" | "cursor_cli";
   event: "output" | "done";
   kind?: "url" | "code_prompt";
   text?: string;

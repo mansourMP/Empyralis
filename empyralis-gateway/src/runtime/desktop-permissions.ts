@@ -120,8 +120,14 @@ export function setLlmRuntimeOllamaReady(ready: boolean): void {
 // installed AND authenticated (see probeClaudeCli/probeCodexCli in
 // health/service-inventory.ts — status "ready", not "degraded"), same
 // installed-vs-authenticated distinction Ollama's reachability check draws.
+// Grok Build (xAI) / Cursor CLI addition: same shape, same "installed AND
+// authenticated" bar (see probeGrokBuildCli/probeCursorCli in
+// health/service-inventory.ts), just two more independent backends the
+// llm_runtime OR-gate below checks.
 let llmRuntimeClaudeCodeReady = false;
 let llmRuntimeCodexReady = false;
+let llmRuntimeGrokBuildReady = false;
+let llmRuntimeCursorReady = false;
 
 export function setLlmRuntimeClaudeCodeReady(ready: boolean): void {
   llmRuntimeClaudeCodeReady = ready;
@@ -129,6 +135,14 @@ export function setLlmRuntimeClaudeCodeReady(ready: boolean): void {
 
 export function setLlmRuntimeCodexReady(ready: boolean): void {
   llmRuntimeCodexReady = ready;
+}
+
+export function setLlmRuntimeGrokBuildReady(ready: boolean): void {
+  llmRuntimeGrokBuildReady = ready;
+}
+
+export function setLlmRuntimeCursorReady(ready: boolean): void {
+  llmRuntimeCursorReady = ready;
 }
 
 // cli_setup (Build F): the box operator's explicit, one-time opt-in for
@@ -189,7 +203,10 @@ function defaultDesktopPermissionState(
     // side: llm/runtime.ts; control plane side:
     // _cli_subscription_readiness_reason) is what enforces WHICH specific
     // runtime a given turn actually needs.
-    return (llmRuntimeOllamaReady || llmRuntimeClaudeCodeReady || llmRuntimeCodexReady) ? "granted" : "restricted";
+    return (
+      llmRuntimeOllamaReady || llmRuntimeClaudeCodeReady || llmRuntimeCodexReady
+      || llmRuntimeGrokBuildReady || llmRuntimeCursorReady
+    ) ? "granted" : "restricted";
   }
   if (permission === "cli_setup") {
     return cliSetupLocallyEnabled ? "granted" : "restricted";

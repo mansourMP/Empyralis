@@ -1715,6 +1715,66 @@ class CliSubscriptionGatewayBrainTests(unittest.TestCase):
         self.assertEqual(usage_kwargs["mode"], "cli_subscription")
         self.assertTrue(usage_kwargs["metadata"]["tokens_known"])
 
+    def test_grok_build_happy_path_dispatches_and_ledgers_like_claude_code_codex(self):
+        # xAI Grok Build / Cursor CLI addition (2026-07-24) — provider
+        # entries resolve correctly through the SAME dispatch path, with no
+        # separate code path or special-casing needed.
+        response = {
+            "result": {"text": "hello from grok", "model": "grok-build", "usage": {"input_tokens": 9, "output_tokens": 3}},
+        }
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {"grok_build": {"installed": True, "authenticated": True}}},
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=AsyncMock(return_value=response)),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger,
+            patch("server_modules.usage_events_repository.record_usage_event", new=AsyncMock()) as mock_usage,
+        ):
+            reply, usage, model = _run(
+                sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                    workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                    gateway_binding="gateway-1", runtime="grok_build", model="grok-build",
+                    system_prompt="Be terse.", user_message="hi",
+                )
+            )
+        self.assertEqual(reply, "hello from grok")
+        self.assertEqual(usage, {"input_tokens": 9, "output_tokens": 3})
+        completed_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "gateway_brain_turn"]
+        self.assertEqual(len(completed_calls), 1)
+        self.assertEqual(completed_calls[0].kwargs["metadata"]["runtime"], "grok_build")
+        usage_kwargs = mock_usage.await_args.kwargs
+        self.assertEqual(usage_kwargs["provider"], "grok_build")
+        self.assertIsNone(usage_kwargs["usd_cost"], "never a fabricated $0.00 known cost for a subscription runtime")
+
+    def test_cursor_cli_not_authenticated_fails_loudly_never_falls_back_to_another_runtime(self):
+        # This is the "reconnect needed, never a silent failure or fallback"
+        # test at the dispatch layer: an unauthenticated cursor_cli binding
+        # must raise a clear error naming cursor_cli specifically — it must
+        # NEVER silently substitute claude_code/codex/platform_credits.
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {"cursor_cli": {"installed": True, "authenticated": False}}},
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=AsyncMock()) as mock_execute,
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.usage_events_repository.record_usage_event", new=AsyncMock()),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="cursor_cli", model="auto",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+            mock_execute.assert_not_awaited()
+        self.assertIn("Cursor CLI", str(ctx.exception))
+        self.assertIn("Heads up:", str(ctx.exception))
+
     def test_reasoning_effort_reaches_the_gateway_arguments_when_set(self):
         """Phase 1 (reasoning-effort control): the value reaches the
         Gateway's llm.generate arguments dict as "reasoning_effort" --
@@ -2046,6 +2106,56 @@ class CliSubscriptionReadinessReasonTests(unittest.TestCase):
             reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="codex")
         self.assertEqual(reason, "")
 
+    def test_grok_build_not_installed(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"grok_build": {"installed": False, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="grok_build")
+        self.assertEqual(reason, "grok_build_not_installed")
+
+    def test_grok_build_installed_but_not_authenticated_is_the_expired_credential_reconnect_case(self):
+        # This is the core "an expired credential produces a visible
+        # reconnect state" signal: installed=True (the binary is there,
+        # auth.json exists or existed) but authenticated=False (the CLI's own
+        # background refresh already failed — see cli-login-session.ts's
+        # grok_build comment). Never confused with "not_installed", never a
+        # silent pass-through.
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"grok_build": {"installed": True, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="grok_build")
+        self.assertEqual(reason, "grok_build_not_authenticated")
+
+    def test_cursor_cli_not_installed_and_not_authenticated(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"cursor_cli": {"installed": False, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="cursor_cli")
+        self.assertEqual(reason, "cursor_cli_not_installed")
+
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"cursor_cli": {"installed": True, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="cursor_cli")
+        self.assertEqual(reason, "cursor_cli_not_authenticated")
+
+    def test_grok_build_and_cursor_cli_ready(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        for runtime in ("grok_build", "cursor_cli"):
+            with patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {runtime: {"installed": True, "authenticated": True}}},
+            ):
+                reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime=runtime)
+            self.assertEqual(reason, "", f"{runtime} should read ready when installed+authenticated")
+
 
 class FriendlyCliSubscriptionErrorTests(unittest.TestCase):
     """Every G5 condition gets its own distinct, platform-voiced
@@ -2091,6 +2201,54 @@ class FriendlyCliSubscriptionErrorTests(unittest.TestCase):
         message = sage_agent_runtime_service._friendly_cli_subscription_error("some_never_seen_reason", runtime="claude_code")
         self.assertIn("Heads up:", message)
         self.assertIn("some_never_seen_reason", message)
+
+    def test_grok_build_and_cursor_cli_get_their_own_distinct_not_installed_and_not_authenticated_messages(self):
+        # xAI Grok Build / Cursor CLI addition (2026-07-24) — same G5
+        # guarantee as claude_code/codex: every distinct failure mode for the
+        # two new runtimes gets its own honest message, never collapsed into
+        # the claude_code/codex fallback.
+        grok_not_installed = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "grok_build_not_installed", runtime="grok_build",
+        )
+        cursor_not_installed = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "cursor_cli_not_installed", runtime="cursor_cli",
+        )
+        grok_not_authenticated = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "grok_build_not_authenticated", runtime="grok_build",
+        )
+        cursor_not_authenticated = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "cursor_cli_not_authenticated", runtime="cursor_cli",
+        )
+        self.assertIn("Grok Build", grok_not_installed)
+        self.assertIn("x.ai/cli/install.sh", grok_not_installed)
+        self.assertIn("Cursor CLI", cursor_not_installed)
+        self.assertIn("cursor.com/install", cursor_not_installed)
+        self.assertIn("Grok Build", grok_not_authenticated)
+        self.assertIn("grok login --device-auth", grok_not_authenticated)
+        self.assertIn("Cursor CLI", cursor_not_authenticated)
+        self.assertIn("cursor-agent login", cursor_not_authenticated)
+        # This IS the "expired credential produces a visible reconnect state"
+        # test at the platform-voice layer: every one of these four messages
+        # is a distinct, non-empty, explicit "Heads up: ..." string — never a
+        # silent no-op and never a fallback to claude_code/codex's wording.
+        messages = {grok_not_installed, cursor_not_installed, grok_not_authenticated, cursor_not_authenticated}
+        self.assertEqual(len(messages), 4)
+        for message in messages:
+            self.assertIn("Heads up:", message)
+
+    def test_unsupported_runtime_message_lists_all_four_valid_runtimes(self):
+        message = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "unsupported cli_subscription runtime: gemini_cli", runtime="gemini_cli",
+        )
+        self.assertIn("Heads up:", message)
+        for runtime in ("claude_code", "codex", "grok_build", "cursor_cli"):
+            self.assertIn(runtime, message)
+
+    def test_valid_cli_subscription_runtimes_includes_all_four(self):
+        self.assertEqual(
+            sage_agent_runtime_service._VALID_CLI_SUBSCRIPTION_RUNTIMES,
+            {"claude_code", "codex", "grok_build", "cursor_cli"},
+        )
 
 
 class SageAgentRuntimeSpecialistProviderResolutionTests(unittest.TestCase):

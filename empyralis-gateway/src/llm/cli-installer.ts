@@ -8,17 +8,35 @@ import { resolveCommandPath } from "../shell/user-install-dirs";
 // would leave the binary nowhere cli-runner.ts's later spawn (also
 // host-side) could ever find it on PATH.
 //
-// The install command is NOT caller-supplied. `runtime` selects one of
-// exactly two hardcoded npm packages baked into this file (INSTALL_PACKAGE
+// The install command is NOT caller-supplied. `runtime` selects one of a
+// small set of hardcoded install specs baked into this file (INSTALL_SPEC
 // below) — there is no code path from a WSS payload to an arbitrary shell
 // string here, unlike shell.execute's full_access mode. That is the whole
 // safety argument for not needing full_access's heavier dual opt-in gate:
 // the capability itself is the boundary, not a runtime policy check.
+//
+// Two install MECHANISMS, not just two packages (xAI Grok Build + Cursor
+// CLI addition): Claude Code / Codex are real npm packages (`npm install
+// -g ...`), verified against their own docs. Grok Build (docs.x.ai/build —
+// see crates/codegen/xai-grok-pager/docs/user-guide/01-getting-started.md,
+// fetched live 2026-07-24) and Cursor CLI (cursor.com/docs/cli — install
+// script fetched live and inspected, 2026-07-24: it symlinks BOTH `agent`
+// and `cursor-agent` to the same downloaded binary) are each installed via
+// their own vendor-hosted shell script, NOT npm — neither ships an npm
+// package. Both scripts are hardcoded constants below (never interpolated
+// with any caller-supplied value), so running them via `sh -c "curl ... |
+// bash"` keeps the exact same non-injectable-boundary property the module
+// doc above already relies on for the npm case.
 
-export type CliInstallRuntime = "claude_code" | "codex";
+export type CliInstallRuntime = "claude_code" | "codex" | "grok_build" | "cursor_cli";
 
 export type CliInstallFailureKind =
   | "npm_missing"
+  // Script-install path (grok_build/cursor_cli) preflight: curl or a POSIX
+  // shell isn't on this Gateway's PATH. Distinct from "npm_missing" so the
+  // control-plane error mapper can say the right dependency name — see
+  // platform_event.CLI_SETUP_INSTALL_DEPENDENCY_MISSING.
+  | "dependency_missing"
   | "permission_denied"
   | "network_error"
   | "timeout"
@@ -53,18 +71,51 @@ export interface CliInstallParams {
   timeoutMs: number;
 }
 
-const INSTALL_PACKAGE: Record<CliInstallRuntime, string> = {
-  claude_code: "@anthropic-ai/claude-code",
-  codex: "@openai/codex",
+interface NpmInstallSpec {
+  kind: "npm";
+  package: string;
+}
+
+interface ScriptInstallSpec {
+  kind: "curl_script";
+  /** Fetched and executed verbatim as `sh -c "curl -fsSL <url> | bash"` — a
+   *  fixed constant per runtime, never interpolated with caller-supplied
+   *  data (see this module's header comment). */
+  url: string;
+}
+
+type InstallSpec = NpmInstallSpec | ScriptInstallSpec;
+
+// Claude Code / Codex: real npm packages. Grok Build / Cursor CLI: each
+// vendor ships its own install script, not npm — verified live against
+// docs.x.ai/build (Grok Build's getting-started guide gives `curl -fsSL
+// https://x.ai/cli/install.sh | bash`) and cursor.com/docs/cli (Cursor's
+// install script, fetched and inspected directly, is `curl https://
+// cursor.com/install -fsS | bash`) on 2026-07-24.
+const INSTALL_SPEC: Record<CliInstallRuntime, InstallSpec> = {
+  claude_code: { kind: "npm", package: "@anthropic-ai/claude-code" },
+  codex: { kind: "npm", package: "@openai/codex" },
+  grok_build: { kind: "curl_script", url: "https://x.ai/cli/install.sh" },
+  cursor_cli: { kind: "curl_script", url: "https://cursor.com/install" },
 };
 
+// Cursor's own install script symlinks BOTH `agent` (its new primary name)
+// and `cursor-agent` (legacy) to the same downloaded binary — inspected
+// directly in the script fetched from cursor.com/install, 2026-07-24. This
+// module standardizes on `cursor-agent` (matches CURSOR_CLI_PATH's default
+// in cli-runner.ts/cli-login-session.ts) since that name is guaranteed by
+// both the current and legacy symlink.
 const BINARY_NAME: Record<CliInstallRuntime, string> = {
   claude_code: "claude",
   codex: "codex",
+  grok_build: "grok",
+  cursor_cli: "cursor-agent",
 };
 
-// npm installs can be genuinely slow on a cold cache / slow network — this
-// is deliberately longer than cli-runner.ts's generation timeout.
+// npm installs (and the two vendor scripts, which each download and unpack
+// a real release archive) can be genuinely slow on a cold cache / slow
+// network — this is deliberately longer than cli-runner.ts's generation
+// timeout.
 const DEFAULT_TIMEOUT_MS = 180_000;
 const FORCE_KILL_GRACE_MS = 5_000;
 const MAX_BUFFERED_OUTPUT_CHARS = 500_000;
@@ -211,19 +262,45 @@ function classifyNpmFailure(outcome: SpawnOutcome): CliInstallFailureKind {
   return "crash";
 }
 
-/** Installs one of the two known CLIs on the real host, headlessly. Never
- *  reads or transmits any credential — install has nothing to do with auth,
- *  it only puts the binary on PATH. */
-export async function installCliSubscriptionRuntime(
-  params: CliInstallParams,
-  config: CliInstallerConfig = {},
+// Same heuristic as classifyNpmFailure, applied to a vendor install script's
+// output instead of npm's — curl and the downloaded installer produce a
+// different (but overlapping) vocabulary of permission/network phrasing.
+function classifyScriptFailure(outcome: SpawnOutcome): CliInstallFailureKind {
+  const haystack = `${outcome.stderr}\n${outcome.stdout}`.toLowerCase();
+  if (haystack.includes("permission denied") || haystack.includes("eacces") || haystack.includes("operation not permitted")) {
+    return "permission_denied";
+  }
+  if (
+    haystack.includes("could not resolve host")
+    || haystack.includes("couldn't connect")
+    || haystack.includes("connection refused")
+    || haystack.includes("connection timed out")
+    || haystack.includes("network")
+    || haystack.includes("ssl")
+    || haystack.includes("curl:")
+  ) {
+    return "network_error";
+  }
+  return "crash";
+}
+
+const RUNTIME_LABEL: Record<CliInstallRuntime, string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  grok_build: "Grok Build",
+  cursor_cli: "Cursor CLI",
+};
+
+async function installViaNpm(
+  runtime: CliInstallRuntime,
+  spec: NpmInstallSpec,
+  timeoutMs: number,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  spawnImpl: CliInstallSpawnImpl,
+  commandExists: (command: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform) => string | null,
 ): Promise<CliInstallResult> {
-  const env = config.env ?? process.env;
-  const platform = config.platform ?? process.platform;
-  const spawnImpl = config.spawnImpl ?? defaultSpawn;
-  const commandExists = config.commandExists ?? defaultCommandExists;
-  const timeoutMs = params.timeoutMs || DEFAULT_TIMEOUT_MS;
-  const pkg = INSTALL_PACKAGE[params.runtime];
+  const pkg = spec.package;
 
   // Preflight: npm must be on PATH, or there's nothing to run at all — fail
   // fast with a clear, specific reason instead of a raw ENOENT from spawn.
@@ -231,7 +308,7 @@ export async function installCliSubscriptionRuntime(
   if (!npmPath) {
     throw new CliInstallError(
       "npm_missing",
-      `npm was not found on PATH (checked ${env.PATH ? "PATH" : "an empty PATH"}). Node.js (which bundles npm) must be installed on this computer before ${params.runtime === "claude_code" ? "Claude Code" : "Codex"} can be installed.`,
+      `npm was not found on PATH (checked ${env.PATH ? "PATH" : "an empty PATH"}). Node.js (which bundles npm) must be installed on this computer before ${RUNTIME_LABEL[runtime]} can be installed.`,
     );
   }
 
@@ -268,7 +345,7 @@ export async function installCliSubscriptionRuntime(
   // edge configurations (e.g. a prefix mismatch) without the bin actually
   // being linked where this box's own PATH resolves it. Best-effort version
   // read piggybacks on the same confirmation call.
-  const binaryName = BINARY_NAME[params.runtime];
+  const binaryName = BINARY_NAME[runtime];
   const lsOutcome = await spawnAndCollect(npmPath, ["ls", "-g", "--depth=0"], { timeoutMs: 15_000, spawnImpl, env });
   const landedOnPath = Boolean(commandExists(binaryName, env, platform));
   if (!landedOnPath) {
@@ -279,10 +356,94 @@ export async function installCliSubscriptionRuntime(
   }
 
   return {
-    runtime: params.runtime,
+    runtime,
     package: pkg,
     installed: true,
     os: platform,
     version: parseVersion(pkg, lsOutcome.stdout),
   };
+}
+
+/** Installs grok_build/cursor_cli via their own vendor-hosted shell script —
+ *  `sh -c "curl -fsSL <url> | bash"`, matching each vendor's own documented
+ *  one-liner exactly (see INSTALL_SPEC's doc comment for the sources). `sh
+ *  -c` is required here (unlike the npm path) because piping curl into bash
+ *  needs a real shell; the command string is a fixed constant per runtime,
+ *  never interpolated with caller-supplied data — see this module's header
+ *  comment for why that keeps the same non-injectable-boundary property. */
+async function installViaScript(
+  runtime: CliInstallRuntime,
+  spec: ScriptInstallSpec,
+  timeoutMs: number,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  spawnImpl: CliInstallSpawnImpl,
+  commandExists: (command: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform) => string | null,
+): Promise<CliInstallResult> {
+  const shPath = commandExists("sh", env, platform) || (platform !== "win32" ? "/bin/sh" : null);
+  const curlPath = commandExists("curl", env, platform);
+  if (!shPath || !curlPath) {
+    const missing = !curlPath ? "curl" : "a POSIX shell (sh)";
+    throw new CliInstallError(
+      "dependency_missing",
+      `${missing} was not found on PATH. Install it on this computer before ${RUNTIME_LABEL[runtime]} can be installed (its install script is \`curl -fsSL ${spec.url} | bash\`).`,
+    );
+  }
+
+  const outcome = await spawnAndCollect(shPath, ["-c", `curl -fsSL ${spec.url} | bash`], { timeoutMs, spawnImpl, env });
+
+  if (outcome.spawnError) {
+    if (outcome.spawnError.code === "ENOENT") {
+      throw new CliInstallError("dependency_missing", `"${shPath}" could not be executed.`);
+    }
+    throw new CliInstallError("crash", outcome.spawnError.message || String(outcome.spawnError));
+  }
+  if (outcome.timedOut) {
+    throw new CliInstallError("timeout", `the ${RUNTIME_LABEL[runtime]} install script did not finish within ${timeoutMs}ms (SIGTERM/SIGKILL sent).`);
+  }
+  if (outcome.exitCode !== 0) {
+    const kind = classifyScriptFailure(outcome);
+    const detail = (outcome.stderr || outcome.stdout || `install script exited with code ${outcome.exitCode}`).trim().slice(-800);
+    throw new CliInstallError(kind, detail);
+  }
+
+  // Confirm the binary actually landed on PATH — both vendor scripts install
+  // to ~/.local/bin by default, which resolveCommandPath already checks (see
+  // CliInstallerConfig.commandExists's doc comment) even when it isn't on
+  // this Gateway process's own inherited PATH.
+  const binaryName = BINARY_NAME[runtime];
+  const landedOnPath = Boolean(commandExists(binaryName, env, platform));
+  if (!landedOnPath) {
+    throw new CliInstallError(
+      "crash",
+      `the ${RUNTIME_LABEL[runtime]} install script exited 0, but "${binaryName}" is still not on PATH afterward.`,
+    );
+  }
+
+  return {
+    runtime,
+    package: spec.url,
+    installed: true,
+    os: platform,
+  };
+}
+
+/** Installs one of the four known CLIs on the real host, headlessly. Never
+ *  reads or transmits any credential — install has nothing to do with auth,
+ *  it only puts the binary on PATH. */
+export async function installCliSubscriptionRuntime(
+  params: CliInstallParams,
+  config: CliInstallerConfig = {},
+): Promise<CliInstallResult> {
+  const env = config.env ?? process.env;
+  const platform = config.platform ?? process.platform;
+  const spawnImpl = config.spawnImpl ?? defaultSpawn;
+  const commandExists = config.commandExists ?? defaultCommandExists;
+  const timeoutMs = params.timeoutMs || DEFAULT_TIMEOUT_MS;
+  const spec = INSTALL_SPEC[params.runtime];
+
+  if (spec.kind === "npm") {
+    return installViaNpm(params.runtime, spec, timeoutMs, env, platform, spawnImpl, commandExists);
+  }
+  return installViaScript(params.runtime, spec, timeoutMs, env, platform, spawnImpl, commandExists);
 }

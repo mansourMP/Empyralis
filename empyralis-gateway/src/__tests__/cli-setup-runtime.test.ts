@@ -79,6 +79,27 @@ test("cli.install dispatches to the injected installer and returns its result ve
   assert.deepEqual(result, fakeResult);
 });
 
+test("grok_build and cursor_cli are accepted runtimes, dispatched to the injected installer like claude_code/codex", async () => {
+  for (const runtime of ["grok_build", "cursor_cli"]) {
+    const fakeResult: CliInstallResult = {
+      runtime: runtime as CliInstallResult["runtime"],
+      package: runtime === "grok_build" ? "https://x.ai/cli/install.sh" : "https://cursor.com/install",
+      installed: true,
+      os: "linux",
+    };
+    let receivedRuntime: string | null = null;
+    const setupRuntime = new GatewayCliSetupRuntime({
+      installer: async (params) => {
+        receivedRuntime = params.runtime;
+        return fakeResult;
+      },
+    });
+    const result = await setupRuntime.handleCapabilityInvoke(makeFrame(CLI_INSTALL_CAPABILITY, { runtime }));
+    assert.equal(receivedRuntime, runtime);
+    assert.deepEqual(result, fakeResult);
+  }
+});
+
 test("cli.install failure is wrapped into a precise, honest error message", async () => {
   const runtime = new GatewayCliSetupRuntime({
     installer: async () => {
