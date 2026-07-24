@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import time
 from typing import Any, Callable
 import uuid
 
@@ -878,3 +879,291 @@ def retry_failed_delegation_runs(
         "note": note,
         "items": created,
     }
+
+
+# ── Chat-turn sub-agent bridge (locked ruling, 2026-07-24) ──────────────────
+# Everything above this line is the pre-existing delegation engine, driven
+# from the 3 HTTP endpoints (delegate_run_children / auto_delegate_run_children /
+# retry_failed_delegation_runs) -- all of which require an EXISTING orchestrator
+# run as the parent (_orchestrator_parent's lookup_run_snapshot + role check).
+# A live chat turn (sage_agent_runtime_service._direct_tool_bundle's
+# subagent__spawn tool) is not backed by any such run: direct chat is a
+# separate, stateless tool-call loop with no run_id of its own (confirmed --
+# runs_execution.py's own "no pre-loaded specialist toolset the way the live
+# chat/skills_service path does" comment marks this as a genuinely different
+# execution surface). Bridging the two means synthesizing a parent snapshot
+# for "this chat turn" in the exact shape build_delegated_child_run_request
+# already expects, then driving the SAME real create/execute/poll machinery
+# used above -- not a second engine.
+#
+# One real gap this bridge does NOT close, and cannot close without changing
+# runs_execution.py itself: the resulting child is a genuine run in the
+# runs_execution.py engine, executing with THAT engine's generic per-
+# agent_role prompt/tool surface (one of VALID_AGENT_ROLES) -- not a literal
+# clone of the calling specialist's own live-chat toolset (its exact bound
+# connectors/instructions from agent_connector_bindings). "A fresh session of
+# the SAME agent" (the founder's wording) is therefore only approximately
+# true today: same underlying harness, a genuinely isolated context, and the
+# same hard caps -- but not byte-identical tools/persona. Wiring
+# runs_execution.py to load a specific deployed agent's bound toolset is a
+# separate, larger change; see the module docstring / build report.
+MAX_SUBAGENTS_PER_TASK = 5
+# Session-context keys. session_ctx is threaded BY REFERENCE through an
+# entire chat turn's tool-call loop already (see
+# sage_agent_runtime_service.py's pending_outbound_media accumulator for the
+# established precedent) -- "task" here is scoped to that one turn's
+# tool-calling loop, the only bounded unit of work that exists structurally
+# on the direct-chat surface. Counting is lifetime/per-task, NOT concurrency:
+# incremented once a child run is actually CREATED and never decremented, so
+# a helper finishing never frees a slot.
+SUBAGENT_SPAWN_COUNT_SESSION_KEY = "subagent_spawn_count"
+# Defense in depth: nothing on the live chat surface stamps this today (a
+# spawned child is a runs_execution.py run, not a chat session, so it has no
+# path back into THIS tool at all yet) -- but if that ever changes, a chat
+# session carrying subagent_depth=1 must still be refused here, the same way
+# run_service.assert_subagent_spawn_allowed already refuses a depth-1 RUN
+# metadata from spawning depth-2 children.
+SUBAGENT_SPAWN_DEPTH_SESSION_KEY = "subagent_depth"
+SUBAGENT_SPAWN_POLL_INTERVAL_SECONDS = 1.0
+# Distinct from runs_delegation.STALE_CHILD_RUN_TIMEOUT_SECONDS (300s): that
+# constant governs how long a BACKGROUND orchestrator run waits across many
+# polling passes before declaring an unattended child stale. This is how
+# long ONE live, synchronous chat tool call is willing to block the user's
+# turn waiting for its child's single result before giving up and telling
+# the model to continue without it.
+SUBAGENT_SPAWN_WAIT_TIMEOUT_SECONDS = 180.0
+
+
+def _subagent_refusal(error: str, message: str) -> dict[str, Any]:
+    # Every refusal is an explicit, model-facing dict -- never a bare False,
+    # never a swallowed exception. See the module docstring above for why
+    # this is a hand-built dict and not an HTTPException: this function is
+    # called from a plain tool-call dispatch, not a route handler.
+    return {"ok": False, "error": error, "message": message}
+
+
+def spawn_subagent_from_chat_turn(
+    *,
+    task_description: str,
+    role: str = "",
+    session_ctx: dict[str, Any] | None,
+    workspace_id: str,
+    tenant_id: str = "default",
+    owner_user_id: str = "",
+    acting_agent_install_id: str = "",
+    note: str | None = None,
+    wait_timeout_seconds: float = SUBAGENT_SPAWN_WAIT_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = SUBAGENT_SPAWN_POLL_INTERVAL_SECONDS,
+    sleep_fn: Callable[[float], Any] = time.sleep,
+    monotonic_fn: Callable[[], float] = time.monotonic,
+    # Injectable seams (all default to the real, live engine functions below)
+    # -- kept optional so the live dispatch call site (skills_service.py)
+    # never has to pass any of this, matching the callback-injection idiom
+    # the rest of this module already uses for delegate_run_children etc.
+    enforce_delegation_child_decision_fn: Callable[..., dict[str, Any]] | None = None,
+    build_delegated_run_request_fn: Callable[..., Any] | None = None,
+    execute_system_run_start_request_via_turn_runtime_fn: Callable[..., dict[str, Any]] | None = None,
+    run_execution_services_fn: Callable[[], Any] | None = None,
+    lookup_run_snapshot_fn: Callable[[str], dict[str, Any]] | None = None,
+    normalize_agent_role_fn: Callable[[Any], str] | None = None,
+    stamp_request_owner_fn: Callable[..., Any] | None = None,
+    terminal_run_statuses: Any = None,
+    assert_subagent_spawn_allowed_fn: Callable[[Any], int] | None = None,
+    subagent_depth_error: type[Exception] | None = None,
+    subagent_depth_metadata_key: str | None = None,
+) -> dict[str, Any]:
+    """Bridge for subagent__spawn (sage_agent_runtime_service._direct_tool_bundle).
+
+    Synthesizes a parent snapshot for the CURRENT CHAT TURN (there is no real
+    parent run to look up), then drives the real engine exactly the way
+    delegate_run_children above does: the same Rust run-routing gate
+    (_enforce_delegation_child_decision), the same run_service.
+    assert_subagent_spawn_allowed depth check, the same
+    build_delegated_child_run_request lineage stamping, and the same
+    execute_system_run_start_request_via_turn_runtime creation call. Blocks
+    (real time.sleep polling, not async) until the child run reaches a
+    terminal status or wait_timeout_seconds elapses -- safe because the live
+    dispatch path this is called from already runs inside a worker thread
+    with no asyncio event loop (see direct_chat_operator_binding_service.py's
+    execute_single_direct_tool_call closure).
+
+    Returns ONLY a summary contract -- {"ok", "run_id", "status", "summary",
+    "spawns_used", "spawns_remaining"} (or an explicit refusal dict) -- never
+    the child's raw events/context/transcript. The child run's
+    result_summary field (runs_output.py's _serialize_run_snapshot, already
+    capped at 5000 chars) is the one piece of it the parent ever sees.
+    """
+    from server_modules import runs_delegation
+    from server_modules import run_service as _rs
+    from server_modules.runtime_run_access_service import stamp_request_owner as _real_stamp_request_owner
+
+    enforce_delegation_child_decision_fn = enforce_delegation_child_decision_fn or _enforce_delegation_child_decision
+    build_delegated_run_request_fn = build_delegated_run_request_fn or runs_delegation._build_delegated_run_request
+    execute_system_run_start_request_via_turn_runtime_fn = (
+        execute_system_run_start_request_via_turn_runtime_fn
+        or runs_delegation.execute_system_run_start_request_via_turn_runtime
+    )
+    run_execution_services_fn = run_execution_services_fn or runs_delegation._delegation_run_execution_services
+    lookup_run_snapshot_fn = lookup_run_snapshot_fn or runs_delegation._lookup_run_snapshot
+    normalize_agent_role_fn = normalize_agent_role_fn or runs_delegation.normalize_agent_role
+    stamp_request_owner_fn = stamp_request_owner_fn or _real_stamp_request_owner
+    terminal_run_statuses = terminal_run_statuses if terminal_run_statuses is not None else runs_delegation.TERMINAL_RUN_STATUSES
+    assert_subagent_spawn_allowed_fn = assert_subagent_spawn_allowed_fn or _rs.assert_subagent_spawn_allowed
+    subagent_depth_error = subagent_depth_error or _rs.SubagentDepthError
+    subagent_depth_metadata_key = subagent_depth_metadata_key or _rs.SUBAGENT_DEPTH_METADATA_KEY
+
+    session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
+
+    clean_task = str(task_description or "").strip()
+    if not clean_task:
+        return _subagent_refusal(
+            "missing_task_description",
+            "task_description is required to spawn a sub-agent.",
+        )
+
+    # ── depth gate: a sub-agent may never spawn further sub-agents ──
+    current_depth = int(session_metadata.get(SUBAGENT_SPAWN_DEPTH_SESSION_KEY) or 0)
+    try:
+        assert_subagent_spawn_allowed_fn({subagent_depth_metadata_key: current_depth})
+    except subagent_depth_error:
+        return _subagent_refusal(
+            "subagent_depth_exceeded",
+            "You are running as a sub-agent yourself and cannot spawn further "
+            "sub-agents. Finish this task yourself and return your summary.",
+        )
+
+    # ── flat lifetime ceiling: 5 per task, non-renewable ──
+    used = int(session_metadata.get(SUBAGENT_SPAWN_COUNT_SESSION_KEY) or 0)
+    if used >= MAX_SUBAGENTS_PER_TASK:
+        return _subagent_refusal(
+            "subagent_limit_reached",
+            f"You have already used all {MAX_SUBAGENTS_PER_TASK} sub-agent helpers "
+            "available for this task. This is a hard ceiling that does not reset "
+            "when a helper finishes -- you must complete the remaining work "
+            "yourself from here.",
+        )
+
+    target_role = normalize_agent_role_fn(role) or "builder"
+    if target_role == "orchestrator":
+        # A chat-turn spawn can never target the orchestrator role -- same
+        # rule delegate_run_children enforces for HTTP-driven delegation.
+        target_role = "builder"
+
+    clean_workspace_id = str(workspace_id or "default").strip() or "default"
+    clean_tenant_id = str(tenant_id or "default").strip() or "default"
+    clean_owner_user_id = str(owner_user_id or "").strip()
+
+    # Every sub-agent spawned within the SAME chat turn is a flat sibling of
+    # the others (never nested), so they all share one synthetic "task root"
+    # id as both their parent_run_id and delegation_root_run_id -- real,
+    # inspectable lineage, generated once per turn and cached on session_ctx
+    # so the 2nd..5th spawn reuse it instead of minting a new root each time.
+    task_root_run_id = str(session_metadata.get("subagent_task_root_id") or "").strip()
+    if not task_root_run_id:
+        task_root_run_id = str(uuid.uuid4())
+        session_metadata["subagent_task_root_id"] = task_root_run_id
+
+    parent_snapshot: dict[str, Any] = {
+        "run_id": task_root_run_id,
+        "agent_role": "orchestrator",
+        "delegation_root_run_id": task_root_run_id,
+        "context": {
+            "workspace_id": clean_workspace_id,
+            "metadata": {
+                "agent_role": "orchestrator",
+                "workspace_id": clean_workspace_id,
+                "tenant_id": clean_tenant_id,
+                "owner_user_id": clean_owner_user_id or None,
+                "user_id": clean_owner_user_id or None,
+                "delegation_root_run_id": task_root_run_id,
+                subagent_depth_metadata_key: current_depth,
+                "spawned_from": "chat_turn",
+                "spawned_from_agent_install_id": acting_agent_install_id or None,
+            },
+        },
+    }
+    child_payload = {
+        "agent_role": target_role,
+        "user_goal": clean_task,
+        "metadata": {
+            "workspace_id": clean_workspace_id,
+            "tenant_id": clean_tenant_id,
+            "spawned_from_agent_install_id": acting_agent_install_id or None,
+        },
+    }
+
+    try:
+        enforce_delegation_child_decision_fn(
+            parent_run_id=task_root_run_id,
+            parent_snapshot=parent_snapshot,
+            child_payload=child_payload,
+        )
+    except HTTPException as exc:
+        return _subagent_refusal(
+            "spawn_denied",
+            f"Sub-agent spawn was denied by platform policy: {exc.detail}",
+        )
+
+    delegated_req = build_delegated_run_request_fn(parent_snapshot, child_payload, note=note)
+    current_user = {"user_id": clean_owner_user_id} if clean_owner_user_id else None
+    result = execute_system_run_start_request_via_turn_runtime_fn(
+        delegated_req,
+        stamp_request_owner_fn=stamp_request_owner_fn,
+        services=run_execution_services_fn(),
+        current_user=current_user,
+    )
+    child_run_id = str((result or {}).get("run_id") or "").strip()
+    if not child_run_id:
+        return _subagent_refusal(
+            "spawn_failed",
+            "The sub-agent run could not be started. Continue without it.",
+        )
+
+    # The slot is spent the moment creation succeeds -- regardless of how the
+    # child eventually finishes. Mutating session_ctx in place (not
+    # reassigning) is what makes this visible to the next spawn call in the
+    # same turn's tool loop, exactly like the pending_outbound_media pattern.
+    session_metadata[SUBAGENT_SPAWN_COUNT_SESSION_KEY] = used + 1
+    spawns_used = used + 1
+    spawns_remaining = max(0, MAX_SUBAGENTS_PER_TASK - spawns_used)
+
+    deadline = monotonic_fn() + max(0.0, float(wait_timeout_seconds))
+    while True:
+        snapshot = lookup_run_snapshot_fn(child_run_id)
+        status = str((snapshot or {}).get("status") or "").strip().lower()
+        if status in terminal_run_statuses:
+            summary = str((snapshot or {}).get("result_summary") or "").strip()
+            ok = status == "completed"
+            if not summary:
+                summary = (
+                    "Sub-agent finished with no summary text."
+                    if ok
+                    else f"Sub-agent ended without completing (status: {status})."
+                )
+            if status == "waiting_for_input":
+                summary = (
+                    "Sub-agent is waiting on an approval/input it cannot receive "
+                    "headlessly, and will not progress further. " + summary
+                )
+            return {
+                "ok": ok,
+                "run_id": child_run_id,
+                "status": status,
+                "summary": summary,
+                "spawns_used": spawns_used,
+                "spawns_remaining": spawns_remaining,
+            }
+        if monotonic_fn() >= deadline:
+            return {
+                "ok": False,
+                "run_id": child_run_id,
+                "status": "timeout",
+                "message": (
+                    f"Sub-agent did not finish within {wait_timeout_seconds:.0f}s and "
+                    "may still be running in the background. Continue without it, "
+                    "or tell the user it is taking longer than expected."
+                ),
+                "spawns_used": spawns_used,
+                "spawns_remaining": spawns_remaining,
+            }
+        sleep_fn(poll_interval_seconds)

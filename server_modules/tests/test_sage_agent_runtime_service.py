@@ -3270,5 +3270,94 @@ class ModelDowngradeFiresPreflightTests(unittest.TestCase):
         )
 
 
+class SubagentSpawnToolVisibilityTests(unittest.TestCase):
+    """Structural toggle test (2026-07-24 ruling): subagent__spawn must be
+    ABSENT from the actual assembled tool payload handed to the model when
+    subagents_enabled is false -- not present-but-discouraged. Exercises the
+    real _direct_tool_bundle (no mocking of the function under test); only
+    its two workspace-lookup side calls are patched to keep this test
+    hermetic (no network/DB), matching this file's established style
+    elsewhere (patch.object on direct_chat_runtime_exports)."""
+
+    def _toolset(self, *, subagents_enabled: bool) -> dict:
+        return {
+            "core": sage_agent_runtime_service._core_direct_tool_names(),
+            "connectors": set(),
+            "tools": set(),
+            "raw_tool_toggles": {},
+            "mandate_audience_tools": [],
+            "capability_providers": frozenset(),
+            "agent_install_id": "agent-pixel",
+            "subagents_enabled": subagents_enabled,
+        }
+
+    def _tool_names(self, *, subagents_enabled: bool) -> list[str]:
+        with patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "resolve_workspace_tool_capabilities",
+            return_value=[],
+        ), patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "_resolve_direct_chat_availability",
+            return_value={},
+        ):
+            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+                workspace_id="ws-test",
+                provider="openai",
+                sender_class="owner",
+                specialist_toolset=self._toolset(subagents_enabled=subagents_enabled),
+            )
+        return [str(t.get("name") or "") for t in tools]
+
+    def test_tool_absent_from_assembled_payload_when_disabled(self):
+        names = self._tool_names(subagents_enabled=False)
+        self.assertNotIn("subagent__spawn", names)
+
+    def test_tool_present_in_assembled_payload_when_enabled(self):
+        names = self._tool_names(subagents_enabled=True)
+        self.assertIn("subagent__spawn", names)
+
+    def test_master_sage_turn_never_gets_the_tool(self):
+        # specialist_toolset=None is the master/Sage path -- this feature is
+        # scoped to deployed specialist agents only (see build report).
+        with patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "resolve_workspace_tool_capabilities",
+            return_value=[],
+        ), patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "_resolve_direct_chat_availability",
+            return_value={},
+        ):
+            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+                workspace_id="ws-test", provider="openai", sender_class="owner", specialist_toolset=None,
+            )
+        names = [str(t.get("name") or "") for t in tools]
+        self.assertNotIn("subagent__spawn", names)
+
+    def test_enabled_schema_requires_task_description_and_offers_role_enum(self):
+        with patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "resolve_workspace_tool_capabilities",
+            return_value=[],
+        ), patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "_resolve_direct_chat_availability",
+            return_value={},
+        ):
+            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+                workspace_id="ws-test",
+                provider="openai",
+                sender_class="owner",
+                specialist_toolset=self._toolset(subagents_enabled=True),
+            )
+        spawn_tool = next(t for t in tools if t.get("name") == "subagent__spawn")
+        params = spawn_tool.get("parameters") or {}
+        self.assertIn("task_description", params.get("required") or [])
+        role_enum = (params.get("properties") or {}).get("role", {}).get("enum") or []
+        self.assertIn("builder", role_enum)
+        self.assertNotIn("orchestrator", role_enum)
+
+
 if __name__ == "__main__":
     unittest.main()

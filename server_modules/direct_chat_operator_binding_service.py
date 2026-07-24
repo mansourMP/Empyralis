@@ -725,7 +725,7 @@ def build_direct_chat_tool_runtime_bindings(
                 agent_id=str(session_payload.get("active_agent_install_id") or metadata.get("sage_agent_id") or "").strip() or None,
             )
             return mcp_registry_service.format_mcp_tool_result(mcp_result)
-        if connector_id not in {"", "http", "llm", "file", "shell", "screenshot", "computer", "hardware", "memory", "web", "browser", "image", "sage_service", "fleet", "skill"}:
+        if connector_id not in {"", "http", "llm", "file", "shell", "screenshot", "computer", "hardware", "memory", "web", "browser", "image", "sage_service", "fleet", "skill", "subagent"}:
             from server_modules import runs_execution
 
             argument_payload = callbacks.tool_arguments_payload(tool_call.get("arguments"))

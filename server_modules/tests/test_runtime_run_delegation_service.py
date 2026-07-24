@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi import HTTPException
 
 from server_modules.agent_trace_service import TraceContext
@@ -603,6 +604,310 @@ class RuntimeRunDelegationServiceTests(unittest.TestCase):
             run_service.MAX_WORKFLOW_TURN_DEPTH_DEFAULT,
         )
         self.assertNotEqual(child_decision_payloads[0]["max_workflow_turn_depth"], 999999)
+
+
+class _FakeClock:
+    """Deterministic monotonic clock + no-op sleep for testing the poll loop
+    without ever really sleeping or racing wall-clock time."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += float(seconds)
+
+
+class SpawnSubagentFromChatTurnTests(unittest.TestCase):
+    """server_modules.runtime_run_delegation_service.spawn_subagent_from_chat_turn
+    -- the chat-turn bridge into the real delegation engine (2026-07-24 ruling)."""
+
+    def _fake_run_store(self):
+        store: dict[str, dict] = {}
+
+        def _lookup(run_id: str) -> dict:
+            return dict(store.get(run_id) or {})
+
+        return store, _lookup
+
+    def _fake_create_call(self, store: dict, *, status: str = "completed", summary: str = "Done."):
+        created_run_ids: list[str] = []
+
+        def _execute(request, *, stamp_request_owner_fn, services, current_user=None):
+            # Numbered off the SHARED store (not this closure's own counter)
+            # so repeated calls across a test's loop never collide -- each
+            # _fake_create_call() invocation gets its own empty
+            # created_run_ids list, but they all write into the same store.
+            run_id = f"child-{len(store) + 1}"
+            created_run_ids.append(run_id)
+            store[run_id] = {
+                "run_id": run_id,
+                "status": status,
+                "result_summary": summary,
+                # Deliberately included so the summary-only-contract test can
+                # assert these never leak into the tool result.
+                "events": [{"event": "step", "message": "secret intermediate reasoning"}],
+                "context": {"metadata": dict(request.metadata or {})},
+            }
+            return {"run_id": run_id}
+
+        return _execute, created_run_ids
+
+    def _call(self, session_ctx, *, store=None, lookup=None, execute=None, **overrides):
+        if store is None:
+            store, lookup = self._fake_run_store()
+        if execute is None:
+            execute, _ = self._fake_create_call(store)
+        kwargs = dict(
+            task_description="Summarize the last 10 support tickets.",
+            session_ctx=session_ctx,
+            workspace_id="ws-1",
+            tenant_id="default",
+            owner_user_id="user-1",
+            acting_agent_install_id="agent-pixel",
+            enforce_delegation_child_decision_fn=lambda **kw: {"ok": True},
+            build_delegated_run_request_fn=lambda parent_snapshot, child_payload, note=None: (
+                __import__("server_modules.run_service", fromlist=["build_delegated_child_run_request"])
+                .build_delegated_child_run_request(
+                    parent_snapshot,
+                    child_payload,
+                    normalize_run_id_token=lambda v: str(v or "").strip() or None,
+                    normalize_agent_role=lambda v: str(v or "").strip().lower(),
+                    normalize_requested_max_iterations=lambda v: None,
+                    valid_execution_targets={"cloud", "local", "auto"},
+                    note=note,
+                )
+            ),
+            execute_system_run_start_request_via_turn_runtime_fn=execute,
+            run_execution_services_fn=lambda: object(),
+            lookup_run_snapshot_fn=lookup,
+            normalize_agent_role_fn=lambda v: str(v or "").strip().lower(),
+            stamp_request_owner_fn=lambda req, current_user: req,
+            sleep_fn=lambda seconds: None,
+            monotonic_fn=lambda: 0.0,
+        )
+        kwargs.update(overrides)
+        return runtime_run_delegation_service.spawn_subagent_from_chat_turn(**kwargs)
+
+    def test_missing_task_description_is_refused_loudly(self):
+        result = self._call({}, task_description="   ")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "missing_task_description")
+        self.assertTrue(result["message"])
+
+    def test_successful_spawn_returns_summary_only_contract(self):
+        session_ctx: dict = {}
+        result = self._call(session_ctx)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["summary"], "Done.")
+        self.assertEqual(result["spawns_used"], 1)
+        self.assertEqual(result["spawns_remaining"], 4)
+        # The summary contract: only ok/run_id/status/summary/spawns_* --
+        # never the child's raw events or context/transcript, even though
+        # the fake run store above deliberately included both.
+        self.assertEqual(
+            set(result.keys()),
+            {"ok", "run_id", "status", "summary", "spawns_used", "spawns_remaining"},
+        )
+        self.assertNotIn("events", result)
+        self.assertNotIn("context", result)
+        # session_ctx was mutated in place (by reference) -- the counter is
+        # visible to the caller for the next spawn in the same turn.
+        self.assertEqual(session_ctx[runtime_run_delegation_service.SUBAGENT_SPAWN_COUNT_SESSION_KEY], 1)
+
+    def test_child_run_request_carries_real_parent_lineage_and_depth_stamp(self):
+        # Uses the REAL run_service.build_delegated_child_run_request (see
+        # build_delegated_run_request_fn above) -- proves the bridge really
+        # drives the existing engine's own lineage/depth stamping, not a
+        # parallel implementation of it.
+        store, lookup = self._fake_run_store()
+        execute, created_run_ids = self._fake_create_call(store)
+        session_ctx: dict = {}
+        result = self._call(session_ctx, store=store, lookup=lookup, execute=execute)
+        self.assertTrue(result["ok"])
+        child_run_id = created_run_ids[0]
+        stamped_metadata = store[child_run_id]["context"]["metadata"]
+        self.assertEqual(stamped_metadata["parent_run_id"], session_ctx["subagent_task_root_id"])
+        self.assertEqual(stamped_metadata["delegation_root_run_id"], session_ctx["subagent_task_root_id"])
+        self.assertEqual(stamped_metadata["delegated_by_role"], "orchestrator")
+        # run_service.build_delegated_child_run_request stamps child depth =
+        # parent depth (0, chat turn is root) + 1 -- this is the SAME
+        # mechanism that would refuse a depth-2 grandchild if the engine's
+        # own delegate_run_children were ever reachable from a run's own
+        # tool loop (see the module docstring above this class).
+        self.assertEqual(stamped_metadata["subagent_depth"], 1)
+
+    def test_sixth_spawn_attempt_in_one_task_is_refused_with_explicit_message(self):
+        session_ctx: dict = {}
+        store, lookup = self._fake_run_store()
+        results = []
+        for _ in range(6):
+            execute, _ = self._fake_create_call(store)
+            results.append(self._call(session_ctx, store=store, lookup=lookup, execute=execute))
+        for i in range(5):
+            self.assertTrue(results[i]["ok"], msg=f"spawn {i + 1} should have succeeded")
+        sixth = results[5]
+        self.assertFalse(sixth["ok"])
+        self.assertEqual(sixth["error"], "subagent_limit_reached")
+        self.assertIn("5 sub-agent helpers", sixth["message"])
+        self.assertIn("does not reset", sixth["message"])
+        # The 6th attempt must be a pure refusal -- no 6th run was ever created.
+        self.assertEqual(len(store), 5)
+        self.assertEqual(session_ctx[runtime_run_delegation_service.SUBAGENT_SPAWN_COUNT_SESSION_KEY], 5)
+
+    def test_a_finished_helper_does_not_free_a_slot(self):
+        # Counting is lifetime/per-task, not concurrency: even though every
+        # spawned child in this test finishes ("completed") before the next
+        # spawn call, the 6th is still refused.
+        session_ctx: dict = {}
+        store, lookup = self._fake_run_store()
+        last = None
+        for _ in range(6):
+            execute, _ = self._fake_create_call(store, status="completed")
+            last = self._call(session_ctx, store=store, lookup=lookup, execute=execute)
+        self.assertFalse(last["ok"])
+        self.assertEqual(last["error"], "subagent_limit_reached")
+
+    def test_subagent_attempting_to_spawn_is_refused(self):
+        # session_ctx carries subagent_depth=1 -- this chat turn IS itself a
+        # spawned child (defense in depth; see module docstring for why
+        # nothing sets this today but the check exists anyway).
+        session_ctx = {runtime_run_delegation_service.SUBAGENT_SPAWN_DEPTH_SESSION_KEY: 1}
+        create_called = []
+
+        def _execute(*args, **kwargs):
+            create_called.append(True)
+            return {"run_id": "should-not-exist"}
+
+        result = self._call(session_ctx, execute=_execute)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "subagent_depth_exceeded")
+        self.assertIn("cannot spawn further", result["message"])
+        self.assertFalse(create_called, "a depth-exceeded refusal must never create a run")
+
+    def test_disabled_kernel_decision_is_surfaced_as_explicit_refusal_not_an_exception(self):
+        def _deny(**kwargs):
+            raise HTTPException(status_code=409, detail="policy blocked this")
+
+        create_called = []
+
+        def _execute(*args, **kwargs):
+            create_called.append(True)
+            return {"run_id": "should-not-exist"}
+
+        result = self._call({}, enforce_delegation_child_decision_fn=_deny, execute=_execute)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "spawn_denied")
+        self.assertIn("policy blocked this", result["message"])
+        self.assertFalse(create_called)
+
+    def test_timeout_is_an_explicit_refusal_not_a_silent_hang(self):
+        clock = _FakeClock()
+        store, lookup = self._fake_run_store()
+
+        def _execute(request, *, stamp_request_owner_fn, services, current_user=None):
+            store["child-1"] = {"run_id": "child-1", "status": "running"}
+            return {"run_id": "child-1"}
+
+        result = self._call(
+            {},
+            store=store,
+            lookup=lookup,
+            execute=_execute,
+            wait_timeout_seconds=5.0,
+            poll_interval_seconds=1.0,
+            sleep_fn=clock.sleep,
+            monotonic_fn=clock.monotonic,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "timeout")
+        self.assertIn("did not finish", result["message"])
+        # Creation still counted -- the slot was spent, the run is real and
+        # may still be running in the background.
+        self.assertEqual(result["spawns_used"], 1)
+
+    def test_orchestrator_role_hint_is_forced_to_builder(self):
+        store, lookup = self._fake_run_store()
+        captured_requests = []
+
+        def _execute(request, *, stamp_request_owner_fn, services, current_user=None):
+            captured_requests.append(request)
+            store["child-1"] = {"run_id": "child-1", "status": "completed", "result_summary": "ok"}
+            return {"run_id": "child-1"}
+
+        result = self._call({}, store=store, lookup=lookup, execute=_execute, role="orchestrator")
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured_requests[0].agent_role, "builder")
+
+
+@pytest.mark.kernel
+class SpawnSubagentRealKernelGateTests(unittest.TestCase):
+    """End-to-end test driving the real chat-turn seam: the REAL compiled
+    Rust run-routing kernel gate (_enforce_delegation_child_decision, no
+    mock), the REAL run_service.assert_subagent_spawn_allowed depth check,
+    and the REAL run_service.build_delegated_child_run_request lineage
+    stamping all execute for real. Only the deepest boundary -- actually
+    creating/running a background run (which would otherwise start a real
+    LLM agent loop) -- is faked, the same boundary
+    test_multi_runtime_demo_proof.py already fakes for the pre-existing
+    delegate_run_children path (create_run_from_request), so this test never
+    touches a network or a real provider.
+
+    Marked @pytest.mark.kernel: server_modules/tests/conftest.py's autouse
+    _skip_kernel_tests_when_binary_missing fixture only lets a kernel-marked
+    test through to the REAL compiled binary; every other test in this file
+    gets the fixture's own Python mock instead (which does not model
+    "run-routing-decision" at all, so this test would otherwise fail with a
+    misleading "next_action: missing" against the wrong thing entirely)."""
+
+    def setUp(self) -> None:
+        from server_modules import rust_runtime_kernel_client
+
+        if not rust_runtime_kernel_client.runtime_kernel_available():
+            self.skipTest("compiled empyralis-runtime-kernel binary not available in this environment")
+
+    def test_real_chat_turn_spawn_drives_the_real_kernel_gate_and_engine(self):
+        store: dict[str, dict] = {}
+
+        def _lookup(run_id: str) -> dict:
+            return dict(store.get(run_id) or {})
+
+        def _execute(request, *, stamp_request_owner_fn, services, current_user=None):
+            run_id = "real-kernel-child-1"
+            store[run_id] = {
+                "run_id": run_id,
+                "status": "completed",
+                "result_summary": "Sub-agent finished the assigned research task.",
+            }
+            return {"run_id": run_id}
+
+        session_ctx: dict = {}
+        result = runtime_run_delegation_service.spawn_subagent_from_chat_turn(
+            task_description="Research the top 3 competitors and summarize their pricing.",
+            role="research",
+            session_ctx=session_ctx,
+            workspace_id="ws-real-kernel-test",
+            tenant_id="default",
+            owner_user_id="user-1",
+            acting_agent_install_id="agent-pixel",
+            # enforce_delegation_child_decision_fn, build_delegated_run_request_fn,
+            # normalize_agent_role_fn, assert_subagent_spawn_allowed_fn: all
+            # left at their REAL defaults (the real module under test).
+            execute_system_run_start_request_via_turn_runtime_fn=_execute,
+            run_execution_services_fn=lambda: object(),
+            lookup_run_snapshot_fn=_lookup,
+            stamp_request_owner_fn=lambda req, current_user: req,
+            sleep_fn=lambda seconds: None,
+            monotonic_fn=lambda: 0.0,
+        )
+        self.assertTrue(result["ok"], msg=result)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["summary"], "Sub-agent finished the assigned research task.")
+        self.assertEqual(result["spawns_used"], 1)
+        self.assertEqual(set(result.keys()), {"ok", "run_id", "status", "summary", "spawns_used", "spawns_remaining"})
 
 
 if __name__ == "__main__":

@@ -3950,6 +3950,14 @@ _BUILTIN_DIRECT_TOOL_IDS: frozenset = frozenset(
         # _execute_custom_connector_tool_call_sync's OAuth-connector lookup,
         # which has no "messaging" connector registered and would error.
         "messaging",
+        # subagent__spawn (2026-07-24 ruling) needs session_ctx to read/write
+        # the per-task spawn counter and depth stamp -- same reasoning as
+        # "messaging" above. Not currently reachable via the async path (the
+        # live loop calls the sync closure in
+        # direct_chat_operator_binding_service.py directly -- see that
+        # module's execute_single_direct_tool_call docstring), added here
+        # only so this set stays authoritative if that ever changes.
+        "subagent",
     }
 )
 
@@ -5644,5 +5652,52 @@ def execute_single_direct_tool_call(
             return json.dumps(result, ensure_ascii=False)
 
         raise RuntimeError(f"Unknown fleet action '{action_id}'.")
+
+    # ── Sub-agent spawn (2026-07-24 ruling) ──────────────────────────────
+    if connector_id == "subagent" and action_id == "spawn":
+        from server_modules import runtime_run_delegation_service as _subagent_bridge
+
+        acting_install_id = str(
+            session_metadata.get("active_agent_install_id")
+            or session_metadata.get("agent_install_id")
+            or ""
+        ).strip()
+        # Defense in depth: the tool is only ever added to the tool list when
+        # sage_agent_runtime_service._direct_tool_bundle already resolved
+        # subagents_enabled=True for this specialist (a stale/cached tool
+        # list is the only way this branch could otherwise be reached with
+        # the flag off) -- re-check here rather than trust the caller.
+        specialist_guard = session_metadata.get("specialist_guard")
+        subagents_enabled = bool(
+            isinstance(specialist_guard, dict) and specialist_guard.get("subagents_enabled")
+        )
+        if not subagents_enabled:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "subagents_disabled",
+                    "message": (
+                        "Sub-agent delegation is disabled for this agent. An "
+                        "operator can enable it via fleet_configure_agent."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        owner_user_id = str(
+            session_metadata.get("owner_user_id")
+            or session_metadata.get("sender_id")
+            or ((session_metadata.get("metadata") or {}).get("user_id") if isinstance(session_metadata.get("metadata"), dict) else "")
+            or ""
+        ).strip()
+        result = _subagent_bridge.spawn_subagent_from_chat_turn(
+            task_description=str(argument_payload.get("task_description") or "").strip(),
+            role=str(argument_payload.get("role") or "").strip(),
+            session_ctx=session_metadata,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            acting_agent_install_id=acting_install_id,
+        )
+        return json.dumps(result, ensure_ascii=False)
 
     _raise_direct_chat_tool_execution_blocked()

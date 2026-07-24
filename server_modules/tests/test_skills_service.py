@@ -1936,5 +1936,131 @@ class AuthorityMandateGateTests(unittest.TestCase):
         self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "audience")
 
 
+class SubagentSpawnDispatchTests(unittest.TestCase):
+    """execute_single_direct_tool_call's connector_id=="subagent" branch
+    (2026-07-24 ruling) -- the live dispatch seam between the chat tool call
+    and runtime_run_delegation_service.spawn_subagent_from_chat_turn."""
+
+    def _callbacks(self) -> direct_tool_execution_service.DirectToolExecutionCallbacks:
+        return direct_tool_execution_service.DirectToolExecutionCallbacks(
+            compact_step_detail=lambda value: None,
+            titleize_direct_step_token=lambda value: str(value or ""),
+            run_async_tool_call=lambda awaitable: asyncio.run(awaitable),
+            parse_tool_name=direct_chat_operator_binding_service.parse_tool_name,
+            tool_arguments_payload=lambda payload: payload if isinstance(payload, dict) else {},
+            parse_json_object_loose=lambda value: {},
+            safe_positive_int=lambda value, default=0: int(value) if str(value or "").strip().isdigit() else default,
+            normalize_reasoning_effort=lambda value: str(value or "").strip().lower() or None,
+            build_direct_local_tool_config=skills_service.build_direct_local_tool_config,
+            format_direct_local_tool_result=lambda result: json.dumps(result, ensure_ascii=False),
+            build_direct_tool_config=lambda connector_id, action_id, tool_input: {
+                "connector": connector_id, "action": action_id, "input": tool_input,
+            },
+            format_direct_tool_result=lambda result: json.dumps(result, ensure_ascii=False),
+            llm_task=lambda *args, **kwargs: {"ok": True},
+            web_search=lambda query: [],
+            web_fetch=lambda url: f"Fetched {url}",
+            search_memory_notebook=lambda workspace_id, query, max_results=5, agent_install_id=None: [],
+            get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None, agent_install_id=None: {},
+        )
+
+    def test_disabled_specialist_guard_refuses_without_calling_the_bridge(self) -> None:
+        """Defense in depth: even if a stale/cached tool list somehow let the
+        model call subagent__spawn, the dispatch branch re-checks
+        session_ctx["specialist_guard"]["subagents_enabled"] itself and must
+        refuse WITHOUT ever calling into the real spawn bridge."""
+        with patch(
+            "server_modules.runtime_run_delegation_service.spawn_subagent_from_chat_turn"
+        ) as bridge_mock:
+            raw = skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "subagent__spawn", "arguments": {"task_description": "Do a thing"}},
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                session_ctx={
+                    "authority_tier": "owner",
+                    "specialist_guard": {"agent_install_id": "agent-pixel", "subagents_enabled": False},
+                },
+                callbacks=self._callbacks(),
+            )
+        result = json.loads(raw)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "subagents_disabled")
+        bridge_mock.assert_not_called()
+
+    def test_missing_specialist_guard_refuses_without_calling_the_bridge(self) -> None:
+        """No specialist_guard at all (e.g. master/Sage's own turn, or a
+        session_ctx built before this feature existed) must fail CLOSED, not
+        open -- same "deny-more, never allow-more" convention as the rest of
+        the specialist toolset machinery."""
+        with patch(
+            "server_modules.runtime_run_delegation_service.spawn_subagent_from_chat_turn"
+        ) as bridge_mock:
+            raw = skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "subagent__spawn", "arguments": {"task_description": "Do a thing"}},
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                session_ctx={"authority_tier": "owner"},
+                callbacks=self._callbacks(),
+            )
+        result = json.loads(raw)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "subagents_disabled")
+        bridge_mock.assert_not_called()
+
+    def test_enabled_specialist_guard_reaches_the_real_bridge_with_resolved_identity(self) -> None:
+        with patch(
+            "server_modules.runtime_run_delegation_service.spawn_subagent_from_chat_turn",
+            return_value={"ok": True, "run_id": "child-1", "status": "completed", "summary": "Done.",
+                           "spawns_used": 1, "spawns_remaining": 4},
+        ) as bridge_mock:
+            raw = skills_service.execute_single_direct_tool_call(
+                tool_call={
+                    "name": "subagent__spawn",
+                    "arguments": {"task_description": "Summarize the tickets.", "role": "support"},
+                },
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                session_ctx={
+                    "authority_tier": "owner",
+                    "tenant_id": "tenant-1",
+                    "active_agent_install_id": "agent-pixel",
+                    "specialist_guard": {"agent_install_id": "agent-pixel", "subagents_enabled": True},
+                },
+                callbacks=self._callbacks(),
+            )
+        result = json.loads(raw)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["run_id"], "child-1")
+        bridge_mock.assert_called_once()
+        call_kwargs = bridge_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["task_description"], "Summarize the tickets.")
+        self.assertEqual(call_kwargs["role"], "support")
+        self.assertEqual(call_kwargs["workspace_id"], "ws-1")
+        self.assertEqual(call_kwargs["tenant_id"], "tenant-1")
+        self.assertEqual(call_kwargs["acting_agent_install_id"], "agent-pixel")
+
+    def test_audience_tier_is_blocked_before_reaching_the_bridge(self) -> None:
+        """subagent__spawn has no ToolDescriptor (audience_safe defaults
+        False) and is never added to mandate_audience_tools by default --
+        an audience-tier caller must be blocked by the mandate gate itself,
+        never reaching the specialist_guard check or the bridge."""
+        with patch(
+            "server_modules.runtime_run_delegation_service.spawn_subagent_from_chat_turn"
+        ) as bridge_mock:
+            with self.assertRaises(RuntimeError) as ctx:
+                skills_service.execute_single_direct_tool_call(
+                    tool_call={"name": "subagent__spawn", "arguments": {"task_description": "Do a thing"}},
+                    workspace_id="ws-1",
+                    thread_id="thread-1",
+                    session_ctx={
+                        "authority_tier": "audience",
+                        "specialist_guard": {"agent_install_id": "agent-pixel", "subagents_enabled": True},
+                    },
+                    callbacks=self._callbacks(),
+                )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+        bridge_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2217,6 +2217,10 @@ async def _resolve_specialist_toolset(
     raw_toggles: dict[str, bool] = {}
     mandate_audience_tools: list[str] = []
     capability_providers: frozenset[str] = frozenset()
+    # Fail-safe default, same "deny-more, never allow-more" convention as the
+    # rest of this function: a lookup error must never silently grant a
+    # specialist the sub-agent spawn tool.
+    subagents_enabled = False
     try:
         from server_modules import agent_bindings_repository as _bind
         rows = await _bind.list_agent_connector_bindings(
@@ -2233,9 +2237,14 @@ async def _resolve_specialist_toolset(
         )
     try:
         from server_modules import agent_registry_repository as _reg
+        from server_modules import fleet_tools as _fleet_tools_subagents
         bundle = await _reg.get_workspace_agent_install_bundle(
             aid, tenant_id=tenant_id or "default", workspace_id=workspace_id
         )
+        # The same agent_installs.subagents_enabled resolution fleet_configure_agent
+        # writes and fleet_tools.py's own callers already read (default False for a
+        # specialist unless explicitly turned on — see resolve_subagents_enabled).
+        subagents_enabled = _fleet_tools_subagents.resolve_subagents_enabled(bundle)
         toggles = bundle.get("tool_toggles") if isinstance(bundle, dict) else None
         if isinstance(toggles, dict):
             for name, enabled in toggles.items():
@@ -2292,6 +2301,10 @@ async def _resolve_specialist_toolset(
         # nobody in particular) owns the credential for" — see
         # _mcp_entry_owned_by_or_unassigned.
         "agent_install_id": aid,
+        # Structural sub-agent toggle (2026-07-24 ruling): consulted by
+        # _direct_tool_bundle to decide whether subagent__spawn is even added
+        # to the tool list -- never a prompt-level "please don't" instruction.
+        "subagents_enabled": subagents_enabled,
     }
 
 
@@ -2495,6 +2508,62 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
         _before_core = len(tools)
         tools = [t for t in tools if _specialist_tool_allowed(str(t.get("name") or ""), specialist_toolset)]
         print(f"[TOOL_FILTER] specialist_core_tools before={_before_core} after={len(tools)}", flush=True)
+        # ── Sub-agent spawn tool (2026-07-24 ruling) ─────────────────────
+        # STRUCTURAL toggle: subagent__spawn is appended to the tool list
+        # (the actual payload handed to the model) only when this specialist's
+        # own subagents_enabled resolved true above. When it is false/absent
+        # the tool is simply never added -- not filtered later, not gated by
+        # prompt text -- so the model cannot call what it cannot see. This is
+        # a raw tool dict (not a skills_service.ToolDescriptor), deliberately:
+        # a descriptor would land in tool_registry_service.build_registry_entries()'s
+        # Tier-2 query_tool_registry corpus unconditionally (source #1, every
+        # builtin descriptor not in ALWAYS_ON_TOOL_NAMES), which would leak this
+        # tool back into discoverability for every specialist regardless of the
+        # toggle -- see _filter_registry_for_specialist below, which only
+        # narrows Tier-2 by connector/tool BINDING membership, something
+        # "subagent" would never naturally have either way. Keeping it out of
+        # _builtin_tool_descriptors() entirely means there is exactly one place
+        # this tool can ever appear: right here, behind this one boolean.
+        if specialist_toolset.get("subagents_enabled"):
+            from server_modules.runtime_run_delegation_service import MAX_SUBAGENTS_PER_TASK as _SUBAGENT_MAX_PER_TASK
+
+            tools.append({
+                "name": "subagent__spawn",
+                "description": (
+                    "Spawn ONE fresh, isolated sub-agent session to do a bounded "
+                    "chunk of work and report back a short summary. The sub-agent "
+                    "runs as a clean session with no visibility into this "
+                    "conversation -- give it a complete, self-contained task "
+                    "description. You will only ever see its final summary, never "
+                    "its step-by-step transcript. You may spawn at most "
+                    f"{_SUBAGENT_MAX_PER_TASK} sub-agents for this task -- a hard "
+                    "ceiling that does NOT reset when a sub-agent finishes. A "
+                    "sub-agent can never spawn further sub-agents. This call "
+                    "blocks until the sub-agent finishes or times out, so only use "
+                    "it for real, boundable work you want to offload -- not for "
+                    "anything you can just answer yourself."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_description": {
+                            "type": "string",
+                            "description": (
+                                "Complete, self-contained description of the "
+                                "sub-agent's task. It sees ONLY this text -- "
+                                "nothing else from this conversation."
+                            ),
+                        },
+                        "role": {
+                            "type": "string",
+                            "enum": ["support", "sales", "research", "finance", "builder", "private-assistant"],
+                            "description": "What kind of specialist to spawn for this task (default: builder).",
+                        },
+                    },
+                    "required": ["task_description"],
+                },
+                "connector_id": "subagent",
+            })
     # Phase A MCP wiring (docs/design/mcp-applications-plan.md): inject this
     # workspace's enabled+approved MCP tools as Tier-2 registry entries.
     # build_registry_entries() has no workspace_id parameter and deliberately
@@ -3145,6 +3214,11 @@ async def _run_sage_action_loop_v3(
                 "core": sorted(_specialist_toolset.get("core", set())),
                 "connectors": sorted(_specialist_toolset.get("connectors", set())),
                 "tools": sorted(_specialist_toolset.get("tools", set())),
+                # Second, independent gate for subagent__spawn (2026-07-24
+                # ruling) -- execute_single_direct_tool_call's dispatch
+                # branch re-checks this instead of trusting that the tool
+                # only appears in the list when true (see _direct_tool_bundle).
+                "subagents_enabled": bool(_specialist_toolset.get("subagents_enabled")),
             }
     import asyncio as _asyncio
 
