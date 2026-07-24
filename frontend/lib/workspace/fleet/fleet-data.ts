@@ -957,3 +957,130 @@ export function useWorkspaceStatusStrip(workspaceId: string): WorkspaceStatusStr
 
   return { ...state, loading };
 }
+
+/** A task on a project's shared board. Mirrors project_tasks_service.py's
+ *  `_row_to_task` (:90-103) exactly — do not add fields the backend does not
+ *  return. Assignment is AGENT-ONLY (`assignee_agent_id`); `created_by`
+ *  records the human author and is not an assignee. A task with no
+ *  `assignee_agent_id` is backlog: created but not yet handed to an agent,
+ *  which the API models as two deliberate steps (create, then assign). */
+export type FleetTask = {
+  id: string;
+  project_id?: string | null;
+  title: string;
+  description?: string;
+  status: FleetTaskStatus;
+  assignee_agent_id?: string | null;
+  created_by?: string | null;
+  due_at?: string | null;
+  plan?: unknown;
+  metadata?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+/** The five statuses project_tasks_service.VALID_TASK_STATUSES (:29) accepts.
+ *  `blocked` and `awaiting_input` are the two that mean a human is needed —
+ *  they are what makes a board readable at a glance, not decoration. */
+export type FleetTaskStatus = "open" | "in_progress" | "blocked" | "awaiting_input" | "done";
+
+export const FLEET_TASK_STATUSES: FleetTaskStatus[] = [
+  "open",
+  "in_progress",
+  "blocked",
+  "awaiting_input",
+  "done",
+];
+
+/** The two statuses that mean the agent has stopped and is waiting on a
+ *  person. Kept as one exported list so the board, and any future "needs me"
+ *  aggregate, cannot drift apart on what "needs me" means. */
+export const FLEET_TASK_NEEDS_HUMAN: FleetTaskStatus[] = ["blocked", "awaiting_input"];
+
+export function useFleetTasks(workspaceId: string, projectId: string | null) {
+  const fetcher = useCallback(async (): Promise<FleetTask[]> => {
+    if (!projectId) return [];
+    const res = await fetch(
+      `/api/w/${workspaceId}/fleet/tasks?project_id=${encodeURIComponent(projectId)}`,
+      { credentials: "include" }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data.tasks) ? data.tasks : [];
+  }, [workspaceId, projectId]);
+
+  // Polled like every other fleet resource: agents move tasks on their own,
+  // so the board has to change without the human touching anything.
+  const { data: tasks, loading, error, refresh } = useSharedPolledResource<FleetTask[]>(
+    `fleet-tasks:${workspaceId}:${projectId || "none"}`,
+    fetcher,
+    30_000,
+    [],
+  );
+
+  return { tasks, loading, error, refresh };
+}
+
+export async function createFleetTask(
+  workspaceId: string,
+  input: { project_id: string; title: string; description?: string; due_at?: string | null }
+): Promise<FleetTask> {
+  const res = await fetch(`/api/w/${workspaceId}/fleet/tasks`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+    body: JSON.stringify(input),
+  });
+  const data = await res.json().catch(() => ({}));
+  // The route returns {ok:false,error} with HTTP 200 on a service-level
+  // failure, so checking res.ok alone would silently swallow it.
+  if (!res.ok || data?.ok === false) {
+    throw new Error(data?.error || data?.detail || `Could not create task (HTTP ${res.status})`);
+  }
+  return data.task as FleetTask;
+}
+
+export async function patchFleetTask(
+  workspaceId: string,
+  taskId: string,
+  patch: { title?: string; description?: string; status?: FleetTaskStatus; due_at?: string | null; clear_due_at?: boolean }
+): Promise<FleetTask> {
+  const res = await fetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+    body: JSON.stringify(patch),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(data?.error || data?.detail || `Could not update task (HTTP ${res.status})`);
+  }
+  return data.task as FleetTask;
+}
+
+/** Assigning is not just a label change — project_tasks_service.assign_task
+ *  also fires a wake request so the agent actually starts on it. The wake can
+ *  fail while the assignment itself succeeds (`wake_error`), which would
+ *  otherwise read as "assigned, working" when nothing is running. Callers get
+ *  `wakeError` back so the UI can say so out loud instead of quietly lying. */
+export async function assignFleetTask(
+  workspaceId: string,
+  taskId: string,
+  agentId: string
+): Promise<{ task: FleetTask; wakeError: string | null; woke: boolean }> {
+  const res = await fetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/assign`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+    body: JSON.stringify({ agent_id: agentId }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(data?.error || data?.detail || `Could not assign task (HTTP ${res.status})`);
+  }
+  const wakeError = data?.wake_error ? String(data.wake_error) : null;
+  return {
+    task: data.task as FleetTask,
+    wakeError,
+    woke: Boolean(data?.wake_request) && !wakeError,
+  };
+}

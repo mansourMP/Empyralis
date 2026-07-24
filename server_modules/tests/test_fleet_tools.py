@@ -1609,3 +1609,108 @@ class FleetConfigureAgentReasoningEffortValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CreateAgentProjectIsolationTests(unittest.TestCase):
+    """The project is the collaboration boundary — agents inside one project
+    share a task board and can see each other's work. So an agent created
+    without an explicit project must get its OWN project, never the shared
+    workspace-wide default. Dropping every unplaced agent into "General"
+    would put an agent built for one person in the same room as an agent
+    built for someone else, and the task board would leak across them.
+
+    These tests hold that boundary structurally, at creation time, rather
+    than trusting a later filter to hide the overlap."""
+
+    @staticmethod
+    def _repo_patches(create_install=None):
+        return {
+            "ensure_workspace_agent_registry_seeded": AsyncMock(return_value=None),
+            "list_agent_definitions": AsyncMock(
+                return_value=[{"slug": "fleet-specialist", "id": "def-1"}]
+            ),
+            "list_workspace_agent_installs": AsyncMock(return_value=[]),
+            "create_workspace_agent_install": create_install
+            or AsyncMock(return_value={"id": "agent-new"}),
+        }
+
+    def _create(self, *, name, project_id="", create_project_mock=None, default_mock=None):
+        create_project_mock = create_project_mock or AsyncMock(
+            return_value={"id": "proj-own"}
+        )
+        default_mock = default_mock or AsyncMock(
+            side_effect=AssertionError(
+                "must not fall back to the shared default project"
+            )
+        )
+        assign_mock = AsyncMock(return_value=None)
+        repo_mocks = self._repo_patches()
+        with (
+            patch.multiple(
+                "server_modules.agent_registry_repository", **repo_mocks
+            ),
+            patch(
+                "server_modules.projects_repository.create_project",
+                create_project_mock,
+            ),
+            patch(
+                "server_modules.projects_repository.ensure_default_project",
+                default_mock,
+            ),
+            patch(
+                "server_modules.projects_repository.assign_install_to_project",
+                assign_mock,
+            ),
+            patch.object(fleet_tools, "_ledger_fleet_action", AsyncMock(return_value=None)),
+        ):
+            result = _run(
+                fleet_tools.fleet_create_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    tenant_id="tenant-1",
+                    name=name,
+                    project_id=project_id,
+                )
+            )
+        return result, create_project_mock, default_mock, assign_mock
+
+    def test_unplaced_agent_gets_its_own_project_named_after_it(self):
+        result, create_project_mock, default_mock, assign_mock = self._create(name="Pixel")
+        self.assertTrue(result.get("ok"), result.get("error"))
+        create_project_mock.assert_awaited_once()
+        self.assertEqual(create_project_mock.await_args.kwargs.get("name"), "Pixel")
+        default_mock.assert_not_awaited()
+        self.assertEqual(
+            assign_mock.await_args.kwargs.get("project_id"), "proj-own"
+        )
+
+    def test_two_unplaced_agents_never_share_a_project(self):
+        """The dad/mother case: two agents created back-to-back with no
+        project must land in two different projects, not one shared room."""
+        seen = []
+
+        async def _fake_create_project(**kwargs):
+            pid = f"proj-{len(seen) + 1}"
+            seen.append((kwargs.get("name"), pid))
+            return {"id": pid}
+
+        mock = AsyncMock(side_effect=_fake_create_project)
+        r1, _, _, assign1 = self._create(name="Dad's agent", create_project_mock=mock)
+        r2, _, _, assign2 = self._create(name="Mum's agent", create_project_mock=mock)
+        self.assertTrue(r1.get("ok") and r2.get("ok"))
+        self.assertEqual([n for n, _ in seen], ["Dad's agent", "Mum's agent"])
+        p1 = assign1.await_args.kwargs.get("project_id")
+        p2 = assign2.await_args.kwargs.get("project_id")
+        self.assertNotEqual(p1, p2, "two unplaced agents must not share a project")
+
+    def test_explicit_project_id_is_still_honoured(self):
+        """Collaboration stays possible — it just has to be deliberate."""
+        result, create_project_mock, default_mock, assign_mock = self._create(
+            name="Shared worker", project_id="proj-chosen"
+        )
+        self.assertTrue(result.get("ok"), result.get("error"))
+        create_project_mock.assert_not_awaited()
+        default_mock.assert_not_awaited()
+        self.assertEqual(
+            assign_mock.await_args.kwargs.get("project_id"), "proj-chosen"
+        )

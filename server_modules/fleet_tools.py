@@ -2192,20 +2192,32 @@ async def fleet_create_agent(
 
         agent_id = str(result.get("id") or "").strip()
 
-        # Assign to the chosen project — an empty project_id resolves to the
-        # workspace's default ("General") project rather than leaving the
-        # agent unassigned, so the create-agent wizard's Placement step never
-        # needs its own project picker. Best-effort: a bad/unresolvable
-        # project id shouldn't fail creation.
+        # Assign to the chosen project. An empty project_id gives the agent
+        # its OWN project named after it — never the shared default.
+        #
+        # The project is the collaboration boundary: agents in one project
+        # share a task board and can see each other's work. So defaulting an
+        # unplaced agent into the workspace-wide "General" project would put
+        # every agent a user ever creates into one shared room — an agent
+        # built for one person could read tasks belonging to an agent built
+        # for someone else. Isolation has to be the structural default and
+        # collaboration the deliberate act (move an agent into a shared
+        # project), not the other way round.
+        #
+        # create_project() already de-duplicates slugs, so two agents with
+        # the same name get distinct projects rather than colliding.
+        # Best-effort: a bad/unresolvable project id shouldn't fail creation.
         _project_id = str(project_id or "").strip()
         if agent_id:
             try:
                 from server_modules import projects_repository as _projects
                 if not _project_id:
-                    _default_project = await _projects.ensure_default_project(
-                        tenant_id=tenant_id, workspace_id=workspace_id,
+                    _own_project = await _projects.create_project(
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
+                        name=(str(name or "").strip() or "Untitled agent"),
                     )
-                    _project_id = str((_default_project or {}).get("id") or "")
+                    _project_id = str((_own_project or {}).get("id") or "")
                 if _project_id:
                     await _projects.assign_install_to_project(
                         tenant_id=tenant_id,
