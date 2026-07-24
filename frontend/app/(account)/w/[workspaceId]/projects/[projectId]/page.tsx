@@ -5,7 +5,15 @@ import { useParams, useRouter } from "next/navigation";
 
 import { Bot, Calendar, Zap } from "lucide-react";
 
-import { useFleetAgents, useFleetProjects, type FleetAgent } from "@/lib/workspace/fleet/fleet-data";
+import {
+  useFleetAgents,
+  useFleetProjects,
+  useFleetTasks,
+  createFleetTask,
+  assignFleetTask,
+  type FleetAgent,
+} from "@/lib/workspace/fleet/fleet-data";
+import { TasksList } from "@/lib/workspace/fleet/TasksList";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { breadcrumbCount, tintKeyForIndex, TINTS, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
@@ -16,6 +24,7 @@ import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/F
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton } from "@/lib/workspace/fleet/fleet-states";
+import { ListChecks } from "lucide-react";
 
 const money = (n: number | undefined) => `$${(n ?? 0).toFixed(4)}`;
 
@@ -82,6 +91,15 @@ export default function ProjectDetailPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
+  // Agents | Tasks. Two views of the same project: who is in it, and what
+  // they are working on.
+  const [view, setView] = useState<"agents" | "tasks">("agents");
+  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
+  // A failed wake is reported here rather than swallowed: assigning fires a
+  // wake so the agent actually starts, and a silent wake failure would read
+  // as "assigned, working" when nothing is running.
+  const [taskNotice, setTaskNotice] = useState<string | null>(null);
+  const { tasks, loading: tasksLoading, refresh: refreshTasks } = useFleetTasks(workspaceId, projectId);
   const [rollup, setRollup] = useState<{ usd_cost: number; total_tokens: number; events: number } | null>(null);
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
   const [cost, setCost] = useState<Map<string, number>>(new Map());
@@ -168,6 +186,21 @@ export default function ProjectDetailPage() {
     router.push(`${projectBase}/agents/${encodeURIComponent(agentId)}/overview`);
   };
 
+  const handleAssign = async (taskId: string, agentId: string) => {
+    setTaskNotice(null);
+    try {
+      const { wakeError } = await assignFleetTask(workspaceId, taskId, agentId);
+      if (wakeError) {
+        setTaskNotice(
+          `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`
+        );
+      }
+      await refreshTasks();
+    } catch (e) {
+      setTaskNotice(e instanceof Error ? e.message : "Could not assign this task.");
+    }
+  };
+
   return (
     <main className="fleet-content fleet-content--with-panel">
       {/* No page-title header here — the breadcrumb (with the project's own
@@ -181,22 +214,47 @@ export default function ProjectDetailPage() {
           still hide themselves when there's nothing to filter/sort (each is
           independently optional). */}
       <HeaderAction>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
-          <span className="fleet-btn-plus">+</span> New agent
-        </button>
+        {view === "agents" ? (
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+            <span className="fleet-btn-plus">+</span> New agent
+          </button>
+        ) : (
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setTaskDialogOpen(true)}>
+            <span className="fleet-btn-plus">+</span> New task
+          </button>
+        )}
       </HeaderAction>
 
+      {/* The view switch lives in the content toolbar, not the topbar — the
+          topbar is where the earlier mobile header-overlap bug came from, and
+          this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
-        <FleetToolbar
-          filters={inProject.length > 0 ? filters : undefined}
-          sortOptions={inProject.length > 0 ? SORT_OPTIONS : undefined}
-          sortValue={sort}
-          sortDefault="last_active"
-          onSortChange={(v) => updateFilters({ sort: v as SortMode })}
-          panelOpen={panelOpen}
-          onTogglePanel={() => setPanelOpen((v) => !v)}
-          usageHref={`${base}/billing`}
-        />
+        <div className="fleet-segmented" role="tablist" aria-label="Project view">
+          {(["agents", "tasks"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              aria-selected={view === v}
+              className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
+              onClick={() => setView(v)}
+            >
+              {v === "agents" ? "Agents" : "Tasks"}
+            </button>
+          ))}
+        </div>
+        {view === "agents" ? (
+          <FleetToolbar
+            filters={inProject.length > 0 ? filters : undefined}
+            sortOptions={inProject.length > 0 ? SORT_OPTIONS : undefined}
+            sortValue={sort}
+            sortDefault="last_active"
+            onSortChange={(v) => updateFilters({ sort: v as SortMode })}
+            panelOpen={panelOpen}
+            onTogglePanel={() => setPanelOpen((v) => !v)}
+            usageHref={`${base}/billing`}
+          />
+        ) : null}
       </div>
 
       {/* The sheet — full width always, whether the drawer below is open or
@@ -205,7 +263,34 @@ export default function ProjectDetailPage() {
           with a permanent sibling. */}
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
-          {loading && inProject.length === 0 ? (
+          {taskNotice ? (
+            <div className="fleet-page-state-body" role="alert" style={{ color: "var(--warning-text)" }}>
+              {taskNotice}
+            </div>
+          ) : null}
+
+          {view === "tasks" ? (
+            tasksLoading && tasks.length === 0 ? (
+              <FleetListSkeleton rows={4} />
+            ) : tasks.length === 0 ? (
+              <div className="fleet-empty">
+                <div className="fleet-empty-icon">
+                  <ListChecks size={20} strokeWidth={1.75} />
+                </div>
+                <div className="fleet-empty-title">No tasks yet</div>
+                <div className="fleet-empty-desc">
+                  Tasks live inside this project and can be assigned to an agent to work on.
+                </div>
+                <div className="fleet-empty-actions">
+                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setTaskDialogOpen(true)}>
+                    <span className="fleet-btn-plus">+</span> New task
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <TasksList tasks={tasks} agents={inProject} onAssign={handleAssign} />
+            )
+          ) : loading && inProject.length === 0 ? (
             <FleetListSkeleton rows={4} />
           ) : inProject.length === 0 ? (
             <FirstAgentEmpty
@@ -259,6 +344,15 @@ export default function ProjectDetailPage() {
         </FleetRightPanel>
       </div>
 
+      {taskDialogOpen && (
+        <NewTaskDialog
+          workspaceId={workspaceId}
+          projectId={projectId}
+          onClose={() => setTaskDialogOpen(false)}
+          onCreated={() => { setTaskDialogOpen(false); refreshTasks(); }}
+        />
+      )}
+
       {wizardOpen && (
         <FleetCreateAgentWizard
           workspaceId={workspaceId}
@@ -287,4 +381,97 @@ function sortAgents(agents: FleetAgent[], sort: SortMode, cost: Map<string, numb
     });
   }
   return list;
+}
+
+/** Create a task. Deliberately has NO assignee field: the API models
+ *  creation and assignment as two separate calls (a task is created into the
+ *  backlog, then handed to an agent), and the create endpoint has no
+ *  agent_id parameter at all. Offering an assignee here would be a UI
+ *  invention the backend can't honour in one step. */
+function NewTaskDialog({
+  workspaceId,
+  projectId,
+  onClose,
+  onCreated,
+}: {
+  workspaceId: string;
+  projectId: string;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [dueAt, setDueAt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function create() {
+    const clean = title.trim();
+    if (!clean) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await createFleetTask(workspaceId, {
+        project_id: projectId,
+        title: clean,
+        description: description.trim(),
+        due_at: dueAt ? new Date(dueAt).toISOString() : null,
+      });
+      onCreated();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not create this task.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fleet-detail-backdrop" onClick={onClose}>
+      <div className="fleet-small-dialog" role="dialog" aria-modal="true" aria-label="New task" onClick={(e) => e.stopPropagation()}>
+        <div className="fleet-small-dialog-header">
+          <div className="fleet-detail-section-title">New task</div>
+        </div>
+        <div className="fleet-small-dialog-body">
+          <div>
+            <label className="fleet-wizard-label">Title</label>
+            <input
+              className="fleet-wizard-input"
+              value={title}
+              onChange={(e) => setTitle(e.currentTarget.value)}
+              placeholder="e.g. Draft the weekly summary"
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className="fleet-wizard-label">Description (optional)</label>
+            {/* Longer than a one-line input on purpose: this text is what the
+                agent actually receives as the work when the task is assigned. */}
+            <textarea
+              className="fleet-persona-textarea"
+              value={description}
+              onChange={(e) => setDescription(e.currentTarget.value)}
+              placeholder="What needs doing, and what does done look like?"
+              rows={4}
+            />
+          </div>
+          <div>
+            <label className="fleet-wizard-label">Due date (optional)</label>
+            <input
+              type="date"
+              className="fleet-wizard-input"
+              value={dueAt}
+              onChange={(e) => setDueAt(e.currentTarget.value)}
+            />
+          </div>
+          {error && <p className="fleet-channel-expand-error">{error}</p>}
+        </div>
+        <div className="fleet-small-dialog-footer">
+          <button type="button" className="fleet-btn" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={create} disabled={busy || !title.trim()}>
+            {busy ? "Creating…" : "Create"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

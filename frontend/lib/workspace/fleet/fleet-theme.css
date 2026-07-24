@@ -6965,3 +6965,95 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     color: var(--text-primary);
   }
 }
+
+/* ── Project task board ─────────────────────────────────────────────────────
+   Three structural clones of the Projects table's own three rules. They exist
+   only because the column count differs (5 tracks, not 6). No new colours, no
+   new spacing primitives, no new interaction pattern: status chips, avatars,
+   text stacks, buttons and the mobile block are all existing classes. */
+.fleet-tasks-list {
+  --fleet-list-grid: minmax(260px, 1fr) 160px 96px 96px 132px;
+  --fleet-list-gap: 16px;
+  --fleet-list-padding-x: 16px;
+  max-width: 1400px;
+}
+.fleet-tasks-list-header {
+  display: grid;
+  grid-template-columns: var(--fleet-list-grid);
+  gap: var(--fleet-list-gap);
+  align-items: center;
+  padding: 8px var(--fleet-list-padding-x);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.fleet-tasks-list-header .is-right { text-align: right; }
+
+.fleet-task-row {
+  display: grid;
+  grid-template-columns: var(--fleet-list-grid);
+  gap: var(--fleet-list-gap);
+  align-items: center;
+  width: 100%;
+  padding: 10px var(--fleet-list-padding-x);
+  min-height: 52px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur-fast) ease-out;
+}
+.fleet-tasks-list .fleet-task-row:last-child { border-bottom: none; }
+.fleet-task-row:hover { background: var(--bg-card-hover); }
+.fleet-task-row:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+/* The assignee cell is clickable to reassign, so it has to be a real button.
+   This is a reset to make it look like the surrounding text, not a new
+   button style. */
+.fleet-task-assignee-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.fleet-task-assignee-btn:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-control);
+}
+.fleet-task-cell-title { min-width: 0; }
+.fleet-task-cell-assignee { min-width: 0; }
+
+@media (max-width: 768px) {
+  .fleet-tasks-list {
+    --fleet-list-padding-x: 0px;
+  }
+  .fleet-tasks-list-header {
+    display: none;
+  }
+  /* Collapse to the same single-block, two-line row the Agents list uses at
+     this width. .fleet-agent-row-mobile is already flipped to flex by the
+     Agents rules above, so reusing the class costs nothing here. */
+  .fleet-task-row {
+    display: block;
+    padding: 10px 0;
+  }
+  .fleet-task-cell-title,
+  .fleet-task-cell-assignee,
+  .fleet-task-cell-status,
+  .fleet-task-row .fleet-agent-cell-right {
+    display: none;
+  }
+}
