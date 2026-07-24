@@ -50,7 +50,14 @@ const CLOUD_PROVIDER_LABELS: Record<string, string> = {
 };
 
 function cloudProviderLabel(providerId: string | null | undefined): string {
-  const id = (providerId || "").trim().toLowerCase();
+  // String(...) first, not `(providerId || "")` — the backend contract says
+  // this is always a string, but that's a compile-time promise only; real
+  // JSON crossing the fetch() boundary isn't type-checked, and a TRUTHY
+  // non-string (a number, an object) would sail past `|| ""` unchanged and
+  // then blow up on `.trim()` (numbers/objects have no `.trim`), taking the
+  // whole route down via Next's error boundary. Matches the safe pattern
+  // isDarwinLocal (below) and gateway-box-picker.tsx already use everywhere.
+  const id = String(providerId || "").trim().toLowerCase();
   if (!id) return "Cloud";
   return CLOUD_PROVIDER_LABELS[id] || id.charAt(0).toUpperCase() + id.slice(1);
 }
@@ -63,13 +70,17 @@ function cloudProviderLabel(providerId: string | null | undefined): string {
  *  Falls back to the raw hardware_region id, then to the full label, and
  *  only says "Unknown region" when there's truly nothing to show. */
 function regionOnlyLabel(hardwareLabel: string | null | undefined, hardwareRegion: string | null | undefined): string {
-  const label = (hardwareLabel || "").trim();
+  // String(...) first — same reasoning as cloudProviderLabel just above:
+  // `(x || "")` only replaces FALSY values. A truthy non-string (e.g. a
+  // stray number/object in hardware_region) would pass through untouched
+  // and crash on `.trim()`/`.indexOf()`/`.slice()` below.
+  const label = String(hardwareLabel || "").trim();
   const sepIndex = label.indexOf(" · ");
   if (sepIndex >= 0) {
     const region = label.slice(sepIndex + 3).trim();
     if (region) return region;
   }
-  return (hardwareRegion || "").trim() || label || "Unknown region";
+  return String(hardwareRegion || "").trim() || label || "Unknown region";
 }
 
 /** True for a genuinely local machine — the Gateway's own handshake reports
@@ -321,8 +332,17 @@ export default function HardwarePage() {
     const presentation = connectionPresentation(r);
     const detailHref = `/w/${encodeURIComponent(workspaceId)}/hardware/${encodeURIComponent(gatewayId)}`;
     const typeLabel = isCloud ? `Cloud · ${cloudProviderLabel(r.hardware_provider)}` : isLocalMac ? "Local computer" : "Computer";
+    // String(...) before the `||` chain, not after — resolveRegionCountry
+    // (country-flag.tsx) does `(label || '').toLowerCase()` internally, the
+    // same falsy-only-replaces pattern cloudProviderLabel/regionOnlyLabel
+    // had above; a truthy non-string hardware_region/hardware_label would
+    // otherwise reach it unconverted and throw there instead of here.
     const flagCode = isCloud
-      ? resolveRegionCountry(r.hardware_provider, r.hardware_region || "", r.hardware_label || r.hardware_region || "")
+      ? resolveRegionCountry(
+          r.hardware_provider,
+          String(r.hardware_region || ""),
+          String(r.hardware_label || r.hardware_region || ""),
+        )
       : "";
     const locationText = isCloud ? regionOnlyLabel(r.hardware_label, r.hardware_region) : localDeviceLocationText(r);
     const agentCount = agentCountByGateway.get(gatewayId) || 0;
